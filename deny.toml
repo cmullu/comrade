@@ -27,6 +27,12 @@ ignore = [
     "RUSTSEC-2025-0057", # fxhash (via sled)
     "RUSTSEC-2024-0384", # instant (via sled's parking_lot)
     "RUSTSEC-2024-0436", # paste (proc-macro, compile-time only)
+    # smallstr is unmaintained (not a vulnerability); it is a dependency of
+    # every published yrs version including the latest (0.27.3), so no bump
+    # can shed it. yrs is the accepted Sakha/Sakhi CRDT framework (AUDIT.md
+    # §4), and the engine is not yet started by any frontend.
+    # Exit: yrs releases a version that drops smallstr, then bump yrs.
+    "RUSTSEC-2026-0215", # smallstr (via yrs)
 ]
 
 [licenses]
