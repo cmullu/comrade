@@ -404,6 +404,24 @@ user has)? Owner call required before any companion code.
 > UI still pending like the journal's. Voice-dispatcher (`tara <text>`) and a
 > desktop web surface are the open follow-ups. Design note: `docs/TARA.md`.
 
+> **Update (2026-07-28, Tara UX + shared model pipeline).** Tara moved to the
+> **last** bottom-nav slot (Chats · Journal · Feed · Tara). Replies now
+> **stream** in word-by-word via `ui/TaraStream.kt` (`Flow<String>` of
+> cumulative text, lossless by test) with a thinking indicator — a real
+> generative backend emits into the same shape without UI changes. Crisis
+> hand-offs deliberately do *not* stream: helpline numbers render complete and
+> at once. The on-demand model machinery is now **shared** by "Hey Comrade" and
+> Tara (`android/.../model/`: `ModelSpec`/`ModelCatalog`, `ModelInstaller`,
+> `ModelDownloads`, `ModelDownloadService`) — a foreground service downloads
+> with **progress in the notification bar**, survives backgrounding, and its
+> completion notification deep-links back into the relevant tab via
+> `AppNavigation`. Note the two models cannot share *weights*: Vosk is a
+> recogniser (audio→text), a companion is generative (text→text) — only the
+> pipeline is shared. `ModelCatalog.COMPANION` stays **unpinned**
+> (`configured == false`) so nothing unverifiable is offered; pinning
+> url+sha256 switches the whole flow on. **OQ9 remains open** — the inference
+> backend is the one piece still missing.
+
 ### 8.1 Calls — voice & video (owner request, 2026-07-12)
 
 > **Status (landed).** The **signaling layer is built and tested**: a

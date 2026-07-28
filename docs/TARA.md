@@ -33,6 +33,57 @@ These come from AUDIT §8 and every future change to Tara must keep them true:
 | Android | **Tara** bottom-nav tab → `TaraScreen`: opt-in explainer (stored in `tara` prefs), chat bubbles, crisis card under any flagged reply, persistent "not a therapist" footer, clear-conversation dialog |
 | Desktop | The five Tauri commands are registered (`desktop/src-tauri`); the vanilla-JS web UI predates the wellbeing pillars and does not render Tara yet (same state as the journal) |
 
+Tara sits **last** in the bottom navigation (Chats · Journal · Feed · Tara):
+the messaging surfaces are the daily ones, and the companion is what you reach
+for on purpose.
+
+## Streaming replies (the "LLM interface" feel)
+
+Replies arrive progressively rather than as one block: a thinking indicator
+while the engine runs, then the text filling in word by word.
+`ui/TaraStream.kt` owns the rule and is deliberately tiny and pure —
+`chunk(text)` splits on whitespace boundaries into ~8-character pieces, and
+`stream(text)` emits growing prefixes as a `Flow<String>`.
+
+Two things are worth being precise about:
+
+* **This paces text that already exists.** The reflective engine computes the
+  whole sentence at once, so streaming is a *presentation* choice today, not a
+  token stream. It is built as `Flow<String>` of cumulative text precisely so
+  that a real generative backend emits into the same shape and the UI needs no
+  change. The tests pin losslessness (`chunk(t).joinToString("") == t`) — an
+  animation that dropped characters would corrupt what the user is told.
+* **Crisis replies never stream.** When `detect_distress` fires, the hand-off
+  and its helpline numbers render complete and immediately. Drip-feeding
+  someone in distress their emergency numbers would be a cruel animation.
+
+## The shared model-download pipeline
+
+"Hey Comrade" and Tara run through **one** download path — `android/.../model/`:
+
+| Piece | Role |
+|---|---|
+| `ModelSpec` / `ModelCatalog` | Pure data: pinned URL + sha256 + size, packaging (zip-directory vs single file), install location, and which tab to return to when finished |
+| `ModelInstaller` | Download → sha256 verify → extract-or-move → atomic swap, with zip-slip and partial-install guards. Pure JVM, so the whole pipeline is unit-tested against `file://` URLs |
+| `ModelDownloads` | Process-wide `StateFlow` per model, so dismissing the prompt (or backgrounding the app) leaves the transfer running and any screen can re-observe it |
+| `ModelDownloadService` | Foreground service: determinate progress in the notification bar, then a tappable "ready" notification that deep-links back (via `AppNavigation`) — for the companion model, straight into the Tara conversation, even if the vault needs unlocking first |
+
+**One model cannot serve both features.** The speech model is a Vosk/Kaldi
+*recogniser* (audio → text); a companion is a *generative* model (text →
+text). Neither can do the other's job, so what is shared is the machinery, not
+the weights.
+
+A foreground service (not WorkManager) does the work: it matches
+`CallService`/`RelayConnectionService` already in the app and adds no new
+dependency. WorkManager would additionally survive process death, which is the
+reason to revisit it if these downloads grow much larger.
+
+`ModelCatalog.COMPANION` ships **unpinned** (`configured == false`), so no
+companion download is offered yet — see OQ9 below. The plumbing, the
+notification UX and the deep-link back to Tara are all live and exercised by
+the speech model today; pinning a URL + sha256 is what switches the companion
+offer on.
+
 Sequence-numbered store ids (`{timestamp}-{seq}`) keep user/reply pairs in
 exact send order even within the same second — random id tails would let
 pairs interleave.
@@ -70,6 +121,20 @@ decision. The `CompanionEngine` trait is the seam:
   model** — the crisis hand-off is not delegated to model behaviour.
 - A cloud backend must never implement the trait (gate 2).
 
-Open follow-ups: desktop web UI surface, a `tara <text>` voice-dispatcher
-command (`ComradeBackend` already has the shape for it), and the OQ9
-model/runtime decision itself.
+**What is already built for it.** The download half is done and in use: pin
+`ModelCatalog.COMPANION`'s `url`/`sha256`/`downloadBytes` and the prompt,
+background transfer, notification progress and tap-back-into-Tara all light up
+with no further UI work. What remains is genuinely the inference side:
+
+1. the owner's model + runtime choice (OQ9), including licence and the
+   size/quality trade-off on low-end phones;
+2. a real streaming implementation behind `CompanionEngine` (it should emit
+   tokens into the existing `Flow<String>` rather than returning a finished
+   string);
+3. a verified checksum for whatever artifact is chosen. This was **not**
+   guessed: an invented sha256 would fail every install, and an unverified
+   download is worse than none.
+
+Open follow-ups: the OQ9 model/runtime decision and its inference backend, a
+desktop web UI surface, and a `tara <text>` voice-dispatcher command
+(`ComradeBackend` already has the shape for it).

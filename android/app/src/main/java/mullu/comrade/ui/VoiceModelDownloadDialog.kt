@@ -18,34 +18,38 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import mullu.comrade.R
-import mullu.comrade.voice.VoiceModelDownloader
-import mullu.comrade.voice.VoiceModelDownloader.State
+import mullu.comrade.model.ModelCatalog
+import mullu.comrade.model.ModelDownloadService
+import mullu.comrade.model.ModelDownloadState as State
+import mullu.comrade.model.ModelDownloads
 import mullu.comrade.voice.VoskModel
 
 /**
  * The "download the on-device speech model?" prompt — Comrade's equivalent of
  * Google's offline speech-model dialog. Voice entry points show it when
  * [mullu.comrade.voice.VoskModel.isAvailable] is false: it explains the
- * one-time ~40 MB download, then tracks [VoiceModelDownloader]'s process-wide
- * state (progress → verify/install → ready or failed-with-retry). When the
- * model lands, [onReady] fires so the tap that opened the dialog can finally
- * do its job.
+ * one-time ~40 MB download, then tracks the shared, process-wide
+ * [ModelDownloads] state (progress → verify/install → ready or
+ * failed-with-retry). When the model lands, [onReady] fires so the tap that
+ * opened the dialog can finally do its job.
  *
- * Dismissing while a download runs does NOT abort it — like the platform
- * flow, it finishes in the background and any voice button picks it back up;
+ * Dismissing while a download runs does NOT abort it — the transfer belongs to
+ * [ModelDownloadService], so it keeps going (with progress in the notification
+ * bar) even if the app is backgrounded, and any voice button picks it back up;
  * only the explicit cancel button stops it.
  */
 @Composable
 fun VoiceModelDownloadDialog(onReady: () -> Unit, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val state by VoiceModelDownloader.state.collectAsState()
+    val spec = ModelCatalog.SPEECH
+    val state by ModelDownloads.stateOf(spec.id).collectAsState()
 
     LaunchedEffect(state) {
         if (state is State.Ready) {
             // Trust Ready only while the model is really still there — a
             // stale in-memory Ready (files cleared mid-process) re-arms the
             // offer instead of firing onReady into a load that can't succeed.
-            if (VoskModel.isAvailable(context)) onReady() else VoiceModelDownloader.reofferIfGone(context)
+            if (VoskModel.isAvailable(context)) onReady() else ModelDownloads.reofferIfGone(context, spec)
         }
     }
 
@@ -82,17 +86,17 @@ fun VoiceModelDownloadDialog(onReady: () -> Unit, onDismiss: () -> Unit) {
                 else -> Text(
                     stringResource(
                         R.string.voice_model_prompt_body,
-                        Formatter.formatShortFileSize(context, VoiceModelDownloader.MODEL_ZIP_BYTES),
+                        Formatter.formatShortFileSize(context, spec.downloadBytes),
                     ),
                 )
             }
         },
         confirmButton = {
             when (state) {
-                is State.Idle -> TextButton(onClick = { VoiceModelDownloader.start(context) }) {
+                is State.Idle -> TextButton(onClick = { ModelDownloadService.start(context, spec.id) }) {
                     Text(stringResource(R.string.voice_model_download))
                 }
-                is State.Failed -> TextButton(onClick = { VoiceModelDownloader.start(context) }) {
+                is State.Failed -> TextButton(onClick = { ModelDownloadService.start(context, spec.id) }) {
                     Text(stringResource(R.string.voice_model_retry))
                 }
                 else -> Unit
@@ -102,7 +106,7 @@ fun VoiceModelDownloadDialog(onReady: () -> Unit, onDismiss: () -> Unit) {
             when (state) {
                 is State.Downloading, State.Installing -> TextButton(
                     onClick = {
-                        VoiceModelDownloader.cancel()
+                        ModelDownloadService.cancel(spec.id)
                         onDismiss()
                     },
                 ) { Text(stringResource(R.string.voice_model_cancel_download)) }

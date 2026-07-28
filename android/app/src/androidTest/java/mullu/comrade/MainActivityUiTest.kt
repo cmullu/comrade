@@ -2,6 +2,7 @@ package mullu.comrade
 
 import android.Manifest
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -23,8 +24,8 @@ import org.junit.runner.RunWith
  * On-device journey test for the Telegram-like flow: the onboarding door
  * renders without blocking on the native core, creating an identity (username
  * + passcode) unlocks the vault through real Rust crypto, and the main shell
- * (Chats / Journal / Feed, with Settings reached from the navigation drawer)
- * comes up with working bottom navigation.
+ * (Chats / Journal / Feed / Tara, with Settings reached from the navigation
+ * drawer) comes up with working bottom navigation.
  *
  * The test adapts to residual state: on a fresh emulator it walks the create
  * path; if a previous run on the same device already created the vault (or the
@@ -61,10 +62,32 @@ class MainActivityUiTest {
         return node.config[SemanticsProperties.Text].joinToString()
     }
 
+    /**
+     * Hide the soft keyboard before tapping something it might be covering.
+     *
+     * [Espresso.closeSoftKeyboard] resolves a root view **with window focus**
+     * (`RootViewPicker`), and on a cold emulator that focus can lag the Compose
+     * hierarchy — the app is drawn and queryable while the window has not been
+     * granted focus yet. Espresso only waits 10s and then fails with
+     * `RootViewWithoutFocusException`, which is what flaked this test on CI.
+     * Waiting for focus first makes the precondition explicit instead of racing
+     * it; if focus genuinely never arrives that is a real problem and this
+     * fails with a message that says so, rather than an opaque root dump.
+     */
+    private fun dismissKeyboard() {
+        // Read the flag straight off the activity rather than hopping to the UI
+        // thread: it is a null-safe field read, and because this is a polling
+        // loop a stale `false` costs one extra poll rather than a wrong answer.
+        composeRule.waitUntil(timeoutMillis = FOCUS_TIMEOUT_MS) {
+            composeRule.activity.hasWindowFocus()
+        }
+        Espresso.closeSoftKeyboard()
+    }
+
     private fun submitOnboarding() {
         // Typing opens the soft keyboard, which can cover the submit button and
         // swallow the injected tap — close it and scroll the button into view.
-        Espresso.closeSoftKeyboard()
+        dismissKeyboard()
         composeRule.onNodeWithTag("onboarding-submit").performScrollTo().performClick()
     }
 
@@ -88,8 +111,24 @@ class MainActivityUiTest {
         // Argon2 key stretching + engine construction run off the UI thread;
         // the shell appears when the vault is open. Fail fast — with the
         // on-screen message — if onboarding surfaced an error instead.
-        composeRule.waitUntil(timeoutMillis = 120_000) {
-            hasText("Chats") || onboardingError() != null
+        try {
+            composeRule.waitUntil(timeoutMillis = 120_000) {
+                hasText("Chats") || onboardingError() != null
+            }
+        } catch (timeout: ComposeTimeoutException) {
+            // Say what was actually on screen: a stuck onboarding form (the tap
+            // never landed) and a genuinely slow unlock are very different bugs,
+            // and the bare timeout distinguishes neither.
+            val screen = if (hasTag("onboarding-submit")) {
+                "the onboarding form is still showing — the submit tap did not take effect"
+            } else {
+                "neither the shell nor the onboarding form is showing"
+            }
+            throw AssertionError(
+                "Vault never opened within 120s: $screen " +
+                    "(error line: ${onboardingError() ?: "none"})",
+                timeout,
+            )
         }
         onboardingError()?.let { message ->
             throw AssertionError("Onboarding reported an error: $message")
@@ -97,7 +136,7 @@ class MainActivityUiTest {
 
         // The IME may still be up from the onboarding fields; drop it so taps
         // reach the bottom navigation.
-        Espresso.closeSoftKeyboard()
+        dismissKeyboard()
 
         // Bottom navigation reaches the Feed section.
         composeRule.onNodeWithText("Feed").performClick()
@@ -126,5 +165,12 @@ class MainActivityUiTest {
     private companion object {
         const val USERNAME = "ci_tester"
         const val PASSCODE = "comrade-ci-passcode"
+
+        /**
+         * How long to wait for the activity window to gain focus. Generous
+         * because it is a cold-emulator warm-up, not app work — but bounded, so
+         * a window that never focuses fails loudly instead of hanging.
+         */
+        const val FOCUS_TIMEOUT_MS = 20_000L
     }
 }
