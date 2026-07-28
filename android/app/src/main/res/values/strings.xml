@@ -30,6 +30,7 @@
     <string name="voice_model_retry">Retry</string>
 
     <!-- Shared on-device model download (ModelDownloadService notifications) -->
+    <string name="model_preparing_title">Preparing download…</string>
     <string name="model_downloading_title">Downloading the %1$s</string>
     <string name="model_downloading_text">%1$s of %2$s</string>
     <string name="model_installing_text">Verifying and installing…</string>

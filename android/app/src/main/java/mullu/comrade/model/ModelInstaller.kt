@@ -108,6 +108,8 @@ object ModelInstaller {
         }
         installTarget.deleteRecursively()
         installTarget.parentFile?.mkdirs()
+        // No copy fallback here (unlike installFile): staging and install are
+        // siblings under filesDir, so this rename cannot cross a filesystem.
         if (!stagingDir.renameTo(installTarget)) {
             throw IOException("could not move the model into place")
         }

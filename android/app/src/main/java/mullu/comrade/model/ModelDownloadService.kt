@@ -51,10 +51,29 @@ class ModelDownloadService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val spec = intent?.getStringExtra(EXTRA_MODEL_ID)?.let(ModelCatalog::byId)
+        val inFlight = activeSpec()
+
         // We were launched with startForegroundService(), so the platform wants
-        // startForeground() promptly — before any of the early returns below,
-        // or it kills the process with "did not then call startForeground()".
-        startForegroundNotified(spec, 0)
+        // startForeground() promptly — before any of the early returns below, or
+        // it kills the process with "did not then call startForeground()".
+        //
+        // When a transfer is already running we re-post *its* notification, at
+        // *its* current progress: a request for some other model must not be
+        // able to relabel the running download or reset its bar.
+        startForegroundNotified(inFlight ?: spec, if (inFlight != null) progressOf(inFlight) else 0)
+
+        if (inFlight != null) {
+            // A Service is a singleton, so this call arrived on the instance
+            // that owns the running transfer. Never take a teardown path here:
+            // stopSelf() would destroy the service and abort that download.
+            if (spec != null && spec.id != inFlight.id) {
+                ModelDownloads.update(
+                    spec.id,
+                    ModelDownloadState.Failed(getString(R.string.model_download_busy)),
+                )
+            }
+            return START_NOT_STICKY
+        }
 
         if (spec == null) {
             finish()
@@ -75,8 +94,8 @@ class ModelDownloadService : Service() {
             return START_NOT_STICKY
         }
         if (!active.compareAndSet(null, spec.id)) {
-            // Another model is mid-flight. Don't tear down the foreground
-            // notification that download owns — just report the refusal.
+            // Lost a race against a concurrent start; the winner owns the
+            // foreground notification, so again: report, don't tear down.
             if (active.get() != spec.id) {
                 ModelDownloads.update(
                     spec.id,
@@ -92,6 +111,15 @@ class ModelDownloadService : Service() {
         return START_NOT_STICKY
     }
 
+    /** The model whose transfer is running on this service, if any. */
+    private fun activeSpec(): ModelSpec? = active.get()?.let(ModelCatalog::byId)
+
+    /** Current whole-percent progress for [spec], from the shared state. */
+    private fun progressOf(spec: ModelSpec): Int =
+        (ModelDownloads.current(spec.id) as? ModelDownloadState.Downloading)
+            ?.let { downloadPercent(it.bytesRead, it.totalBytes) }
+            ?: 0
+
     /** Drop the foreground notification and stop — the only teardown path. */
     private fun finish() {
         stopForegroundCompat()
@@ -100,6 +128,11 @@ class ModelDownloadService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // If we are being torn down with a transfer still in flight (process
+        // pressure rather than our own finish()), ask it to abort. The download
+        // loop is blocking, so cancelling the scope alone would not stop it —
+        // it would keep writing bytes for a service that no longer exists.
+        active.get()?.let(ModelDownloads::cancel)
         scope.cancel()
     }
 
@@ -155,7 +188,9 @@ class ModelDownloadService : Service() {
                 if (spec != null) {
                     getString(R.string.model_downloading_title, spec.displayName)
                 } else {
-                    getString(R.string.model_installing_text)
+                    // Only reachable for a moment on a malformed start intent,
+                    // but it still has to read as something sane in the shade.
+                    getString(R.string.model_preparing_title)
                 },
             )
             .setOngoing(true)
