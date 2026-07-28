@@ -30,14 +30,29 @@ entirely in Rust, with a shared view-model layer driving an Android
 | **Tara** | On-device reply engine (no network, no cloud) | Reflective companion — a private space to think out loud: feeling-mirroring, reflective prompts, brainstorming scaffolds, journaling nudges from mood markers. Replies **stream in** word-by-word (crisis hand-offs never do — those appear complete). **Not therapy, and it says so**: distress cues switch the reply into a hand-off to real crisis helplines. Thread sealed in the encrypted store; *clear conversation* built in | ⚠️ v1 deterministic template engine wired end-to-end (Android **Tara** tab — last in the bottom nav — with opt-in explainer, streaming replies + crisis card; desktop backend commands, web UI pending). The engine seam is ready for an **on-device** LLM once [`AUDIT.md` OQ9](AUDIT.md) is decided — a cloud model is ruled out by design. See [`docs/TARA.md`](docs/TARA.md) |
 | **Model downloads** | One pinned-checksum pipeline for every on-device model | Shared fetch/verify/install for the **speech** model ("Hey Comrade") and Tara's future companion model: sha256-pinned, zip-slip-guarded, atomic install. Runs in a **foreground service** so the transfer survives backgrounding, with live progress in the **notification bar** and a tappable "ready" notification that deep-links back to where the model is used | ✅ Wired for the speech model (Android). ⚠️ The companion-model entry ships deliberately **unpinned** until OQ9 picks a model, so no unverifiable download is ever offered |
 
+| **Dak** (store & forward) | Sender outbox + sealed courier envelopes | A DM no relay will accept is **queued, not lost**: persisted in the encrypted store, retried on a cadence and at every launch, cleared by the peer's receipt, and marked *failed* — visibly — after 8 attempts or 24 h. Alongside it, an engine for handing sealed mail to a peer who may physically meet the recipient: day-rotating recipient tags (`HMAC(recipient key, ctx‖UTC day)`), trust-tier quotas, spray-and-wait copy budgets | ✅ Outbox wired (queue → retry → receipt/fail, survives an app kill). 🧪 Courier engine + tests only, no transport drives it yet |
+| **Anonymous Chitthi** | Per-post ephemeral keys / device-seed personas | A public post signed by a key that is **not your identity**: a throwaway key per post (two anonymous posts cannot be linked to each other) or a stable per-scope persona so replies reach the same pseudonym. `created_at` coarsened to the hour | ✅ Engine + `ComradeRuntime`/Android bridge command; UI surface pending. Honest about limits: the key is unlinkable, the network path (IP, timing) is not |
+| **Location channels** | Geohash-scoped Nostr rooms (kinds 20000/20001) | Public rooms scoped to a place instead of a follow graph, spoken under a per-cell persona. Presence heartbeats **only** at region/province/city precision — never street level — and an empty fine-precision channel reports "?" rather than a misleading 0 | 🧪 Engine + tests only (publish/subscribe/presence + geohash arithmetic); no UI yet |
+| **Panic wipe** | Whole-store shred + re-lock | One call destroys every stored value — identity keys, DM history, journal, Tara thread, queued mail — then re-locks to a pre-onboarding state. Enumerates the database's *actual* tables, so a store added later cannot be forgotten | ✅ Wired (`ComradeRuntime::panic_wipe`, Android bridge command); a UI entry point is the follow-up. Wipes rather than hides, and needs the app unlocked — deliberately **not** a duress feature |
+| **Metrics** | Device-local counters | Delivery-behaviour tallies (queued/resent/delivered/dropped, courier deposits and handovers, dedup drops) with **no** peer, message id, content, or timestamp — so they can never become a record of who talked to whom. No exporter, no endpoint; cleared by the panic wipe | ✅ Wired at the outbox/courier call sites + `metrics_snapshot()`; diagnostics screen pending |
+
 > **Status honesty.** 🧪 rows are working, unit-tested library code that no
 > frontend invokes yet — they describe the architecture's direction, not
 > shipped behavior. The full gap analysis lives in [`AUDIT.md`](AUDIT.md).
 
 > **Nomenclature.** A public post is a **Chitthi** (Hindi for *letter*) throughout
 > the application layer — `ChitthiNode`/`ChitthiThread`, `broadcast_chitthi`,
-> `subscribe_chitthi_feed`, the `chitthi_cache`. Nostr protocol constants
-> (`Kind::TextNote`, NIP-44) are kept intact at the wire level.
+> `subscribe_chitthi_feed`, the `chitthi_cache`. **Dak** (डाक — *post, mail*) is
+> the store-and-forward layer, and a courier carrying someone's mail is its
+> *dakiya*. Nostr protocol constants (`Kind::TextNote`, NIP-44) are kept intact
+> at the wire level.
+
+> **Prior art.** The store-and-forward stack, the privacy mechanics (padding,
+> panic wipe, identity-free metrics), the anonymity primitives, and the location
+> channels are adapted from [bitchat](https://github.com/permissionlesstech/bitchat).
+> [`docs/BITCHAT_ADOPTION.md`](docs/BITCHAT_ADOPTION.md) is the full ledger:
+> every mechanism examined, what landed, what was adapted because Comrade's
+> stack differs, and what was deliberately declined.
 
 ## Identity & usernames
 
@@ -89,6 +104,9 @@ Base ──────── Sabha (public feed) + Vault (E2E DMs)
 crates/
   comrade_state/   State machine (no I/O dependencies)
   comrade_core/    Protocol engines: crypto, sabha, vault, saathi, sakha, relay, media
+                   plus dak (outbox + couriers), gcs (history reconciliation),
+                   anon (unlinkable personas), geo (location channels),
+                   pad / seen / metrics (padding, dedup, local counters)
   comrade_storage/ Encrypted-at-rest persistence (redb + Argon2id + AES-256-GCM)
   comrade_ui/      Framework-agnostic view-model / service layer (UiService + DTOs)
   comrade_jni/     JNI bridge — compiled to libcomrade_jni.so for Android

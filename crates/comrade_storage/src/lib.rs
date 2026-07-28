@@ -252,6 +252,100 @@ impl EncryptedStore {
         Ok(())
     }
 
+    /// Names of every user tree currently present, i.e. everything a wipe must
+    /// reach. Excludes the reserved meta tree (salt + PIN verification token),
+    /// which is store machinery rather than user data.
+    pub fn tree_names(&self) -> Result<Vec<String>, StorageError> {
+        let txn = self.db.begin_read()?;
+        // Collect into a local before the transaction drops: the iterator
+        // `list_tables` returns borrows it.
+        let names: Vec<String> = txn
+            .list_tables()?
+            .map(|t| t.name().to_string())
+            .filter(|name| name != META_TREE)
+            .collect();
+        Ok(names)
+    }
+
+    /// **Panic wipe** — destroy every stored value and make the residue
+    /// undecryptable, in one atomic transaction.
+    ///
+    /// Adopted from bitchat's panic wipe, and the reason it earns its place in a
+    /// wellbeing app is the threat bitchat's own privacy assessment names: for
+    /// many of the people this is built for, the realistic compromise is not
+    /// interception but a phone taken, and often unlocked under duress. A
+    /// journal of someone's worst weeks is exactly the wrong thing to still be
+    /// on the device at that point.
+    ///
+    /// Every row of every user tree is removed — the identity keypair, DM
+    /// history, journal, Tara thread, contacts, media refs, call log, queued
+    /// outbox mail, carried courier mail, whatever exists — in a single write
+    /// transaction, so a crash mid-wipe leaves either the old store or an empty
+    /// one, never a half-wiped mix.
+    ///
+    /// The store stays open and usable with the same passphrase, just empty:
+    /// deleting the file out from under a live handle is a harder failure mode
+    /// on Android, where the process keeps running after the wipe.
+    ///
+    /// **What this does not promise.** Removed rows free database pages; the
+    /// sealed bytes may physically remain there until redb reuses the space, and
+    /// they are still sealed under the *current* key. Someone with both the
+    /// device image and the passphrase could in principle carve them out. Use
+    /// [`Self::destroy`] once every handle is dropped when that matters — and
+    /// note that on flash storage even file deletion is not a guarantee.
+    ///
+    /// Callers must clear in-memory state too — see
+    /// `comrade_ui::ComradeRuntime::panic_wipe`, which drops the engines, the
+    /// dedup sets, and the metrics counters alongside this.
+    pub fn panic_wipe(&self) -> Result<(), StorageError> {
+        let txn = self.db.begin_write()?;
+        {
+            let tree_names: Vec<String> = txn
+                .list_tables()?
+                .map(|t| t.name().to_string())
+                .filter(|name| name != META_TREE)
+                .collect();
+
+            for tree_name in tree_names {
+                let keys: Vec<String> = {
+                    let table = txn.open_table(table_def(&tree_name))?;
+                    let mut keys = Vec::new();
+                    for item in table.iter()? {
+                        let (k, _) = item?;
+                        keys.push(k.value().to_string());
+                    }
+                    keys
+                };
+                let mut table = txn.open_table(table_def(&tree_name))?;
+                for key in keys {
+                    table.remove(key.as_str())?;
+                }
+            }
+        }
+        txn.commit()?;
+
+        info!("storage: panic wipe removed every stored value");
+        Ok(())
+    }
+
+    /// Delete the store's files from disk entirely. The stronger half of the
+    /// panic wipe, for callers that can drop every [`EncryptedStore`] handle
+    /// first (a desktop shell on quit, or Android before restarting onboarding).
+    ///
+    /// A missing store is success — this is idempotent, so a retry after a
+    /// partial failure is safe.
+    pub fn destroy(path: impl AsRef<Path>) -> Result<(), StorageError> {
+        let dir = path.as_ref();
+        let file = dir.join(REDB_FILE_NAME);
+        if file.exists() {
+            fs::remove_file(&file).map_err(|e| {
+                StorageError::Corrupt(format!("cannot remove {}: {e}", file.display()))
+            })?;
+        }
+        info!("storage: store files destroyed");
+        Ok(())
+    }
+
     /// Re-key the entire store under a new PIN.
     ///
     /// Every value across every user tree is decrypted with the current key
@@ -451,6 +545,101 @@ mod tests {
         let store = EncryptedStore::open(dir.path(), "hunter2").unwrap();
         let got: Option<String> = store.get("identity", "self").unwrap();
         assert_eq!(got.as_deref(), Some("secret-value"));
+    }
+
+    /// The panic wipe must reach **every** tree, including ones this crate has
+    /// never heard of (`comrade_ui` defines its own: media refs, peer profiles,
+    /// app settings, the Sakha pairing, and the store-and-forward queues).
+    ///
+    /// That is why the wipe enumerates the database's actual tables instead of
+    /// walking a hand-maintained list: bitchat's release checklist has to say
+    /// "new persistent stores must add an explicit wipe hook", and this test
+    /// pins the property that makes the reminder unnecessary here.
+    #[test]
+    fn panic_wipe_reaches_every_tree_including_unknown_ones() {
+        let (_dir, store) = temp_store("pin");
+
+        let trees = [
+            "identity",
+            "contacts",
+            "vault_cache",
+            "chitthi_cache",
+            "journal",
+            "tara_companion",
+            "conversation_meta",
+            "call_log",
+            "ledger",
+            // Trees owned by other crates, and one this test just invented —
+            // a wipe that walked a registry would miss these.
+            "comrade_media_refs",
+            "peer_profiles",
+            "app_settings",
+            "sakha_pairing",
+            "comrade_outbox",
+            "comrade_courier",
+            "a_tree_added_next_year",
+        ];
+        for tree in trees {
+            store.put(tree, "k", &format!("sensitive-{tree}")).unwrap();
+        }
+        store
+            .put_bytes("ledger", "snapshot", b"crdt-bytes")
+            .unwrap();
+        assert_eq!(store.tree_names().unwrap().len(), trees.len());
+
+        store.panic_wipe().unwrap();
+
+        for tree in trees {
+            let got: Option<String> = store.get(tree, "k").unwrap();
+            assert!(got.is_none(), "{tree} survived the wipe");
+            assert!(store.keys(tree).unwrap().is_empty(), "{tree} kept keys");
+        }
+        assert!(store.get_bytes("ledger", "snapshot").unwrap().is_none());
+    }
+
+    #[test]
+    fn store_still_works_after_a_wipe() {
+        let dir = TempDir::new().unwrap();
+        {
+            let store = EncryptedStore::open(dir.path(), "pin").unwrap();
+            store.put("identity", "self", &"old-identity").unwrap();
+            store.panic_wipe().unwrap();
+            // A wiped store is empty, not broken: onboarding can start over.
+            store.put("identity", "self", &"new-identity").unwrap();
+        }
+        let store = EncryptedStore::open(dir.path(), "pin").unwrap();
+        let got: Option<String> = store.get("identity", "self").unwrap();
+        assert_eq!(
+            got.as_deref(),
+            Some("new-identity"),
+            "the same passphrase must still unlock the wiped store"
+        );
+    }
+
+    #[test]
+    fn destroy_removes_the_store_file_and_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        {
+            let store = EncryptedStore::open(dir.path(), "pin").unwrap();
+            store.put("identity", "self", &"data").unwrap();
+        }
+        assert!(dir.path().join(REDB_FILE_NAME).exists());
+        EncryptedStore::destroy(dir.path()).unwrap();
+        assert!(!dir.path().join(REDB_FILE_NAME).exists());
+        // A retry after a partial failure must not error.
+        EncryptedStore::destroy(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn tree_names_excludes_store_machinery() {
+        let (_dir, store) = temp_store("pin");
+        store.put("journal", "k", &"entry").unwrap();
+        let names = store.tree_names().unwrap();
+        assert_eq!(names, vec!["journal".to_string()]);
+        assert!(
+            !names.iter().any(|n| n == META_TREE),
+            "the salt/verify tree is machinery, not user data"
+        );
     }
 
     #[test]

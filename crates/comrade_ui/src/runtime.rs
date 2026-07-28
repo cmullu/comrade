@@ -30,21 +30,26 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use comrade_core::anon;
 use comrade_core::call::{
     derive_sas, ice_servers_for, new_call_id, parse_call_envelope, validate_turn_url, CallEnvelope,
     CallMediaKind, CallSignal, HangupReason, IceServer, IceStrategy,
 };
 use comrade_core::crypto::derive_media_key;
+use comrade_core::dak::outbox::local_message_id;
+use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
 use comrade_core::dm::{parse_profile_share, parse_receipt, ProfileShare, Receipt, ReceiptKind};
 use comrade_core::media::{
     build_file_metadata_event, encrypt_media, fetch_and_decrypt_media, FileMetadata,
     MAX_MEDIA_BYTES,
 };
+use comrade_core::metrics as core_metrics;
 use comrade_core::saathi::SaathiEngine;
 use comrade_core::sabha::{
     display_name_of, ChitthiCallback, FeedFilterSpec, FeedScope, SabhaEngine, DEFAULT_RELAYS,
 };
 use comrade_core::sakha::{LedgerEntry, SakhaEngine, SakhaSyncCallback};
+use comrade_core::seen::SeenSet;
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
 use comrade_core::vault::{VaultCallback, VaultEngine, VaultMessage};
 use nostr_sdk::{EventId, Metadata, PublicKey, ToBech32};
@@ -105,6 +110,32 @@ const TURN_CONFIG_KEY: &str = "turn_server";
 /// inbox message this device has processed — see [`advance_watermark`] and
 /// [`ComradeRuntime::spawn_event_loops`]'s `since_floor` computation.
 const VAULT_WATERMARK_KEY: &str = "vault_last_seen_at";
+/// Encrypted-store tree holding the sender-outbox snapshot — DMs that could not
+/// be published, kept so an offline send survives an app kill instead of
+/// evaporating (adopted from bitchat's store-and-forward, see
+/// `docs/BITCHAT_ADOPTION.md`).
+const OUTBOX_TREE: &str = "comrade_outbox";
+const OUTBOX_KEY: &str = "queued";
+/// Settings key holding the 32-byte device seed every anonymous persona is
+/// derived from — see [`load_or_create_device_seed`].
+const DEVICE_SEED_KEY: &str = "anonymity_device_seed";
+/// Status string on a message that is queued in the outbox, not yet on a relay.
+const STATUS_QUEUED: &str = "queued";
+/// Status string on a message the outbox gave up on (attempt cap or TTL).
+const STATUS_FAILED: &str = "failed";
+/// How often the background flush loop retries queued mail. Comrade has no
+/// mesh-style "peer reconnected" event to hang a flush on, so a modest fixed
+/// cadence stands in for bitchat's reconnect trigger; a flush with an empty
+/// outbox costs one lock and returns.
+const OUTBOX_FLUSH_INTERVAL_SECS: u64 = 60;
+
+/// Capacity of the call-signal dedup set: comfortably above one call's signal
+/// count (offer/answer/several ICE candidates/hangup is a handful of events), so
+/// a single call can never evict its own earlier signals mid-negotiation.
+/// At-least-once relay delivery plus the 2-day inbox backfill mean the same
+/// wrapper can arrive repeatedly, and a duplicate `Answer` or terminal `Hangup`
+/// must not be re-applied downstream.
+const CALL_SIGNAL_DEDUP_CAPACITY: usize = 512;
 
 /// A call signal older than this is meaningless — the ring timeout has long
 /// since passed on the sender's side (an `Offer`), and every other signal
@@ -447,6 +478,19 @@ pub struct ConversationDto {
     pub last_outgoing: bool,
 }
 
+/// One device-local counter, as a diagnostics screen sees it.
+///
+/// Deliberately just a name and a number: the metrics layer has no way to
+/// attach a peer, a message id, or a timestamp, so a snapshot cannot become a
+/// record of who someone talked to and when. See
+/// [`ComradeRuntime::metrics_snapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct MetricDto {
+    /// Stable dotted key, e.g. `outbox.queued`.
+    pub key: String,
+    pub value: u64,
+}
+
 /// Locally cached snapshot of a peer's published Kind-0 profile. `name` is a
 /// self-declared, non-unique handle — a display aid, never an identifier.
 /// Every field defaults so rows written by older builds keep deserialising
@@ -635,7 +679,14 @@ pub struct ComradeRuntime {
     /// the event bus this session — see [`dispatch_incoming_dm`]'s call-signal
     /// branch. Behind an `Arc` so the vault callback (which outlives `&self`
     /// borrows) can hold its own clone.
-    call_signal_dedup: Arc<CallSignalDedup>,
+    call_signal_dedup: Arc<SeenSet>,
+    /// Sender outbox: DMs a relay would not accept, retried by the flush loop
+    /// until a receipt clears them or the attempt cap drops them. Restored from
+    /// the encrypted store on unlock, so a message survives an app kill.
+    outbox: Arc<Outbox>,
+    /// The periodic outbox-flush task, tracked like [`Self::feed_task`] so
+    /// [`Self::lock_vault`] can abort it.
+    outbox_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for ComradeRuntime {
@@ -672,7 +723,9 @@ impl ComradeRuntime {
             vault_task: None,
             sakha_sync_task: None,
             relays,
-            call_signal_dedup: Arc::new(CallSignalDedup::new()),
+            call_signal_dedup: Arc::new(SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY)),
+            outbox: Arc::new(Outbox::new()),
+            outbox_task: None,
         }
     }
 
@@ -755,6 +808,18 @@ impl ComradeRuntime {
         let kdf_ms = started.elapsed().as_millis() as u64;
         self.ui.attach_store(store);
 
+        // Mail queued before the last kill goes back into the live outbox, so
+        // the flush loop picks it up on this launch.
+        if let Some(store) = self.ui.store_ref() {
+            if let Ok(Some(snapshot)) = store.get::<OutboxSnapshot>(OUTBOX_TREE, OUTBOX_KEY) {
+                let restored = snapshot.queues.values().map(Vec::len).sum::<usize>();
+                if restored > 0 {
+                    tracing::info!(restored, "restored queued messages from the outbox");
+                }
+                self.outbox = Arc::new(Outbox::from_snapshot(snapshot));
+            }
+        }
+
         // Restore the saved identity, or seed and persist a fresh one so the
         // engines always have keys to sign with.
         let identity = match self.ui.load_identity()? {
@@ -828,6 +893,7 @@ impl ComradeRuntime {
             self.feed_task.take(),
             self.vault_task.take(),
             self.sakha_sync_task.take(),
+            self.outbox_task.take(),
         ]
         .into_iter()
         .flatten()
@@ -898,6 +964,7 @@ impl ComradeRuntime {
             // delivered receipts (the callback itself is sync; it spawns).
             let vault_cb = vault.clone();
             let dedup = self.call_signal_dedup.clone();
+            let outbox = self.outbox.clone();
             // Widen the backfill window past the standard gift-wrap skew when
             // this device was last seen longer ago than that (see
             // `VaultEngine::subscribe_inbox_with_callback`'s `since_floor`).
@@ -905,10 +972,33 @@ impl ComradeRuntime {
             self.vault_task = Some(tokio::spawn(async move {
                 vault.connect().await;
                 let cb: VaultCallback = Box::new(move |msg| {
-                    dispatch_incoming_dm(&vault_cb, store.as_ref(), &tx, &dedup, msg);
+                    dispatch_incoming_dm(&vault_cb, store.as_ref(), &tx, &dedup, &outbox, msg);
                 });
                 if let Err(e) = vault.subscribe_inbox_with_callback(cb, since_floor).await {
                     warn!("vault inbox loop ended: {e}");
+                }
+            }));
+        }
+
+        // Retry queued mail on a cadence (bitchat re-sends its outbox on
+        // reconnect events; Comrade has no equivalent signal, so this stands in).
+        // Spawned unconditionally alongside the vault loop: a flush with nothing
+        // queued is one lock acquisition.
+        if self.vault.is_some() {
+            let handles = self.handles();
+            self.outbox_task = Some(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                    OUTBOX_FLUSH_INTERVAL_SECS,
+                ));
+                // The first tick fires immediately: a launch is exactly when
+                // mail queued in a previous session should go out.
+                loop {
+                    ticker.tick().await;
+                    match handles.flush_outbox().await {
+                        Ok(0) => {}
+                        Ok(sent) => tracing::info!(sent, "outbox flushed"),
+                        Err(e) => tracing::debug!("outbox flush skipped: {e}"),
+                    }
                 }
             }));
         }
@@ -1000,6 +1090,81 @@ impl ComradeRuntime {
         self.handles()
             .send_dm_reply(target, content, reply_to)
             .await
+    }
+
+    /// Retry queued mail now. Delegates to [`RuntimeHandles::flush_outbox`] —
+    /// see [`Self::send_dm`]. Returns how many messages a relay accepted.
+    ///
+    /// A host that learns connectivity came back (Android's network callback,
+    /// the desktop resuming from sleep) should call this instead of waiting for
+    /// the periodic loop.
+    pub async fn flush_outbox(&self) -> Result<usize, UiError> {
+        self.handles().flush_outbox().await
+    }
+
+    /// How many messages are waiting for a relay that will take them.
+    pub fn outbox_pending(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Broadcast a Chitthi under a throwaway or scoped persona instead of this
+    /// device's identity. Delegates to
+    /// [`RuntimeHandles::broadcast_anonymous_chitthi`] — see [`Self::send_dm`].
+    pub async fn broadcast_anonymous_chitthi(
+        &self,
+        content: &str,
+        scope: Option<String>,
+    ) -> Result<String, UiError> {
+        self.handles()
+            .broadcast_anonymous_chitthi(content, scope.as_deref())
+            .await
+    }
+
+    /// Device-local delivery counters — bare tallies with no identities, ids,
+    /// content, or timestamps, so they are safe to render on a diagnostics
+    /// screen or paste into a bug report.
+    ///
+    /// Adopted from bitchat's `StoreAndForwardMetrics`. Nothing here leaves the
+    /// device: there is no exporter and no per-peer dimension to re-identify.
+    pub fn metrics_snapshot(&self) -> Vec<MetricDto> {
+        core_metrics::snapshot()
+            .into_iter()
+            .map(|(key, value)| MetricDto { key, value })
+            .collect()
+    }
+
+    /// **Panic wipe** — destroy everything this device holds, then re-lock.
+    ///
+    /// Adopted from bitchat, whose privacy assessment names the threat plainly:
+    /// for many of the people this is built for, the realistic compromise is a
+    /// phone taken, often unlocked under duress. A journal of someone's worst
+    /// weeks should not still be there at that point.
+    ///
+    /// In order: every stored value goes (identity keys included — see
+    /// `comrade_storage::EncryptedStore::panic_wipe`, which enumerates the
+    /// database's actual tables so a tree added later cannot be missed), then
+    /// the in-memory queues, dedup sets, and counters, then the engines and
+    /// identity via [`Self::lock_vault`]. Afterwards the runtime is exactly as
+    /// it was before its first unlock, and a fresh unlock starts onboarding
+    /// over.
+    ///
+    /// What it deliberately does not do is pretend to be a duress feature: it
+    /// wipes, it does not hide, and it needs the app open and unlocked to run.
+    pub async fn panic_wipe(&mut self) -> Result<(), UiError> {
+        let store = self.ui.store_arc().ok_or(UiError::VaultLocked)?;
+        // redb commits are fsync'd, so this is real I/O — keep it off the
+        // reactor thread.
+        tokio::task::spawn_blocking(move || store.panic_wipe())
+            .await
+            .map_err(|e| UiError::Storage(format!("wipe task failed: {e}")))?
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        self.outbox.clear();
+        self.call_signal_dedup.clear();
+        core_metrics::reset();
+        self.lock_vault().await;
+        tracing::warn!("panic wipe complete: local state destroyed and vault locked");
+        Ok(())
     }
 
     /// The chat list: one entry per **accepted** peer, newest thread first, with
@@ -2163,6 +2328,8 @@ impl ComradeRuntime {
             keys: self.ui.identity_keys(),
             username: self.ui.username(),
             identity: self.ui.current_identity(),
+            outbox: self.outbox.clone(),
+            events: self.events.clone(),
         }
     }
 }
@@ -2190,6 +2357,12 @@ pub struct RuntimeHandles {
     keys: Option<nostr_sdk::Keys>,
     username: Option<String>,
     identity: Option<IdentityDto>,
+    /// The live sender outbox — shared with the runtime and the inbox callback,
+    /// so a send failure here and a receipt there act on the same queue.
+    outbox: Arc<Outbox>,
+    /// Event bus, so a flush can report status changes (`sent` / `failed`)
+    /// without going back through `ComradeRuntime`.
+    events: broadcast::Sender<BridgeEvent>,
 }
 
 impl RuntimeHandles {
@@ -2208,19 +2381,45 @@ impl RuntimeHandles {
         }
         let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
         let peer = parse_pubkey(target)?;
-        let id = vault
-            .send_dm_reply(&peer, content, reply_to)
-            .await
-            .map_err(|e| UiError::Engine(e.to_string()))?;
-
         let peer_npub = to_npub(target);
+        let created_at = now_secs();
+
+        // A relay that will not take the message is not the end of the road:
+        // queue it, persist it as `queued`, and let the flush loop retry
+        // (bitchat whitepaper §6.1). Before this, a publish failure lost the
+        // text entirely — the worst failure mode an app about staying in touch
+        // can have.
+        let (id, status) = match vault.send_dm_reply(&peer, content, reply_to).await {
+            Ok(id) => (id.to_hex(), "sent"),
+            Err(e) => {
+                let local_id = local_message_id(&peer_npub, content, created_at);
+                tracing::info!(error = %e, "DM could not be published — queued for retry");
+                let queued = QueuedMessage::new(
+                    local_id.clone(),
+                    peer_npub.clone(),
+                    content,
+                    reply_to.map(str::to_string),
+                    created_at,
+                );
+                if let QueueOutcome::Displaced(dropped) = self.outbox.queue(queued) {
+                    // The peer's queue was full; the oldest message is gone and
+                    // must not keep showing as pending.
+                    self.mark_status(&peer_npub, &[dropped], STATUS_FAILED);
+                }
+                if let Some(store) = &self.store {
+                    persist_outbox(store, &self.outbox);
+                }
+                (local_id, STATUS_QUEUED)
+            }
+        };
+
         let dto = MessageDto {
-            id: id.to_hex(),
+            id,
             peer: peer_npub.clone(),
             content: content.to_string(),
-            created_at: now_secs(),
+            created_at,
             outgoing: true,
-            status: Some("sent".into()),
+            status: Some(status.into()),
             reply_to: reply_to.map(str::to_string),
         };
         if let Some(store) = &self.store {
@@ -2230,21 +2429,216 @@ impl RuntimeHandles {
                 content: dto.content.clone(),
                 created_at: dto.created_at,
                 outgoing: true,
-                status: Some("sent".into()),
+                status: Some(status.into()),
                 reply_to: dto.reply_to.clone(),
             };
             if let Err(e) = store.save_message(&row).and_then(|()| store.flush()) {
                 warn!("failed to persist outgoing DM: {e}");
             }
         }
-        share_profile_on_accept(
-            self.store.clone(),
-            self.vault.clone(),
-            self.username.clone(),
-            &peer_npub,
-            &peer,
-        );
+        // Only a message that actually reached a relay should trigger the
+        // profile share; a queued one shares on its successful flush instead.
+        if status == "sent" {
+            share_profile_on_accept(
+                self.store.clone(),
+                self.vault.clone(),
+                self.username.clone(),
+                &peer_npub,
+                &peer,
+            );
+        }
         Ok(dto)
+    }
+
+    /// Retry every queued message that is still worth retrying, and reap the
+    /// ones that are not. Returns how many were accepted by a relay.
+    ///
+    /// Called on a cadence by the loop [`ComradeRuntime::spawn_event_loops`]
+    /// starts (with the first tick at launch, which is when mail queued in a
+    /// previous session should go out), and callable directly by a host that
+    /// knows connectivity just came back.
+    pub async fn flush_outbox(&self) -> Result<usize, UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+
+        // Expired or attempt-exhausted mail: stop lying about it in the UI.
+        for dropped in self.outbox.prune(now) {
+            if let Some(peer) = self.peer_of_stored(&dropped) {
+                self.mark_status(&peer, &[dropped], STATUS_FAILED);
+            }
+        }
+
+        let due = self.outbox.due(now);
+        if due.is_empty() {
+            return Ok(0);
+        }
+
+        let mut sent = 0usize;
+        for queued in due {
+            let Ok(peer_pk) = parse_pubkey(&queued.peer_npub) else {
+                // An unparseable recipient can never succeed; drop it rather
+                // than retry it eight times.
+                self.outbox
+                    .ack(&queued.peer_npub, std::slice::from_ref(&queued.message_id));
+                continue;
+            };
+            match vault
+                .send_dm_reply(&peer_pk, &queued.content, queued.reply_to.as_deref())
+                .await
+            {
+                Ok(event_id) => {
+                    self.outbox
+                        .ack(&queued.peer_npub, std::slice::from_ref(&queued.message_id));
+                    // Re-key the stored row to the relay's event id: a later
+                    // delivered/read receipt names *that* id, so without this
+                    // the ticks would never advance past `sent`.
+                    self.rekey_stored_message(&queued, &event_id.to_hex());
+                    let _ = self.events.send(BridgeEvent::MessageStatus {
+                        peer: queued.peer_npub.clone(),
+                        message_ids: vec![event_id.to_hex()],
+                        status: "sent".into(),
+                    });
+                    share_profile_on_accept(
+                        self.store.clone(),
+                        self.vault.clone(),
+                        self.username.clone(),
+                        &queued.peer_npub,
+                        &peer_pk,
+                    );
+                    sent += 1;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "queued DM still undeliverable");
+                    if matches!(
+                        self.outbox
+                            .record_attempt(&queued.peer_npub, &queued.message_id),
+                        AttemptOutcome::Exhausted
+                    ) {
+                        self.mark_status(
+                            &queued.peer_npub,
+                            std::slice::from_ref(&queued.message_id),
+                            STATUS_FAILED,
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(store) = &self.store {
+            persist_outbox(store, &self.outbox);
+        }
+        Ok(sent)
+    }
+
+    /// Broadcast a Chitthi that is **not** signed by this device's identity.
+    ///
+    /// `scope` picks the privacy shape (adopted from bitchat's per-geohash
+    /// identities, and the missing piece `AUDIT.md` §8 flagged for the anonymous
+    /// thoughts pillar):
+    ///  • `None` — a throwaway key per post. Two anonymous Chitthis cannot be
+    ///    linked to each other, let alone to you.
+    ///  • `Some(label)` — a stable persona derived from the device seed for that
+    ///    label, so replies can reach the same pseudonym while it stays
+    ///    unlinkable to your identity and to your other personas.
+    ///
+    /// The post is cached locally under its throwaway key so it appears in your
+    /// own timeline. Nothing links it to the identity on any relay; the network
+    /// layer (IP, timing) is a separate exposure this cannot close — see the
+    /// engine docs on [`SabhaEngine::broadcast_anonymous_chitthi`].
+    pub async fn broadcast_anonymous_chitthi(
+        &self,
+        content: &str,
+        scope: Option<&str>,
+    ) -> Result<String, UiError> {
+        if content.trim().is_empty() {
+            return Err(UiError::Engine("chitthi is empty".into()));
+        }
+        let sabha = self.sabha.clone().ok_or(UiError::VaultLocked)?;
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+
+        let signer = match scope {
+            Some(label) => {
+                let seed = load_or_create_device_seed(&store)?;
+                anon::derive_scoped(&seed, anon::SCOPE_CHITTHI, label)
+                    .map_err(|e| UiError::Engine(e.to_string()))?
+            }
+            None => anon::ephemeral(),
+        };
+
+        let id = sabha
+            .broadcast_anonymous_chitthi(content, &signer)
+            .await
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+
+        let author_npub = signer
+            .public_key()
+            .to_bech32()
+            .unwrap_or_else(|_| signer.public_key().to_hex());
+        let row = comrade_storage::Chitthi {
+            id: id.to_hex(),
+            author_npub,
+            content: content.to_string(),
+            created_at: now_secs(),
+            reply_to: None,
+        };
+        if let Err(e) = store.cache_chitthi(&row).and_then(|()| store.flush()) {
+            warn!("failed to cache anonymous chitthi: {e}");
+        }
+        Ok(id.to_hex())
+    }
+
+    /// Persist a status change and announce it on the event bus.
+    fn mark_status(&self, peer: &str, message_ids: &[String], status: &str) {
+        if let Some(store) = &self.store {
+            for id in message_ids {
+                let _ = store.set_message_status(id, status);
+            }
+            let _ = store.flush();
+        }
+        let _ = self.events.send(BridgeEvent::MessageStatus {
+            peer: peer.to_string(),
+            message_ids: message_ids.to_vec(),
+            status: status.to_string(),
+        });
+    }
+
+    /// Which conversation a stored message belongs to, for a status update whose
+    /// only handle is the message id.
+    fn peer_of_stored(&self, message_id: &str) -> Option<String> {
+        self.store
+            .as_ref()?
+            .get_message(message_id)
+            .ok()
+            .flatten()
+            .map(|m| m.peer_npub)
+    }
+
+    /// Replace a queued row's local id with the relay's event id, keeping the
+    /// message's place in the conversation.
+    fn rekey_stored_message(&self, queued: &QueuedMessage, event_id: &str) {
+        let Some(store) = &self.store else { return };
+        let created_at = store
+            .get_message(&queued.message_id)
+            .ok()
+            .flatten()
+            .map(|m| m.created_at)
+            .unwrap_or(queued.queued_at);
+        let row = comrade_storage::StoredMessage {
+            id: event_id.to_string(),
+            peer_npub: queued.peer_npub.clone(),
+            content: queued.content.clone(),
+            created_at,
+            outgoing: true,
+            status: Some("sent".into()),
+            reply_to: queued.reply_to.clone(),
+        };
+        let result = store
+            .save_message(&row)
+            .and_then(|()| store.remove_message(&queued.message_id).map(|_| ()))
+            .and_then(|()| store.flush());
+        if let Err(e) = result {
+            warn!("failed to re-key a flushed message: {e}");
+        }
     }
 
     pub async fn broadcast_chitthi(
@@ -2820,52 +3214,44 @@ fn send_delivered_receipt(vault: &Arc<VaultEngine>, sender_hex: &str, message_id
     });
 }
 
-/// Bounded, hand-rolled LRU set of call-envelope wrapper event ids already
-/// dispatched onto the event bus this session. At-least-once relay delivery
-/// and the 2-day inbox backfill mean the exact same `Offer`/`Answer`/`Ice`/
-/// `Hangup` wrapper can arrive more than once; without this a duplicate
-/// `Answer` gets re-applied downstream and a duplicate terminal `Hangup`
-/// re-processed. Capacity-bounded (not just a growing `HashSet`) so a
-/// long-running session's memory use stays flat.
-struct CallSignalDedup {
-    state: std::sync::Mutex<CallSignalDedupState>,
+/// Write the outbox snapshot into the encrypted store. Best-effort: a failure
+/// here costs durability across a kill, never the live queue.
+fn persist_outbox(store: &Arc<comrade_storage::EncryptedStore>, outbox: &Arc<Outbox>) {
+    let snapshot = outbox.snapshot();
+    if let Err(e) = store
+        .put(OUTBOX_TREE, OUTBOX_KEY, &snapshot)
+        .and_then(|()| store.flush())
+    {
+        warn!("failed to persist the outbox: {e}");
+    }
 }
 
-#[derive(Default)]
-struct CallSignalDedupState {
-    /// Insertion order, oldest first — evicted from the front once at capacity.
-    order: std::collections::VecDeque<String>,
-    seen: std::collections::HashSet<String>,
-}
-
-impl CallSignalDedup {
-    /// Comfortably above one call's signal count (offer/answer/several ICE
-    /// candidates/hangup is a handful of events), so a single call can never
-    /// evict its own earlier signals mid-negotiation.
-    const CAPACITY: usize = 512;
-
-    fn new() -> Self {
-        Self {
-            state: std::sync::Mutex::new(CallSignalDedupState::default()),
+/// Load the device anonymity seed, creating and sealing one on first use.
+///
+/// This is the root secret every anonymous persona is derived from
+/// ([`anon::derive_scoped`]). It lives in the encrypted store next to the
+/// identity and is destroyed by the panic wipe, after which past personas cannot
+/// be regenerated — which is the intent.
+fn load_or_create_device_seed(
+    store: &Arc<comrade_storage::EncryptedStore>,
+) -> Result<anon::DeviceSeed, UiError> {
+    if let Some(bytes) = store
+        .get_bytes(SETTINGS_TREE, DEVICE_SEED_KEY)
+        .map_err(|e| UiError::Storage(e.to_string()))?
+    {
+        if let Ok(seed) = anon::DeviceSeed::from_slice(&bytes) {
+            return Ok(seed);
         }
+        // A wrong-length seed means a corrupt record; replacing it is better
+        // than deriving personas from truncated key material.
+        warn!("stored anonymity seed was malformed — generating a fresh one");
     }
-
-    /// Returns `true` if `event_id` was already recorded (the caller should
-    /// drop the signal); otherwise records it and returns `false`.
-    fn already_seen(&self, event_id: &str) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.seen.contains(event_id) {
-            return true;
-        }
-        if state.order.len() >= Self::CAPACITY {
-            if let Some(oldest) = state.order.pop_front() {
-                state.seen.remove(&oldest);
-            }
-        }
-        state.order.push_back(event_id.to_string());
-        state.seen.insert(event_id.to_string());
-        false
-    }
+    let seed = anon::DeviceSeed::generate();
+    store
+        .put_bytes(SETTINGS_TREE, DEVICE_SEED_KEY, seed.as_bytes())
+        .and_then(|()| store.flush())
+        .map_err(|e| UiError::Storage(e.to_string()))?;
+    Ok(seed)
 }
 
 /// Read the persisted inbox high-watermark (unix seconds of the newest
@@ -2906,7 +3292,8 @@ fn dispatch_incoming_dm(
     vault: &Arc<VaultEngine>,
     store: Option<&Arc<comrade_storage::EncryptedStore>>,
     tx: &broadcast::Sender<BridgeEvent>,
-    dedup: &CallSignalDedup,
+    dedup: &SeenSet,
+    outbox: &Arc<Outbox>,
     msg: VaultMessage,
 ) {
     if let Some(store) = store {
@@ -2923,6 +3310,14 @@ fn dispatch_incoming_dm(
     // 1) Receipt — advance our outgoing statuses (accepted conversations only).
     if let Some(receipt) = parse_receipt(&msg.content) {
         if matches!(gate, IncomingGate::Accepted) {
+            // A receipt proves the peer holds the message, so anything still
+            // queued for a retry is done — clear it before the status update so
+            // a concurrent flush cannot re-send an already-delivered message.
+            if !outbox.ack(&peer_npub, &receipt.message_ids).is_empty() {
+                if let Some(store) = store {
+                    persist_outbox(store, outbox);
+                }
+            }
             if let Some(store) = store {
                 let status = receipt.status.as_str();
                 let mut changed = Vec::new();
@@ -4574,7 +4969,8 @@ mod tests {
         let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
         let vault = test_vault().await;
         let (tx, mut rx) = broadcast::channel(16);
-        let dedup = CallSignalDedup::new();
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
         let (hex, peer) = stranger();
 
         dispatch_incoming_dm(
@@ -4582,6 +4978,7 @@ mod tests {
             Some(&store),
             &tx,
             &dedup,
+            &outbox,
             incoming(&hex, "e1", "hello?"),
         );
 
@@ -4605,7 +5002,8 @@ mod tests {
         let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
         let vault = test_vault().await;
         let (tx, mut rx) = broadcast::channel(16);
-        let dedup = CallSignalDedup::new();
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -4622,6 +5020,7 @@ mod tests {
             Some(&store),
             &tx,
             &dedup,
+            &outbox,
             incoming(&hex, "e1", "yo"),
         );
         assert!(matches!(
@@ -4649,6 +5048,7 @@ mod tests {
             Some(&store),
             &tx,
             &dedup,
+            &outbox,
             incoming(&hex, "e2", &receipt),
         );
         assert_eq!(
@@ -4679,7 +5079,8 @@ mod tests {
         let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
         let vault = test_vault().await;
         let (tx, mut rx) = broadcast::channel(16);
-        let dedup = CallSignalDedup::new();
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -4694,6 +5095,7 @@ mod tests {
             Some(&store),
             &tx,
             &dedup,
+            &outbox,
             incoming(&hex, "e1", "let me in"),
         );
         assert!(store.messages_with(&peer).unwrap().is_empty());
@@ -4707,6 +5109,7 @@ mod tests {
             Some(&store),
             &tx,
             &dedup,
+            &outbox,
             incoming(&other_hex, "e2", &share),
         );
         match rx.try_recv().unwrap() {
@@ -4726,7 +5129,8 @@ mod tests {
         let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
         let vault = test_vault().await;
         let (tx, mut rx) = broadcast::channel(16);
-        let dedup = CallSignalDedup::new();
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -4751,7 +5155,7 @@ mod tests {
         // window) must never ring.
         let mut stale = incoming(&hex, "e1", &envelope);
         stale.created_at = now_secs().saturating_sub(7200);
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, stale);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, stale);
         assert!(
             rx.try_recv().is_err(),
             "a call signal older than CALL_SIGNAL_MAX_AGE_SECS must not reach the bus"
@@ -4761,12 +5165,12 @@ mod tests {
         // redelivered (at-least-once relay delivery) must not fire twice.
         let mut fresh = incoming(&hex, "e2", &envelope);
         fresh.created_at = now_secs();
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, fresh.clone());
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, fresh.clone());
         assert!(matches!(
             rx.try_recv().unwrap(),
             BridgeEvent::IncomingCallSignal(_)
         ));
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, fresh);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, fresh);
         assert!(
             rx.try_recv().is_err(),
             "the same wrapper event id must only ever dispatch one IncomingCallSignal"
@@ -4781,7 +5185,8 @@ mod tests {
         let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
         let vault = test_vault().await;
         let (tx, mut rx) = broadcast::channel(16);
-        let dedup = CallSignalDedup::new();
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -4793,7 +5198,7 @@ mod tests {
             .unwrap();
 
         let msg = incoming(&hex, "dup1", "hello twice");
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, msg.clone());
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg.clone());
         assert!(matches!(
             rx.try_recv().unwrap(),
             BridgeEvent::IncomingDirectMessage(_)
@@ -4802,7 +5207,7 @@ mod tests {
 
         // Redelivered (same event id — relay at-least-once, or a backfill
         // re-scan on the next launch) must not re-notify or duplicate the row.
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, msg);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg);
         assert!(
             rx.try_recv().is_err(),
             "an already-persisted event id must not re-fire IncomingDirectMessage"
@@ -4816,7 +5221,8 @@ mod tests {
         let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
         let vault = test_vault().await;
         let (tx, mut rx) = broadcast::channel(16);
-        let dedup = CallSignalDedup::new();
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -4843,6 +5249,7 @@ mod tests {
             Some(&store),
             &tx,
             &dedup,
+            &outbox,
             incoming(&hex, "w1", &json),
         );
         assert!(matches!(
@@ -4856,6 +5263,7 @@ mod tests {
             Some(&store),
             &tx,
             &dedup,
+            &outbox,
             incoming(&hex, "w2", &json),
         );
         assert!(
@@ -4887,12 +5295,13 @@ mod tests {
         let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
         let vault = test_vault().await;
         let (tx, _rx) = broadcast::channel(16);
-        let dedup = CallSignalDedup::new();
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
         let (hex, _peer) = stranger();
 
         let mut msg = incoming(&hex, "e1", "hi");
         msg.created_at = 12_345;
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, msg);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg);
         assert_eq!(read_watermark(&store), Some(12_345));
     }
 
@@ -4947,5 +5356,256 @@ mod tests {
         assert!(toggled.unwrap().is_ok());
 
         send_task.abort();
+    }
+
+    // ── Store and forward (adopted from bitchat, see docs/BITCHAT_ADOPTION.md) ──
+
+    /// A runtime with no relays at all: every publish fails, which is exactly
+    /// the "you are offline" case the outbox exists for.
+    async fn offline_runtime(dir: &TempDir) -> ComradeRuntime {
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        rt
+    }
+
+    #[tokio::test]
+    async fn a_dm_that_no_relay_accepts_is_queued_not_lost() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let dto = rt.send_dm(&peer, "i had a hard day").await.unwrap();
+
+        assert_eq!(
+            dto.status.as_deref(),
+            Some("queued"),
+            "the user must see it pending, not see an error and lose the text"
+        );
+        assert!(comrade_core::dak::outbox::is_local_message_id(&dto.id));
+        assert_eq!(rt.outbox_pending(), 1);
+
+        // It is in the conversation history too, so the thread renders it.
+        let history = rt.messages_with(&peer).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "i had a hard day");
+        assert_eq!(history[0].status.as_deref(), Some("queued"));
+    }
+
+    #[tokio::test]
+    async fn queued_mail_survives_a_lock_and_unlock() {
+        let dir = TempDir::new().unwrap();
+        let (_hex, peer) = stranger();
+        {
+            let mut rt = offline_runtime(&dir).await;
+            rt.send_dm(&peer, "are you around?").await.unwrap();
+            assert_eq!(rt.outbox_pending(), 1);
+            rt.lock_vault().await;
+        }
+
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert_eq!(
+            rt.outbox_pending(),
+            1,
+            "queued mail must survive an app kill — that is the whole point"
+        );
+        assert_eq!(
+            rt.messages_with(&peer).unwrap()[0].content,
+            "are you around?"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_receipt_clears_queued_mail_so_a_flush_cannot_resend_it() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, _rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        outbox.queue(QueuedMessage::new("out1", &peer, "sup", None, 1));
+        store
+            .save_message(&comrade_storage::StoredMessage {
+                id: "out1".into(),
+                peer_npub: peer.clone(),
+                content: "sup".into(),
+                created_at: 1,
+                outgoing: true,
+                status: Some("sent".into()),
+                reply_to: None,
+            })
+            .unwrap();
+
+        let receipt = Receipt::new(ReceiptKind::Read, vec!["out1".into()])
+            .to_json()
+            .unwrap();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            incoming(&hex, "e-receipt", &receipt),
+        );
+
+        assert!(
+            outbox.is_empty(),
+            "the peer has the message; retrying it would send a duplicate"
+        );
+        assert_eq!(
+            store
+                .get_message("out1")
+                .unwrap()
+                .unwrap()
+                .status
+                .as_deref(),
+            Some("read")
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_marks_a_message_failed_once_attempts_run_out() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let dto = rt.send_dm(&peer, "still trying").await.unwrap();
+
+        // Burn the attempt budget directly: a real flush would take one relay
+        // timeout per attempt.
+        for _ in 0..comrade_core::dak::outbox::MAX_ATTEMPTS {
+            rt.outbox.record_attempt(&peer, &dto.id);
+        }
+        assert_eq!(rt.outbox_pending(), 0, "the attempt cap drops the message");
+
+        // The flush loop's reaping pass is what makes that visible in the UI.
+        rt.handles()
+            .mark_status(&peer, std::slice::from_ref(&dto.id), "failed");
+        assert_eq!(
+            rt.messages_with(&peer).unwrap()[0].status.as_deref(),
+            Some("failed"),
+            "a dropped message must stop showing as in flight"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_with_an_empty_outbox_is_a_no_op() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        assert_eq!(rt.flush_outbox().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn flush_requires_an_unlocked_vault() {
+        let rt = ComradeRuntime::with_relays(vec![]);
+        assert!(matches!(rt.flush_outbox().await, Err(UiError::VaultLocked)));
+    }
+
+    // ── Panic wipe ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn panic_wipe_destroys_local_state_and_relocks() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        rt.send_dm(&peer, "something private").await.unwrap();
+        rt.add_journal_entry("a hard week", Some("low")).unwrap();
+        assert_eq!(rt.outbox_pending(), 1);
+
+        rt.panic_wipe().await.unwrap();
+
+        assert!(!rt.is_vault_unlocked(), "the wipe re-locks the runtime");
+        assert_eq!(rt.outbox_pending(), 0, "queued mail is destroyed too");
+
+        // Reopening the store with the same passphrase finds nothing.
+        let store = comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap();
+        assert!(
+            store.load_identity().unwrap().is_none(),
+            "identity survived"
+        );
+        assert!(
+            store.journal_entries().unwrap().is_empty(),
+            "journal survived"
+        );
+        assert!(
+            store.messages_with(&peer).unwrap().is_empty(),
+            "DMs survived"
+        );
+        assert!(
+            store
+                .tree_names()
+                .unwrap()
+                .iter()
+                .all(|tree| store.keys(tree).map(|k| k.is_empty()).unwrap_or(false)),
+            "some tree kept its rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_wipe_needs_an_unlocked_vault() {
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        assert!(matches!(rt.panic_wipe().await, Err(UiError::VaultLocked)));
+    }
+
+    #[tokio::test]
+    async fn a_wiped_store_can_be_onboarded_again() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = offline_runtime(&dir).await;
+        let first = rt.current_identity().unwrap().npub;
+        rt.panic_wipe().await.unwrap();
+
+        let second = rt.unlock_vault(dir.path(), "pin").await.unwrap().npub;
+        assert_ne!(
+            first, second,
+            "a wipe must produce a new identity, not resurrect the old one"
+        );
+    }
+
+    // ── Anonymous personas ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn scoped_personas_are_stable_per_scope_and_never_the_identity() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let store = rt.ui.store_arc().unwrap();
+        let identity = rt.current_identity().unwrap().npub;
+
+        let seed = load_or_create_device_seed(&store).unwrap();
+        let again = load_or_create_device_seed(&store).unwrap();
+        let persona = anon::derive_scoped(&seed, anon::SCOPE_CHITTHI, "night-thoughts").unwrap();
+        let persona_again =
+            anon::derive_scoped(&again, anon::SCOPE_CHITTHI, "night-thoughts").unwrap();
+        let other = anon::derive_scoped(&seed, anon::SCOPE_CHITTHI, "other-room").unwrap();
+
+        assert_eq!(
+            persona.public_key(),
+            persona_again.public_key(),
+            "the seed must be persisted, not regenerated per call"
+        );
+        assert_ne!(persona.public_key(), other.public_key());
+        assert_ne!(
+            persona.public_key().to_bech32().unwrap(),
+            identity,
+            "a persona must never be the identity key"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_anonymous_chitthi_is_refused_before_any_key_work() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        assert!(matches!(
+            rt.broadcast_anonymous_chitthi("   ", None).await,
+            Err(UiError::Engine(_))
+        ));
     }
 }

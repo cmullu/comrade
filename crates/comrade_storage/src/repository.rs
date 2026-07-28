@@ -31,14 +31,24 @@ use serde::{Deserialize, Serialize};
 use crate::{EncryptedStore, StorageError};
 
 /// Monotonic rank of a delivery status so receipts only ever move forward:
-/// sent (0) < delivered (1) < read (2). Unknown strings rank as sent.
+/// queued (0) < sent (1) < delivered (2) < read (3).
+///
+/// `queued` is the pre-relay state of a message sitting in the sender outbox,
+/// and `failed` is its terminal counterpart; both rank 0, and `failed` gets an
+/// explicit escape hatch in [`EncryptedStore::set_message_status`] because it
+/// must be able to replace `sent` (a flush that ran out of attempts) without
+/// ever overwriting a real delivered/read receipt. Unknown strings rank 0.
 fn status_rank(status: &str) -> u8 {
     match status {
-        "read" => 2,
-        "delivered" => 1,
+        "read" => 3,
+        "delivered" => 2,
+        "sent" => 1,
         _ => 0,
     }
 }
+
+/// Terminal local failure: the outbox gave up on this message.
+const STATUS_FAILED: &str = "failed";
 
 // ── Tree names ────────────────────────────────────────────────────────────────
 
@@ -307,20 +317,39 @@ impl EncryptedStore {
         self.get(MESSAGES_TREE, id)
     }
 
-    /// Advance an outgoing message's delivery `status` (sent → delivered →
-    /// read) in response to a receipt. Never downgrades — a late "delivered"
-    /// receipt can't unset a "read" already recorded. Returns whether the row
-    /// existed and changed.
+    /// Advance an outgoing message's delivery `status` (queued → sent →
+    /// delivered → read) in response to a receipt. Never downgrades — a late
+    /// "delivered" receipt can't unset a "read" already recorded. Returns
+    /// whether the row existed and changed.
+    ///
+    /// `failed` is the one non-monotonic transition: the sender outbox reaching
+    /// its attempt cap must be able to mark a `queued` or `sent` message failed,
+    /// so the UI stops showing it as in-flight. It still cannot overwrite a
+    /// delivered/read receipt — the peer demonstrably has the message, whatever
+    /// the local queue thinks.
     pub fn set_message_status(&self, id: &str, status: &str) -> Result<bool, StorageError> {
         let Some(mut msg) = self.get_message(id)? else {
             return Ok(false);
         };
-        if status_rank(status) <= status_rank(msg.status.as_deref().unwrap_or("sent")) {
+        let current = msg.status.as_deref().unwrap_or("sent");
+        let allowed = if status == STATUS_FAILED {
+            current != STATUS_FAILED && status_rank(current) < status_rank("delivered")
+        } else {
+            status_rank(status) > status_rank(current)
+        };
+        if !allowed {
             return Ok(false);
         }
         msg.status = Some(status.to_string());
         self.save_message(&msg)?;
         Ok(true)
+    }
+
+    /// Delete a stored message. Used when a queued message is re-keyed to the
+    /// event id a relay finally assigned it, so the conversation does not end up
+    /// holding both rows. Returns whether a row existed.
+    pub fn remove_message(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete(MESSAGES_TREE, id)
     }
 
     // Conversation gate (message requests) ------------------------------------
@@ -837,6 +866,79 @@ mod tests {
         );
         // Unknown message id is a clean false, not an error.
         assert!(!s.set_message_status("nope", "read").unwrap());
+    }
+
+    #[test]
+    fn queued_messages_advance_and_can_fail_terminally() {
+        let (_d, s) = store();
+        let queued = StoredMessage {
+            id: "q1".into(),
+            peer_npub: "npub1x".into(),
+            content: "are you around?".into(),
+            created_at: 1,
+            outgoing: true,
+            status: Some("queued".into()),
+            reply_to: None,
+        };
+        s.save_message(&queued).unwrap();
+
+        // A queued message that reaches a relay advances to sent…
+        assert!(s.set_message_status("q1", "sent").unwrap());
+        // …and one the outbox gives up on is marked failed, so the UI stops
+        // showing it as in flight.
+        assert!(s.set_message_status("q1", "failed").unwrap());
+        assert_eq!(
+            s.get_message("q1").unwrap().unwrap().status.as_deref(),
+            Some("failed")
+        );
+        assert!(
+            !s.set_message_status("q1", "failed").unwrap(),
+            "marking failed twice is a no-op"
+        );
+        // A receipt still wins over a local failure verdict.
+        assert!(s.set_message_status("q1", "delivered").unwrap());
+    }
+
+    #[test]
+    fn failed_never_overwrites_a_delivery_receipt() {
+        let (_d, s) = store();
+        s.save_message(&StoredMessage {
+            id: "m1".into(),
+            peer_npub: "npub1x".into(),
+            content: "hi".into(),
+            created_at: 1,
+            outgoing: true,
+            status: Some("read".into()),
+            reply_to: None,
+        })
+        .unwrap();
+        assert!(
+            !s.set_message_status("m1", "failed").unwrap(),
+            "the peer demonstrably has it, whatever the local queue thinks"
+        );
+        assert_eq!(
+            s.get_message("m1").unwrap().unwrap().status.as_deref(),
+            Some("read")
+        );
+    }
+
+    #[test]
+    fn remove_message_drops_the_row() {
+        let (_d, s) = store();
+        s.save_message(&StoredMessage {
+            id: "queued:abc".into(),
+            peer_npub: "npub1x".into(),
+            content: "hi".into(),
+            created_at: 1,
+            outgoing: true,
+            status: Some("queued".into()),
+            reply_to: None,
+        })
+        .unwrap();
+        assert!(s.remove_message("queued:abc").unwrap());
+        assert!(s.get_message("queued:abc").unwrap().is_none());
+        assert!(!s.remove_message("queued:abc").unwrap());
+        assert!(s.messages_with("npub1x").unwrap().is_empty());
     }
 
     #[test]
