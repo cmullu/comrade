@@ -40,6 +40,13 @@ object Notifier {
     const val CHANNEL_CALLS = "comrade_calls_v2"
     const val CHANNEL_CONNECTION = "comrade_connection"
 
+    /**
+     * On-demand model downloads (speech, companion): the ongoing progress
+     * notification plus the tappable "ready" / "failed" one that replaces it.
+     * See [mullu.comrade.model.ModelDownloadService].
+     */
+    const val CHANNEL_MODELS = "comrade_models"
+
     private const val GROUP_MESSAGES = "comrade_messages_group"
 
     /** Register notification channels once (no-op on < O). */
@@ -79,6 +86,15 @@ object Notifier {
                 "Background connection",
                 NotificationManager.IMPORTANCE_MIN,
             ).apply { description = "Comrade is staying connected while unlocked in the background" },
+        )
+        mgr.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_MODELS,
+                "Model downloads",
+                // LOW: a long download should show progress without buzzing;
+                // the one-off "ready" notification still lands in the shade.
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply { description = "Progress for on-device speech and companion model downloads" },
         )
     }
 

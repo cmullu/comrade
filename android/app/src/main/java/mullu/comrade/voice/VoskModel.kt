@@ -6,6 +6,8 @@ import android.os.Looper
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.Executors
+import mullu.comrade.model.ModelCatalog
+import mullu.comrade.model.ModelInstaller
 import org.vosk.Model
 import org.vosk.android.StorageService
 
@@ -13,8 +15,9 @@ import org.vosk.android.StorageService
  * No usable speech model on this device: none was baked into the APK
  * (`assets/model-en-us`, see the assets README) and none has been downloaded
  * yet. Voice entry points catch this (or pre-check [VoskModel.isAvailable])
- * and offer the on-demand download ([VoiceModelDownloader]) instead of
- * surfacing a dead-end error.
+ * and offer the on-demand download
+ * ([mullu.comrade.model.ModelDownloadService]) instead of surfacing a
+ * dead-end error.
  */
 class VoiceModelMissingException : IOException("speech model not installed")
 
@@ -65,7 +68,8 @@ internal class ModelRefCount {
  *     before build), unpacked by [StorageService] into the app's external
  *     files dir on first use;
  *  2. **downloaded** — `filesDir/voice-model`, installed on demand by
- *     [VoiceModelDownloader] after the user accepts the download prompt.
+ *     [mullu.comrade.model.ModelDownloadService] after the user accepts the
+ *     download prompt.
  *
  * The model is read-only and shared across the wake-word service, the
  * one-shot recogniser, the assist session, and the recognition service —
@@ -82,8 +86,12 @@ object VoskModel {
     const val ASSET_PATH = "model-en-us"
     const val TARGET_DIR = "model"
 
-    /** `filesDir` subdirectory [VoiceModelDownloader] installs into. */
-    const val DOWNLOAD_DIR = "voice-model"
+    /**
+     * `filesDir` subdirectory the on-demand download installs into — owned by
+     * [ModelCatalog.SPEECH] so the downloader and this loader can never drift
+     * apart on where the model lives.
+     */
+    val DOWNLOAD_DIR: String get() = ModelCatalog.SPEECH.installName
 
     /**
      * How long a fully released model stays loaded before closing. Long
@@ -112,7 +120,7 @@ object VoskModel {
     fun isAvailable(context: Context): Boolean =
         synchronized(lock) { cached != null } ||
             isBundled(context) ||
-            VoiceModelInstaller.looksLikeModel(downloadedDir(context))
+            ModelInstaller.looksLikeSpeechModel(downloadedDir(context))
 
     // The uuid marker is the exact asset StorageService keys its unpacking on
     // — its absence is the "model-en-us/uuid" FileNotFoundException voice
@@ -154,7 +162,7 @@ object VoskModel {
                     onError(exception)
                 },
             )
-            VoiceModelInstaller.looksLikeModel(downloaded) -> loadDownloaded(downloaded, onReady, onError)
+            ModelInstaller.looksLikeSpeechModel(downloaded) -> loadDownloaded(downloaded, onReady, onError)
             else -> {
                 release()
                 onError(VoiceModelMissingException())

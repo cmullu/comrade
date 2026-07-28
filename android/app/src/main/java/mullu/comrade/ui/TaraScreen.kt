@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.ComradeCore
@@ -109,6 +111,9 @@ private fun TaraExplainer(onAccept: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
+/** Tara's reply while it is still arriving — see [TaraStream]. */
+private data class StreamingReply(val text: String, val crisis: Boolean)
+
 @Composable
 private fun TaraThread(modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
@@ -116,10 +121,18 @@ private fun TaraThread(modifier: Modifier = Modifier) {
     var opener by remember { mutableStateOf<String?>(null) }
     var crisisResources by remember { mutableStateOf<List<ComradeCore.CrisisResourceInfo>>(emptyList()) }
     var draft by remember { mutableStateOf("") }
-    var sending by remember { mutableStateOf(false) }
+    // The turn in flight: the user's message shown immediately, then a
+    // thinking indicator, then the reply streaming in. All three are local —
+    // the persisted thread is only re-read once the turn settles, so nothing
+    // renders twice.
+    var pendingUser by remember { mutableStateOf<String?>(null) }
+    var thinking by remember { mutableStateOf(false) }
+    var streaming by remember { mutableStateOf<StreamingReply?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+
+    val busy = thinking || streaming != null
 
     suspend fun reload() {
         val (thread, hello) = withContext(Dispatchers.IO) {
@@ -141,26 +154,52 @@ private fun TaraThread(modifier: Modifier = Modifier) {
         reload()
     }
 
-    // Keep the newest turn visible as the thread grows.
-    LaunchedEffect(messages?.size) {
-        val count = messages?.size ?: 0
-        if (count > 0) listState.animateScrollToItem(count - 1)
+    // Follow the conversation only while the reader is already at the bottom —
+    // scrolling back to re-read something must not be yanked away (the same
+    // rule the chat thread follows).
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            info.totalItemsCount == 0 || lastVisible >= info.totalItemsCount - 2
+        }
+    }
+    LaunchedEffect(messages?.size, pendingUser, thinking, streaming?.text?.length) {
+        val count = listState.layoutInfo.totalItemsCount
+        if (count > 0 && atBottom) listState.scrollToItem(count - 1)
     }
 
     fun send() {
         val text = draft.trim()
-        if (text.isEmpty() || sending) return
-        sending = true
+        if (text.isEmpty() || busy) return
+        draft = ""
         error = null
+        pendingUser = text
+        thinking = true
         scope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) { ComradeCore.taraSendTyped(text) }
-            }.onSuccess {
-                draft = ""
-                sending = false
+            val reply = withContext(Dispatchers.IO) {
+                runCatching { ComradeCore.taraSendTyped(text) }
+            }
+            thinking = false
+            reply.onSuccess { message ->
+                if (message.crisis) {
+                    // Never drip-feed a crisis hand-off: helpline numbers
+                    // appear complete, at once, the moment they are known.
+                    streaming = StreamingReply(message.text, crisis = true)
+                } else {
+                    streaming = StreamingReply("", crisis = false)
+                    TaraStream.stream(message.text).collect { soFar ->
+                        streaming = StreamingReply(soFar, crisis = false)
+                    }
+                }
+                // The turn is already persisted (taraSend wrote both sides);
+                // re-read it, then drop the local copies in the same frame.
                 reload()
+                pendingUser = null
+                streaming = null
             }.onFailure {
-                sending = false
+                pendingUser = null
+                streaming = null
                 error = it.message ?: "Could not send."
             }
         }
@@ -178,17 +217,43 @@ private fun TaraThread(modifier: Modifier = Modifier) {
         ) {
             when {
                 list == null -> item {
-                    Box(Modifier.fillMaxWidth().padding(top = 24.dp)) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(top = 24.dp),
+                    ) {
                         CircularProgressIndicator(Modifier.align(Alignment.Center))
                     }
                 }
-                list.isEmpty() -> item(key = "opener") {
+                list.isEmpty() && pendingUser == null -> item(key = "opener") {
                     opener?.let { TaraBubble(text = it, fromTara = true) }
                 }
                 else -> items(list, key = { it.id }) { msg ->
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         TaraBubble(text = msg.text, fromTara = msg.fromTara)
                         if (msg.crisis && msg.fromTara) CrisisCard(crisisResources)
+                    }
+                }
+            }
+
+            // The turn in flight.
+            pendingUser?.let { pending ->
+                item(key = "pending-user") { TaraBubble(text = pending, fromTara = false) }
+            }
+            if (thinking) {
+                item(key = "thinking") { ThinkingBubble() }
+            }
+            streaming?.let { reply ->
+                item(key = "streaming") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (reply.text.isNotEmpty()) {
+                            TaraBubble(
+                                text = reply.text,
+                                fromTara = true,
+                                tag = "tara-streaming",
+                            )
+                        }
+                        if (reply.crisis) CrisisCard(crisisResources)
                     }
                 }
             }
@@ -216,9 +281,9 @@ private fun TaraThread(modifier: Modifier = Modifier) {
                     )
                     Button(
                         onClick = { send() },
-                        enabled = draft.isNotBlank() && !sending,
+                        enabled = draft.isNotBlank() && !busy,
                         modifier = Modifier.testTag("tara-send"),
-                    ) { Text(if (sending) "…" else "Send") }
+                    ) { Text(if (busy) "…" else "Send") }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -227,7 +292,7 @@ private fun TaraThread(modifier: Modifier = Modifier) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
                     )
-                    if (!messages.isNullOrEmpty()) {
+                    if (!messages.isNullOrEmpty() && !busy) {
                         TextButton(
                             onClick = { confirmClear = true },
                             modifier = Modifier.testTag("tara-clear"),
@@ -271,7 +336,7 @@ private fun TaraThread(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun TaraBubble(text: String, fromTara: Boolean) {
+private fun TaraBubble(text: String, fromTara: Boolean, tag: String? = null) {
     Row(Modifier.fillMaxWidth()) {
         if (!fromTara) Spacer(Modifier.weight(1f))
         Card(
@@ -282,7 +347,9 @@ private fun TaraBubble(text: String, fromTara: Boolean) {
                     MaterialTheme.colorScheme.primaryContainer
                 },
             ),
-            modifier = Modifier.widthIn(max = 300.dp),
+            modifier = Modifier
+                .widthIn(max = 300.dp)
+                .then(if (tag != null) Modifier.testTag(tag) else Modifier),
         ) {
             Text(
                 text,
@@ -292,6 +359,23 @@ private fun TaraBubble(text: String, fromTara: Boolean) {
         }
         if (fromTara) Spacer(Modifier.weight(1f))
     }
+}
+
+/**
+ * The "…" that fills the gap between sending and the first streamed chunk.
+ * Hand-rolled from a delay loop rather than the animation APIs so this screen
+ * adds no dependency the app doesn't already declare.
+ */
+@Composable
+private fun ThinkingBubble() {
+    var dots by remember { mutableStateOf(1) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(350)
+            dots = if (dots >= 3) 1 else dots + 1
+        }
+    }
+    TaraBubble(text = ".".repeat(dots), fromTara = true, tag = "tara-thinking")
 }
 
 /** Real places to turn — rendered under any reply that detected distress. */

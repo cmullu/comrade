@@ -2,6 +2,7 @@ package mullu.comrade
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -108,6 +109,10 @@ class MainActivity : ComponentActivity() {
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE,
         )
+        // A tapped "model is ready" notification asks for a specific tab; park
+        // the request so the shell honours it once it exists (the vault may
+        // still need unlocking first).
+        AppNavigation.request(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
         setContent {
             ComradeTheme {
                 Surface(
@@ -118,6 +123,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * The activity is `singleTop`-launched from notifications, so a tap while
+     * it is already running arrives here rather than in [onCreate].
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        AppNavigation.request(intent.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
     }
 
     /**
@@ -234,13 +249,18 @@ fun ComradeApp() {
     }
 }
 
-// ── Main shell: Chats · Journal · Tara · Feed (Settings & Call history via the drawer) ─
+// ── Main shell: Chats · Journal · Feed · Tara (Settings & Call history via the drawer) ─
 
+/**
+ * Bottom-navigation destinations, in on-screen order. Tara sits **last**
+ * (rightmost) deliberately: the messaging/journal/feed tabs are the daily
+ * surfaces, and the companion is the one you reach for on purpose.
+ */
 private enum class MainTab(val label: String, val icon: ImageVector) {
     Chats("Chats", ChatBubbleIcon),
     Journal("Journal", BookIcon),
-    Tara("Tara", HeartIcon),
     Feed("Feed", ArticleIcon),
+    Tara("Tara", HeartIcon),
 }
 
 /** Sub-navigation inside the Chats tab. */
@@ -289,6 +309,20 @@ private fun MainShell(
     // inline before every notification.
     LaunchedEffect(chatNav) {
         ChatEventRouter.setOpenConversation((chatNav as? ChatNav.Open)?.peer)
+    }
+
+    // Honour a tab requested from outside the composition — a tapped
+    // "the companion model is ready" notification lands the user back in the
+    // Tara conversation (see AppNavigation).
+    val requestedTab by AppNavigation.requestedTab.collectAsState()
+    LaunchedEffect(requestedTab) {
+        val key = requestedTab ?: return@LaunchedEffect
+        MainTab.entries.firstOrNull { it.name.equals(key, ignoreCase = true) }?.let {
+            tab = it
+            if (it == MainTab.Chats) chatNav = ChatNav.List
+            settingsOpen = false
+        }
+        AppNavigation.consume()
     }
 
     // Notification channels + runtime permission (Android 13+). Notifications

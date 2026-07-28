@@ -115,6 +115,14 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Downloads an on-device model (speech / companion) in the
+             background with progress in the notification bar, so the transfer
+             survives the app being backgrounded — see ModelDownloadService. -->
+        <service
+            android:name=".model.ModelDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Assist app: the assist gesture (long-press power) opens Comrade -->
         <service
             android:name=".voice.ComradeInteractionService"
