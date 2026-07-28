@@ -37,6 +37,44 @@ class VoiceCommandTest {
     }
 
     @Test
+    fun `tara prefixes address the companion and never the public feed`() {
+        assertEquals(
+            VoiceCommand.Tara("i've been anxious all week"),
+            VoiceCommand.parse("tara i've been anxious all week"),
+        )
+        assertEquals(
+            VoiceCommand.Tara("should i take the job"),
+            VoiceCommand.parse("talk to tara should i take the job"),
+        )
+        assertEquals(
+            VoiceCommand.Tara("i feel stuck"),
+            VoiceCommand.parse("hey comrade ask tara i feel stuck"),
+        )
+        assertEquals(
+            VoiceCommand.Tara("today was hard"),
+            VoiceCommand.parse("Tell Tara today was hard."),
+        )
+        // The longer phrasings must win over the bare "tara" prefix, or the
+        // body would come out as "to tara should i take the job".
+        assertEquals(
+            VoiceCommand.Tara("what now"),
+            VoiceCommand.parse("talk to tara what now"),
+        )
+        // Addressing her with nothing to say prompts instead of sending "".
+        assertEquals(VoiceCommand.Empty, VoiceCommand.parse("tara"))
+        assertEquals(VoiceCommand.Empty, VoiceCommand.parse("talk to tara"))
+    }
+
+    @Test
+    fun `tara never collides with journal or post prefixes`() {
+        // Both are private, but they are distinct destinations: a thought meant
+        // for the companion must not silently become a journal entry, and
+        // neither may fall through to the public feed.
+        assertEquals(VoiceCommand.Journal("tara called"), VoiceCommand.parse("journal tara called"))
+        assertEquals(VoiceCommand.Post("tara is a name"), VoiceCommand.parse("post tara is a name"))
+    }
+
+    @Test
     fun `wake phrase is stripped before parsing`() {
         assertEquals(
             VoiceCommand.Post("running late"),
