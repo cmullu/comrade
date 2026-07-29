@@ -670,6 +670,7 @@ dependencies = [
  "tracing",
  "uniffi",
  "yrs",
+ "zeroize",
 ]
 
 [[package]]

@@ -22,6 +22,12 @@ pub enum CoreError {
     #[error("gossip: {0}")]
     Gossip(#[from] GossipError),
 
+    #[error("store-and-forward: {0}")]
+    Dak(#[from] DakError),
+
+    #[error("padding: {0}")]
+    Padding(#[from] PaddingError),
+
     #[error("media: {0}")]
     Media(#[from] MediaError),
 
@@ -141,6 +147,49 @@ pub enum MediaError {
 
     #[error("http error: {0}")]
     Http(String),
+}
+
+// ── dak: store-and-forward (outbox + couriers) ───────────────────────────────
+
+#[derive(Debug, Error)]
+pub enum DakError {
+    #[error("payload is {size} bytes, over the {max}-byte courier cap")]
+    Oversize { size: usize, max: usize },
+
+    #[error("envelope has already expired")]
+    Expired,
+
+    #[error("envelope lifetime exceeds the {0}s policy limit")]
+    LifetimeTooLong(u64),
+
+    #[error("courier bag is full")]
+    BagFull,
+
+    #[error("this depositor's courier quota is used up")]
+    DepositorQuotaFull,
+
+    #[error("malformed envelope: {0}")]
+    Malformed(String),
+
+    #[error("sender authentication failed")]
+    AuthFailed,
+
+    #[error("crypto: {0}")]
+    Crypto(#[from] CryptoError),
+
+    #[error("padding: {0}")]
+    Padding(#[from] PaddingError),
+}
+
+// ── pad: bucket length padding ───────────────────────────────────────────────
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PaddingError {
+    #[error("padded buffer is shorter than the pad-length trailer")]
+    TooShort,
+
+    #[error("declared pad length {0} does not fit the buffer")]
+    Invalid(usize),
 }
 
 // ── Milestone 5: Sakha/Sakhi CRDT ledger ────────────────────────────────────

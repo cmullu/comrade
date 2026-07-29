@@ -55,7 +55,7 @@ use comrade_ui::{
     BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
     ConversationDto, CrisisResourceDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto,
+    MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto,
     WorkspaceDto,
 };
 use tokio::sync::RwLock;
@@ -410,6 +410,28 @@ impl Comrade {
         handles.broadcast_chitthi(&content, reply_to).await
     }
 
+    /// Broadcast a Chitthi under a throwaway or scoped persona instead of this
+    /// device's identity — the anonymous-thoughts path.
+    ///
+    /// `scope` of `None` signs the post with a key used exactly once, so two
+    /// anonymous Chitthis cannot be linked to each other. `Some(label)` derives
+    /// a stable persona for that label, so replies can reach the same pseudonym
+    /// while it stays unlinkable to the identity. See
+    /// `comrade_ui::ComradeRuntime::broadcast_anonymous_chitthi`, and
+    /// `docs/BITCHAT_ADOPTION.md` for what this does and does not hide.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn broadcast_anonymous_chitthi(
+        &self,
+        content: String,
+        scope: Option<String>,
+    ) -> Result<String, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .broadcast_anonymous_chitthi(&content, scope.as_deref())
+            .await
+    }
+
     // ── Vault (E2E DMs) ──────────────────────────────────────────────────────
 
     /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
@@ -429,6 +451,43 @@ impl Comrade {
         handles
             .send_dm_reply(&target, &content, reply_to.as_deref())
             .await
+    }
+
+    /// Retry every DM sitting in the sender outbox because no relay would take
+    /// it. Returns how many a relay accepted this pass.
+    ///
+    /// A background loop already flushes on a cadence (and once at launch);
+    /// call this when the platform reports connectivity came back, so a queued
+    /// message goes out immediately instead of on the next tick.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn flush_outbox(&self) -> Result<u64, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.flush_outbox().await.map(|n| n as u64)
+    }
+
+    /// How many DMs are waiting for a relay that will take them — for a
+    /// "queued" indicator in the chat list.
+    pub fn outbox_pending(&self) -> u64 {
+        self.inner.blocking_read().outbox_pending() as u64
+    }
+
+    /// **Panic wipe.** Destroy every locally stored value — identity keys, DM
+    /// history, journal, Tara thread, queued mail — then re-lock, leaving the
+    /// runtime as it was before its first unlock.
+    ///
+    /// Irreversible, and deliberately not a duress feature: it wipes rather
+    /// than hides, and it needs the app open and unlocked. After it returns,
+    /// send the user back to onboarding.
+    pub async fn panic_wipe(&self) -> Result<(), UiError> {
+        self.inner.write().await.panic_wipe().await
+    }
+
+    /// Device-local delivery counters — bare tallies with no identities, ids,
+    /// content, or timestamps, for a diagnostics screen. Nothing here is ever
+    /// uploaded; the panic wipe clears them.
+    pub fn metrics_snapshot(&self) -> Vec<MetricDto> {
+        self.inner.blocking_read().metrics_snapshot()
     }
 
     pub fn conversations(&self) -> Result<Vec<ConversationDto>, UiError> {

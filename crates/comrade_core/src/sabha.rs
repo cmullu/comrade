@@ -17,7 +17,75 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::error::SabhaError;
+use crate::{error::SabhaError, geo::Geohash};
+
+// ── Location channels (adopted from bitchat) ─────────────────────────────────
+
+/// Ephemeral kind carrying a note in a geohash location channel.
+pub const KIND_GEOHASH_NOTE: u16 = 20_000;
+/// Ephemeral kind carrying a bare presence heartbeat — no content, no name.
+pub const KIND_GEOHASH_PRESENCE: u16 = 20_001;
+/// Tag naming the geohash cell an event belongs to.
+const GEOHASH_TAG: &str = "g";
+
+/// Round a timestamp down to the hour.
+///
+/// Anonymous posts carry this instead of a to-the-second `created_at`, so an
+/// observer cannot align a post with the rest of a device's traffic by exact
+/// time. bitchat does the same thing to its seal/envelope timestamps (±15
+/// minutes of jitter); truncation is used here instead of jitter because it also
+/// makes every post in an hour share one value, and it can never land in the
+/// future — which relays reject.
+pub fn coarse_timestamp(now: Timestamp) -> Timestamp {
+    const HOUR: u64 = 3_600;
+    Timestamp::from(now.as_secs() / HOUR * HOUR)
+}
+
+/// Event for an anonymous Chitthi: a normal Kind-1 note with a coarsened
+/// timestamp and no identity-bearing tags.
+fn anonymous_chitthi_builder(content: &str, now: Timestamp) -> EventBuilder {
+    EventBuilder::text_note(content).custom_created_at(coarse_timestamp(now))
+}
+
+/// Event for a note in a location channel.
+fn geohash_note_builder(cell: &Geohash, content: &str) -> EventBuilder {
+    EventBuilder::new(Kind::Custom(KIND_GEOHASH_NOTE), content).tags([geohash_tag(cell)])
+}
+
+/// Event for a presence heartbeat: same shape, empty content, no nickname.
+fn geohash_presence_builder(cell: &Geohash) -> EventBuilder {
+    EventBuilder::new(Kind::Custom(KIND_GEOHASH_PRESENCE), "").tags([geohash_tag(cell)])
+}
+
+/// Filter for one location channel's notes and heartbeats.
+fn geohash_channel_filter(cell: &Geohash, since_secs: u64) -> Filter {
+    Filter::new()
+        .kinds([
+            Kind::Custom(KIND_GEOHASH_NOTE),
+            Kind::Custom(KIND_GEOHASH_PRESENCE),
+        ])
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::G), [cell.to_string()])
+        .since(Timestamp::now() - since_secs)
+}
+
+fn geohash_tag(cell: &Geohash) -> Tag {
+    Tag::custom(
+        TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::G)),
+        [cell.to_string()],
+    )
+}
+
+/// The geohash cell an event belongs to, if it carries a valid `g` tag.
+pub fn geohash_of(event: &Event) -> Option<Geohash> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let slice = tag.as_slice();
+            (slice.len() >= 2 && slice[0] == GEOHASH_TAG).then(|| slice[1].clone())
+        })
+        .find_map(|value| Geohash::parse(&value))
+}
 
 // ── Well-known public relays ─────────────────────────────────────────────────
 
@@ -379,6 +447,113 @@ impl SabhaEngine {
             ));
         }
         info!(event_id = %output.id(), reply = reply_to.is_some(), "Chitthi broadcast to Sabha");
+        Ok(*output.id())
+    }
+
+    /// Broadcast an **anonymous** Chitthi, signed by `signer` instead of by the
+    /// device identity.
+    ///
+    /// Pass a throwaway key from [`crate::anon::ephemeral`] for a post that
+    /// links to nothing (not even to your other anonymous posts), or a scoped
+    /// persona from [`crate::anon::derive_scoped`] when replies need to reach
+    /// the same pseudonym.
+    ///
+    /// The timestamp is coarsened to the hour ([`coarse_timestamp`]) so a
+    /// relay-side observer cannot line a post up with your device's other
+    /// traffic to the second. What this cannot hide is the network layer:
+    /// connection timing and IP address still identify the *device* to the relay
+    /// unless the socket goes through a proxy.
+    pub async fn broadcast_anonymous_chitthi(
+        &self,
+        content: &str,
+        signer: &Keys,
+    ) -> Result<EventId, SabhaError> {
+        let event = anonymous_chitthi_builder(content, Timestamp::now())
+            .sign_with_keys(signer)
+            .map_err(|e| SabhaError::ParseError(e.to_string()))?;
+        self.send_signed(event, "anonymous chitthi").await
+    }
+
+    /// Publish a note into a geohash location channel under a per-cell persona.
+    pub async fn publish_geohash_note(
+        &self,
+        cell: &Geohash,
+        content: &str,
+        signer: &Keys,
+    ) -> Result<EventId, SabhaError> {
+        let event = geohash_note_builder(cell, content)
+            .sign_with_keys(signer)
+            .map_err(|e| SabhaError::ParseError(e.to_string()))?;
+        self.send_signed(event, "geohash note").await
+    }
+
+    /// Announce presence in a location channel (an empty ephemeral heartbeat).
+    ///
+    /// Refuses fine-precision cells: a heartbeat is a public "I am here", and
+    /// past city precision that is a location disclosure rather than a room
+    /// count (see [`crate::geo::Precision::presence_allowed`]).
+    pub async fn publish_geohash_presence(
+        &self,
+        cell: &Geohash,
+        signer: &Keys,
+    ) -> Result<EventId, SabhaError> {
+        if !cell.presence_allowed() {
+            return Err(SabhaError::ParseError(format!(
+                "presence is not broadcast at {} precision",
+                cell.as_str().len()
+            )));
+        }
+        let event = geohash_presence_builder(cell)
+            .sign_with_keys(signer)
+            .map_err(|e| SabhaError::ParseError(e.to_string()))?;
+        self.send_signed(event, "geohash presence").await
+    }
+
+    /// Subscribe to a location channel: notes **and** presence heartbeats, so a
+    /// participant count reflects listeners as well as speakers.
+    pub async fn subscribe_geohash_channel(
+        &self,
+        cell: &Geohash,
+        since_secs: u64,
+        callback: ChitthiCallback,
+    ) -> Result<(), SabhaError> {
+        let filter = geohash_channel_filter(cell, since_secs);
+        self.client
+            .subscribe(filter, None)
+            .await
+            .map_err(|e| SabhaError::SubscriptionError(e.to_string()))?;
+        info!(cell = %cell, "subscribed to geohash channel");
+
+        let cb = Arc::new(callback);
+        self.client
+            .handle_notifications(move |notification| {
+                let cb = cb.clone();
+                async move {
+                    if let RelayPoolNotification::Event { event, .. } = notification {
+                        cb(*event);
+                    }
+                    Ok(false)
+                }
+            })
+            .await
+            .map_err(|e| SabhaError::SubscriptionError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Shared publish tail: wait for a live relay, require an acceptance.
+    async fn send_signed(&self, event: Event, what: &str) -> Result<EventId, SabhaError> {
+        wait_for_any_relay(&self.client, CONNECT_WAIT).await;
+        let output = self
+            .client
+            .send_event(&event)
+            .await
+            .map_err(|e| SabhaError::RelayError(e.to_string()))?;
+        if output.success.is_empty() {
+            return Err(SabhaError::RelayError(format!(
+                "no relay accepted the {what}"
+            )));
+        }
+        info!(event_id = %output.id(), kind = %event.kind, "{what} published");
         Ok(*output.id())
     }
 
@@ -750,5 +925,122 @@ mod tests {
             Some("Fancy Name")
         );
         assert_eq!(display_name_of(&Metadata::new()), None);
+    }
+
+    // ── Anonymous posting + location channels ───────────────────────────────
+
+    #[test]
+    fn anonymous_chitthi_is_signed_by_the_throwaway_key_only() {
+        let identity = Keys::generate();
+        let throwaway = crate::anon::ephemeral();
+        let event = anonymous_chitthi_builder("i am not ok today", Timestamp::now())
+            .sign_with_keys(&throwaway)
+            .unwrap();
+
+        assert_eq!(event.pubkey, throwaway.public_key());
+        assert_ne!(
+            event.pubkey,
+            identity.public_key(),
+            "an anonymous post must never carry the identity key"
+        );
+        assert!(event.verify().is_ok());
+        assert!(
+            event.tags.is_empty(),
+            "no tags: a tag is another correlation handle"
+        );
+    }
+
+    #[test]
+    fn anonymous_chitthi_timestamp_is_coarsened_to_the_hour() {
+        let now = Timestamp::from(1_700_003_671); // 01:14:31 past the hour
+        let event = anonymous_chitthi_builder("x", now)
+            .sign_with_keys(&crate::anon::ephemeral())
+            .unwrap();
+        assert_eq!(event.created_at.as_secs() % 3_600, 0);
+        assert!(
+            event.created_at <= now,
+            "a coarsened stamp must never be in the future — relays reject that"
+        );
+        assert_eq!(coarse_timestamp(now).as_secs(), 1_700_002_800);
+    }
+
+    #[test]
+    fn two_anonymous_posts_are_unlinkable() {
+        let one = anonymous_chitthi_builder("a", Timestamp::now())
+            .sign_with_keys(&crate::anon::ephemeral())
+            .unwrap();
+        let two = anonymous_chitthi_builder("b", Timestamp::now())
+            .sign_with_keys(&crate::anon::ephemeral())
+            .unwrap();
+        assert_ne!(one.pubkey, two.pubkey);
+    }
+
+    #[test]
+    fn geohash_note_carries_the_cell_tag_and_ephemeral_kind() {
+        let cell = Geohash::parse("tdr1w").unwrap();
+        let event = geohash_note_builder(&cell, "anyone around?")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert_eq!(event.kind, Kind::Custom(KIND_GEOHASH_NOTE));
+        assert_eq!(geohash_of(&event).as_ref(), Some(&cell));
+        assert_eq!(event.content, "anyone around?");
+    }
+
+    #[test]
+    fn presence_heartbeat_carries_no_content_or_nickname() {
+        let cell = Geohash::parse("tdr1").unwrap();
+        let event = geohash_presence_builder(&cell)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert_eq!(event.kind, Kind::Custom(KIND_GEOHASH_PRESENCE));
+        assert!(
+            event.content.is_empty(),
+            "a heartbeat is liveness, not data"
+        );
+        assert_eq!(event.tags.len(), 1, "the cell tag and nothing else");
+        assert_eq!(geohash_of(&event).as_ref(), Some(&cell));
+    }
+
+    #[test]
+    fn geohash_of_ignores_events_without_a_valid_cell() {
+        let plain = EventBuilder::text_note("no cell")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert_eq!(geohash_of(&plain), None);
+
+        let bogus = EventBuilder::new(Kind::Custom(KIND_GEOHASH_NOTE), "x")
+            .tags([Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::G)),
+                ["not a geohash!"],
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert_eq!(geohash_of(&bogus), None);
+    }
+
+    #[test]
+    fn channel_filter_targets_both_kinds_of_the_cell() {
+        let cell = Geohash::parse("tdr1").unwrap();
+        let filter = geohash_channel_filter(&cell, 900);
+        let kinds = filter.kinds.clone().expect("kinds are set");
+        assert!(kinds.contains(&Kind::Custom(KIND_GEOHASH_NOTE)));
+        assert!(kinds.contains(&Kind::Custom(KIND_GEOHASH_PRESENCE)));
+        // The cell must ride in the `g` tag filter, not in the content.
+        let note = geohash_note_builder(&cell, "hello")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(
+            filter.match_event(&note, MatchEventOptions::default()),
+            "the filter must match its channel"
+        );
+
+        let elsewhere = Geohash::parse("u4pr").unwrap();
+        let other = geohash_note_builder(&elsewhere, "hello")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(
+            !filter.match_event(&other, MatchEventOptions::default()),
+            "another cell must not match"
+        );
     }
 }

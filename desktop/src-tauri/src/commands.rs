@@ -519,10 +519,17 @@ pub async fn peer_presence(
 /// relay hiccup must not surface in a UI that only calls this in passing.
 ///
 /// See [`sync_ledger`]'s doc comment for the lock discipline.
+/// Infallible in substance, `Result` in signature: Tauri requires an async
+/// command that borrows its state (`State<'_, _>`) to return a `Result`, so the
+/// count is wrapped in `Ok`. `invoke` resolves with the number either way, so
+/// the SPA sees no difference.
 #[tauri::command]
-pub async fn announce_presence(state: tauri::State<'_, Runtime>, online: bool) -> u64 {
+pub async fn announce_presence(
+    state: tauri::State<'_, Runtime>,
+    online: bool,
+) -> Result<u64, String> {
     let handles = state.read().await.handles();
-    handles.announce_presence(online).await
+    Ok(handles.announce_presence(online).await)
 }
 
 /// Best-effort people search by handle over NIP-50-capable relays.
