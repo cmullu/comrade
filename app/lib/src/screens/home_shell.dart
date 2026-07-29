@@ -23,11 +23,13 @@ import '../state/chat_providers.dart';
 import '../state/providers.dart';
 import '../theme/breakpoints.dart';
 import '../theme/comrade_theme.dart';
+import '../util/chat_menu.dart';
 import '../util/display_name.dart';
 import '../widgets/app_chrome.dart';
 import '../widgets/peer_avatar.dart';
 import 'call_screen.dart';
 import 'chats/call_history_screen.dart';
+import 'chats/chat_menu_dialogs.dart';
 import 'chats/chats_list_screen.dart';
 import 'chats/conversation_screen.dart';
 import 'chats/edit_alias_dialog.dart';
@@ -146,6 +148,41 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     );
     // The chat list titles change too.
     ref.read(conversationsProvider.notifier).refresh();
+  }
+
+  /// Runs one ⋮ entry. Everything here needs the open chat, so a null target
+  /// (the menu closing as the pane clears) is simply a no-op.
+  Future<void> _onMenuAction(ChatMenuAction action) async {
+    final ChatTarget? chat = _openChat;
+    if (chat == null) return;
+    switch (action) {
+      case ChatMenuAction.setAlias:
+        await _editAlias();
+      case ChatMenuAction.addComrade:
+      case ChatMenuAction.removeComrade:
+        await ref.read(comradesProvider.notifier).setComrade(
+              chat.peer,
+              comrade: action == ChatMenuAction.addComrade,
+            );
+      case ChatMenuAction.copyKey:
+        await Clipboard.setData(ClipboardData(text: chat.peer));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Public key copied')),
+          );
+        }
+      case ChatMenuAction.encryptionInfo:
+        await showEncryptionDetailsDialog(context, peer: chat.peer);
+      case ChatMenuAction.block:
+        if (!await confirmBlockPeer(context)) return;
+        // The requests controller owns the only `block` in the state layer and
+        // already refreshes both lists; a second implementation here would be
+        // one more thing to keep in step.
+        await ref.read(messageRequestsProvider.notifier).block(chat.peer);
+        // The thread is gone from the list, so staying on it would show a
+        // conversation that no longer exists.
+        if (mounted) ref.read(openConversationProvider.notifier).state = null;
+    }
   }
 
   @override
@@ -370,6 +407,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   List<Widget> _headerActions(BuildContext context, ChatTarget? openChat) {
     if (_secondary != null || _tab != MainTab.chats) return const <Widget>[];
     if (openChat != null) {
+      final bool isComrade = ref.watch(isComradeProvider(openChat.peer));
       return <Widget>[
         IconButton(
           tooltip: 'Voice call',
@@ -381,11 +419,22 @@ class _HomeShellState extends ConsumerState<HomeShell> {
           icon: const Icon(Icons.videocam),
           onPressed: () => _startCall(video: true),
         ),
-        IconButton(
-          key: const Key('edit-alias'),
-          tooltip: 'Set alias',
-          icon: const Icon(Icons.edit),
-          onPressed: _editAlias,
+        // Everything that isn't a call lives behind ⋮, so the bar stays
+        // readable as options grow (the alias pencil used to sit out here).
+        PopupMenuButton<ChatMenuAction>(
+          key: const Key('chat-menu'),
+          tooltip: 'More options',
+          icon: const Icon(Icons.more_vert),
+          // Flutter caps popup menus at 280px, which the longer labels
+          // ("Encryption details" beside its glyph) overflow. Widen it rather
+          // than truncate a label that tells someone what a tap will do.
+          constraints: const BoxConstraints(minWidth: 220, maxWidth: 340),
+          onSelected: _onMenuAction,
+          // Watched, not read: the comrade list loads on first subscribe, so
+          // reading it lazily inside itemBuilder would render the first menu
+          // from a not-yet-loaded (false) answer.
+          itemBuilder: (BuildContext context) =>
+              conversationMenu(isComrade: isComrade).map(_menuEntry).toList(),
         ),
       ];
     }
@@ -399,6 +448,44 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       ];
     }
     return const <Widget>[];
+  }
+
+  /// One row of the ⋮ menu. Labels and glyphs are resolved here so
+  /// [conversationMenu] can stay a pure list.
+  PopupMenuItem<ChatMenuAction> _menuEntry(ChatMenuAction action) {
+    final (String label, IconData icon) = switch (action) {
+      ChatMenuAction.setAlias => ('Set alias', Icons.edit),
+      // Outline for "not yet", filled for "currently".
+      ChatMenuAction.addComrade => ('Make a comrade', Icons.star_border),
+      ChatMenuAction.removeComrade => ('Remove as comrade', Icons.star),
+      ChatMenuAction.copyKey => ('Copy public key', Icons.content_copy),
+      ChatMenuAction.encryptionInfo => ('Encryption details', Icons.lock),
+      ChatMenuAction.block => ('Block this person', Icons.warning),
+    };
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final Color color =
+        action.destructive ? scheme.error : scheme.onSurfaceVariant;
+    return PopupMenuItem<ChatMenuAction>(
+      key: Key('chat-menu-${action.name}'),
+      value: action,
+      child: Row(
+        children: <Widget>[
+          Icon(icon, size: 20, color: color),
+          const SizedBox(width: 12),
+          // Flexible so a large system font scale shrinks the label instead of
+          // overflowing the row.
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: action.destructive ? scheme.error : null,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // ── Body ──────────────────────────────────────────────────────────────────

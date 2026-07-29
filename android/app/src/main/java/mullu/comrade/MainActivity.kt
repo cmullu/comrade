@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,16 +24,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -63,9 +71,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -77,9 +87,12 @@ import mullu.comrade.ui.ArticleIcon
 import mullu.comrade.ui.BookIcon
 import mullu.comrade.ui.CallHistoryScreen
 import mullu.comrade.ui.ChatBubbleIcon
+import mullu.comrade.ui.ChatMenuAction
 import mullu.comrade.ui.ChatsScreen
 import mullu.comrade.ui.ComradesScreen
 import mullu.comrade.ui.ConversationScreen
+import mullu.comrade.ui.CopyIcon
+import mullu.comrade.ui.conversationMenu
 import mullu.comrade.ui.FeedScreen
 import mullu.comrade.ui.HeartIcon
 import mullu.comrade.ui.JournalScreen
@@ -448,6 +461,12 @@ private fun MainShell(
 
     val openChat = chatNav as? ChatNav.Open
     var editingAlias by remember { mutableStateOf(false) }
+    // Overflow-menu surfaces. Keyed on the peer so switching conversations can
+    // never leave a sheet or a Block confirmation pointed at the previous one.
+    var chatMenuOpen by remember(openChat?.peer) { mutableStateOf(false) }
+    var showEncryption by remember(openChat?.peer) { mutableStateOf(false) }
+    var confirmBlock by remember(openChat?.peer) { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
     // Whether the open conversation's peer is a comrade, and whether they are
     // around — read from the store on open (and after a toggle), with the dot
     // then following the live presence flow.
@@ -553,36 +572,6 @@ private fun MainShell(
                                 },
                                 actions = {
                                     val callLabel = peerTitle(openChat.peer, openChat.alias, openChat.username)
-                                    IconButton(
-                                        onClick = {
-                                            val next = !isComrade
-                                            scope.launch {
-                                                val saved = withContext(Dispatchers.IO) {
-                                                    runCatching {
-                                                        ComradeCore.setComradeTyped(openChat.peer, next)
-                                                    }.getOrNull()
-                                                }
-                                                if (saved != null) {
-                                                    comradeToggleTick++
-                                                    // Chat-list rows carry the dot too.
-                                                    ChatEventRouter.bumpChatTick()
-                                                }
-                                            }
-                                        },
-                                        modifier = Modifier.testTag("toggle-comrade"),
-                                    ) {
-                                        Icon(
-                                            if (isComrade) StarIcon else StarOutlineIcon,
-                                            contentDescription = stringResource(
-                                                if (isComrade) R.string.comrade_remove else R.string.comrade_add,
-                                            ),
-                                            tint = if (isComrade) {
-                                                MaterialTheme.colorScheme.primary
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            },
-                                        )
-                                    }
                                     IconButton(onClick = {
                                         withCallPermissions(video = false) {
                                             CallManager.startOutgoingCall(
@@ -601,11 +590,74 @@ private fun MainShell(
                                     }) {
                                         Icon(VideocamIcon, contentDescription = "Video call")
                                     }
-                                    IconButton(
-                                        onClick = { editingAlias = true },
-                                        modifier = Modifier.testTag("edit-alias"),
-                                    ) {
-                                        Icon(Icons.Filled.Edit, contentDescription = "Set alias")
+                                    // Everything that isn't a call lives behind ⋮, so the bar
+                                    // stays readable as options grow (the alias pencil and the
+                                    // comrade star used to sit out here).
+                                    Box {
+                                        IconButton(
+                                            onClick = { chatMenuOpen = true },
+                                            modifier = Modifier.testTag("chat-menu"),
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.MoreVert,
+                                                contentDescription = stringResource(R.string.chat_menu),
+                                            )
+                                        }
+                                        DropdownMenu(
+                                            expanded = chatMenuOpen,
+                                            onDismissRequest = { chatMenuOpen = false },
+                                        ) {
+                                            conversationMenu(isComrade).forEach { action ->
+                                                ChatMenuRow(
+                                                    action = action,
+                                                    onClick = {
+                                                        chatMenuOpen = false
+                                                        when (action) {
+                                                            ChatMenuAction.SetAlias ->
+                                                                editingAlias = true
+                                                            ChatMenuAction.AddComrade,
+                                                            ChatMenuAction.RemoveComrade,
+                                                            -> scope.launch {
+                                                                val saved = withContext(Dispatchers.IO) {
+                                                                    runCatching {
+                                                                        ComradeCore.setComradeTyped(
+                                                                            openChat.peer,
+                                                                            !isComrade,
+                                                                        )
+                                                                    }.getOrNull()
+                                                                }
+                                                                if (saved != null) {
+                                                                    comradeToggleTick++
+                                                                    // Chat-list rows carry the dot too.
+                                                                    ChatEventRouter.bumpChatTick()
+                                                                }
+                                                            }
+                                                            ChatMenuAction.CopyKey -> {
+                                                                clipboard.setText(
+                                                                    AnnotatedString(openChat.peer),
+                                                                )
+                                                                // Android 13+ shows its own clipboard
+                                                                // confirmation; a Toast there would
+                                                                // just say it twice.
+                                                                if (Build.VERSION.SDK_INT <
+                                                                    Build.VERSION_CODES.TIRAMISU
+                                                                ) {
+                                                                    Toast.makeText(
+                                                                        context,
+                                                                        R.string.chat_menu_copied,
+                                                                        Toast.LENGTH_SHORT,
+                                                                    ).show()
+                                                                }
+                                                            }
+                                                            ChatMenuAction.EncryptionInfo ->
+                                                                showEncryption = true
+                                                            ChatMenuAction.Block ->
+                                                                confirmBlock = true
+                                                        }
+                                                    },
+                                                )
+                                            }
+                                        }
                                     }
                                 },
                             )
@@ -777,6 +829,169 @@ private fun MainShell(
             },
         )
     }
+
+    if (showEncryption && openChat != null) {
+        EncryptionDetailsDialog(
+            peer = openChat.peer,
+            onDismiss = { showEncryption = false },
+        )
+    }
+
+    if (confirmBlock && openChat != null) {
+        val blocked = openChat.peer
+        BlockPeerDialog(
+            onDismiss = { confirmBlock = false },
+            onConfirm = {
+                confirmBlock = false
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        runCatching { ComradeCore.blockConversationTyped(blocked) }.isSuccess
+                    }
+                    if (ok) {
+                        // The thread is gone from the list, so staying on it would
+                        // show a conversation that no longer exists.
+                        chatNav = ChatNav.List
+                        Notifier.clearForPeer(context, blocked)
+                        ChatEventRouter.bumpChatTick()
+                    }
+                }
+            },
+        )
+    }
+}
+
+/**
+ * One row of the conversation ⋮ menu. The label and glyph are resolved here
+ * from the [ChatMenuAction] so [conversationMenu] can stay a pure list.
+ */
+@Composable
+private fun ChatMenuRow(action: ChatMenuAction, onClick: () -> Unit) {
+    val label = stringResource(
+        when (action) {
+            ChatMenuAction.SetAlias -> R.string.chat_menu_set_alias
+            ChatMenuAction.AddComrade -> R.string.comrade_add
+            ChatMenuAction.RemoveComrade -> R.string.comrade_remove
+            ChatMenuAction.CopyKey -> R.string.chat_menu_copy_key
+            ChatMenuAction.EncryptionInfo -> R.string.chat_menu_encryption
+            ChatMenuAction.Block -> R.string.chat_menu_block
+        },
+    )
+    val icon = when (action) {
+        ChatMenuAction.SetAlias -> Icons.Filled.Edit
+        // Outline for "not yet", filled for "currently" — the same read the
+        // star toggle in the bar used to give at a glance.
+        ChatMenuAction.AddComrade -> StarOutlineIcon
+        ChatMenuAction.RemoveComrade -> StarIcon
+        ChatMenuAction.CopyKey -> CopyIcon
+        ChatMenuAction.EncryptionInfo -> Icons.Filled.Lock
+        ChatMenuAction.Block -> Icons.Filled.Warning
+    }
+    val tint = if (action.destructive) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    DropdownMenuItem(
+        text = {
+            Text(
+                label,
+                color = if (action.destructive) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+        },
+        leadingIcon = { Icon(icon, contentDescription = null, tint = tint) },
+        onClick = onClick,
+        modifier = Modifier.testTag("chat-menu-${action.name}"),
+    )
+}
+
+/**
+ * What protects this thread, plus the peer's key in full.
+ *
+ * The key is shown unabbreviated and selectable on purpose: comparing it out
+ * of band is the only way to be sure who you're talking to, and a truncated
+ * key can't be compared.
+ */
+@Composable
+private fun EncryptionDetailsDialog(peer: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+        title = { Text(stringResource(R.string.encryption_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    stringResource(R.string.encryption_body),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    stringResource(R.string.encryption_key_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    SelectionContainer {
+                        Text(
+                            peer,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                                .testTag("encryption-key"),
+                        )
+                    }
+                }
+                Text(
+                    stringResource(R.string.encryption_verify_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        },
+    )
+}
+
+/**
+ * Block confirmation. Blocking is silent to the other person and drops their
+ * future messages, so it says both of those things before doing it.
+ */
+@Composable
+private fun BlockPeerDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+            )
+        },
+        title = { Text(stringResource(R.string.block_title)) },
+        text = { Text(stringResource(R.string.block_body)) },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                modifier = Modifier.testTag("block-confirm"),
+            ) {
+                Text(
+                    stringResource(R.string.block_confirm),
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
 }
 
 /**

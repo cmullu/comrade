@@ -124,7 +124,7 @@
     <string name="comrade_online_title">%1$s is online</string>
     <string name="comrade_online_text">Someone you chose as a comrade is around</string>
     <string name="comrades_explainer">Choose the people whose company you want to know about. Your comrades — and nobody else, not even a relay — are told when you\'re online. You see them the same way: once they\'ve chosen you back.</string>
-    <string name="comrades_empty">No comrades yet. Pick a contact below, or tap the star in any conversation.</string>
+    <string name="comrades_empty">No comrades yet. Pick a contact below, or open any conversation\'s ⋮ menu and choose “Make a comrade”.</string>
     <string name="comrades_no_contacts">Save a contact first — start a chat, and they\'ll show up here.</string>
     <string name="comrade_online">Online now</string>
     <string name="comrade_last_seen">Last seen %1$s ago</string>
@@ -132,4 +132,23 @@
     <string name="comrade_awaiting_reciprocity">Waiting for them to choose you back</string>
     <string name="comrade_add">Make a comrade</string>
     <string name="comrade_remove">Remove as comrade</string>
+
+    <!-- Conversation overflow (⋮) menu -->
+    <string name="chat_menu">More options</string>
+    <string name="chat_menu_set_alias">Set alias</string>
+    <string name="chat_menu_copy_key">Copy public key</string>
+    <string name="chat_menu_copied">Public key copied</string>
+    <string name="chat_menu_encryption">Encryption details</string>
+    <string name="chat_menu_block">Block this person</string>
+    <!-- Encryption-details dialog -->
+    <string name="encryption_title">Encryption details</string>
+    <string name="encryption_body">Messages in this chat are sealed with your key and theirs (NIP-44) and gift-wrapped, so relays carry neither the text nor who is talking to whom. Nobody without one of the two private keys can read it — not a relay, not us.</string>
+    <string name="encryption_key_label">Their public key</string>
+    <string name="encryption_verify_hint">Names are claims; this key is the identity. Compare it with them over a channel you already trust to be certain who you\'re talking to.</string>
+    <!-- Block-confirmation dialog -->
+    <string name="block_title">Block this person?</string>
+    <string name="block_body">Their future messages will be dropped before they reach you, and this chat leaves your list. They are not told. You can start a new chat with their key later.</string>
+    <string name="block_confirm">Block</string>
+    <string name="cancel">Cancel</string>
+    <string name="close">Close</string>
 </resources>

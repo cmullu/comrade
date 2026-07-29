@@ -71,6 +71,46 @@ final Provider<int> messageRequestCountProvider = Provider<int>(
   (Ref ref) => ref.watch(messageRequestsProvider).value?.length ?? 0,
 );
 
+// ── Comrades ────────────────────────────────────────────────────────────────
+
+class ComradesController extends AsyncNotifier<List<ComradeInfo>> {
+  @override
+  Future<List<ComradeInfo>> build() =>
+      ref.watch(comradeRepositoryProvider).comrades();
+
+  /// Make [npub] a comrade, or stop being one.
+  ///
+  /// Refreshes the chat list too: comrade state is what decides whether a row
+  /// carries a presence dot, so a stale list would show the old answer.
+  Future<void> setComrade(String npub, {required bool comrade}) async {
+    await ref
+        .read(comradeRepositoryProvider)
+        .setComrade(npub: npub, comrade: comrade);
+    ref.invalidateSelf();
+    ref.read(conversationsProvider.notifier).refresh();
+  }
+}
+
+final AsyncNotifierProvider<ComradesController, List<ComradeInfo>>
+    comradesProvider =
+    AsyncNotifierProvider<ComradesController, List<ComradeInfo>>(
+        ComradesController.new);
+
+/// Whether one key is a comrade of ours.
+///
+/// Defaults to `false` while the list is loading or if it fails: the ⋮ menu
+/// offers "Make a comrade", which is the harmless direction to guess wrong —
+/// re-marking an existing comrade is a no-op, whereas guessing `true` would
+/// offer to remove a relationship that may not exist.
+final ProviderFamily<bool, String> isComradeProvider =
+    Provider.family<bool, String>(
+  (Ref ref, String npub) =>
+      ref.watch(comradesProvider).value?.any(
+            (ComradeInfo c) => c.npub == npub,
+          ) ??
+      false,
+);
+
 // ── The open conversation ───────────────────────────────────────────────────
 
 /// Which peer the shell currently has open.
