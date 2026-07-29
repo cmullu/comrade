@@ -212,8 +212,19 @@ jobs:
           key: ${{ runner.os }}-cargo-ndk-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-ndk-
 
+      # `~/.cargo/bin` is one of the cached paths above, so on a cache hit the
+      # binary is already restored and a bare `cargo install` aborts with
+      # "binary `cargo-ndk` already exists in destination" (exit 101) — which
+      # is what failed this job on every run after the cache was first
+      # populated. Install only when it is genuinely absent; `--version ^4`
+      # still bounds what a restored copy may be.
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked --version ^4
+        run: |
+          if command -v cargo-ndk >/dev/null 2>&1; then
+            echo "cargo-ndk already present: $(cargo ndk --version)"
+          else
+            cargo install cargo-ndk --locked --version ^4
+          fi
 
       - uses: subosito/flutter-action@v2
         with:
