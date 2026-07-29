@@ -6,6 +6,7 @@
 library;
 
 import 'package:comrade/src/data/fake_comrade_repository.dart';
+import 'package:comrade/src/data/models.dart';
 import 'package:comrade/src/screens/home_shell.dart';
 import 'package:comrade/src/state/chat_providers.dart';
 import 'package:comrade/src/theme/breakpoints.dart';
@@ -220,6 +221,127 @@ void main() {
 
       expect(find.text('Amma'), findsOneWidget);
       expect(find.text('@bhaskar'), findsOneWidget);
+    });
+  });
+
+  group('conversation ⋮ menu', () {
+    Future<void> openMenu(
+        WidgetTester tester, FakeComradeRepository repo, String peer) async {
+      setWindowSize(tester, const Size(400, 900));
+      await tester.pumpWidget(_shell(repo, open: ChatTarget(peer: peer)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('chat-menu')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('replaces the alias pencil — calls stay, the rest move in',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      setWindowSize(tester, const Size(400, 900));
+      await tester.pumpWidget(
+        _shell(repo, open: const ChatTarget(peer: FakePeers.bhaskar)),
+      );
+      await tester.pumpAndSettle();
+
+      // The pencil that used to sit in the bar is gone…
+      expect(find.byKey(const Key('edit-alias')), findsNothing);
+      // …calls remain one tap away…
+      expect(find.byIcon(Icons.call), findsOneWidget);
+      expect(find.byIcon(Icons.videocam), findsOneWidget);
+      // …and everything else is behind ⋮.
+      expect(find.byKey(const Key('chat-menu')), findsOneWidget);
+    });
+
+    testWidgets('offers to make a non-comrade a comrade',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await openMenu(tester, repo, FakePeers.bhaskar);
+
+      expect(find.text('Make a comrade'), findsOneWidget);
+      expect(find.text('Remove as comrade'), findsNothing);
+      // The rest of the menu is present too.
+      expect(find.text('Set alias'), findsOneWidget);
+      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('Encryption details'), findsOneWidget);
+      expect(find.text('Block this person'), findsOneWidget);
+    });
+
+    testWidgets('offers to drop an existing comrade',
+        (WidgetTester tester) async {
+      // Amma is seeded as a comrade.
+      final FakeComradeRepository repo = await unlockedFake();
+      await openMenu(tester, repo, FakePeers.alice);
+
+      expect(find.text('Remove as comrade'), findsOneWidget);
+      expect(find.text('Make a comrade'), findsNothing);
+    });
+
+    testWidgets('making a comrade sticks, and the menu then offers the reverse',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await openMenu(tester, repo, FakePeers.bhaskar);
+
+      await tester.tap(find.text('Make a comrade'));
+      await tester.pumpAndSettle();
+
+      expect(
+        (await repo.comrades()).map((ComradeInfo c) => c.npub),
+        contains(FakePeers.bhaskar),
+      );
+      await tester.tap(find.byKey(const Key('chat-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove as comrade'), findsOneWidget);
+    });
+
+    testWidgets('encryption details shows the key in full, not shortened',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await openMenu(tester, repo, FakePeers.bhaskar);
+
+      await tester.tap(find.text('Encryption details'));
+      await tester.pumpAndSettle();
+
+      // Unabbreviated on purpose: a truncated key can't be compared.
+      expect(find.byKey(const Key('encryption-key')), findsOneWidget);
+      expect(find.text(FakePeers.bhaskar), findsOneWidget);
+    });
+
+    testWidgets('block asks first, and cancelling leaves the chat alone',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await openMenu(tester, repo, FakePeers.bhaskar);
+
+      await tester.tap(find.text('Block this person'));
+      await tester.pumpAndSettle();
+      expect(find.text('Block this person?'), findsOneWidget);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      // Still open, still there.
+      expect(find.byKey(const Key('dm-input')), findsOneWidget);
+      expect(
+        (await repo.conversations()).map((ConversationInfo c) => c.peer),
+        contains(FakePeers.bhaskar),
+      );
+    });
+
+    testWidgets('confirming block drops the thread and leaves the conversation',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await openMenu(tester, repo, FakePeers.bhaskar);
+
+      await tester.tap(find.text('Block this person'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('block-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(
+        (await repo.conversations()).map((ConversationInfo c) => c.peer),
+        isNot(contains(FakePeers.bhaskar)),
+      );
+      // Staying on a blocked thread would show a chat that no longer exists.
+      expect(find.byKey(const Key('dm-input')), findsNothing);
     });
   });
 }
