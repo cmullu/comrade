@@ -1,0 +1,221 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ======================================================================
+         Phase 2 of the Flutter migration: the native Android service surface,
+         carried over from android/app/src/main/AndroidManifest.xml with the
+         Compose-era Activity replaced by the Flutter one.
+
+         Every <service>, <receiver>, <uses-permission> and <uses-feature>
+         below is preserved verbatim, comments included, because each is
+         load-bearing for a service this phase keeps native — see
+         app/android/app/src/main/kotlin/mullu/comrade/PLATFORM_CHANNELS.md.
+
+         UNCOMPILED: nothing here has been run through the manifest merger or
+         built. See PLATFORM_CHANNELS.md §10.
+         ====================================================================== -->
+
+    <!-- Network access for Nostr relay connections -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Local network access for Saathi mDNS peer discovery -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- "Hey Comrade" voice assistant: microphone + always-listening service -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- CallService: keeps an in-progress call's process alive while the app
+         is backgrounded. Required alongside the matching foregroundServiceType
+         on Android 14+ (see CallService/the <service> entry below); video
+         calls additionally use the camera type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <!-- RelayConnectionService: keeps the relay connection (and therefore
+         notification delivery) alive while the vault is unlocked but no
+         Activity is visible — see its doc comment for the security boundary.
+         "dataSync" is the closest stock foregroundServiceType to "maintaining
+         a network connection and delivering the data it carries". -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- The in-call proximity screen-off wake lock. Under Compose this was held
+         by CallScreen.kt's ProximityScreenControl; the permission is declared
+         here regardless of which layer ends up holding it. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Voice/video calls (WebRTC): camera capture for video calls and in-call
+         audio routing (earpiece/speaker/Bluetooth/wired headset — see
+         CallManager's AudioRoute). RECORD_AUDIO above already covers the
+         microphone. The camera is declared optional so the app still installs
+         on camera-less devices — voice calls don't need it. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Bluetooth call-audio routing on API 31+: AudioManager.setCommunicationDevice
+         to a TYPE_BLUETOOTH_SCO device requires this even though CallManager
+         never touches android.bluetooth.* directly. Requested at runtime only
+         when the user actually selects the Bluetooth route (AUDIT COMMS-06 —
+         now CallChannel.setAudioRoute, which calls
+         CallManager.onBluetoothPermissionDenied() on refusal); declaring it
+         here just makes that request possible, it does not grant it. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Ringing/vibrating for an incoming call (Ringer.kt, now driven by
+         CallStateReactor rather than the UI). Normal permission — no prompt. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Required for Notifier.notifyIncomingCall's CallStyle notification: on
+         the callee side there is no foreground service yet while merely
+         ringing (CallService only starts once the call is accepted/placed),
+         so the fullScreenIntent it already sets is the only one of
+         CallStyle's three allowed conditions available at ring time. Without
+         this declared, the platform silently treats fullScreenIntent as
+         absent too, and NotificationManagerCompat.notify throws
+         IllegalArgumentException instead of posting. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <!-- allowBackup=false: the encrypted vault must not leave the device via
+         adb/cloud backup — an exported copy is an offline brute-force target.
+         hasFragileUserData=true is unrelated to that: it just opts into the
+         platform's "keep app data" uninstall dialog (Android 10+) so a
+         reinstall doesn't silently wipe the vault/key material and chat
+         history the user never asked to delete.
+
+         android:name is ComradeFlutterApplication, NOT Flutter's default
+         ${applicationName}: it extends the preserved ComradeApplication for the
+         native-library warm-up and appScope, and starts CallStateReactor at
+         process start so an incoming call rings even in a process the OS
+         restarted for RelayConnectionService alone, with no engine attached. -->
+    <application
+        android:name=".ComradeFlutterApplication"
+        android:allowBackup="false"
+        android:hasFragileUserData="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Comrade"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <!-- Handles the Decline/Hang Up actions on the call notifications'
+             CallStyle (Notifier.notifyIncomingCall, CallService). Not
+             exported: only this app's own PendingIntents ever invoke it.
+             Independent of any UI — declining works with no engine attached. -->
+        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false" />
+
+        <!-- Keeps the process alive with an ongoing-call notification for the
+             duration of a call's live media — see CallService's doc comment.
+             foregroundServiceType declares the maximum this service may use;
+             each startForeground() call passes the subset it actually needs
+             (microphone alone for voice, +camera for video). -->
+        <service
+            android:name=".call.CallService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone" />
+
+        <!-- Always-listening "Hey Comrade" wake-word foreground service -->
+        <service
+            android:name=".voice.WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Keeps the relay connection alive while the vault is unlocked but
+             the app is backgrounded — see RelayConnectionService's doc
+             comment for scope and the security boundary. Sole consumer of
+             ComradeCore.pollEvent(); no Dart code may drain that queue. -->
+        <service
+            android:name=".RelayConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Downloads an on-device model (speech / companion) in the
+             background with progress in the notification bar, so the transfer
+             survives the app being backgrounded — see ModelDownloadService. -->
+        <service
+            android:name=".model.ModelDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Assist app: the assist gesture (long-press power) opens Comrade -->
+        <service
+            android:name=".voice.ComradeInteractionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+        </service>
+
+        <service
+            android:name=".voice.ComradeInteractionSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+        <!-- Offline recognition service backing the assist registration -->
+        <service
+            android:name=".voice.ComradeRecognitionService"
+            android:exported="true"
+            android:permission="android.permission.RECORD_AUDIO">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
+        </service>
+
+        <!-- Hands a decrypted media attachment to another app (e.g. opening a
+             video/document externally) as a content:// URI instead of a raw
+             file:// path, which Android has blocked cross-app since N. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+         Used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+    </queries>
+
+</manifest>

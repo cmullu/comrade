@@ -10,13 +10,33 @@
  * manual panic guard (uniffi's scaffolding catches panics itself and turns
  * them into a `PanicException` on the Kotlin side).
  *
+ * # Two foreign ABIs, one runtime
+ *
+ * This cdylib exports **two** independent FFI surfaces:
+ *
+ *  1. the uniffi scaffolding below (`uniffi_comrade_*` / `ffi_comrade_*`
+ *     symbols), which Kotlin — the app *and* the background services
+ *     (`WakeWordService`, `RelayConnectionService`, `ModelDownloadService`,
+ *     `CommandDispatcher`) — drives through the generated JNA bindings, and
+ *  2. the flutter_rust_bridge scaffolding in [`api`] (`frb_*` symbols), which
+ *     a Dart/Flutter UI drives.
+ *
+ * They must live in **one** shared library, because two cdylibs would each get
+ * their own copy of this crate's `static`s, hence two [`ComradeRuntime`]s, and
+ * `comrade_storage::EncryptedStore::open` opens the vault with
+ * `redb::Database::create` — redb takes an exclusive file lock, so the second
+ * unlock of the same vault directory fails outright. Hence
+ * [`global_runtime`]: the single, process-lifetime `ComradeRuntime` that both
+ * ABIs read and write. See `docs/FRONTEND_STRATEGY.md` §4 D2.
+ *
  * Shape:
  *  • Free functions ([`version`], [`generate_keypair`], …) — stateless crypto
  *    and workspace-metadata helpers that don't need a live runtime.
  *  • [`Comrade`] — an opaque uniffi `Object` (handed to Kotlin as a single
- *    `Comrade()` instance, constructed once and reused — the same
- *    "one shared instance for the process" shape as the desktop's
- *    `Arc<RwLock<ComradeRuntime>>` managed state) wrapping every
+ *    `Comrade()` instance, constructed once and reused) that is now a thin
+ *    handle onto [`global_runtime`] rather than the owner of its own
+ *    `ComradeRuntime` — the same "one shared instance for the process" shape
+ *    as the desktop's `Arc<RwLock<ComradeRuntime>>` managed state, wrapping every
  *    [`comrade_ui::ComradeRuntime`] method the Vault (DMs/calls/media),
  *    Sabha (public feed) and Identity (profile/contacts/workspace) engines
  *    expose. Methods that only read/write `ComradeRuntime`'s own fields stay
@@ -46,7 +66,7 @@
  */
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
@@ -62,6 +82,51 @@ use tokio::sync::RwLock;
 use tracing::warn;
 
 uniffi::setup_scaffolding!("comrade");
+
+pub mod api;
+mod frb_generated;
+
+// ── The process-global runtime ────────────────────────────────────────────────
+
+/// The one [`ComradeRuntime`] for the whole process, shared by *both* foreign
+/// ABIs this cdylib exports (see the module header). Not `pub` — nothing
+/// outside this crate should be able to build a second one.
+static RUNTIME: OnceLock<Arc<RwLock<ComradeRuntime>>> = OnceLock::new();
+
+/// The process-global [`ComradeRuntime`], created on first use.
+///
+/// Both [`Comrade`] (uniffi → Kotlin) and every function in [`api`]
+/// (flutter_rust_bridge → Dart) resolve to *this* handle, so an unlock done
+/// through one ABI is immediately visible through the other and the vault's
+/// redb file is only ever opened once.
+pub(crate) fn global_runtime() -> &'static Arc<RwLock<ComradeRuntime>> {
+    RUNTIME.get_or_init(|| Arc::new(RwLock::new(ComradeRuntime::new())))
+}
+
+/// [`global_runtime`], but seeding it with an explicit relay set if — and only
+/// if — it has not been created yet (AUDIT.md COMMS-03's isolated-relay test
+/// hook, reached from [`Comrade::new_with_relays`]).
+///
+/// First caller wins: there is exactly one runtime per process, so a later
+/// call cannot retarget engines that may already be connected. That is logged
+/// rather than silently ignored, and never fails — the caller still gets a
+/// working handle.
+pub(crate) fn global_runtime_with_relays(
+    relays: Vec<String>,
+) -> &'static Arc<RwLock<ComradeRuntime>> {
+    let mut seeded = false;
+    let runtime = RUNTIME.get_or_init(|| {
+        seeded = true;
+        Arc::new(RwLock::new(ComradeRuntime::with_relays(relays)))
+    });
+    if !seeded {
+        warn!(
+            "new_with_relays: the process-global runtime already exists; \
+             keeping its current relay set"
+        );
+    }
+    runtime
+}
 
 // ── Stateless helpers (no ComradeRuntime instance needed) ────────────────────
 
@@ -254,25 +319,46 @@ fn spawn_event_forwarder(
 
 // ── Comrade — the live runtime handle ────────────────────────────────────────
 
-/// The single, process-lifetime handle to the native core. Kotlin constructs
-/// this exactly once (mirroring the desktop's `Arc<RwLock<ComradeRuntime>>`
-/// managed state) and calls every method on that one instance — uniffi hands
-/// it to Kotlin as `Arc<Comrade>` under the hood, so cloning the reference is
+/// The Kotlin-facing handle to the native core. Kotlin constructs this
+/// exactly once and calls every method on that one instance — uniffi hands it
+/// to Kotlin as `Arc<Comrade>` under the hood, so cloning the reference is
 /// cheap and every method call is thread-safe.
+///
+/// The handle no longer *owns* a [`ComradeRuntime`]: every instance borrows
+/// the process-global one (see [`global_runtime`]) so the Dart ABI in [`api`]
+/// drives the same engines, the same unlocked store, and the same event bus.
+/// Constructing two `Comrade`s is therefore harmless — they are two references
+/// to one runtime, not two runtimes.
 #[derive(uniffi::Object)]
 pub struct Comrade {
-    inner: RwLock<ComradeRuntime>,
+    inner: Arc<RwLock<ComradeRuntime>>,
+    /// Per-handle, deliberately *not* process-global: each `Comrade` may
+    /// register (at most) one listener, exactly as before this became a shared
+    /// runtime. Two handles registering two listeners means two forwarders
+    /// over the same broadcast channels, which is correct — `broadcast`
+    /// fans out to every receiver.
     listener_registered: AtomicBool,
+}
+
+impl Comrade {
+    /// Build a handle over an explicit runtime. Not exported over FFI: the
+    /// only foreign-reachable constructors are [`Comrade::new`] and
+    /// [`Comrade::new_with_relays`], both of which bind the process-global
+    /// runtime. Tests use this to get an isolated runtime (and therefore an
+    /// isolated redb vault) per test.
+    fn with_runtime(inner: Arc<RwLock<ComradeRuntime>>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            listener_registered: AtomicBool::new(false),
+        })
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Comrade {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inner: RwLock::new(ComradeRuntime::new()),
-            listener_registered: AtomicBool::new(false),
-        })
+        Self::with_runtime(global_runtime().clone())
     }
 
     /// Like [`Comrade::new`], but connecting new engines to `relays` instead
@@ -280,12 +366,12 @@ impl Comrade {
     /// hook: a two-installation/two-instance device test points both sides
     /// at one local relay instead of the public internet. Not used by the
     /// shipping app (which always calls [`Comrade::new`]).
+    ///
+    /// Only takes effect if it is what first creates the process-global
+    /// runtime — see [`global_runtime_with_relays`].
     #[uniffi::constructor]
     pub fn new_with_relays(relays: Vec<String>) -> Arc<Self> {
-        Arc::new(Self {
-            inner: RwLock::new(ComradeRuntime::with_relays(relays)),
-            listener_registered: AtomicBool::new(false),
-        })
+        Self::with_runtime(global_runtime_with_relays(relays).clone())
     }
 
     // ── Push events ───────────────────────────────────────────────────────
@@ -809,6 +895,19 @@ impl Comrade {
 mod tests {
     use super::*;
 
+    /// A `Comrade` over a runtime of its own.
+    ///
+    /// `Comrade::new()` now hands back the *process-global* runtime, and
+    /// `cargo test` runs every test in one process on many threads — so a test
+    /// that unlocks a vault, toggles a workspace or asserts "nothing is
+    /// unlocked yet" needs its own runtime or it races every other test (and,
+    /// for the unlock tests, would collide on redb's exclusive lock). Tests
+    /// that are specifically *about* the shared global say so in their name
+    /// and use `Comrade::new()`.
+    fn isolated() -> Arc<Comrade> {
+        Comrade::with_runtime(Arc::new(RwLock::new(ComradeRuntime::new())))
+    }
+
     #[test]
     fn version_matches_crate_version() {
         assert_eq!(version(), env!("CARGO_PKG_VERSION"));
@@ -854,7 +953,7 @@ mod tests {
 
     #[test]
     fn comrade_starts_locked_on_the_base_workspace() {
-        let c = Comrade::new();
+        let c = isolated();
         assert!(!c.is_vault_unlocked());
         assert!(!c.is_store_unlocked());
         assert_eq!(c.current_workspace().key, "Base");
@@ -862,16 +961,32 @@ mod tests {
 
     #[test]
     fn new_with_relays_is_reachable_through_the_ffi_constructor() {
+        // Reachable, and — like every other foreign constructor — a handle
+        // onto the one process-global runtime, not a second one.
         let c = Comrade::new_with_relays(vec!["wss://relay.example.test".to_string()]);
-        assert!(!c.is_vault_unlocked());
+        assert!(Arc::ptr_eq(&c.inner, global_runtime()));
         assert_eq!(c.current_workspace().key, "Base");
+    }
+
+    #[test]
+    fn every_uniffi_handle_shares_one_process_global_runtime() {
+        // The architectural invariant this crate exists to hold: two cdylibs
+        // (or two runtimes in one) would both open the same vault directory,
+        // and redb's exclusive lock makes the second open fail. See the
+        // module header.
+        let a = Comrade::new();
+        let b = Comrade::new();
+        assert!(Arc::ptr_eq(&a.inner, &b.inner));
+        assert!(Arc::ptr_eq(&a.inner, global_runtime()));
+        // …and the flutter_rust_bridge ABI resolves to the very same handle.
+        assert!(Arc::ptr_eq(&a.inner, api::runtime()));
     }
 
     #[test]
     fn sync_calls_reject_gracefully_before_unlock() {
         // Mirrors comrade_ui::runtime::tests::commands_reject_gracefully_when_vault_locked
         // — this wrapper must not panic or silently succeed pre-unlock.
-        let c = Comrade::new();
+        let c = isolated();
         assert!(matches!(c.conversations(), Err(UiError::VaultLocked)));
         assert!(matches!(c.profile(), Err(UiError::NoIdentity)));
         assert!(matches!(c.comrades(), Err(UiError::VaultLocked)));
@@ -886,7 +1001,16 @@ mod tests {
         // Presence is a courtesy, never an error path — the Android shell
         // calls this on every foreground transition, including ones that
         // race the vault being open.
-        let c = Comrade::new();
+        //
+        // `isolated()`, not `Comrade::new()`: this asserts a *locked*
+        // precondition, and the process-global vault is unlocked partway
+        // through the run by
+        // `a_vault_unlocked_through_the_dart_abi_is_visible_through_the_kotlin_abi`
+        // — the one test that owns the global's lifecycle. Sharing the global
+        // here made this fail roughly one run in four (`set_comrade` returning
+        // `Ok` because the vault had just been opened underneath it), which is
+        // exactly what the note above that test warns about.
+        let c = isolated();
         assert_eq!(c.announce_presence(true).await, 0);
         assert!(matches!(
             c.set_comrade("npub1x".to_string(), true).await,
@@ -899,7 +1023,7 @@ mod tests {
         // Pure computation over the two SDP strings already in hand — unlike
         // the store-backed calls above, this must work before the vault is
         // ever unlocked.
-        let c = Comrade::new();
+        let c = isolated();
         let sdp_a = "v=0\r\na=fingerprint:sha-256 AA:BB\r\n".to_string();
         let sdp_b = "v=0\r\na=fingerprint:sha-256 CC:DD\r\n".to_string();
         let sas = c.call_sas(sdp_a.clone(), sdp_b.clone());
@@ -913,7 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_calls_reject_gracefully_before_unlock() {
-        let c = Comrade::new();
+        let c = isolated();
         assert!(matches!(
             c.send_call_signal(
                 "peer".to_string(),
@@ -937,7 +1061,7 @@ mod tests {
         // would (there is no surrounding reactor on that thread either).
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().to_string_lossy().to_string();
-        let c = Comrade::new();
+        let c = isolated();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on(c.unlock_vault(path.clone(), "pin".to_string()))
@@ -960,7 +1084,7 @@ mod tests {
 
     #[test]
     fn turn_server_status_is_reachable_through_the_ffi_object() {
-        let c = Comrade::new();
+        let c = isolated();
         // Pre-unlock: honest "nothing configured", not an error.
         let status = c.turn_server_status();
         assert!(!status.configured);
@@ -977,7 +1101,7 @@ mod tests {
             }
         }
 
-        let c = Comrade::new();
+        let c = isolated();
         let listener: Arc<dyn BridgeEventListener> = Arc::new(Counter::default());
         c.set_event_listener(listener.clone()).await;
         // A second registration must be a no-op, not a second forwarder task.
@@ -1010,7 +1134,7 @@ mod tests {
             }
         }
 
-        let c = Comrade::new();
+        let c = isolated();
         let called = Arc::new(AtomicBool::new(false));
         let panicked = Arc::new(AtomicBool::new(false));
         let listener: Arc<dyn BridgeEventListener> = Arc::new(ReentrantListener {
@@ -1044,5 +1168,188 @@ mod tests {
             !panicked.load(Ordering::SeqCst),
             "on_event must be able to call a blocking_read method with no panic"
         );
+    }
+
+    // ── The Dart (flutter_rust_bridge) ABI ────────────────────────────────
+
+    #[test]
+    fn dart_sync_tier_is_safe_on_a_plain_thread_with_no_reactor() {
+        // FRB dispatches a non-`async fn` through `SimpleExecutor::execute_normal`
+        // onto a `SimpleThreadPool` (`threadpool::ThreadPool` — plain std
+        // threads, no ambient Tokio reactor). That is the *only* reason the
+        // sync tier of `api` may use `blocking_read`/`blocking_write`, which
+        // panic inside a reactor. Reproduce that calling convention here
+        // rather than trusting it: if someone later makes one of these
+        // functions async-aware, or FRB changes its executor, this fails.
+        let joined = std::thread::spawn(|| {
+            assert_eq!(api::current_workspace().key, "Base");
+            let _ = api::workspaces();
+            let _ = api::mesh_status();
+            let _ = api::conversations();
+            let _ = api::message_requests();
+            let _ = api::list_contacts();
+            let _ = api::comrades();
+            let _ = api::peer_presence("npub1x".to_string());
+            let _ = api::outbox_pending();
+            let _ = api::metrics_snapshot();
+            let _ = api::journal_entries();
+            let _ = api::tara_crisis_resources();
+            let _ = api::turn_server_status();
+            let _ = api::call_ice_servers();
+            let _ = api::call_sas("v=0\r\n".to_string(), "v=0\r\n".to_string());
+            api::version()
+        })
+        .join();
+        assert_eq!(
+            joined.expect("the Dart sync tier must not panic off-reactor"),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[tokio::test]
+    async fn dart_event_pump_merges_both_channels_and_stops_when_dart_drops() {
+        // The fan-in half of `api::bridge_event_stream`. A real `StreamSink`
+        // needs a live Dart isolate port, so the sink is stubbed; what is
+        // under test is that *both* buses reach one consumer and that a dead
+        // consumer ends the task instead of spinning.
+        let (critical_tx, critical_rx) = tokio::sync::broadcast::channel(8);
+        let (feed_tx, feed_rx) = tokio::sync::broadcast::channel(8);
+
+        let mesh = BridgeEvent::MeshStatusChanged(MeshStatusDto {
+            active: true,
+            peer_count: 3,
+        });
+        let ledger = BridgeEvent::LedgerUpdated {
+            ledger: "from the feed bus".to_string(),
+        };
+        critical_tx.send(mesh.clone()).unwrap();
+        feed_tx.send(ledger.clone()).unwrap();
+
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Accept exactly two events, then report the consumer as gone.
+        let mut budget = 2;
+        let pump = tokio::spawn(async move {
+            api::pump_bridge_events(critical_rx, feed_rx, move |event| {
+                seen_tx.send(event).unwrap();
+                budget -= 1;
+                budget > 0
+            })
+            .await;
+        });
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            seen.push(
+                tokio::time::timeout(std::time::Duration::from_secs(5), seen_rx.recv())
+                    .await
+                    .expect("the pump must forward both buses")
+                    .expect("sender must stay alive"),
+            );
+        }
+        assert!(seen.contains(&mesh), "critical bus event missing");
+        assert!(seen.contains(&ledger), "feed bus event missing");
+
+        // A consumer that has gone away must end the task, not spin forever.
+        tokio::time::timeout(std::time::Duration::from_secs(5), pump)
+            .await
+            .expect("the pump must exit once the Dart sink is gone")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn one_event_reaches_the_kotlin_listener_and_the_dart_stream_at_once() {
+        // Requirement: both consumers work *simultaneously* off one runtime.
+        // `broadcast` fans out, so neither starves the other — but that only
+        // holds if the Dart pump and the uniffi forwarder subscribe to the
+        // same `ComradeRuntime`, which is what this asserts end to end.
+        #[derive(Default)]
+        struct Collect(std::sync::Mutex<Vec<BridgeEvent>>);
+        impl BridgeEventListener for Collect {
+            fn on_event(&self, event: BridgeEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let c = isolated();
+        let kotlin = Arc::new(Collect::default());
+        c.set_event_listener(kotlin.clone()).await;
+
+        let (critical_rx, feed_rx, sender) = {
+            let guard = c.inner.read().await;
+            (
+                guard.subscribe_events(),
+                guard.subscribe_feed_events(),
+                guard.event_sender(),
+            )
+        };
+        let (dart_tx, mut dart_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            api::pump_bridge_events(critical_rx, feed_rx, move |event| {
+                dart_tx.send(event).is_ok()
+            })
+            .await;
+        });
+
+        let event = BridgeEvent::LedgerUpdated {
+            ledger: "shared bus".to_string(),
+        };
+        sender.send(event.clone()).unwrap();
+
+        // Dart side.
+        let via_dart = tokio::time::timeout(std::time::Duration::from_secs(5), dart_rx.recv())
+            .await
+            .expect("the Dart pump must receive the event")
+            .expect("pump must stay alive");
+        assert_eq!(via_dart, event);
+
+        // Kotlin side — delivered on the dedicated forwarder thread, so poll.
+        for _ in 0..250 {
+            if !kotlin.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            kotlin.0.lock().unwrap().as_slice(),
+            std::slice::from_ref(&event),
+            "the uniffi listener must receive the same event"
+        );
+    }
+
+    // ── The dual-ABI invariant ────────────────────────────────────────────
+    //
+    // NOTE: this is the *only* test that unlocks the process-global vault.
+    // Every other test above runs against an `isolated()` runtime precisely so
+    // this one can own the global's lifecycle without racing them. If you add
+    // a second global-mutating test, serialise the two.
+
+    #[test]
+    fn a_vault_unlocked_through_the_dart_abi_is_visible_through_the_kotlin_abi() {
+        // The whole reason both ABIs live in one cdylib. `api::unlock_vault`
+        // (flutter_rust_bridge → Dart) and `Comrade` (uniffi → Kotlin) must be
+        // looking at one `ComradeRuntime`; if they were not, this second
+        // "open" would be a second `redb::Database::create` on the same
+        // directory and would fail on redb's exclusive lock instead of
+        // reporting an already-unlocked vault.
+        //
+        // A plain `#[test]`: the uniffi assertions go through `blocking_read`,
+        // which panics inside an ambient reactor. The async halves run on a
+        // hand-built runtime via `block_on`, exactly like a real foreign
+        // caller with no surrounding reactor.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let via_dart = rt
+            .block_on(api::unlock_vault(path.clone(), "pin".to_string()))
+            .expect("unlock through the Dart ABI must succeed");
+
+        let via_kotlin = Comrade::new();
+        assert!(via_kotlin.is_vault_unlocked());
+        assert_eq!(via_kotlin.current_identity(), Some(via_dart));
+
+        // …and back the other way: lock through Kotlin, observe through Dart.
+        rt.block_on(via_kotlin.lock_vault());
+        assert!(!rt.block_on(api::is_vault_unlocked()));
     }
 }

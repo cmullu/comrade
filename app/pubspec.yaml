@@ -1,0 +1,38 @@
+name: comrade
+description: "Comrade — one privacy-first client for phone and desktop."
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.6.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: 2.6.1
+  meta: 1.18.0
+  # The Dart half of the FFI bridge. Pinned to the *exact* version of the
+  # `flutter_rust_bridge` crate in `crates/comrade_jni/Cargo.toml` and of the
+  # `flutter_rust_bridge_codegen` binary that produced `lib/src/rust/`: the
+  # generated Rust and Dart speak a wire protocol whose framing is only
+  # guaranteed stable within one version. A caret range here would let `pub
+  # upgrade` silently desync Dart from the .so and corrupt arguments in ways
+  # no type checker can see.
+  flutter_rust_bridge: 2.12.0
+  # `BridgeEvent`, `CallSignal` and `UiError` are Rust enums with payloads, so
+  # the codegen emits them as freezed unions — the annotations are a runtime
+  # dependency of the generated code, not just a build-time one.
+  freezed_annotation: 3.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: 5.0.0
+  # Runs `freezed` over the generated bridge. `flutter_rust_bridge_codegen`
+  # invokes `dart run build_runner build` itself as its last step and hard
+  # fails if either is missing.
+  build_runner: 2.15.1
+  freezed: 3.2.5
+
+flutter:
+  uses-material-design: true

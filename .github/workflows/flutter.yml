@@ -1,0 +1,303 @@
+name: Flutter
+
+# The unified Flutter frontend (app/). Runs alongside — NOT instead of — the
+# existing `android` and `desktop*` lanes in ci.yml: the Compose app and the
+# Tauri shell are still the shipping frontends until app/ reaches parity, and
+# deleting their CI before the replacement is proven would leave the shipped
+# artifacts untested. See docs/FRONTEND_STRATEGY.md §7 for the retirement
+# trigger; the removal is Phase 4's last step, not its first.
+#
+# Same trigger discipline as ci.yml: push-only, no `pull_request` (all PRs come
+# from same-repo branches, so a second trigger would only duplicate runs).
+on:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: flutter-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pinned rather than `stable`: an unpinned channel means an upstream Flutter
+  # release can turn CI red on a commit that changed nothing. Bump deliberately.
+  FLUTTER_VERSION: "3.44.8"
+
+jobs:
+  # ── Dart: analyze + unit/widget tests ────────────────────────────────────
+  # Cheapest signal, so it runs on its own and gates nothing else. Needs no
+  # Rust toolchain: the generated bridge bindings are committed, and the
+  # widget tests run against the in-memory fake repository rather than FFI.
+  #
+  # One file does need FFI — test/rust_bridge_roundtrip_test.dart — and with no
+  # libcomrade_jni built here it skips itself, loudly, rather than passing
+  # vacuously. The `bridge` job below is where it actually runs.
+  analyze:
+    name: Flutter — analyze + test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # `--fatal-infos` deliberately: this repo gates clippy at -D warnings, so
+      # the Dart lane holds the same line rather than accumulating lint debt.
+      - name: flutter analyze
+        working-directory: app
+        run: flutter analyze --fatal-infos
+
+      - name: dart format --set-exit-if-changed
+        working-directory: app
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: flutter test
+        working-directory: app
+        run: flutter test
+
+  # ── flutter_rust_bridge round trip ───────────────────────────────────────
+  # The only lane that calls Rust from Dart. `analyze` deliberately has no Rust
+  # toolchain, so the FFI test skips there; without this job it would skip
+  # everywhere and gate nothing.
+  #
+  # Separate from `analyze` rather than folded into it because building the
+  # cdylib pulls the whole workspace (libp2p, nostr, redb) and would turn the
+  # repo's cheapest signal into its slowest.
+  bridge:
+    name: Flutter — Rust bridge round trip
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-frb-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-frb-
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # Debug, not release: the test only needs the symbols, and the app's own
+      # default loader path is irrelevant here — the test passes an explicit
+      # ExternalLibrary.
+      - name: cargo build -p comrade_jni
+        run: cargo build -p comrade_jni
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # ── Codegen freshness ────────────────────────────────────────────────
+      # api.rs restates ~31 comrade_ui/comrade_core types as `#[frb(mirror(..))]`
+      # declarations, duplicating their field lists. When main added a
+      # BridgeEvent variant and two DTO fields, those mirrors went stale and the
+      # merge did not compile — see the merge commit. The compiler only catches
+      # a mirror whose decode path constructs the struct, so drift in the others
+      # is silent until something far downstream misbehaves.
+      #
+      # Regenerating and diffing catches all of it, and also catches the plain
+      # mistake of editing api.rs without re-running codegen. Codegen is
+      # byte-reproducible, so a clean tree in means a clean tree out.
+      - name: Install flutter_rust_bridge_codegen
+        run: |
+          # Version must match the `flutter_rust_bridge = "=2.12.0"` pin in
+          # crates/comrade_jni/Cargo.toml — generated code is only valid against
+          # its exact matching runtime. Guarded like cargo-ndk above, because
+          # ~/.cargo/bin may already hold it from the restored cache.
+          if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
+            echo "already present: $(flutter_rust_bridge_codegen --version)"
+          else
+            cargo install flutter_rust_bridge_codegen --locked --version 2.12.0
+          fi
+
+      - name: Generated bridge code is in sync with api.rs
+        run: |
+          flutter_rust_bridge_codegen generate \
+            --rust-input crate::api --rust-root crates/comrade_jni \
+            --dart-output app/lib/src/rust --no-add-mod-to-lib --no-web
+          if ! git diff --quiet -- crates/comrade_jni/src/frb_generated.rs app/lib/src/rust; then
+            echo "::error::Generated bridge code is stale. Re-run flutter_rust_bridge_codegen and commit the result."
+            git diff --stat -- crates/comrade_jni/src/frb_generated.rs app/lib/src/rust
+            exit 1
+          fi
+
+      # `set -o pipefail` so a test failure is not swallowed by `tee`, and the
+      # skip check because a skipped suite exits 0 — in this job, "skipped"
+      # means the .so was not found and nothing was proven, which is a failure.
+      - name: flutter test (bridge round trip)
+        working-directory: app
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/frb-test.log"
+          flutter test --reporter expanded \
+            test/rust_bridge_roundtrip_test.dart 2>&1 | tee "$log"
+          if grep -q "All tests skipped" "$log"; then
+            echo "::error::The bridge round trip skipped — libcomrade_jni was not found."
+            exit 1
+          fi
+
+  # ── Linux desktop bundle ─────────────────────────────────────────────────
+  # Proves the desktop target links against the Rust cdylib. Linux is the only
+  # desktop OS buildable on a free ubuntu runner; macOS/Windows lanes come with
+  # the release workflow once parity lands (they need their own runner images).
+  linux:
+    name: Flutter — Linux desktop bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux desktop toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtk-3-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-flutter-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-flutter-
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      - name: flutter build linux --release
+        working-directory: app
+        run: flutter build linux --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comrade-linux-x64
+          path: app/build/linux/x64/release/bundle/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Android APK ──────────────────────────────────────────────────────────
+  # Cross-compiles the Rust cdylib for both shipped ABIs via cargo-ndk, then
+  # assembles. Mirrors android-apk.yml's ABI set (arm64-v8a for handsets,
+  # x86_64 for the emulator lanes) so the two builds stay comparable.
+  apk:
+    name: Flutter — Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Rust stable + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cargo-ndk-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ndk-
+
+      # `~/.cargo/bin` is one of the cached paths above, so on a cache hit the
+      # binary is already restored and a bare `cargo install` aborts with
+      # "binary `cargo-ndk` already exists in destination" (exit 101) — which
+      # is what failed this job on every run after the cache was first
+      # populated. Install only when it is genuinely absent; `--version ^4`
+      # still bounds what a restored copy may be.
+      - name: Install cargo-ndk
+        run: |
+          if command -v cargo-ndk >/dev/null 2>&1; then
+            echo "cargo-ndk already present: $(cargo ndk --version)"
+          else
+            cargo install cargo-ndk --locked --version ^4
+          fi
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # Debug APK only for now. Release signing reuses the SIGNING_* secrets
+      # android/app/build.gradle.kts already consumes; wiring that into app/ is
+      # part of the release-workflow change, which lands with parity, not here.
+      - name: flutter build apk --debug
+        working-directory: app
+        run: flutter build apk --debug
+
+      # The failure mode this guards is silent: the APK assembles perfectly
+      # well without the Rust core in it and only dies at first launch, so a
+      # green build step proves nothing on its own. app/android/app/
+      # build.gradle.kts cross-compiles it as part of the build; assert the
+      # result — the same check android-apk.yml makes on the legacy module's
+      # jniLibs, moved one stage later because here the .so reaches the APK
+      # through Gradle rather than through a downloaded artifact.
+      - name: Verify the Rust core is packaged
+        working-directory: app
+        run: |
+          set -euo pipefail
+          apk=build/app/outputs/flutter-apk/app-debug.apk
+          unzip -l "$apk" | grep 'lib/'
+          for abi in arm64-v8a x86_64; do
+            unzip -l "$apk" | grep -q "lib/$abi/libcomrade_jni.so" \
+              || { echo "::error::missing lib/$abi/libcomrade_jni.so in $apk"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comrade-flutter-debug-apk
+          path: app/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

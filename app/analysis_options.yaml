@@ -1,0 +1,24 @@
+# Comrade Flutter app — lint configuration.
+#
+# Starts from `package:flutter_lints` (the Flutter team's recommended set) and
+# tightens the rules that matter for a UI codebase this size: every public API
+# in `lib/src` is consumed across screen boundaries, so relaxed typing there
+# turns into runtime surprises.
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # A missing `await` in a repository call silently drops errors.
+    unawaited_futures: warning
+
+linter:
+  rules:
+    - always_declare_return_types
+    - avoid_print
+    - prefer_final_locals
+    - prefer_single_quotes
+    - unawaited_futures
