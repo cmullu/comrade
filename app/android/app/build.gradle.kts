@@ -24,34 +24,56 @@ val legacyAndroid = comradeRoot.resolve("android/app/src/main")
 val preservedSrcDir = layout.buildDirectory.dir("preserved/java")
 
 /**
- * The Compose surfaces Flutter replaces. Everything else under the legacy
- * source root is a service, a helper, or a pure function the services need.
+ * Which legacy sources are Compose UI that Flutter replaces — decided by
+ * reading the file, not by a hand-kept list.
+ *
+ * This module has no Compose dependency, so staging one Compose file fails
+ * `:app:compileDebugKotlin` outright. A literal list of filenames was the
+ * obvious first cut and it broke within a day: `main` shipped the comrade-
+ * presence feature, whose `ui/ComradesScreen.kt` was not on the list, and the
+ * merge went red with 100+ `Unresolved reference 'compose'` errors. Any list
+ * duplicated from another directory's contents goes stale the moment that
+ * directory grows — the same failure mode as the `#[frb(mirror)]` drift the
+ * bridge lane now guards against.
+ *
+ * An import scan is self-maintaining and, checked against the legacy tree at
+ * the time of writing, exactly reproduces the hand-kept list plus the file it
+ * had missed: 14 matches, no false positives, no false negatives. It is also
+ * the honest definition of the thing being excluded — "a file that draws
+ * Compose UI" is precisely "a file that imports androidx.compose".
  *
  * Filtered by a staging Sync rather than `sourceSets.filter.exclude` because
- * those patterns are matched relative to *every* source root — and
- * `mullu/comrade/MainActivity.kt` names both the Compose Activity we are
- * dropping and the Flutter one we are keeping.
+ * those patterns match relative to *every* source root — and
+ * `mullu/comrade/MainActivity.kt` names both the Compose Activity being
+ * dropped and the Flutter one being kept.
  */
-val composeOnlySources = listOf(
-    "mullu/comrade/MainActivity.kt",
-    "mullu/comrade/call/CallScreen.kt",
-    "mullu/comrade/ui/AppIcons.kt",
-    "mullu/comrade/ui/CallHistoryScreen.kt",
-    "mullu/comrade/ui/ChatsScreen.kt",
-    "mullu/comrade/ui/FeedScreen.kt",
-    "mullu/comrade/ui/JournalScreen.kt",
-    "mullu/comrade/ui/MediaAttachment.kt",
-    "mullu/comrade/ui/OnboardingScreen.kt",
-    "mullu/comrade/ui/SettingsScreen.kt",
-    "mullu/comrade/ui/TaraScreen.kt",
-    "mullu/comrade/ui/VoiceModelDownloadDialog.kt",
-    "mullu/comrade/ui/theme/**",
-)
+val composeImport = Regex("""^\s*import\s+androidx\.compose""", RegexOption.MULTILINE)
 
 val stagePreservedServices = tasks.register<Sync>("stagePreservedServices") {
     description = "Stages the preserved native services, minus the Compose UI Flutter replaces"
-    from(legacyAndroid.resolve("java")) { exclude(composeOnlySources) }
+    val dropped = mutableListOf<String>()
+    from(legacyAndroid.resolve("java")) {
+        exclude { element ->
+            val f = element.file
+            val isCompose = !element.isDirectory &&
+                f.name.endsWith(".kt") &&
+                composeImport.containsMatchIn(f.readText())
+            if (isCompose) dropped += element.path
+            isCompose
+        }
+    }
     into(preservedSrcDir)
+    // Printed so that a service accidentally importing Compose — which would
+    // otherwise vanish silently and surface as a baffling "unresolved
+    // reference" against its own class name — is visible in the build log.
+    doLast {
+        if (dropped.isNotEmpty()) {
+            logger.lifecycle(
+                "stagePreservedServices: dropped ${dropped.size} Compose source(s): " +
+                    dropped.sorted().joinToString(", "),
+            )
+        }
+    }
 }
 
 // ── uniffi-generated Kotlin bindings ─────────────────────────────────────────
