@@ -13,6 +13,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
@@ -48,6 +49,14 @@ class CallService : Service() {
 
     private var peer: String = ""
     private var peerLabel: String = ""
+
+    /**
+     * The single control-observing collector. Held so a second
+     * `onStartCommand` — a redelivered intent, or `CallManager` restarting the
+     * service for a new call — replaces it instead of stacking a second
+     * collector that would fight the first over the same notification.
+     */
+    private var controlsJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -103,7 +112,8 @@ class CallService : Service() {
      * so the update is best-effort by design.
      */
     private fun observeCallControls() {
-        scope.launch {
+        controlsJob?.cancel()
+        controlsJob = scope.launch {
             combine(
                 CallManager.state,
                 CallManager.muted,
