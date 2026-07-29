@@ -97,6 +97,202 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
     dependsOn(generateUniffiBindings, stagePreservedServices)
 }
 
+// ── The Rust core itself, cross-compiled for the shipped Android ABIs ────────
+//
+// The block above generates *bindings*; this one produces the thing they bind
+// to. JNA resolves them against a real `libcomrade_jni.so` on first touch
+// (`Native.register(…, "comrade_jni")` in the generated `uniffi/comrade/
+// comrade.kt`), and `ComradeApplication.onCreate` warms exactly that touch on a
+// background thread at process start — so an APK missing the .so does not lose
+// a feature, it dies before the first frame.
+//
+// The legacy module never built it in Gradle at all: `.github/workflows/
+// android-apk.yml` runs `cargo ndk` in a *separate CI job* and drops the result
+// into `android/app/src/main/jniLibs/`, which is why a bare local
+// `./gradlew assembleDebug` there also yields an APK that cannot start.
+// Building it as a real Gradle task instead makes `flutter build apk` and
+// `flutter run` sufficient on their own, with no CI-only step to keep in sync —
+// and `.github/workflows/flutter.yml` already installs cargo-ndk and both Rust
+// targets for precisely this, so nothing there needs to change.
+
+/**
+ * ABI → Rust target triple. Mirrors android-apk.yml's matrix, for the same two
+ * reasons: arm64-v8a is what real handsets run (Pixel 9, Moto Edge 60 Pro),
+ * x86_64 is what the emulator lanes run.
+ *
+ * Also the exact set `defaultConfig.ndk.abiFilters` pins below — see the note
+ * there for why that pinning is load-bearing rather than an optimisation.
+ */
+val androidAbiTargets = mapOf(
+    "arm64-v8a" to "aarch64-linux-android",
+    "x86_64" to "x86_64-linux-android",
+)
+
+/**
+ * Cross-compiles `comrade_jni` with `cargo ndk` into the `<abi>/lib*.so` layout
+ * AGP wants from a jniLibs directory.
+ *
+ * A real typed task rather than the `Exec` the uniffi steps above use, because
+ * this one's output has to be *wired into a variant*: `addGeneratedSourceDirectory`
+ * takes a `DirectoryProperty`, and in exchange derives the task dependency
+ * itself. That is what makes a from-scratch build work — the `kotlin.srcDir(…)`
+ * + explicit `dependsOn` pattern used above for the generated bindings cannot
+ * infer it (see the AGP 9 note in `sourceSets` below), and getting it wrong
+ * here fails silently: the APK simply builds without the library.
+ */
+abstract class CargoNdkBuild : DefaultTask() {
+    companion object {
+        /** The cargo package built, and — as `lib<name>.so` — the file it produces. */
+        const val CRATE = "comrade_jni"
+    }
+
+    /** ABI directory name → Rust target triple. */
+    @get:Input
+    abstract val abiTargets: MapProperty<String, String>
+
+    /** Cargo features to enable. */
+    @get:Input
+    abstract val features: ListProperty<String>
+
+    /**
+     * NDK to build against, as a path string rather than an `@InputDirectory`:
+     * fingerprinting a multi-gigabyte NDK on every build would cost more than
+     * the build. The path embeds the version, so a version bump still
+     * invalidates.
+     */
+    @get:Input
+    abstract val ndkPath: Property<String>
+
+    /** Cargo workspace root — `cargo ndk` runs here. */
+    @get:Internal
+    abstract val workspaceRoot: DirectoryProperty
+
+    /** Everything that can change the .so: the crate sources and the lockfile. */
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val rustSources: ConfigurableFileCollection
+
+    /** `<abi>/libcomrade_jni.so`. Convention set by `addGeneratedSourceDirectory`. */
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @get:javax.inject.Inject
+    abstract val execOperations: ExecOperations
+
+    @TaskAction
+    fun build() {
+        val ndk = File(ndkPath.get())
+        // Fail with the fix rather than with cargo-ndk's "clang not found".
+        if (!ndk.resolve("toolchains/llvm/prebuilt").isDirectory) {
+            throw GradleException(
+                "No usable Android NDK at '$ndk'. AGP resolves this from the module's " +
+                    "`ndkVersion` (currently flutter.ndkVersion); install that NDK via " +
+                    "sdkmanager, or point ANDROID_NDK_HOME at one and re-run.",
+            )
+        }
+
+        val outDir = outputDirectory.get().asFile
+        // Rebuilt from empty so that dropping an ABI from `androidAbiTargets`
+        // cannot leave a stale .so behind for AGP to package.
+        outDir.deleteRecursively()
+        outDir.mkdirs()
+
+        val abis = abiTargets.get()
+        execOperations.exec {
+            workingDir(workspaceRoot.get().asFile)
+            // cargo-ndk locates its linker under $ANDROID_NDK_HOME. Neither it
+            // nor ANDROID_HOME is exported in this repo's dev containers or on
+            // the CI runners — the SDK reaches Gradle via local.properties'
+            // `sdk.dir` — so pass AGP's own resolved NDK explicitly instead of
+            // hoping the ambient environment has one.
+            environment("ANDROID_NDK_HOME", ndk.absolutePath)
+            environment("ANDROID_NDK_ROOT", ndk.absolutePath)
+            commandLine(
+                buildList {
+                    add("cargo")
+                    add("ndk")
+                    abis.values.sorted().forEach {
+                        add("--target")
+                        add(it)
+                    }
+                    add("--output-dir")
+                    add(outDir.absolutePath)
+                    add("--")
+                    add("build")
+                    // Always release, never the Gradle variant's profile —
+                    // matching android-apk.yml, which cross-compiles `--release`
+                    // even for the debug APK its emulator lanes install. The
+                    // workspace release profile (thin LTO, one codegen unit,
+                    // stripped) is tuned specifically for this artifact because
+                    // its size sets how long the warm-up blocks; the debug .so
+                    // is ~270 MB against ~15 MB here, which is an APK you would
+                    // not want to install even once.
+                    add("--release")
+                    add("-p")
+                    add(CRATE)
+                    features.get().takeIf { it.isNotEmpty() }?.let {
+                        add("--features")
+                        add(it.joinToString(","))
+                    }
+                },
+            )
+        }
+
+        val soName = "lib$CRATE.so"
+        abis.keys.forEach { abi ->
+            val abiDir = outDir.resolve(abi)
+
+            // `--output-dir` copies *every* cdylib the target directory holds,
+            // and the graph contains one besides ours: `if-watch` (via libp2p)
+            // also builds as a cdylib. Nothing loads it — libcomrade_jni.so's
+            // only DT_NEEDEDs are liblog/libdl/libm/libc — so it is ~0.9 MB of
+            // APK across both ABIs that no loader will ever open.
+            abiDir.listFiles().orEmpty().forEach { if (it.name != soName) it.delete() }
+
+            // An absent .so is precisely the defect this task exists to
+            // prevent, and AGP packages an empty jniLibs directory without
+            // complaint — so fail the build here rather than at first launch.
+            if (!abiDir.resolve(soName).isFile) {
+                throw GradleException("cargo ndk produced no $abi/$soName under $outDir")
+            }
+        }
+    }
+}
+
+val androidComponentsExtension =
+    extensions.getByType(com.android.build.api.variant.ApplicationAndroidComponentsExtension::class.java)
+
+// AGP's own resolved NDK — honours the module's `ndkVersion` and will provision
+// it if absent, so CI needs no separate NDK-install action.
+val resolvedNdkPath = androidComponentsExtension.sdkComponents.ndkDirectory.map { it.asFile.absolutePath }
+
+androidComponentsExtension.onVariants { variant ->
+    // Registered per variant, not once and shared: `addGeneratedSourceDirectory`
+    // sets the output directory's convention per variant, so one task wired into
+    // two would silently have them share a directory. Per variant costs nothing
+    // — only the variant actually being assembled is realised, and cargo no-ops
+    // the second build anyway since the profile does not vary by variant.
+    val cargoNdkBuild =
+        tasks.register<CargoNdkBuild>(
+            "cargoNdkBuild${variant.name.replaceFirstChar(Char::uppercase)}JniLibs",
+        ) {
+            description = "Cross-compiles comrade_jni for ${androidAbiTargets.keys.joinToString(", ")}"
+            abiTargets.set(androidAbiTargets)
+            // Matches android-apk.yml: enables the Blossom upload / fetch-and-
+            // decrypt attachment pipeline, so the APK can actually send and
+            // receive media. Off only in the lean workspace test build.
+            features.set(listOf("media-http"))
+            ndkPath.set(resolvedNdkPath)
+            workspaceRoot.set(comradeRoot)
+            rustSources.from(
+                comradeRoot.resolve("Cargo.toml"),
+                comradeRoot.resolve("Cargo.lock"),
+                fileTree(comradeRoot.resolve("crates")),
+            )
+        }
+    variant.sources.jniLibs?.addGeneratedSourceDirectory(cargoNdkBuild, CargoNdkBuild::outputDirectory)
+}
+
 android {
     namespace = "mullu.comrade"
     compileSdk = flutter.compileSdkVersion
@@ -130,6 +326,27 @@ android {
         buildConfigField("String", "DEFAULT_TURN_URL", turnField(System.getenv("TURN_URL")))
         buildConfigField("String", "DEFAULT_TURN_USERNAME", turnField(System.getenv("TURN_USERNAME")))
         buildConfigField("String", "DEFAULT_TURN_PASSWORD", turnField(System.getenv("TURN_PASSWORD")))
+
+        ndk {
+            // Exactly the ABIs `androidAbiTargets` cross-compiles the Rust core
+            // for — the pinning is what keeps those two lists from drifting.
+            //
+            // Left alone, Flutter defaults to armeabi-v7a + arm64-v8a + x86_64
+            // and every dependency AAR (WebRTC, Vosk, JNA) supplies all three,
+            // so the APK would ship a complete-looking armeabi-v7a slice that is
+            // missing only libcomrade_jni.so — i.e. an APK that installs on a
+            // 32-bit ARM device and then dies in the warm-up thread. That is the
+            // precise failure being fixed here, so shipping a slice with it
+            // would be self-defeating. Adding armv7 instead is possible but is a
+            // third ABI to build, cache and ship, and neither android-apk.yml
+            // nor flutter.yml has ever targeted it.
+            //
+            // Requires `disable-abi-filtering=true` in gradle.properties:
+            // without it the Flutter plugin clears this set and re-adds all
+            // three (FlutterPlugin.kt, `configureAbiWithoutSplits`).
+            abiFilters.clear()
+            abiFilters.addAll(androidAbiTargets.keys)
+        }
     }
 
     buildFeatures {

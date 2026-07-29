@@ -29,6 +29,10 @@ jobs:
   # Cheapest signal, so it runs on its own and gates nothing else. Needs no
   # Rust toolchain: the generated bridge bindings are committed, and the
   # widget tests run against the in-memory fake repository rather than FFI.
+  #
+  # One file does need FFI — test/rust_bridge_roundtrip_test.dart — and with no
+  # libcomrade_jni built here it skips itself, loudly, rather than passing
+  # vacuously. The `bridge` job below is where it actually runs.
   analyze:
     name: Flutter — analyze + test
     runs-on: ubuntu-latest
@@ -59,6 +63,66 @@ jobs:
       - name: flutter test
         working-directory: app
         run: flutter test
+
+  # ── flutter_rust_bridge round trip ───────────────────────────────────────
+  # The only lane that calls Rust from Dart. `analyze` deliberately has no Rust
+  # toolchain, so the FFI test skips there; without this job it would skip
+  # everywhere and gate nothing.
+  #
+  # Separate from `analyze` rather than folded into it because building the
+  # cdylib pulls the whole workspace (libp2p, nostr, redb) and would turn the
+  # repo's cheapest signal into its slowest.
+  bridge:
+    name: Flutter — Rust bridge round trip
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-frb-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-frb-
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # Debug, not release: the test only needs the symbols, and the app's own
+      # default loader path is irrelevant here — the test passes an explicit
+      # ExternalLibrary.
+      - name: cargo build -p comrade_jni
+        run: cargo build -p comrade_jni
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # `set -o pipefail` so a test failure is not swallowed by `tee`, and the
+      # skip check because a skipped suite exits 0 — in this job, "skipped"
+      # means the .so was not found and nothing was proven, which is a failure.
+      - name: flutter test (bridge round trip)
+        working-directory: app
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP:-/tmp}/frb-test.log"
+          flutter test --reporter expanded \
+            test/rust_bridge_roundtrip_test.dart 2>&1 | tee "$log"
+          if grep -q "All tests skipped" "$log"; then
+            echo "::error::The bridge round trip skipped — libcomrade_jni was not found."
+            exit 1
+          fi
 
   # ── Linux desktop bundle ─────────────────────────────────────────────────
   # Proves the desktop target links against the Rust cdylib. Linux is the only
@@ -167,6 +231,24 @@ jobs:
       - name: flutter build apk --debug
         working-directory: app
         run: flutter build apk --debug
+
+      # The failure mode this guards is silent: the APK assembles perfectly
+      # well without the Rust core in it and only dies at first launch, so a
+      # green build step proves nothing on its own. app/android/app/
+      # build.gradle.kts cross-compiles it as part of the build; assert the
+      # result — the same check android-apk.yml makes on the legacy module's
+      # jniLibs, moved one stage later because here the .so reaches the APK
+      # through Gradle rather than through a downloaded artifact.
+      - name: Verify the Rust core is packaged
+        working-directory: app
+        run: |
+          set -euo pipefail
+          apk=build/app/outputs/flutter-apk/app-debug.apk
+          unzip -l "$apk" | grep 'lib/'
+          for abi in arm64-v8a x86_64; do
+            unzip -l "$apk" | grep -q "lib/$abi/libcomrade_jni.so" \
+              || { echo "::error::missing lib/$abi/libcomrade_jni.so in $apk"; exit 1; }
+          done
 
       - uses: actions/upload-artifact@v4
         with:

@@ -13,8 +13,10 @@ document is the whole of what Flutter is allowed to say to them._
 > `./gradlew :app:assembleDebug` → a complete APK, manifest merged and resources linked.
 >
 > **Not verified: any behaviour whatsoever.** Nothing has been run, on a device or an
-> emulator. There is no test for a single line of this. And the APK does not yet contain
-> `libcomrade_jni.so`, so it cannot start. See §10 for the precise line between the two.
+> emulator. There is no test for a single line of this. The APK now *does* contain
+> `libcomrade_jni.so` for both shipped ABIs — which removes a guaranteed crash at process
+> start, and is a strictly weaker claim than "it starts". See §10 for the precise line
+> between the two.
 
 ---
 
@@ -728,11 +730,16 @@ That is the argument for compiling, in two data points.
   wrong thread — but they have not been run against this module, and no channel-layer
   test exists. Wiring the JVM suites into this module and re-running
   `connectedDebugAndroidTest` is the next step, and it is a real gap, not a formality.
-- **The APK cannot start.** `libcomrade_jni.so` is not in it. The legacy build gets the
-  Android-ABI Rust core from a `cargo ndk` step in `.github/workflows/android-apk.yml:113`
-  that writes into `android/app/src/main/jniLibs/`; this module has no equivalent yet, so
-  the first `ComradeCore` touch would fail to load the library. Adding a `jniLibs` source
-  dir (or the matching CI step) is required before anyone runs this.
+- **The APK now contains the Rust core — which is not the same as starting.**
+  `app/android/app/build.gradle.kts` cross-compiles `comrade_jni` with `cargo ndk` for
+  arm64-v8a and x86_64 and wires the result into each variant's `jniLibs`, so
+  `flutter build apk --debug` produces an APK carrying `lib/<abi>/libcomrade_jni.so`
+  (verified by unzipping it; `abiFilters` pins the APK to exactly those two ABIs so no
+  slice can ship without the core, and CI re-asserts it in `flutter.yml`). The legacy
+  module still gets its copy the old way, from a separate `cargo ndk` job in
+  `.github/workflows/android-apk.yml`. What this buys is only the removal of a
+  *certain* failure: the first `ComradeCore` touch can now find the library. Whether it
+  then loads, initialises and returns is untested here — see the first bullet.
 - **The video path is the least-proven part.** `TextureVideoRenderer` compiles, but
   whether it renders a correct, correctly-rotated frame into a Flutter `Texture` is
   exactly the thing that needs a device. Same for the `PlatformView` fallback. Neither
