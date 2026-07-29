@@ -42,7 +42,7 @@ use comrade_core::media::{
 };
 use comrade_core::presence::{
     is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
-    PRESENCE_HEARTBEAT_SECS,
+    PRESENCE_HEARTBEAT_SECS, PRESENCE_SWEEP_SECS,
 };
 use comrade_core::saathi::SaathiEngine;
 use comrade_core::sabha::{
@@ -1016,15 +1016,25 @@ impl ComradeRuntime {
         let tx = self.events.clone();
         self.presence_task = Some(tokio::spawn(async move {
             let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(PRESENCE_HEARTBEAT_SECS));
+                tokio::time::interval(std::time::Duration::from_secs(PRESENCE_SWEEP_SECS));
             // The default `Burst` behaviour would fire back-to-back catch-up
             // ticks after a suspended/backgrounded stretch, announcing several
             // times in a row for no benefit.
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Announcing costs a DM per comrade, so it happens on the
+            // heartbeat; expiring is local work over a handful of rows, so it
+            // happens on every (shorter) sweep — a dot must not stay green for
+            // an extra heartbeat after the claim behind it lapsed. The first
+            // tick fires immediately, so unlocking announces right away.
+            let announce_every = PRESENCE_HEARTBEAT_SECS.div_ceil(PRESENCE_SWEEP_SECS).max(1);
+            let mut tick: u64 = 0;
             loop {
                 ticker.tick().await;
-                handles.announce_presence(true).await;
+                if tick.is_multiple_of(announce_every) {
+                    handles.announce_presence(true).await;
+                }
                 expire_stale_presence(handles.store.as_deref(), &tx);
+                tick = tick.wrapping_add(1);
             }
         }));
     }

@@ -55,6 +55,15 @@ pub const PRESENCE_HEARTBEAT_SECS: u64 = 180;
 /// single dropped or slow heartbeat doesn't flap the peer to offline and back.
 pub const PRESENCE_TTL_SECS: u64 = 480;
 
+/// How often a receiver checks whether a claim it is showing has lapsed.
+///
+/// Separate from (and shorter than) the heartbeat because the two answer
+/// different questions: the heartbeat costs a DM per comrade, while a sweep is
+/// local work over a handful of rows. Sweeping on the heartbeat alone would
+/// mean a dot could stay green for a whole extra heartbeat after the claim
+/// behind it expired.
+pub const PRESENCE_SWEEP_SECS: u64 = 60;
+
 /// Hard ceiling on any peer-supplied TTL. A beacon is a claim by someone
 /// else's device; without a clamp a buggy (or hostile) peer could claim to be
 /// online for a year and pin a green dot next to their name forever.

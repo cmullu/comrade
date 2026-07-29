@@ -1,0 +1,157 @@
+# Comrade presence — "is my person online right now?"
+
+_Added 2026-07-29._
+
+You can mark a contact as your **comrade**: someone whose company you want to
+know about. Your comrades — and nobody else, not even a relay — are told when
+you are online, and you are told when they are.
+
+This document is the design record: what the wire protocol is, what the model
+guarantees, and (just as important) what it deliberately cannot do.
+
+---
+
+## 1. Why not a public status event
+
+Nostr already has a user-status convention: **NIP-38**, a public,
+*replaceable* Kind-30315 event. Publishing one would have been half a day's
+work and it is what most clients do.
+
+It is also, for this app, the wrong answer. A replaceable public status is a
+minute-by-minute log of when a person is holding their phone, published to
+every relay and readable by anyone who cares to watch — including people the
+user has never met, forever, with no way to retract what was already
+collected. Comrade's entire posture is that metadata is the thing worth
+protecting (gift-wrapped DMs exist precisely so a relay can't see who talks to
+whom); broadcasting an activity timeline would give away more than the message
+contents we go to such lengths to hide.
+
+So presence rides the channel we already trust: a small JSON envelope inside a
+**NIP-44 / NIP-17 gift-wrapped DM**, addressed to one chosen peer. What a
+relay sees is an event signed by a one-time key, with a timestamp randomized
+by up to two days, whose payload it cannot read — indistinguishable from any
+other DM. What a non-comrade sees is nothing at all.
+
+## 2. The wire protocol
+
+`comrade_core::presence` — pure, framework-free, unit-tested:
+
+```json
+{ "comrade_presence": 1, "state": "online", "ttl_secs": 480, "reply": false }
+```
+
+The `comrade_presence` marker is what makes it a presence beacon rather than
+chat text, exactly like `comrade_receipt` / `comrade_profile` /
+`comrade_call` / `comrade_media` do for the other control envelopes riding
+the same channel. Each parser accepts only its own shape, so the inbox
+dispatcher can try them in turn and fall through to a plain DM — a beacon
+never renders as a chat bubble, and chat text is never mistaken for a beacon.
+
+| Field | Meaning |
+|---|---|
+| `state` | `online` or `offline`. That is the whole semantic payload — no activity, no location, no "last app used". |
+| `ttl_secs` | How long to believe an `online` claim. Clamped by the **receiver** to 30 minutes. |
+| `reply` | Set when the beacon exists only to answer someone else's (see §4). A reply is never itself answered, which is what stops two online devices ping-ponging forever. |
+
+## 3. The model, stated honestly
+
+**Presence is mutual by construction.** You announce to the people you
+marked; you see the people who marked you. Marking someone does *not*
+subscribe you to their presence — and no design change could make it, because
+there is no server: nothing can compel someone else's device to report to
+you. If you choose Ana and Ana hasn't chosen you, you will never see Ana
+online, no matter how long you wait.
+
+That could easily read as a bug, or worse, as "Ana is ignoring me", so the
+model is surfaced rather than hidden. Any beacon we receive proves the sender
+chose us (`peer_marked_us`), so the UI can say **"waiting for them to choose
+you back"** instead of showing an unexplained grey dot. And the moment you
+choose someone who had already chosen you, the beacon already on file surfaces
+immediately — the reveal happens when the information becomes yours to see,
+not on some later transition.
+
+**Presence is soft state with a deadline.** A beacon claims "online, for
+`ttl_secs`". Expiry is measured from the beacon's **send** time, not its
+arrival, which is what makes the whole thing robust against the parts of Nostr
+we don't control:
+
+- a phone that runs out of battery, loses signal, or is force-killed sends no
+  goodbye — so the claim ages out on its own rather than leaving a permanent
+  green dot;
+- relays deliver at-least-once and the vault inbox backfills up to two days on
+  every launch — a replayed beacon is already spent and cannot resurrect a
+  stale dot;
+- a peer-supplied TTL is clamped, so a buggy or hostile peer cannot claim to
+  be online for a year.
+
+Every read recomputes "online" against the current clock, so a stored `online`
+row can never outlive its own deadline just because nothing swept it yet.
+
+**Presence is gated like every other control envelope.** Only accepted
+conversations are processed. A stranger can neither push presence state at you
+nor provoke the reply that would disclose yours.
+
+**Only transitions are news.** Heartbeats update state silently; the
+`online` edge is the only thing that raises a notification, and going offline
+never does (nobody wants to be told their friend closed an app).
+
+## 4. Timing
+
+| Constant | Value | Why |
+|---|---|---|
+| `PRESENCE_HEARTBEAT_SECS` | 180 s | One gift-wrapped DM per comrade per tick — a battery/traffic knob as much as a freshness one. |
+| `PRESENCE_TTL_SECS` | 480 s | More than twice the heartbeat, so one dropped beacon can't flap a comrade offline. (The ratio is asserted at compile time.) |
+| `PRESENCE_MAX_TTL_SECS` | 1800 s | The clamp on anything a peer claims. |
+
+Beacons are sent when:
+
+1. the vault unlocks and the event loops start (the first heartbeat tick fires
+   immediately);
+2. every heartbeat interval thereafter — a tick with no comrades does nothing
+   at all, so the feature is invisible and free until someone opts in;
+3. a comrade is chosen or un-chosen (`online` / `offline` respectively, so
+   neither side waits on a heartbeat to learn about the change);
+4. the app returns to the foreground (Android) — freshness, not mechanism;
+5. **a comrade's own fresh `online` beacon arrives** — we answer with
+   `reply: true`, so someone coming online learns we are already here instead
+   of waiting up to a heartbeat.
+
+And an `offline` beacon is sent when the vault locks. Process death sends
+nothing, by definition — that is what the TTL is for.
+
+Backgrounding deliberately does **not** announce offline: the connection
+service keeps delivering while the app is backgrounded, so the user really is
+still reachable. Claiming otherwise would be the dishonest direction.
+
+## 5. Where the code lives
+
+| Layer | What it owns |
+|---|---|
+| `comrade_core::presence` | Wire protocol + freshness arithmetic. Pure; 10 unit tests. |
+| `comrade_storage` | Opt-in `Contact.comrade` flag (defaulted for rows written before the feature; preserved across alias edits) and a `peer_presence` tree per peer. |
+| `comrade_ui::runtime` | `set_comrade` / `comrades` / `peer_presence` / `announce_presence`, the heartbeat + expiry loop, the farewell beacon on lock, the receive path in `dispatch_incoming_dm`, and the `ComradePresence` bridge event. |
+| `comrade_jni`, `desktop/src-tauri` | The same four calls over uniffi / Tauri commands. |
+| Android | `PresenceMonitor` (live dots), `ComradesScreen` (choose + see), a dot on chat-list rows and the conversation header's ★ toggle, and a `comrade_presence` notification channel. |
+| Desktop SPA | ★ toggle + presence line in the conversation header, dots in the conversation list, a toast on the online edge. |
+
+Tests worth knowing about: `crates/comrade_ui/tests/two_peer_integration.rs`
+drives two real runtimes over one in-process relay and proves both halves of
+the claim — comrades seeing each other come and go (including the
+answer-on-the-spot path), and a beacon reaching *only* the chosen peer while
+another accepted contact learns nothing.
+
+## 6. Deliberately out of scope
+
+- **Typing indicators and "last active" timelines.** Same channel would work;
+  both leak considerably more about a person's day than "around / not
+  around", and neither was asked for.
+- **Presence for anyone but a chosen comrade.** No "everyone in your chat
+  list" mode. The disclosure has to stay something a user picked, one person
+  at a time.
+- **Push wakeup.** Presence needs the app process alive, exactly like calls
+  and message delivery (see the `RelayConnectionService` security-boundary
+  note). A killed process is honestly offline, and its comrades' dots go grey
+  when the TTL lapses.
+- **Cross-device presence.** One vault per device today, so "online" means
+  "this device". A multi-device account model would have to define what
+  online means before presence could follow it.

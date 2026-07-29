@@ -44,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +72,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.ComradeCore
 import mullu.comrade.Notifier
+import mullu.comrade.PresenceMonitor
 import mullu.comrade.media.VoiceRecorder
 
 /**
@@ -150,6 +152,7 @@ fun ChatsScreen(
 ) {
     var conversations by remember { mutableStateOf<List<ComradeCore.ConversationInfo>?>(null) }
     var requestCount by remember { mutableStateOf(0) }
+    val onlineNow by PresenceMonitor.online.collectAsState()
 
     LaunchedEffect(chatTick) {
         conversations = withContext(Dispatchers.IO) {
@@ -177,6 +180,9 @@ fun ChatsScreen(
             item { RequestsBanner(requestCount, onOpenRequests) }
             items(list, key = { it.peer }) { convo ->
                 val title = peerTitle(convo.peer, convo.alias, convo.peerName)
+                // A comrade's dot follows the live flow, so a beacon arriving
+                // while the list is on screen moves it without a reload.
+                val online = convo.comrade && (onlineNow[convo.peer] ?: convo.online)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -185,7 +191,10 @@ fun ChatsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    PeerAvatar(title, seed = convo.peer)
+                    Box(contentAlignment = Alignment.BottomEnd) {
+                        PeerAvatar(title, seed = convo.peer)
+                        if (convo.comrade) PresenceDot(online, size = 12.dp)
+                    }
                     Column(Modifier.weight(1f)) {
                         Text(
                             title,

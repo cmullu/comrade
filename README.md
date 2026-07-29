@@ -19,6 +19,7 @@ entirely in Rust, with a shared view-model layer driving an Android
 | **Sabha** | Nostr Kind-1 + NIP-10 | Public microblogging — the **Chitthi Feed**, with nested `ChitthiThread` reply trees | ✅ Wired (desktop + Android: broadcast + live feed; reply threading in live feed pending) |
 | **Vault** | NIP-44 + NIP-17/NIP-59 (gift-wrapped); legacy NIP-04 read-only | End-to-end encrypted direct messages; replies (NIP-10 `e` tag), delivered/read receipts, `/pay` UPI intent detection | ✅ Send + receive wired (desktop + Android), offline chat history persisted. New DMs are NIP-44-encrypted and gift-wrapped (no sender/content metadata leaks to relays); a peer's older NIP-04 DMs still decrypt |
 | **Message requests** | Conversation gate + Kind-4 profile share | A stranger's DM lands in a *requests* bucket, not your chat list; **your @handle is shared only when you accept**; accept / block; blocked keys are dropped | ✅ Engine + bridges tested; UI wired (desktop + Android) |
+| **Comrades** | Presence beacons over the NIP-44/NIP-17 DM channel | Mark a contact as your **comrade** and get told when they come online — a green dot in the chat list and a notification. Presence is disclosed to the peers you choose and to no one else (never to a relay: the beacon is gift-wrapped), is **mutual by construction** (you see them once they choose you back — the UI says so), and expires on its own so a phone that dies doesn't leave a permanent green dot | ✅ Wired (Android: Comrades screen + ★ toggle in any conversation + presence dots + notification channel; desktop: ★ toggle, dots, toast; engine, storage and both bridges tested) |
 | **Profiles** | Nostr Kind-0 + NIP-50 | @username display handles: published with retry **and republished on every launch**, searched on dedicated NIP-50 relays; peers' handles cached locally so chats are titled by name; per-contact aliases | ✅ Wired (Android onboarding + settings + chat UI; desktop backend commands) |
 | **Saathi** | libp2p mDNS + Gossipsub | Off-grid local mesh — works without internet | 🧪 Experimental — engine + tests only, not started by any frontend |
 | **Sakha/Sakhi** | Yrs CRDT + AES-256-GCM | Cryptographically isolated shared ledger for couples | 🧪 Engine built; pairing handshake not yet reachable from any UI |
@@ -74,6 +75,40 @@ unreliable. The model instead:
   icon in the conversation header; an empty alias falls back to the handle.
 - The opt-in path to *verified* unique names (NIP-05 DNS mapping) is future
   work.
+
+## Comrades — knowing when your person is around
+
+Mark a contact as your **comrade** (the ★ in any conversation, or the Comrades
+screen in the navigation drawer) and Comrade tells you when they come online.
+
+Presence is the one feature here that tells someone else something about you,
+so the rules are deliberately narrow and stated in the UI itself:
+
+- **Only the people you chose are told, and no relay ever is.** A presence
+  beacon is a tiny envelope inside a gift-wrapped E2E DM — the same channel
+  read receipts and call signals already ride. Nostr's public status
+  convention (NIP-38) was rejected on purpose: a replaceable public event
+  would publish a minute-by-minute log of when you are holding your phone, to
+  everyone, forever. See [`docs/PRESENCE.md`](docs/PRESENCE.md).
+- **It is mutual by construction.** You announce to whom you marked; you see
+  whoever marked you. Choosing someone cannot subscribe you to their presence
+  — with no server, nothing can make their device report to you — so until
+  they choose you back their row honestly reads *"waiting for them to choose
+  you back"* rather than showing an unexplained grey dot. Choose someone who
+  already chose you and their presence appears immediately.
+- **A green dot expires.** A beacon says "online for the next few minutes",
+  measured from when it was *sent*, so a phone that dies (or is force-killed,
+  or loses signal) fades out on its own, and a beacon replayed out of the
+  relay backfill can never resurrect a stale dot. Locking your vault sends a
+  goodbye immediately.
+- **Nothing else leaks.** A beacon carries "online / offline" and how long to
+  believe it. No activity, no location, no last-seen timeline for
+  non-comrades, no typing indicators.
+
+Honest limit: presence needs the app process alive, exactly like calls and
+message delivery (there is no push wakeup — see the notes on
+`RelayConnectionService` below). A killed process is offline, and its
+comrades' dots go grey when the claim lapses.
 
 The **Progressive-Disclosure state machine** (`comrade_state`) gates which engines are active:
 
