@@ -50,7 +50,7 @@ internal class CallChannel(
 
     // ── State ────────────────────────────────────────────────────────────────
 
-    /** The five non-phase flows, bundled so the outer `combine` stays typed. */
+    /** The five non-phase control flows, bundled so the outer `combine` stays typed. */
     private data class Controls(
         val muted: Boolean,
         val cameraOn: Boolean,
@@ -59,9 +59,15 @@ internal class CallChannel(
         val available: List<AudioRoute>,
     )
 
+    /** The two video-visibility flows, bundled for the same reason. */
+    private data class VideoState(
+        val suspended: Boolean,
+        val remotePaused: Boolean,
+    )
+
     /**
-     * All seven of `CallManager`'s observable flows, combined into one
-     * conflated snapshot.
+     * All of `CallManager`'s observable flows, combined into one conflated
+     * snapshot.
      *
      * Combined rather than published as seven channels so Dart always sees a
      * *coherent* picture: a mute toggle and a phase transition that happen in
@@ -70,10 +76,10 @@ internal class CallChannel(
      * behaviour the relay contract depends on, since every input is a
      * `StateFlow` with a current value.
      *
-     * Nested as 5 + 3 rather than one 7-way `combine` so both calls hit the
+     * Nested (5 + 2 + 3) rather than one wide `combine` so every call hits the
      * *typed* overloads. The vararg overload would work too, but it hands the
-     * lambda an `Array<Any?>` and seven unchecked casts — and this file cannot
-     * be compiled here, so the version the type checker can verify wins.
+     * lambda an `Array<Any?>` and one unchecked cast per flow — and this file
+     * cannot be compiled here, so the version the type checker can verify wins.
      */
     private fun callStateFlow(): Flow<Any?> {
         val controls = combine(
@@ -85,7 +91,11 @@ internal class CallChannel(
         ) { muted, cameraOn, quality, route, available ->
             Controls(muted, cameraOn, quality, route, available)
         }
-        return combine(CallManager.state, controls, CallManager.sasEmojis) { phase, c, sas ->
+        val video = combine(
+            CallManager.videoSuspended,
+            CallManager.remoteVideoPaused,
+        ) { suspended, remotePaused -> VideoState(suspended, remotePaused) }
+        return combine(CallManager.state, controls, video) { phase, c, v ->
             encodeState(
                 state = phase,
                 muted = c.muted,
@@ -93,7 +103,7 @@ internal class CallChannel(
                 quality = c.quality,
                 route = c.route,
                 available = c.available,
-                sas = sas,
+                video = v,
             )
         }
     }
@@ -105,7 +115,7 @@ internal class CallChannel(
         quality: CallQuality,
         route: AudioRoute,
         available: List<AudioRoute>,
-        sas: List<String>?,
+        video: VideoState,
     ): Map<String, Any?> {
         val base = mutableMapOf<String, Any?>(
             "muted" to muted,
@@ -113,11 +123,12 @@ internal class CallChannel(
             "quality" to quality.name.lowercase(),
             "audioRoute" to route.wireName(),
             "availableRoutes" to available.map { it.wireName() },
-            // Deliberately nullable on the wire: null means "cannot verify"
-            // (no SDP fingerprint to derive from), which is a real, displayable
-            // state — an honest "no code", never a fabricated one. Dart must
-            // not coerce it to an empty list. See ComradeCore.kt:491-498.
-            "sasEmojis" to sas,
+            // Two separate facts, and the UI needs both: `cameraOn` is what the
+            // user chose, `videoSuspended` is capture stopped because nothing
+            // was displaying it. Collapsing them would make a backgrounded call
+            // come back with the camera silently off (or silently on).
+            "videoSuspended" to video.suspended,
+            "remoteVideoPaused" to video.remotePaused,
         )
         when (state) {
             is CallUiState.Idle -> base["phase"] = "idle"
@@ -193,6 +204,14 @@ internal class CallChannel(
                     CallManager.switchCamera()
                     result.postSuccess()
                 }
+                // Not a camera toggle: this is "no surface is showing the local
+                // video", so the camera hardware is released while the app is
+                // backgrounded without a picture-in-picture window. The user's
+                // own camera choice is kept separately and survives it.
+                "setVideoCaptureSuspended" -> {
+                    CallManager.setVideoCaptureSuspended(call.requireBool("suspended"))
+                    result.postSuccess()
+                }
                 "cycleAudioRoute" -> {
                     CallManager.cycleAudioRoute()
                     result.postSuccess()
@@ -204,9 +223,6 @@ internal class CallChannel(
                     mapOf("configured" to s.configured, "url" to s.url)
                 }
                 "setTurnServer" -> setTurnServer(call, result)
-                "callSas" -> scope.replyOnIo(result) {
-                    ComradeCore.callSasTyped(call.requireString("localSdp"), call.requireString("remoteSdp"))
-                }
                 else -> result.postNotImplemented()
             }
         } catch (e: MissingArgument) {

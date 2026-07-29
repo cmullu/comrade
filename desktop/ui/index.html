@@ -406,15 +406,34 @@
           <div id="call-media-label" class="call-media-label"></div>
           <div id="call-status" class="call-status"></div>
           <div id="call-timer" class="call-timer" hidden></div>
-          <div id="call-sas" class="call-sas" hidden>
-            <span class="call-sas-label">Encryption check — should match on both ends</span>
-            <span id="call-sas-value" class="call-sas-value"></span>
+          <!-- Network-strength bars (Telegram-style), where the 4-emoji SAS
+               row used to be. Four bars are always in the DOM so "one bar"
+               reads as one-of-four; `data-filled` says how many are lit, and
+               0 (the "nothing measured yet" state) lights none. -->
+          <div id="call-signal" class="call-signal" hidden>
+            <span class="call-bars" data-filled="0" aria-hidden="true">
+              <i></i><i></i><i></i><i></i>
+            </span>
+            <span id="call-signal-label" class="call-signal-label"></span>
           </div>
         </div>
+        <div id="call-video-paused" class="call-video-paused" hidden>Video paused</div>
       </div>
       <div class="call-controls">
-        <button id="call-mute" class="call-btn" title="Mute microphone" aria-label="Mute microphone">🎙</button>
-        <button id="call-hangup" class="call-btn call-btn-end" title="Hang up" aria-label="Hang up">📵</button>
+        <button id="call-mute" class="call-btn" title="Mute microphone" aria-label="Mute microphone">
+          <span class="call-btn-glyph">🎙</span>
+        </button>
+        <button id="call-camera" class="call-btn" title="Turn camera off" aria-label="Turn camera off" hidden>
+          <span class="call-btn-glyph">🎥</span>
+        </button>
+        <!-- Chat: opens the conversation and shrinks the call into a
+             picture-in-picture window (browser PiP on the remote <video>). -->
+        <button id="call-chat" class="call-btn" title="Open chat (call goes picture-in-picture)" aria-label="Open chat, call goes picture-in-picture">
+          <span class="call-btn-glyph">💬</span>
+        </button>
+        <button id="call-hangup" class="call-btn call-btn-end" title="Hang up" aria-label="Hang up">
+          <span class="call-btn-glyph">📵</span>
+        </button>
       </div>
     </div>
 

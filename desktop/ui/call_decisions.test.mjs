@@ -18,7 +18,14 @@ import {
   ANSWER_DECISION,
   decideAnswer,
   shouldConnectTimeoutFire,
-  formatSas,
+  CALL_QUALITY,
+  classifyCallQuality,
+  signalBarsFor,
+  signalLabelFor,
+  remoteVideoFramesDecoded,
+  decideRemoteVideoPaused,
+  REMOTE_VIDEO_STALL_POLLS,
+  shouldSendLocalVideo,
 } from "./call_decisions.mjs";
 
 // ── decideOfferDisposition ───────────────────────────────────────────────────
@@ -377,38 +384,226 @@ test("shouldConnectTimeoutFire does not fire for a superseded call (zombie-timer
   );
 });
 
-// ── formatSas ─────────────────────────────────────────────────────────────
-// The WP4 SAS UI: formatSas mirrors the honest-none contract of
-// comrade_ui::ComradeRuntime::call_sas (runtime.rs:1258-1270) / the Tauri
-// call_sas command — None/null means one side's SDP had no
-// `a=fingerprint:` line, an honest "can't verify", not an error.
+// ── classifyCallQuality ───────────────────────────────────────────────────
+// The signal-strength indicator that replaced the SAS row. Vectors mirror
+// CallManager.kt's classifyQuality thresholds (RTT_GOOD_MS / RTT_MEDIUM_MS /
+// JITTER_GOOD_MS) so a given network reads the same on a phone and on desktop.
+// Remember the WebRTC stats spec's units: roundTripTime and jitter are SECONDS.
 
-test("formatSas joins a real 4-emoji SAS with spaces (happy path)", () => {
-  assert.equal(formatSas(["🐶", "🦊", "🐝", "🐳"]), "🐶 🦊 🐝 🐳");
+test("classifyCallQuality: low RTT and low jitter is good", () => {
+  assert.equal(
+    classifyCallQuality([{ type: "remote-inbound-rtp", roundTripTime: 0.05, jitter: 0.01 }]),
+    CALL_QUALITY.GOOD,
+  );
 });
 
-test("formatSas returns null for a null SAS — no fingerprint on one side, honest can't-verify (required)", () => {
-  // The required "no fingerprint -> no SAS" branch (docs/COMMS_ARCHITECTURE.md
-  // WP4 acceptance criteria): call_sas resolves to None/null when either SDP
-  // lacks an a=fingerprint: line, and that must format to null, never a
-  // fabricated or partial code.
-  assert.equal(formatSas(null), null);
+test("classifyCallQuality: jitter alone knocks an otherwise-good RTT down to medium", () => {
+  // 40 ms jitter > JITTER_GOOD_MS (30) with a 50 ms RTT — mirrors the Kotlin
+  // branch ordering, where the jitter clause guards the GOOD arm.
+  assert.equal(
+    classifyCallQuality([{ type: "remote-inbound-rtp", roundTripTime: 0.05, jitter: 0.04 }]),
+    CALL_QUALITY.MEDIUM,
+  );
 });
 
-test("formatSas returns null for undefined (not yet derived / older backend)", () => {
-  assert.equal(formatSas(undefined), null);
+test("classifyCallQuality: the thresholds are inclusive at both boundaries", () => {
+  assert.equal(
+    classifyCallQuality([{ type: "remote-inbound-rtp", roundTripTime: 0.15, jitter: 0.03 }]),
+    CALL_QUALITY.GOOD,
+    "RTT exactly RTT_GOOD_MS with jitter exactly JITTER_GOOD_MS is still good",
+  );
+  assert.equal(
+    classifyCallQuality([{ type: "remote-inbound-rtp", roundTripTime: 0.4 }]),
+    CALL_QUALITY.MEDIUM,
+    "RTT exactly RTT_MEDIUM_MS is medium, not poor",
+  );
 });
 
-test("formatSas returns null for an empty array", () => {
-  assert.equal(formatSas([]), null);
+test("classifyCallQuality: past the medium threshold is poor", () => {
+  assert.equal(
+    classifyCallQuality([{ type: "remote-inbound-rtp", roundTripTime: 0.9 }]),
+    CALL_QUALITY.POOR,
+  );
 });
 
-test("formatSas returns null for anything other than exactly 4 emoji (never trust a partial code)", () => {
-  assert.equal(formatSas(["🐶", "🦊"]), null);
-  assert.equal(formatSas(["🐶", "🦊", "🐝", "🐳", "🐧"]), null);
+test("classifyCallQuality: falls back to the succeeded candidate-pair RTT before RTP stats arrive", () => {
+  assert.equal(
+    classifyCallQuality([
+      { type: "candidate-pair", state: "succeeded", currentRoundTripTime: 0.02 },
+    ]),
+    CALL_QUALITY.GOOD,
+  );
 });
 
-test("formatSas returns null for a non-array input", () => {
-  assert.equal(formatSas("🐶 🦊 🐝 🐳"), null);
-  assert.equal(formatSas(42), null);
+test("classifyCallQuality: ignores a candidate-pair that has not succeeded", () => {
+  assert.equal(
+    classifyCallQuality([
+      { type: "candidate-pair", state: "in-progress", currentRoundTripTime: 0.02 },
+    ]),
+    CALL_QUALITY.UNKNOWN,
+  );
+});
+
+test("classifyCallQuality: remote-inbound-rtp wins over the candidate-pair fallback", () => {
+  assert.equal(
+    classifyCallQuality([
+      { type: "candidate-pair", state: "succeeded", currentRoundTripTime: 0.01 },
+      { type: "remote-inbound-rtp", roundTripTime: 0.9 },
+    ]),
+    CALL_QUALITY.POOR,
+  );
+});
+
+test("classifyCallQuality: the worst stream wins across multiple remote-inbound-rtp entries", () => {
+  assert.equal(
+    classifyCallQuality([
+      { type: "remote-inbound-rtp", roundTripTime: 0.02 },
+      { type: "remote-inbound-rtp", roundTripTime: 0.9 },
+    ]),
+    CALL_QUALITY.POOR,
+    "one bad direction is a bad call",
+  );
+});
+
+test("classifyCallQuality: nothing readable is unknown, never poor", () => {
+  // This is the load-bearing honesty case: 'no reading yet' must render as four
+  // empty bars, not as a fabricated bad reading.
+  assert.equal(classifyCallQuality([]), CALL_QUALITY.UNKNOWN);
+  assert.equal(classifyCallQuality(null), CALL_QUALITY.UNKNOWN);
+  assert.equal(classifyCallQuality(undefined), CALL_QUALITY.UNKNOWN);
+  assert.equal(classifyCallQuality([{ type: "remote-inbound-rtp" }]), CALL_QUALITY.UNKNOWN);
+  assert.equal(
+    classifyCallQuality([{ type: "remote-inbound-rtp", roundTripTime: "fast" }]),
+    CALL_QUALITY.UNKNOWN,
+    "a non-numeric field degrades the poll rather than throwing",
+  );
+  assert.equal(
+    classifyCallQuality([{ type: "remote-inbound-rtp", roundTripTime: NaN }]),
+    CALL_QUALITY.UNKNOWN,
+  );
+});
+
+test("classifyCallQuality: survives junk entries in the report", () => {
+  assert.equal(
+    classifyCallQuality([null, "nonsense", 7, { type: "remote-inbound-rtp", roundTripTime: 0.05 }]),
+    CALL_QUALITY.GOOD,
+  );
+});
+
+// ── signalBarsFor / signalLabelFor ────────────────────────────────────────
+// Must stay identical to the Flutter (widgets/signal_bars.dart) and Compose
+// (call/CallWidgets.kt) mappings — the same call should not show a different
+// number of bars depending on which frontend you answered it on.
+
+test("signalBarsFor maps quality to bars, and invents nothing for unknown", () => {
+  assert.equal(signalBarsFor(CALL_QUALITY.GOOD), 4);
+  assert.equal(signalBarsFor(CALL_QUALITY.MEDIUM), 2);
+  assert.equal(signalBarsFor(CALL_QUALITY.POOR), 1);
+  assert.equal(signalBarsFor(CALL_QUALITY.UNKNOWN), 0);
+  assert.equal(signalBarsFor("something else"), 0, "an unknown string is not a reading either");
+});
+
+test("signalLabelFor speaks only when the connection has degraded", () => {
+  assert.equal(signalLabelFor(CALL_QUALITY.GOOD), null);
+  assert.equal(signalLabelFor(CALL_QUALITY.UNKNOWN), null);
+  assert.equal(signalLabelFor(CALL_QUALITY.MEDIUM), "Weak signal");
+  assert.equal(signalLabelFor(CALL_QUALITY.POOR), "Poor connection");
+});
+
+// ── remoteVideoFramesDecoded / decideRemoteVideoPaused ────────────────────
+// "Video paused" instead of a frozen frame. Mirrors CallManager.kt's
+// remoteVideoFramesDecoded + updateRemoteVideoPaused, hysteresis included.
+
+test("remoteVideoFramesDecoded reads the inbound video stream, by either field name", () => {
+  assert.equal(
+    remoteVideoFramesDecoded([{ type: "inbound-rtp", kind: "video", framesDecoded: 120 }]),
+    120,
+  );
+  assert.equal(
+    remoteVideoFramesDecoded([{ type: "inbound-rtp", mediaType: "video", framesDecoded: 7 }]),
+    7,
+    "older reports spell it mediaType",
+  );
+});
+
+test("remoteVideoFramesDecoded is null when there is no inbound video", () => {
+  assert.equal(remoteVideoFramesDecoded([{ type: "inbound-rtp", kind: "audio", framesDecoded: 9 }]), null);
+  assert.equal(remoteVideoFramesDecoded([]), null);
+  assert.equal(remoteVideoFramesDecoded(null), null);
+});
+
+test("decideRemoteVideoPaused needs two stalled polls before it says paused", () => {
+  // First reading is a baseline, not a delta.
+  let s = decideRemoteVideoPaused({ frames: 100, lastFrames: null, stalledPolls: 0, paused: false });
+  assert.deepEqual(s, { lastFrames: 100, stalledPolls: 0, paused: false });
+
+  // One stalled poll is not enough — a single dropped poll on a congested link
+  // is normal, and a caption that flickers is worse than none.
+  s = decideRemoteVideoPaused({ frames: 100, ...s, stalledPolls: s.stalledPolls, paused: s.paused });
+  assert.equal(s.paused, false);
+  assert.equal(s.stalledPolls, 1);
+
+  // The second one is.
+  s = decideRemoteVideoPaused({ frames: 100, lastFrames: s.lastFrames, stalledPolls: s.stalledPolls, paused: s.paused });
+  assert.equal(s.paused, true);
+  assert.equal(s.stalledPolls, REMOTE_VIDEO_STALL_POLLS);
+});
+
+test("decideRemoteVideoPaused clears the moment frames grow again", () => {
+  const s = decideRemoteVideoPaused({ frames: 101, lastFrames: 100, stalledPolls: 5, paused: true });
+  assert.deepEqual(s, { lastFrames: 101, stalledPolls: 0, paused: false }, "resuming looks instant");
+});
+
+test("decideRemoteVideoPaused never lets a missing reading age into paused", () => {
+  // An audio call, or a report with no inbound video: hold the current state
+  // rather than counting absence as a stall.
+  const s = decideRemoteVideoPaused({ frames: null, lastFrames: 100, stalledPolls: 1, paused: false });
+  assert.deepEqual(s, { lastFrames: 100, stalledPolls: 1, paused: false });
+});
+
+test("decideRemoteVideoPaused treats a frame counter that went backwards as a stall", () => {
+  // Counters reset on an ICE restart / track replacement; that is not growth,
+  // so it must not clear the caption early — but it re-baselines.
+  const s = decideRemoteVideoPaused({ frames: 3, lastFrames: 900, stalledPolls: 0, paused: false });
+  assert.deepEqual(s, { lastFrames: 3, stalledPolls: 1, paused: false });
+});
+
+// ── shouldSendLocalVideo ──────────────────────────────────────────────────
+// "Don't capture video nobody is displaying", as a pure rule. The two facts
+// must stay independent: collapsing them is what makes a minimised call come
+// back with the camera silently on (or off).
+
+test("shouldSendLocalVideo sends while the window is shown and the camera is on", () => {
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: false, inPictureInPicture: false, cameraOn: true }),
+    true,
+  );
+});
+
+test("shouldSendLocalVideo stops sending when nothing is displaying the call", () => {
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: true, inPictureInPicture: false, cameraOn: true }),
+    false,
+  );
+});
+
+test("shouldSendLocalVideo keeps sending in picture-in-picture — that window IS displaying it", () => {
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: true, inPictureInPicture: true, cameraOn: true }),
+    true,
+    "floating a video call is pointless if it stops sending",
+  );
+});
+
+test("shouldSendLocalVideo never overrides the user's camera choice", () => {
+  // Visible, but the user turned the camera off: stays off.
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: false, inPictureInPicture: false, cameraOn: false }),
+    false,
+  );
+  // And coming back into view does not switch it on behind their back.
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: true, inPictureInPicture: true, cameraOn: false }),
+    false,
+  );
 });

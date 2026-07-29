@@ -38,6 +38,7 @@ library;
 
 import 'call_channel.dart';
 import 'model_download_channel.dart';
+import 'pip_channel.dart';
 import 'relay_channel.dart';
 import 'system_channel.dart';
 import 'voice_recorder_channel.dart';
@@ -47,6 +48,7 @@ export 'call_channel.dart';
 export 'call_video.dart';
 export 'channels.dart';
 export 'model_download_channel.dart';
+export 'pip_channel.dart';
 export 'relay_channel.dart';
 export 'system_channel.dart';
 export 'voice_recorder_channel.dart';
@@ -61,12 +63,14 @@ export 'wake_word_channel.dart';
 class ComradePlatform {
   ComradePlatform({
     CallChannel? call,
+    PipChannel? pip,
     WakeWordChannel? wakeWord,
     RelayChannel? relay,
     ModelDownloadChannel? models,
     VoiceRecorderChannel? recorder,
     SystemChannel? system,
   })  : call = call ?? CallChannel(),
+        pip = pip ?? PipChannel(),
         wakeWord = wakeWord ?? WakeWordChannel(),
         relay = relay ?? RelayChannel(),
         models = models ?? ModelDownloadChannel(),
@@ -74,6 +78,7 @@ class ComradePlatform {
         system = system ?? SystemChannel();
 
   final CallChannel call;
+  final PipChannel pip;
   final WakeWordChannel wakeWord;
   final RelayChannel relay;
   final ModelDownloadChannel models;

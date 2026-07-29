@@ -577,15 +577,6 @@ object ComradeCore {
         ffi.callIceServersFor(strategy).map { it.toInfo() }
 
     /**
-     * The 4-emoji short authentication string (SAS) both call participants
-     * should read aloud and compare to catch a man-in-the-middle — derived
-     * from the two sides' already-negotiated SDP fingerprints. `null`/empty
-     * when either side's SDP had no fingerprint to derive one from; that is
-     * a valid "can't verify" outcome, not an error, so this never throws.
-     */
-    fun callSasTyped(localSdp: String, remoteSdp: String): List<String>? = ffi.callSas(localSdp, remoteSdp)
-
-    /**
      * Configure (or, with a blank [url], clear) the TURN relay. Throws with a
      * user-safe message (never the credential) if [url] isn't a well-formed
      * `turn:`/`turns:` URI — see `comrade_core::call::validate_turn_url`.

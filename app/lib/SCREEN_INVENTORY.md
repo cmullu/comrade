@@ -205,17 +205,19 @@ map 1:1 onto `ComradeCore.kt`'s methods and `commands.rs`'s commands.
 
 - **Phases**: Ringing (accept/decline or cancel) · Connecting/Active (one
   subtree — see below) · Ended (terminal card).
-- **Active tree, video**: main renderer · tappable PiP tile (swaps; hosts the
-  camera-flip control) · name+timer pill · quality badge · SAS row · control
-  bar (mute · route · camera · end) over a scrim.
+- **Active tree, video**: main renderer · tappable self-view tile (swaps; hosts
+  the camera-flip control) · name+timer pill · signal-strength bars · control
+  bar (mute · camera · chat · route · end) over a scrim — the pill and controls
+  are FaceTime-style self-hiding chrome (fade after ~4 s, tap to toggle).
 - **State**: `callProvider` → `{state, muted, cameraOn, audioRoute,
-  availableRoutes, quality, sasEmojis}`.
+  availableRoutes, quality, pip, videoSuspended, remoteVideoPaused}`.
 - **Details kept**: one composition subtree for Connecting **and** Active, so
   the video surfaces are not destroyed and recreated exactly as the first
   frames arrive; the local track mirrors wherever it renders and the remote
-  never does; the quality dot appears only for MEDIUM/POOR; the SAS row appears
-  only while Active and only with a real derived code — `null` renders as
-  nothing, never as a fabricated code.
+  never does; the four bars render UNKNOWN as empty (nothing measured is not
+  zero signal); a side that stopped sending shows "Video paused", never a
+  frozen frame; the chat button shrinks the call into picture-in-picture
+  (native window, or the draggable in-app `FloatingCallTile`).
 - **Not implemented**: the media engine itself. See D29 / §5.
 
 ### 2.13 Couple sandbox

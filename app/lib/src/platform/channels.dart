@@ -25,6 +25,12 @@ abstract final class Channels {
   /// `PLATFORM_CHANNELS.md` §6.3.
   static const callVideoSurfaceView = 'mullu.comrade/call/video/surface';
 
+  /// Picture-in-picture. Not under `call/` because it is a *window* concern,
+  /// not a media one: the same window mode would serve any other full-screen
+  /// surface, and nothing here touches `CallManager`.
+  static const pip = 'mullu.comrade/pip';
+  static const pipState = 'mullu.comrade/pip/state';
+
   static const wakeWord = 'mullu.comrade/wakeword';
   static const wakeWordState = 'mullu.comrade/wakeword/state';
 

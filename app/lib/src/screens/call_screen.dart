@@ -1,35 +1,75 @@
 /// The full-screen call overlay: ringing, connecting, active, ended.
 ///
-/// Port of `call/CallScreen.kt`, with the desktop overlay's SAS copy. It
-/// observes [callProvider] and renders every phase; the media itself comes
-/// from whatever [CallEngine] is installed (see `state/call_providers.dart`
-/// for why that is a seam and not an implementation).
+/// Port of `call/CallScreen.kt`. It observes [callProvider] and renders every
+/// phase; the media itself comes from whatever [CallEngine] is installed (see
+/// `state/call_providers.dart` for why that is a seam and not an
+/// implementation).
 ///
 /// Details kept because they were deliberate:
 ///  * one composition subtree for Connecting **and** Active, so the video
 ///    surfaces are not torn down and recreated exactly as the first frames
 ///    arrive;
 ///  * tap the picture-in-picture tile to swap it with the full-screen view;
-///  * the local track mirrors wherever it renders, the remote never does;
-///  * the SAS row appears only while Active and only with a real derived
-///    code — "can't verify" renders as nothing, never as a fabricated code;
-///  * the connection-quality dot appears only for MEDIUM/POOR.
+///  * the local track mirrors wherever it renders, the remote never does.
+///
+/// Details that are new, and why:
+///  * **A video call opens full screen and then gets out of the way.** The
+///    controls linger for [_chromeLinger] after the call connects and then fade
+///    out; a tap anywhere brings them back, a second tap dismisses them again.
+///    This is FaceTime's behaviour and it exists because the thing worth
+///    looking at is the person, not five buttons. Audio calls keep their
+///    controls permanently — there is nothing underneath to reveal.
+///  * **A network-strength indicator instead of a verification code.** Four
+///    Telegram-style bars (`widgets/signal_bars.dart`) replace the 4-emoji
+///    short authentication string that used to live in this corner. The SAS was
+///    an out-of-band man-in-the-middle check on the media path; Comrade's SDP
+///    already rides the NIP-44 gift-wrapped DM channel, so the fingerprints are
+///    authenticated by the peer's Nostr key before a call is ever answered, and
+///    the check was near-redundant. Signal strength is the thing people
+///    actually need mid-call. `comrade_core::call::derive_sas` is still there
+///    and still tested — nothing surfaces it.
+///  * **Mute and camera slash themselves.** `widgets/slashed_icon.dart` draws
+///    the line on rather than swapping glyph, because a swapped glyph reads as
+///    "the icon changed", not as "your mic is off".
+///  * **"Video paused" is a state, not a frozen frame.** Whenever a side stops
+///    sending — camera off, or capture suspended because that app is in the
+///    background — the tile says so over the avatar.
+///  * **The chat button shrinks the call rather than hiding it.** Native
+///    picture-in-picture where the OS gives us a window, a draggable in-app
+///    tile everywhere else.
 library;
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/call_providers.dart';
 import '../theme/comrade_theme.dart';
 import '../util/display_name.dart';
 import '../widgets/peer_avatar.dart';
+import '../widgets/signal_bars.dart';
+import '../widgets/slashed_icon.dart';
+
+/// How long the controls stay up before a video call fades them out — long
+/// enough to hit "mute" without hunting, short enough that the call is mostly
+/// the other person's face.
+const Duration _chromeLinger = Duration(seconds: 4);
+
+/// Fade duration for the controls. Deliberately unhurried: a fast fade reads
+/// as a glitch, and this one is triggered by doing nothing at all.
+const Duration _chromeFade = Duration(milliseconds: 320);
 
 /// Shows the call overlay when a call is in flight, nothing when idle.
 /// Callers place this last in their layout stack so it covers the app.
 class CallOverlay extends ConsumerWidget {
-  const CallOverlay({super.key});
+  const CallOverlay({this.onOpenChat, super.key});
+
+  /// Invoked by the in-call chat button, before the call shrinks into
+  /// picture-in-picture. The shell navigates to the conversation with this
+  /// peer; the call keeps running either way.
+  final void Function(String peer, String label)? onOpenChat;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -37,13 +77,23 @@ class CallOverlay extends ConsumerWidget {
     final CallUiState state = session.state;
     if (state is CallIdle) return const SizedBox.shrink();
 
+    // In-app picture-in-picture: the call gives up the screen to a corner tile
+    // so the conversation behind it is usable. Only meaningful mid-call —
+    // ringing and the ended card stay full screen.
+    if (session.pip == CallPipMode.inApp &&
+        (state is CallConnecting || state is CallActive)) {
+      return FloatingCallTile(session: session);
+    }
+
     return Positioned.fill(
       child: Material(
         color: CallPalette.background,
         child: switch (state) {
           CallRinging() => _RingingContent(state: state),
           // One subtree for both in-call phases.
-          CallConnecting() || CallActive() => _InCallContent(session: session),
+          CallConnecting() ||
+          CallActive() =>
+            _InCallContent(session: session, onOpenChat: onOpenChat),
           CallEnded() => _EndedContent(state: state),
           CallIdle() => const SizedBox.shrink(),
         },
@@ -114,41 +164,138 @@ class _RingingContent extends ConsumerWidget {
 }
 
 class _InCallContent extends ConsumerStatefulWidget {
-  const _InCallContent({required this.session});
+  const _InCallContent({required this.session, this.onOpenChat});
 
   final CallSession session;
+  final void Function(String peer, String label)? onOpenChat;
 
   @override
   ConsumerState<_InCallContent> createState() => _InCallContentState();
 }
 
-class _InCallContentState extends ConsumerState<_InCallContent> {
+class _InCallContentState extends ConsumerState<_InCallContent>
+    with WidgetsBindingObserver {
   /// Tap the picture-in-picture tile to swap it with the full-screen view.
   /// Only changes which track renders where — the tracks are untouched.
   bool _swapped = false;
+
+  /// Whether the controls and the name pill are on screen. Always true for an
+  /// audio call; self-hiding for video (see [_armAutoHide]).
+  bool _chromeVisible = true;
+
+  Timer? _hideTimer;
+  bool _immersive = false;
+
+  bool get _isVideo => widget.session.state.video;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _applyImmersive();
+    _armAutoHide();
+  }
+
+  @override
+  void didUpdateWidget(_InCallContent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Connecting → Active on a video call is the moment the picture appears:
+    // start the fade countdown from there, not from when the screen was built.
+    final bool becameActive = oldWidget.session.state is CallConnecting &&
+        widget.session.state is CallActive;
+    if (becameActive) {
+      _chromeVisible = true;
+      _armAutoHide();
+    }
+    if (oldWidget.session.state.video != _isVideo) _applyImmersive();
+  }
+
+  @override
+  void dispose() {
+    _hideTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    if (_immersive) {
+      unawaited(
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
+      );
+    }
+    super.dispose();
+  }
+
+  /// A video call takes the whole screen, status bar and all — and gives it
+  /// back the moment the call is over.
+  void _applyImmersive() {
+    final bool wanted = _isVideo;
+    if (wanted == _immersive) return;
+    _immersive = wanted;
+    unawaited(
+      SystemChrome.setEnabledSystemUIMode(
+        wanted ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      ),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Backgrounding with no picture-in-picture window means nothing is showing
+    // the camera — so stop capturing it. The controller knows about the PiP
+    // exception; this only reports the lifecycle.
+    unawaited(ref.read(callProvider.notifier).onAppLifecycleChanged(state));
+  }
+
+  void _armAutoHide() {
+    _hideTimer?.cancel();
+    if (!_isVideo) return;
+    _hideTimer = Timer(_chromeLinger, () {
+      if (mounted) setState(() => _chromeVisible = false);
+    });
+  }
+
+  /// Tap anywhere on the picture: reveal the controls, or dismiss them early.
+  void _toggleChrome() {
+    if (!_isVideo) return;
+    _hideTimer?.cancel();
+    setState(() => _chromeVisible = !_chromeVisible);
+    if (_chromeVisible) _armAutoHide();
+  }
+
+  /// Any deliberate interaction keeps the controls up rather than having them
+  /// vanish mid-gesture.
+  void _keepChromeUp() {
+    if (_isVideo && _chromeVisible) _armAutoHide();
+  }
+
+  Future<void> _openChat() async {
+    final CallUiState state = widget.session.state;
+    final String? peer = state.peer;
+    if (peer != null && peer.isNotEmpty) {
+      widget.onOpenChat?.call(peer, state.peerLabel);
+    }
+    await ref.read(callProvider.notifier).openChat();
+  }
 
   @override
   Widget build(BuildContext context) {
     final CallSession session = widget.session;
     final CallUiState state = session.state;
     final bool connecting = state is CallConnecting;
-    final CallController controller = ref.read(callProvider.notifier);
     final CallEngine engine = ref.watch(callEngineProvider);
 
-    // Quality stats and the SAS are only meaningful once the call is Active.
-    final bool showWeak = !connecting &&
-        (session.quality == CallQuality.medium ||
-            session.quality == CallQuality.poor);
-    final List<String>? sas =
-        (!connecting && (session.sasEmojis?.isNotEmpty ?? false))
-            ? session.sasEmojis
-            : null;
+    // The OS is drawing us into a thumbnail: the picture is all that fits, and
+    // the controls belong to the PiP window's own action bar.
+    if (session.pip == CallPipMode.native) {
+      return _NativePipContent(session: session, engine: engine);
+    }
+
+    // Quality is only meaningful once the media path is up.
+    final CallQuality quality =
+        connecting ? CallQuality.unknown : session.quality;
 
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
         if (state.video)
-          _videoStage(context, session, engine, connecting, showWeak, sas)
+          _videoStage(context, session, engine, connecting, quality)
         else
           Center(
             child: _PeerHeader(
@@ -158,62 +305,27 @@ class _InCallContentState extends ConsumerState<_InCallContent> {
                   ? 'Connecting…'
                   : _CallTimer.labelFor(state as CallActive),
               extra: <Widget>[
-                if (showWeak) ConnectionQualityBadge(quality: session.quality),
-                if (sas != null) SasRow(emojis: sas),
+                if (!connecting) ConnectionStrengthIndicator(quality: quality),
               ],
               liveTimerFor: connecting ? null : state as CallActive,
             ),
           ),
-        Align(
-          alignment: Alignment.bottomCenter,
-          child: DecoratedBox(
-            decoration: state.video
-                ? const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: <Color>[Colors.transparent, Color(0xB3000000)],
-                    ),
-                  )
-                : const BoxDecoration(),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 28, 24, 36),
-              child: Wrap(
-                alignment: WrapAlignment.center,
-                spacing: 26,
-                runSpacing: 16,
-                children: <Widget>[
-                  CallActionButton(
-                    icon: session.muted ? Icons.mic_off : Icons.mic,
-                    label: session.muted ? 'Unmute' : 'Mute',
-                    background: session.muted
-                        ? CallPalette.controlActive
-                        : CallPalette.controlIdle,
-                    tint: session.muted ? CallPalette.background : Colors.white,
-                    onPressed: controller.toggleMute,
-                  ),
-                  AudioRouteButton(session: session),
-                  if (state.video)
-                    CallActionButton(
-                      icon: session.cameraOn
-                          ? Icons.videocam
-                          : Icons.videocam_off,
-                      label: 'Camera',
-                      background: session.cameraOn
-                          ? CallPalette.controlIdle
-                          : CallPalette.controlActive,
-                      tint: session.cameraOn
-                          ? Colors.white
-                          : CallPalette.background,
-                      onPressed: controller.toggleCamera,
-                    ),
-                  CallActionButton(
-                    icon: Icons.call_end,
-                    label: 'End',
-                    background: CallPalette.hangup,
-                    onPressed: controller.hangup,
-                  ),
-                ],
+        _chrome(
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: DecoratedBox(
+              decoration: state.video
+                  ? const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: <Color>[Colors.transparent, Color(0xB3000000)],
+                      ),
+                    )
+                  : const BoxDecoration(),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 28, 20, 36),
+                child: _controls(session),
               ),
             ),
           ),
@@ -222,13 +334,83 @@ class _InCallContentState extends ConsumerState<_InCallContent> {
     );
   }
 
+  /// The controls, in the order the hand expects them: the two mutes first,
+  /// then the chat button that shrinks the call, then output, then the one
+  /// button nobody wants to hit by accident.
+  Widget _controls(CallSession session) {
+    final CallController controller = ref.read(callProvider.notifier);
+    final CallUiState state = session.state;
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 20,
+      runSpacing: 16,
+      children: <Widget>[
+        CallActionButton(
+          key: const Key('call-mute'),
+          icon: Icons.mic,
+          slashed: session.muted,
+          label: session.muted ? 'Unmute' : 'Mute',
+          background: session.muted
+              ? CallPalette.controlActive
+              : CallPalette.controlIdle,
+          tint: session.muted ? CallPalette.background : Colors.white,
+          onPressed: () {
+            _keepChromeUp();
+            unawaited(controller.toggleMute());
+          },
+        ),
+        if (state.video)
+          CallActionButton(
+            key: const Key('call-camera'),
+            icon: Icons.videocam,
+            slashed: !session.cameraOn,
+            label: session.cameraOn ? 'Camera' : 'Camera off',
+            background: session.cameraOn
+                ? CallPalette.controlIdle
+                : CallPalette.controlActive,
+            tint: session.cameraOn ? Colors.white : CallPalette.background,
+            onPressed: () {
+              _keepChromeUp();
+              unawaited(controller.toggleCamera());
+            },
+          ),
+        CallActionButton(
+          key: const Key('call-chat'),
+          icon: Icons.chat_bubble_outline,
+          label: 'Chat',
+          background: CallPalette.controlIdle,
+          onPressed: () {
+            _keepChromeUp();
+            unawaited(_openChat());
+          },
+        ),
+        AudioRouteButton(session: session, onInteract: _keepChromeUp),
+        CallActionButton(
+          key: const Key('call-hangup'),
+          icon: Icons.call_end,
+          label: 'End',
+          background: CallPalette.hangup,
+          onPressed: controller.hangup,
+        ),
+      ],
+    );
+  }
+
+  /// Wraps the self-hiding parts of the UI. Fades rather than unmounts, and
+  /// stops taking taps while invisible so a hidden button can't be pressed.
+  Widget _chrome({required Widget child}) => AnimatedOpacity(
+        opacity: _chromeVisible ? 1 : 0,
+        duration: _chromeFade,
+        curve: Curves.easeOut,
+        child: IgnorePointer(ignoring: !_chromeVisible, child: child),
+      );
+
   Widget _videoStage(
     BuildContext context,
     CallSession session,
     CallEngine engine,
     bool connecting,
-    bool showWeak,
-    List<String>? sas,
+    CallQuality quality,
   ) {
     final CallUiState state = session.state;
     final Widget? mainView =
@@ -237,22 +419,46 @@ class _InCallContentState extends ConsumerState<_InCallContent> {
     final Widget? pipView =
         engine.videoView(local: pipIsLocal, mirror: pipIsLocal);
 
+    // Whichever track each surface is showing, "paused" is that side having
+    // stopped sending — not a renderer that has no frames yet.
+    final bool mainPaused =
+        _swapped ? session.localVideoPaused : session.remoteVideoPaused;
+    final bool tilePaused =
+        pipIsLocal ? session.localVideoPaused : session.remoteVideoPaused;
+
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
-        if (mainView != null)
+        if (mainView != null && !mainPaused)
           mainView
         else
-          // No frames for the big view yet — show who the call is with rather
-          // than a raw black screen.
-          Center(
-            child: _PeerHeader(peer: state.peer ?? '', label: state.peerLabel),
+          // No picture: say which of the two reasons it is, rather than
+          // showing a black rectangle or a frozen frame.
+          _VideoPlaceholder(
+            peer: state.peer ?? '',
+            label: state.peerLabel,
+            paused: mainPaused,
+            large: true,
           ),
+        // The tap target for revealing/dismissing the controls. Below every
+        // control in the stack, so buttons keep their own taps.
+        Positioned.fill(
+          child: GestureDetector(
+            key: const Key('call-stage'),
+            behavior: HitTestBehavior.opaque,
+            onTap: _toggleChrome,
+          ),
+        ),
+        // Self-view. Deliberately *not* part of the fading chrome — FaceTime
+        // keeps it up, and it is the only feedback that your own camera works.
         Positioned(
           top: 16,
           right: 16,
           child: GestureDetector(
-            onTap: () => setState(() => _swapped = !_swapped),
+            onTap: () {
+              _keepChromeUp();
+              setState(() => _swapped = !_swapped);
+            },
             child: Semantics(
               button: true,
               label: 'Swap video',
@@ -267,17 +473,16 @@ class _InCallContentState extends ConsumerState<_InCallContent> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: <Widget>[
-                    if (pipView != null && (session.cameraOn || !pipIsLocal))
+                    if (pipView != null && !tilePaused)
                       pipView
                     else
-                      const Center(
-                        child: Icon(
-                          Icons.videocam_off,
-                          size: 30,
-                          color: Color(0x66FFFFFF),
-                        ),
+                      _VideoPlaceholder(
+                        peer: pipIsLocal ? '' : (state.peer ?? ''),
+                        label: pipIsLocal ? 'You' : state.peerLabel,
+                        paused: tilePaused,
+                        large: false,
                       ),
-                    if (pipIsLocal && session.cameraOn)
+                    if (pipIsLocal && !session.localVideoPaused)
                       Align(
                         alignment: Alignment.bottomCenter,
                         child: Padding(
@@ -287,8 +492,12 @@ class _InCallContentState extends ConsumerState<_InCallContent> {
                             label: null,
                             background: const Color(0x66000000),
                             size: 34,
-                            onPressed:
-                                ref.read(callProvider.notifier).switchCamera,
+                            onPressed: () {
+                              _keepChromeUp();
+                              unawaited(ref
+                                  .read(callProvider.notifier)
+                                  .switchCamera());
+                            },
                           ),
                         ),
                       ),
@@ -298,60 +507,253 @@ class _InCallContentState extends ConsumerState<_InCallContent> {
             ),
           ),
         ),
-        // Name + duration/status pill, kept clear of the self-preview tile.
+        // Name + duration/status pill and the signal bars, kept clear of the
+        // self-view tile. Fades with the controls.
         Positioned(
           left: 16,
           top: 20,
           right: 142,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0x66000000),
-                  borderRadius: BorderRadius.circular(14),
+          child: _chrome(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0x66000000),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        state.peerLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 15),
+                      ),
+                      if (connecting)
+                        const Text(
+                          'Connecting…',
+                          style: TextStyle(
+                            color: CallPalette.secondaryText,
+                            fontSize: 13,
+                            fontFamily: 'monospace',
+                          ),
+                        )
+                      else
+                        _CallTimer(active: state as CallActive),
+                    ],
+                  ),
                 ),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Text(
-                      state.peerLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white, fontSize: 15),
-                    ),
-                    if (connecting)
-                      const Text(
-                        'Connecting…',
-                        style: TextStyle(
-                          color: CallPalette.secondaryText,
-                          fontSize: 13,
-                          fontFamily: 'monospace',
-                        ),
-                      )
-                    else
-                      _CallTimer(active: state as CallActive),
-                  ],
-                ),
-              ),
-              if (showWeak) ...<Widget>[
-                const SizedBox(height: 6),
-                ConnectionQualityBadge(quality: session.quality),
+                if (!connecting) ...<Widget>[
+                  const SizedBox(height: 6),
+                  ConnectionStrengthIndicator(quality: quality),
+                ],
               ],
-              if (sas != null) ...<Widget>[
-                const SizedBox(height: 6),
-                SasRow(emojis: sas),
-              ],
-            ],
+            ),
           ),
         ),
       ],
     );
   }
+}
+
+/// What the OS picture-in-picture window shows: the picture, and nothing else.
+///
+/// A PiP window is a thumbnail with its own system-drawn action bar, so app
+/// controls in it would be unreadable and unhittable. Tapping it asks the OS to
+/// restore the app, which is the platform gesture — we do not intercept it.
+class _NativePipContent extends StatelessWidget {
+  const _NativePipContent({required this.session, required this.engine});
+
+  final CallSession session;
+  final CallEngine engine;
+
+  @override
+  Widget build(BuildContext context) {
+    final CallUiState state = session.state;
+    final Widget? remote = engine.videoView(local: false, mirror: false);
+    if (!state.video || remote == null || session.remoteVideoPaused) {
+      return _VideoPlaceholder(
+        peer: state.peer ?? '',
+        label: state.peerLabel,
+        paused: session.remoteVideoPaused,
+        large: false,
+      );
+    }
+    return remote;
+  }
+}
+
+/// The call shrunk into a corner of this app, for platforms with no OS
+/// picture-in-picture window. Draggable, tappable to restore, and it keeps the
+/// two controls worth having at that size.
+class FloatingCallTile extends ConsumerStatefulWidget {
+  const FloatingCallTile({required this.session, super.key});
+
+  final CallSession session;
+
+  @override
+  ConsumerState<FloatingCallTile> createState() => _FloatingCallTileState();
+}
+
+class _FloatingCallTileState extends ConsumerState<FloatingCallTile> {
+  /// Bottom-right by default: the top-left of a chat is where the messages
+  /// are. Dragged position is kept as an offset from that corner.
+  Offset _drag = Offset.zero;
+
+  static const double _width = 132;
+  static const double _height = 186;
+
+  @override
+  Widget build(BuildContext context) {
+    final CallSession session = widget.session;
+    final CallUiState state = session.state;
+    final CallEngine engine = ref.watch(callEngineProvider);
+    final CallController controller = ref.read(callProvider.notifier);
+    final Widget? remote =
+        state.video ? engine.videoView(local: false, mirror: false) : null;
+
+    return Positioned(
+      right: 16 - _drag.dx,
+      bottom: 16 - _drag.dy,
+      child: GestureDetector(
+        key: const Key('call-floating-tile'),
+        onTap: controller.restoreFromPip,
+        onPanUpdate: (DragUpdateDetails d) => setState(() => _drag += d.delta),
+        child: Material(
+          elevation: 8,
+          color: CallPalette.pipBackground,
+          borderRadius: BorderRadius.circular(14),
+          clipBehavior: Clip.antiAlias,
+          child: SizedBox(
+            width: _width,
+            height: _height,
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                if (remote != null && !session.remoteVideoPaused)
+                  remote
+                else
+                  _VideoPlaceholder(
+                    peer: state.peer ?? '',
+                    label: state.peerLabel,
+                    paused: state.video && session.remoteVideoPaused,
+                    large: false,
+                  ),
+                Align(
+                  alignment: Alignment.topLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.all(6),
+                    child: ConnectionStrengthIndicator(
+                      quality: session.quality,
+                      compact: true,
+                    ),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        CallActionButton(
+                          key: const Key('call-tile-mute'),
+                          icon: Icons.mic,
+                          slashed: session.muted,
+                          label: null,
+                          size: 34,
+                          background: session.muted
+                              ? CallPalette.controlActive
+                              : const Color(0x66000000),
+                          tint: session.muted
+                              ? CallPalette.background
+                              : Colors.white,
+                          onPressed: () => unawaited(controller.toggleMute()),
+                        ),
+                        const SizedBox(width: 8),
+                        CallActionButton(
+                          key: const Key('call-tile-hangup'),
+                          icon: Icons.call_end,
+                          label: null,
+                          size: 34,
+                          background: CallPalette.hangup,
+                          onPressed: controller.hangup,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// What a video surface shows when there is no picture: whose call it is, and
+/// — when the other side deliberately stopped sending — that it is paused
+/// rather than broken.
+class _VideoPlaceholder extends StatelessWidget {
+  const _VideoPlaceholder({
+    required this.peer,
+    required this.label,
+    required this.paused,
+    required this.large,
+  });
+
+  final String peer;
+  final String label;
+  final bool paused;
+  final bool large;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+        color: CallPalette.pipBackground,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              if (large)
+                PeerAvatar(title: label, seed: peer, size: 96)
+              else
+                Icon(
+                  paused ? Icons.videocam_off : Icons.videocam,
+                  size: 26,
+                  color: const Color(0x99FFFFFF),
+                ),
+              if (paused) ...<Widget>[
+                SizedBox(height: large ? 18 : 6),
+                Text(
+                  'Video paused',
+                  key: const Key('video-paused'),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: large ? 16 : 11,
+                  ),
+                ),
+              ] else if (large) ...<Widget>[
+                const SizedBox(height: 18),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white, fontSize: 20),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
 }
 
 class _EndedContent extends ConsumerWidget {
@@ -435,7 +837,7 @@ class _PeerHeader extends StatelessWidget {
             ),
           ],
           for (final Widget widget in extra) ...<Widget>[
-            const SizedBox(height: 6),
+            const SizedBox(height: 10),
             widget,
           ],
         ],
@@ -487,105 +889,27 @@ class _CallTimerState extends State<_CallTimer> {
       );
 }
 
-/// A small, unobtrusive dot + label shown only while the connection has
-/// degraded: amber for MEDIUM, red for POOR.
-class ConnectionQualityBadge extends StatelessWidget {
-  const ConnectionQualityBadge({required this.quality, super.key});
-
-  final CallQuality quality;
-
-  @override
-  Widget build(BuildContext context) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: quality == CallQuality.poor
-                  ? CallPalette.hangup
-                  : CallPalette.weakConnection,
-            ),
-          ),
-          const SizedBox(width: 6),
-          const Text(
-            'Weak connection',
-            style: TextStyle(color: Colors.white, fontSize: 13),
-          ),
-        ],
-      );
-}
-
-/// The 4-emoji short authentication string.
-///
-/// This is a real security signal, not decoration: it is derived from both
-/// sides' DTLS-SRTP certificate fingerprints, so the same 4 emoji appearing on
-/// both devices is what rules out a man-in-the-middle on the call's media
-/// path. Tapping the row explains that rather than leaving it unexplained.
-class SasRow extends StatelessWidget {
-  const SasRow({required this.emojis, super.key});
-
-  final List<String> emojis;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-        key: const Key('call-sas'),
-        borderRadius: BorderRadius.circular(14),
-        onTap: () => showDialog<void>(
-          context: context,
-          builder: (BuildContext context) => AlertDialog(
-            title: const Text('Call verification code'),
-            content: const Text(
-              "These 4 symbols are derived from both devices' connection "
-              'security codes. Read them aloud — if the other person sees the '
-              'same 4, your call is not being intercepted. If they see '
-              'something different, hang up.',
-            ),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Got it'),
-              ),
-            ],
-          ),
-        ),
-        child: Container(
-          decoration: BoxDecoration(
-            color: CallPalette.controlIdle,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              const Text(
-                'Verify:',
-                style:
-                    TextStyle(color: CallPalette.secondaryText, fontSize: 13),
-              ),
-              const SizedBox(width: 8),
-              Text(emojis.join(' '), style: const TextStyle(fontSize: 20)),
-            ],
-          ),
-        ),
-      );
-}
-
 /// The audio-output control: a button showing the current route that opens a
 /// menu of every currently-present route.
 class AudioRouteButton extends ConsumerWidget {
-  const AudioRouteButton({required this.session, super.key});
+  const AudioRouteButton({required this.session, this.onInteract, super.key});
 
   final CallSession session;
+
+  /// Lets the call screen keep its self-hiding controls up while this menu is
+  /// being used.
+  final VoidCallback? onInteract;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final bool active = session.audioRoute != AudioRoute.earpiece;
     return PopupMenuButton<AudioRoute>(
       tooltip: 'Speaker: ${session.audioRoute.label}',
-      onSelected: (AudioRoute route) =>
-          ref.read(callProvider.notifier).setAudioRoute(route),
+      onOpened: onInteract,
+      onSelected: (AudioRoute route) {
+        onInteract?.call();
+        unawaited(ref.read(callProvider.notifier).setAudioRoute(route));
+      },
       itemBuilder: (BuildContext context) => <PopupMenuEntry<AudioRoute>>[
         for (final AudioRoute route in session.availableRoutes)
           PopupMenuItem<AudioRoute>(value: route, child: Text(route.label)),
@@ -612,6 +936,7 @@ class CallActionButton extends StatelessWidget {
     required this.onPressed,
     this.tint = Colors.white,
     this.size = 60,
+    this.slashed = false,
     super.key,
   });
 
@@ -620,6 +945,10 @@ class CallActionButton extends StatelessWidget {
   final Color background;
   final Color tint;
   final double size;
+
+  /// Draws (and animates) a slash across [icon] — the explicit "this is off"
+  /// every other video app uses. See `widgets/slashed_icon.dart`.
+  final bool slashed;
 
   /// `null` when the surrounding widget owns the gesture (see
   /// [AudioRouteButton], whose popup wraps this).
@@ -641,7 +970,13 @@ class CallActionButton extends StatelessWidget {
                 decoration:
                     BoxDecoration(shape: BoxShape.circle, color: background),
                 alignment: Alignment.center,
-                child: Icon(icon, color: tint, size: size * 0.44),
+                child: SlashedIcon(
+                  icon: icon,
+                  slashed: slashed,
+                  color: tint,
+                  cutoutColor: background,
+                  size: size * 0.44,
+                ),
               ),
             ),
           ),

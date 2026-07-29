@@ -18,6 +18,11 @@ internal object ChannelNames {
     const val CALL_VIDEO = "mullu.comrade/call/video"
     const val CALL_VIDEO_EVENTS = "mullu.comrade/call/video/events"
 
+    // Not under `call/`: picture-in-picture is a *window* mode, not a media
+    // concern — nothing behind it touches CallManager's media.
+    const val PIP = "mullu.comrade/pip"
+    const val PIP_STATE = "mullu.comrade/pip/state"
+
     const val WAKE_WORD = "mullu.comrade/wakeword"
     const val WAKE_WORD_STATE = "mullu.comrade/wakeword/state"
 

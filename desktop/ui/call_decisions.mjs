@@ -266,28 +266,219 @@ export function shouldConnectTimeoutFire({ isCurrentCall, ended, connected }) {
 }
 
 /**
- * Format a derived short-authentication-string (SAS) emoji list for display
- * on the connected call panel (§ADR-3/WP4). This is a pure formatting
- * helper, not a decision — it doesn't call anything, it just turns whatever
- * `call_sas` produced into either a display string or `null`.
+ * The four connection-quality readings, mirroring Android's `CallQuality`
+ * enum (`android/app/src/main/java/mullu/comrade/call/CallQuality.kt`).
  *
- * Mirrors the honest-none contract of `comrade_ui::ComradeRuntime::call_sas`
- * (`crates/comrade_ui/src/runtime.rs:1258-1270`) and the Tauri `call_sas`
- * command it fronts (`desktop/src-tauri/src/commands.rs`): both return
- * `None` — which arrives here as `null`/`undefined` over the JS bridge —
- * when either side's SDP has no `a=fingerprint:` line to derive a code
- * from. That is an honest "can't verify", not an error, and this function
- * mirrors it by also returning `null` for anything that isn't exactly the
- * 4-emoji list a real derivation produces (nullish, empty, or any length
- * other than 4) rather than rendering a misleading partial code. Deriving
- * *and* fetching the SAS (the `call_sas` invoke, liveness checks, and
- * turning a `null` result into the visible "can't verify" panel state) is
- * `main.js`'s job — this function only formats an already-resolved value.
- *
- * @param {string[]|null|undefined} sasList - The value `call_sas` resolved to.
- * @returns {string|null} The emoji joined with spaces (e.g. `"🐶 🦊 🐝 🐳"`), or `null` if `sasList` isn't a real 4-emoji SAS.
+ * `unknown` covers both "no reading yet" and "stats present but unparseable",
+ * because in both cases the only correct UI is to show nothing — four empty
+ * bars and no label. It is emphatically **not** a synonym for `poor`.
  */
-export function formatSas(sasList) {
-  if (!Array.isArray(sasList) || sasList.length !== 4) return null;
-  return sasList.join(" ");
+export const CALL_QUALITY = Object.freeze({
+  GOOD: "good",
+  MEDIUM: "medium",
+  POOR: "poor",
+  UNKNOWN: "unknown",
+});
+
+/**
+ * Round-trip-time and jitter thresholds behind {@link classifyCallQuality}.
+ *
+ * Copied deliberately — same numbers, same names — from `CallManager.kt`'s
+ * `RTT_GOOD_MS` / `RTT_MEDIUM_MS` / `JITTER_GOOD_MS`, so the same network reads
+ * the same on a phone and on the desktop. A deliberately simple heuristic, not
+ * a quality model: good enough to flag an obviously-bad call, not to be precise.
+ */
+export const RTT_GOOD_MS = 150;
+export const RTT_MEDIUM_MS = 400;
+export const JITTER_GOOD_MS = 30;
+
+/**
+ * Consecutive stats polls with no new decoded video frames before the peer's
+ * video is called *paused*. Mirrors `REMOTE_VIDEO_STALL_POLLS` on Android.
+ */
+export const REMOTE_VIDEO_STALL_POLLS = 2;
+
+/**
+ * Classify an `RTCPeerConnection.getStats()` report into a {@link CALL_QUALITY}.
+ *
+ * Mirrors Android's `classifyQuality` (`CallManager.kt`): prefer the
+ * RTCP-derived `remote-inbound-rtp` round-trip time and jitter (present once the
+ * peer's receiver reports start arriving), falling back to the succeeded ICE
+ * `candidate-pair`'s `currentRoundTripTime` when no RTP-stream stats are in yet
+ * — e.g. in the first seconds after connecting. `roundTripTime` and `jitter` are
+ * in **seconds** per the WebRTC stats spec, hence the ×1000.
+ *
+ * Every field is read defensively: a report missing them, or carrying
+ * non-numbers, yields `unknown` rather than throwing or inventing a reading.
+ * Accepts any iterable of stat objects (an `RTCStatsReport` is one), which keeps
+ * this pure and testable with plain arrays.
+ *
+ * @param {Iterable<Record<string, unknown>>|null|undefined} report
+ * @returns {string} One of {@link CALL_QUALITY}'s values.
+ */
+export function classifyCallQuality(report) {
+  if (!isIterable(report)) return CALL_QUALITY.UNKNOWN;
+
+  let remoteRttSeconds = null;
+  let jitterSeconds = null;
+  let pairRttSeconds = null;
+
+  for (const stat of report) {
+    if (!stat || typeof stat !== "object") continue;
+    if (stat.type === "remote-inbound-rtp") {
+      // Worst reading across streams wins, as on Android: one bad direction is
+      // a bad call.
+      if (isFiniteNumber(stat.roundTripTime)) {
+        remoteRttSeconds =
+          remoteRttSeconds === null ? stat.roundTripTime : Math.max(remoteRttSeconds, stat.roundTripTime);
+      }
+      if (isFiniteNumber(stat.jitter)) {
+        jitterSeconds = jitterSeconds === null ? stat.jitter : Math.max(jitterSeconds, stat.jitter);
+      }
+    } else if (stat.type === "candidate-pair" && stat.state === "succeeded") {
+      if (isFiniteNumber(stat.currentRoundTripTime)) pairRttSeconds = stat.currentRoundTripTime;
+    }
+  }
+
+  const rttSeconds = remoteRttSeconds !== null ? remoteRttSeconds : pairRttSeconds;
+  if (rttSeconds === null) return CALL_QUALITY.UNKNOWN;
+
+  const rttMs = rttSeconds * 1000;
+  const jitterMs = jitterSeconds === null ? null : jitterSeconds * 1000;
+  if (rttMs <= RTT_GOOD_MS && (jitterMs === null || jitterMs <= JITTER_GOOD_MS)) {
+    return CALL_QUALITY.GOOD;
+  }
+  if (rttMs <= RTT_MEDIUM_MS) return CALL_QUALITY.MEDIUM;
+  return CALL_QUALITY.POOR;
+}
+
+/**
+ * How many of the four signal bars a quality reading fills.
+ *
+ * The same mapping as the Flutter `signalBarsFor` and the Compose one, so a
+ * call shows the same number of bars on every frontend. `medium` fills two
+ * rather than three on purpose: three-of-four reads as "basically fine", which
+ * is the opposite of what a MEDIUM sample means. `unknown` fills none — nothing
+ * measured is not zero signal, but it is also not a number to invent.
+ *
+ * @param {string} quality One of {@link CALL_QUALITY}'s values.
+ * @returns {number} 0–4.
+ */
+export function signalBarsFor(quality) {
+  switch (quality) {
+    case CALL_QUALITY.GOOD:
+      return 4;
+    case CALL_QUALITY.MEDIUM:
+      return 2;
+    case CALL_QUALITY.POOR:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * The short label shown beside the bars, or `null` when there is nothing worth
+ * saying (a healthy call, or nothing measured yet). Same words as the other two
+ * frontends.
+ *
+ * @param {string} quality One of {@link CALL_QUALITY}'s values.
+ * @returns {string|null}
+ */
+export function signalLabelFor(quality) {
+  if (quality === CALL_QUALITY.POOR) return "Poor connection";
+  if (quality === CALL_QUALITY.MEDIUM) return "Weak signal";
+  return null;
+}
+
+/**
+ * Total video frames decoded from the peer so far, or `null` when this report
+ * has no inbound video stream at all (an audio call, or the first poll).
+ *
+ * @param {Iterable<Record<string, unknown>>|null|undefined} report
+ * @returns {number|null}
+ */
+export function remoteVideoFramesDecoded(report) {
+  if (!isIterable(report)) return null;
+  for (const stat of report) {
+    if (!stat || typeof stat !== "object") continue;
+    if (stat.type !== "inbound-rtp") continue;
+    if (stat.kind !== "video" && stat.mediaType !== "video") continue;
+    if (isFiniteNumber(stat.framesDecoded)) return stat.framesDecoded;
+  }
+  return null;
+}
+
+/**
+ * Decide whether the peer's video counts as *paused* from consecutive
+ * `framesDecoded` readings — frames stopped arriving while their track is still
+ * live, because they turned their camera off or their app stopped capturing in
+ * the background.
+ *
+ * Mirrors Android's `updateRemoteVideoPaused` (`CallManager.kt`), including the
+ * two-stalled-polls hysteresis: at a 2 s poll that is ~4 s before the caption
+ * appears, because one dropped poll on a congested link is normal and a caption
+ * that flickers on and off is worse than none. Any growth clears it
+ * immediately — resuming should look instant.
+ *
+ * Pure: the caller owns the state and passes it back in.
+ *
+ * @param {object} input
+ * @param {number|null} input.frames This poll's `framesDecoded`, or null if absent.
+ * @param {number|null} input.lastFrames The previous poll's reading.
+ * @param {number} input.stalledPolls How many polls in a row have not grown.
+ * @param {boolean} input.paused The caption's current state.
+ * @returns {{lastFrames: number|null, stalledPolls: number, paused: boolean}} The next state.
+ */
+export function decideRemoteVideoPaused({ frames, lastFrames, stalledPolls, paused }) {
+  const stalled = isFiniteNumber(stalledPolls) ? stalledPolls : 0;
+  const wasPaused = !!paused;
+  // No inbound video stats at all: say nothing, and never let a *missing*
+  // reading age into "paused".
+  if (!isFiniteNumber(frames)) {
+    return { lastFrames: isFiniteNumber(lastFrames) ? lastFrames : null, stalledPolls: stalled, paused: wasPaused };
+  }
+  // The first reading is a baseline, not a delta.
+  if (!isFiniteNumber(lastFrames)) {
+    return { lastFrames: frames, stalledPolls: 0, paused: wasPaused };
+  }
+  if (frames > lastFrames) return { lastFrames: frames, stalledPolls: 0, paused: false };
+  const nextStalled = stalled + 1;
+  return {
+    lastFrames: frames,
+    stalledPolls: nextStalled,
+    paused: nextStalled >= REMOTE_VIDEO_STALL_POLLS ? true : wasPaused,
+  };
+}
+
+/**
+ * Whether the local camera should be *sending* right now.
+ *
+ * Two independent facts decide it, and collapsing them is the bug this shape
+ * exists to prevent: `cameraOn` is the user's own choice, and "is anything
+ * displaying this call" is the app's. Capture runs only when both allow it, so
+ * a window that was minimised with the camera deliberately off does not come
+ * back sending. Mirrors `CallManager.applyCaptureState` and the Dart
+ * `CallSession.localVideoPaused`.
+ *
+ * A picture-in-picture window **is** something displaying the call, so it keeps
+ * sending — that is the whole point of floating a video call.
+ *
+ * @param {object} input
+ * @param {boolean} input.documentHidden `document.hidden` — the window/tab is not being shown.
+ * @param {boolean} input.inPictureInPicture A PiP window is up.
+ * @param {boolean} input.cameraOn The user's camera choice.
+ * @returns {boolean} Whether video tracks should be enabled.
+ */
+export function shouldSendLocalVideo({ documentHidden, inPictureInPicture, cameraOn }) {
+  const displayed = !documentHidden || !!inPictureInPicture;
+  return displayed && cameraOn !== false;
+}
+
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isIterable(value) {
+  return !!value && typeof value[Symbol.iterator] === "function";
 }

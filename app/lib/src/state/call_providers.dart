@@ -15,11 +15,14 @@
 /// says so.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/models.dart';
 import '../platform/call_channel.dart' show AudioRoute, CallQuality;
+import '../platform/pip_channel.dart';
 import 'providers.dart';
 
 // `AudioRoute` and `CallQuality` are declared ONCE, in the platform layer
@@ -166,6 +169,24 @@ class CallEnded extends CallUiState {
   bool get incoming => isIncoming;
 }
 
+/// Where the call is being drawn: full screen, an OS picture-in-picture
+/// window, or a floating tile inside this app.
+///
+/// [inApp] is not a lesser fallback in one respect that matters: it is the only
+/// mode in which the call and *this app's* chat are on screen together, which
+/// is exactly what the in-call chat button is for on a desktop window or any
+/// device the OS won't give a PiP window to.
+enum CallPipMode {
+  /// The normal in-call layout, covering the app.
+  none,
+
+  /// The OS is showing the call in its own floating window, over other apps.
+  native,
+
+  /// A floating tile inside the app, with the rest of the app usable behind it.
+  inApp,
+}
+
 /// Everything the call overlay renders beyond the phase itself — the
 /// `StateFlow`s `CallManager` exposes one by one.
 class CallSession {
@@ -179,9 +200,11 @@ class CallSession {
       AudioRoute.speaker
     ],
     this.quality = CallQuality.unknown,
-    this.sasEmojis,
     this.hasLocalVideo = false,
     this.hasRemoteVideo = false,
+    this.pip = CallPipMode.none,
+    this.videoSuspended = false,
+    this.remoteVideoPaused = false,
   });
 
   final CallUiState state;
@@ -193,14 +216,31 @@ class CallSession {
   /// connected (and Bluetooth is dropped for the rest of the call if its
   /// permission is denied — AUDIT COMMS-06).
   final List<AudioRoute> availableRoutes;
-  final CallQuality quality;
 
-  /// The 4-emoji short authentication string, or `null` for the honest
-  /// "can't verify" state. Never fabricated.
-  final List<String>? sasEmojis;
+  /// The live connection-quality reading behind the signal-strength bars.
+  /// [CallQuality.unknown] means "nothing measured yet" and draws no filled
+  /// bars — see `widgets/signal_bars.dart`.
+  final CallQuality quality;
 
   final bool hasLocalVideo;
   final bool hasRemoteVideo;
+
+  final CallPipMode pip;
+
+  /// Camera capture is stopped because no surface is showing it (backgrounded
+  /// with no PiP window). Independent of [cameraOn], which is the user's own
+  /// choice: capture resumes on return only if [cameraOn] was true.
+  final bool videoSuspended;
+
+  /// The peer's video has stopped arriving while their track is still live —
+  /// they muted their camera or their app stopped capturing. Drawn as "Video
+  /// paused", never as a frozen frame.
+  final bool remoteVideoPaused;
+
+  /// True while our own camera is not being sent, for whichever of the two
+  /// reasons. The self-view shows "Video paused" for both, because from the
+  /// peer's side they are the same thing.
+  bool get localVideoPaused => !cameraOn || videoSuspended;
 
   CallSession copyWith({
     CallUiState? state,
@@ -209,10 +249,11 @@ class CallSession {
     AudioRoute? audioRoute,
     List<AudioRoute>? availableRoutes,
     CallQuality? quality,
-    List<String>? sasEmojis,
-    bool clearSas = false,
     bool? hasLocalVideo,
     bool? hasRemoteVideo,
+    CallPipMode? pip,
+    bool? videoSuspended,
+    bool? remoteVideoPaused,
   }) =>
       CallSession(
         state: state ?? this.state,
@@ -221,9 +262,11 @@ class CallSession {
         audioRoute: audioRoute ?? this.audioRoute,
         availableRoutes: availableRoutes ?? this.availableRoutes,
         quality: quality ?? this.quality,
-        sasEmojis: clearSas ? null : (sasEmojis ?? this.sasEmojis),
         hasLocalVideo: hasLocalVideo ?? this.hasLocalVideo,
         hasRemoteVideo: hasRemoteVideo ?? this.hasRemoteVideo,
+        pip: pip ?? this.pip,
+        videoSuspended: videoSuspended ?? this.videoSuspended,
+        remoteVideoPaused: remoteVideoPaused ?? this.remoteVideoPaused,
       );
 }
 
@@ -245,6 +288,14 @@ abstract interface class CallEngine {
   Future<void> setCameraOn(bool on);
   Future<void> switchCamera();
   Future<void> setAudioRoute(AudioRoute route);
+
+  /// Stop or resume capture because nothing is *displaying* the local video.
+  ///
+  /// Not the same call as [setCameraOn], and an engine must not collapse the
+  /// two: the user's camera choice has to survive backgrounding, so capture
+  /// runs only while the camera is on **and** this is false. See
+  /// `CallChannel.setVideoCaptureSuspended`.
+  Future<void> setVideoCaptureSuspended(bool suspended);
 
   /// A widget rendering the named track, or `null` when the engine has no
   /// frames for it yet. `local` mirrors (it is the front-camera preview);
@@ -287,11 +338,20 @@ class NullCallEngine implements CallEngine {
   Future<void> setAudioRoute(AudioRoute route) async {}
 
   @override
+  Future<void> setVideoCaptureSuspended(bool suspended) async {}
+
+  @override
   Widget? videoView({required bool local, required bool mirror}) => null;
 }
 
 final Provider<CallEngine> callEngineProvider =
     Provider<CallEngine>((Ref ref) => const NullCallEngine());
+
+/// The window-mode channel behind [CallController.openChat]. Overridden in
+/// tests; on a platform with no native picture-in-picture every method answers
+/// "no" and the call falls back to [CallPipMode.inApp].
+final Provider<PipChannel> pipChannelProvider =
+    Provider<PipChannel>((Ref ref) => PipChannel());
 
 /// Drives the call overlay.
 ///
@@ -307,6 +367,12 @@ class CallController extends Notifier<CallSession> {
       matches: (BridgeEvent e) => e is IncomingCallSignal,
       onEvent: (BridgeEvent e) => _onSignal(e as IncomingCallSignal),
     );
+    // The OS is the authority on whether the window is in PiP: it also gets
+    // there without us (the auto-enter on leaving the app), and the user can
+    // leave it by dragging the window back.
+    final StreamSubscription<bool> pip =
+        ref.read(pipChannelProvider).modeChanges.listen(onNativePipChanged);
+    ref.onDispose(pip.cancel);
     return const CallSession();
   }
 
@@ -323,7 +389,6 @@ class CallController extends Notifier<CallSession> {
             isVideo: signal.media == 'video',
             isIncoming: true,
           ),
-          clearSas: true,
         );
       case 'ringing':
         final CallUiState s = state.state;
@@ -421,6 +486,11 @@ class CallController extends Notifier<CallSession> {
   void _end(String outcome) {
     final CallUiState s = state.state;
     if (s is CallIdle) return;
+    // A PiP window must not outlive its call: without this it would sit there
+    // showing the app's ordinary UI in a thumbnail.
+    if (state.pip == CallPipMode.native) {
+      unawaited(ref.read(pipChannelProvider).close());
+    }
     state = state.copyWith(
       state: CallEnded(
         peerNpub: s.peer ?? '',
@@ -429,7 +499,9 @@ class CallController extends Notifier<CallSession> {
         isIncoming: s.incoming,
         outcome: outcome,
       ),
-      clearSas: true,
+      pip: CallPipMode.none,
+      videoSuspended: false,
+      remoteVideoPaused: false,
     );
   }
 
@@ -473,15 +545,71 @@ class CallController extends Notifier<CallSession> {
   void setQuality(CallQuality quality) =>
       state = state.copyWith(quality: quality);
 
-  /// Publish a derived SAS. `null` means "can't verify" and is rendered as
-  /// nothing — never as a fabricated code.
-  void setSas(List<String>? emojis) =>
-      state = (emojis == null || emojis.isEmpty)
-          ? state.copyWith(clearSas: true)
-          : state.copyWith(sasEmojis: emojis);
-
   void setVideoAvailability({bool? local, bool? remote}) =>
       state = state.copyWith(hasLocalVideo: local, hasRemoteVideo: remote);
+
+  /// The peer's frames stopped arriving (or started again) — drives the
+  /// "Video paused" placeholder over their avatar.
+  void setRemoteVideoPaused(bool paused) =>
+      state = state.copyWith(remoteVideoPaused: paused);
+
+  // ── Picture-in-picture ────────────────────────────────────────────────────
+
+  /// The in-call chat button: shrink the call and get out of the way.
+  ///
+  /// Native PiP first, because a real floating window survives leaving the app
+  /// entirely; the in-app tile is the fallback where the OS won't give us one
+  /// (desktop, older or restricted Android). Either way the call keeps running
+  /// — this only changes where it is drawn.
+  Future<void> openChat() async {
+    if (state.state is CallIdle || state.state is CallEnded) return;
+    final bool native = await ref.read(pipChannelProvider).enter();
+    // A native request that succeeded still waits for the OS to confirm via
+    // [onNativePipChanged]; setting it here would leave the UI claiming PiP if
+    // the transition were refused after the fact.
+    if (!native) state = state.copyWith(pip: CallPipMode.inApp);
+  }
+
+  /// The OS entered or left picture-in-picture.
+  void onNativePipChanged(bool active) {
+    if (active) {
+      state = state.copyWith(pip: CallPipMode.native);
+      return;
+    }
+    // Leaving native PiP restores the full-screen call, and — because the
+    // window is visible again — un-suspends capture.
+    if (state.pip == CallPipMode.native) {
+      state = state.copyWith(pip: CallPipMode.none);
+      unawaited(_applyVideoSuspended(false));
+    }
+  }
+
+  /// Tapping the in-app floating tile puts the call back to full screen.
+  void restoreFromPip() {
+    if (state.pip == CallPipMode.inApp) {
+      state = state.copyWith(pip: CallPipMode.none);
+    }
+  }
+
+  // ── Capture follows visibility ────────────────────────────────────────────
+
+  /// Stop capturing when nothing can show the picture.
+  ///
+  /// Called by the call overlay's lifecycle observer. A PiP window *is* a
+  /// surface showing the call, so it counts as visible even though Flutter
+  /// reports the Activity as no longer resumed — which is why this reads
+  /// [CallSession.pip] rather than trusting the lifecycle value alone.
+  Future<void> onAppLifecycleChanged(AppLifecycleState lifecycle) async {
+    final bool visible = lifecycle == AppLifecycleState.resumed ||
+        state.pip == CallPipMode.native;
+    await _applyVideoSuspended(!visible);
+  }
+
+  Future<void> _applyVideoSuspended(bool suspended) async {
+    if (!state.state.video || state.videoSuspended == suspended) return;
+    state = state.copyWith(videoSuspended: suspended);
+    await _engine.setVideoCaptureSuspended(suspended);
+  }
 }
 
 final NotifierProvider<CallController, CallSession> callProvider =
