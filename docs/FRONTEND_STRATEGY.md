@@ -7,12 +7,30 @@ migration as specified**, on evidence measured from this repository. `AUDIT.md` 
 the repo-wide decision ledger; `docs/COMMS_ARCHITECTURE.md` remains the adopted comms
 plan — this document is scoped to the frontend-framework question only._
 
+> **SUPERSEDED IN PART — owner decision, 2026-07-29.** After reading this analysis the
+> owner directed the migration to proceed anyway, explicitly setting cost aside ("if we
+> ignore the effort"). That is a legitimate call this document does not overrule: §5
+> already concedes that ignoring effort changes the answer, and §7's own reopen trigger
+> is iOS, which only a cross-platform toolkit delivers. **§1's "do not migrate now" and
+> §7's recommendation are therefore no longer the operative decision.** What survives
+> unchanged is everything §2 measured (the premise *was* wrong, and the real problem
+> *was* parity debt) and the defect list in §4 — which is exactly what the build was
+> steered around. See §10 for what the implementation actually found, including which
+> of D1–D8 held up and which turned out sharper than written.
+
 _**Verification honesty.** Every claim about *this repository* below was measured or read
-directly, and Appendix A gives the exact command for each. Claims about Flutter, Compose
-Multiplatform, `flutter_rust_bridge`, and `flutter_webrtc` are from their published
-package metadata and documentation — **no Flutter or Dart toolchain was installed and
-nothing Flutter-related was compiled**. Where a claim is reasoned rather than measured, it
-says so._
+directly, and Appendix A gives the exact command for each. Where a claim is reasoned
+rather than measured, it says so._
+
+_Scope note on that, because it changed mid-document. **In §§1–9** — written before the
+owner override — no Flutter or Dart toolchain was installed and nothing Flutter-related
+was compiled; every claim there about Flutter, Compose Multiplatform,
+`flutter_rust_bridge` and `flutter_webrtc` comes from published package metadata and
+documentation, and is labelled reasoned, not verified. **§10 is different**: it reports an
+actual build on Flutter 3.44.8 / Dart 3.12.2 with Android SDK 36 and NDK 27, and its
+claims are compiled, run, and in several cases mutation-tested. §10 is explicit about
+which of its own statements are still unverified — chiefly that nothing has run on a
+device, an emulator, or a desktop window manager._
 
 ---
 
@@ -422,3 +440,112 @@ git log --since=2026-05-30 --oneline -- desktop/ | wc -l                 # 30
 curl -s https://pub.dev/api/packages/flutter_webrtc        # 1.5.2; linux/macos/windows declared
 curl -s https://pub.dev/api/packages/flutter_rust_bridge   # 2.12.0
 ```
+
+---
+
+## 10. What the implementation found (2026-07-29, after the owner override)
+
+The migration was built to the corrected plan in §8, not the original proposal. This
+section records what the defect list got right, what it got wrong, and what is actually
+true of the tree now. Everything below was verified by building and running, not by
+reading — commands and outputs are in the commit messages for `05bb3d4` and `87584dc`.
+
+### Scorecard against §4
+
+| | Held up? | What actually happened |
+|---|---|---|
+| **D1** no JNI to retain | ✅ as written | It is uniffi. The Kotlin services kept those bindings. |
+| **D2** two runtimes / redb lock | ✅ real, **and solvable** | Resolved rather than avoided — see below. The strongest claim in §4 turned out to have a clean fix. |
+| **D3** CallScreen vs CallManager | ✅ **sharper than written** | §4 called (a) a large *risk*. It is a functional *blocker*. |
+| **D4** moving `crates/` | ✅ avoided entirely | `crates/` never moved; the app is a sibling at `app/`. |
+| **D5** `integrate` vs 7-crate workspace | ✅ avoided | Codegen was pointed at the existing crate; `integrate` never run. |
+| **D6** toolchain count | ✅ as written | Rust + Kotlin/Gradle + Dart/Flutter. Tauri/JS not yet retired, so today it is *four*. |
+| **D7** strands the comms roadmap | ⚠️ deferred, not disproven | Nothing was deleted. `desktop/ui/` and its `node --test` lane are untouched. |
+| **D8** desktop WebRTC regression | ⏸️ untested | No desktop call path was built or run. Still the biggest open risk. |
+
+### D2 — the fix, and why it is not a workaround
+
+Two `ComradeRuntime`s in one process fail on `redb`'s exclusive lock. The resolution is
+not to pick one bridge but to stop the runtime being per-handle:
+
+```rust
+static RUNTIME: OnceLock<Arc<RwLock<ComradeRuntime>>>   // crates/comrade_jni/src/lib.rs
+```
+
+**One cdylib exports both ABIs.** `nm -D --defined-only … | sort | uniq -d` is empty; FRB
+2.12 routes through a fixed PDE dispatcher by integer id rather than exporting a symbol
+per function, so a collision is not merely absent but structurally impossible. Confirmed
+on host, `aarch64-linux-android`, `x86_64-linux-android`, and inside the shipped APK (180
+uniffi + 15 `frb_` symbols in the same AArch64 `.so`).
+
+This is what lets Phase 2 mean what it says: `WakeWordService` and
+`RelayConnectionService` reach Rust through uniffi with no Flutter engine attached, while
+Dart uses FRB — no `MethodChannel` round trip, one vault, one relay set. Two tests pin it:
+`every_uniffi_handle_shares_one_process_global_runtime`, and one that unlocks through FRB,
+observes through uniffi, locks through uniffi, and observes through FRB.
+
+uniffi's library-mode Kotlin codegen is unaffected: generated against the pre-change
+commit and diffed, the only delta anywhere is one constructor checksum, moved because
+uniffi hashes docstrings into metadata and a doc comment grew.
+
+### D3 — decided: keep `CallManager`, render through a Flutter `Texture`
+
+§4 framed this as rewrite-vs-PlatformView with the rewrite merely risky. The
+implementation review found option (a) is **blocked, not just expensive**: call offers
+arrive on `pollEvent()` → `RelayConnectionService` → `CallManager.onIncomingSignal`, a
+foreground service whose entire purpose is running with no UI. Move the `PeerConnection`
+into the Dart isolate and an offer arriving while detached has nowhere to go without a
+permanently-warm headless isolate — re-creating the dependency Phase 2 exists to remove.
+
+So `CallManager` stays native and only a ~200-line video *leaf* remains Kotlin
+(`TextureVideoRenderer extends org.webrtc.EglRenderer` — the same mechanism
+`flutter_webrtc` uses internally). **Cost stated honestly: this is Android-only. If iOS
+enters the roadmap, option (a) becomes correct** — which matters, because §5 identifies
+iOS as the main reason to migrate at all.
+
+### A related lifecycle bug, found by porting
+
+`MainActivity.kt:373-411` drove `Ringer.start/stop` and missed-call notifications from an
+Activity-scoped `LaunchedEffect`. Under Flutter that means **the phone only rings while a
+Flutter engine is attached**. Extracted to `CallStateReactor` on the process-lifetime
+scope, which also covers a `START_STICKY` restart of `RelayConnectionService` alone.
+
+### A parity gap this surfaced, unrelated to Flutter
+
+`sakha_status`, `pair_sakha`, `sakha_add_entry`, `sakha_read_ledger` exist on
+`comrade_ui::ComradeRuntime` and are exposed by Tauri, but by **neither** FFI ABI (only
+`sync_ledger` crosses). That is *why* the couple sandbox is desktop-only — a pre-existing
+hole the migration merely made visible. `test_turn_connectivity` has no Rust
+implementation at all; it is Kotlin-side in `CallManager`.
+
+### State of the tree
+
+Built and verified: `cargo fmt`/`clippy -D warnings`/`test` (244 passed); `flutter
+analyze --fatal-infos` clean with no analysis excludes; `flutter test` 104 passed; a
+Linux desktop release bundle; a debug APK containing both ABI slices of the Rust core;
+and a `dart:ffi` round trip proven **by mutation** — each assertion broken in turn to read
+the real value back, so it cannot pass for the wrong reason.
+
+Not true yet, stated plainly:
+
+- **Nothing has run on Android or on a desktop window manager.** No device, no emulator,
+  no display here. `System.loadLibrary` never executed; no frame ever rendered. A packaged
+  `.so` removes a certain crash — it is not evidence of a launch.
+- **The vault has never been unlocked over the bridge.** Only locked-state behaviour is
+  exercised, so no relay, media, or call path has been touched.
+- **No call has been placed from Flutter on any platform**, and desktop WebRTC (D8) is
+  entirely unbuilt.
+- The fake repository is still the default; the real one is opt-in behind
+  `--dart-define=COMRADE_BACKEND=rust`, with no silent fallback.
+- Voice notes, dictation, wake word and the UPI `/pay` composer preview are not ported.
+- Stripped release `.so` size is unmeasured, and the root `Cargo.toml` notes this
+  library's size sets `System.loadLibrary` startup cost.
+
+### What has NOT been deleted, deliberately
+
+`android/` and `desktop/` are untouched and remain the shipping frontends. Their CI lanes
+still run; the new Flutter lanes were added *beside* them. The original Phase 4 called for
+replacing the Tauri and Compose build steps — doing that now would leave the artifacts
+users actually install untested, on the strength of a frontend that has never been run on
+a real device. Retirement is the last step of this migration, gated on parity, not the
+first.
