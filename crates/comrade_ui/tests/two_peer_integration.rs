@@ -572,3 +572,252 @@ async fn media_kind_defaults_to_audio_when_the_offer_never_arrives_and_call_logs
 
     relay.stop().await;
 }
+
+// ── Comrade presence ─────────────────────────────────────────────────────────
+//
+// Presence is the one feature whose whole point is *mutual consent*, and the
+// consent rules only really exist across two devices: one runtime cannot
+// demonstrate "she only sees him online because he chose her too". These two
+// tests are that proof — real beacons, real gift wraps, one relay.
+
+/// Get `a` and `b` past the message-request gate in both directions, which is
+/// the precondition for any presence beacon to be processed at all.
+async fn become_accepted_contacts(
+    a: &ComradeRuntime,
+    a_npub: &str,
+    b: &ComradeRuntime,
+    b_npub: &str,
+    b_events: &mut tokio::sync::broadcast::Receiver<BridgeEvent>,
+) {
+    a.send_dm(b_npub, "hey").await.unwrap();
+    wait_for(b_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::IncomingMessageRequest(_))
+    })
+    .await
+    .expect("the first DM lands as a message request");
+    b.accept_request(a_npub).unwrap();
+}
+
+/// Poll `cond` until it holds or `timeout` elapses; returns whether it held.
+/// Some presence effects are observed through the store rather than the event
+/// bus (a beacon recorded silently for a peer we hadn't chosen yet), and those
+/// still land asynchronously.
+async fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cond()
+}
+
+#[tokio::test]
+async fn comrades_see_each_other_come_online_and_go_offline() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut alice_events = alice.subscribe_events();
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+
+    // Alice chooses Bob. Nothing is revealed to her in return: he hasn't
+    // chosen her, so his device tells her nothing about himself.
+    alice.set_comrade(&bob_npub, true).unwrap();
+    assert!(
+        wait_for(&mut alice_events, ABSENCE_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::ComradePresence { .. }
+        ))
+        .await
+        .is_none(),
+        "choosing someone must not conjure presence they never sent"
+    );
+
+    // Her beacon did reach Bob, who records it silently — she is not his
+    // comrade (yet), so it is state, not news.
+    assert!(
+        wait_until(RECV_TIMEOUT, || bob
+            .peer_presence(&alice_npub)
+            .unwrap()
+            .is_some())
+        .await,
+        "bob must have received the beacon she sent on choosing him"
+    );
+    assert!(
+        wait_for(&mut bob_events, ABSENCE_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::ComradePresence { .. }
+        ))
+        .await
+        .is_none(),
+        "presence for a peer he hasn't chosen must not be announced to him"
+    );
+
+    // Choosing her back is the moment it becomes news — the beacon already on
+    // file surfaces immediately instead of waiting for a transition that has
+    // already happened.
+    bob.set_comrade(&alice_npub, true).unwrap();
+    let event = wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::ComradePresence { online: true, .. })
+    })
+    .await
+    .expect("choosing her back must reveal the presence he already held");
+    let BridgeEvent::ComradePresence { peer, .. } = event else {
+        unreachable!()
+    };
+    assert_eq!(peer, alice_npub);
+
+    // …and his own beacon tells her he is here.
+    let event = wait_for(&mut alice_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::ComradePresence { online: true, .. })
+    })
+    .await
+    .expect("alice must be told bob is online");
+    let BridgeEvent::ComradePresence { peer, online, .. } = event else {
+        unreachable!()
+    };
+    assert_eq!(peer, bob_npub);
+    assert!(online);
+
+    let bobs_row = &alice.comrades().unwrap()[0];
+    assert_eq!(bobs_row.npub, bob_npub);
+    assert!(bobs_row.online);
+    assert!(
+        bobs_row.peer_marked_us,
+        "his beacon is the proof he chose her back"
+    );
+
+    // The answering half: when one comrade announces, the other answers on
+    // the spot rather than leaving them to wait out a heartbeat interval. A
+    // beacon carries second granularity, so cross a second boundary first —
+    // then Bob's record of Alice must freshen purely because she answered
+    // (the heartbeat is minutes away).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let before = bob
+        .peer_presence(&alice_npub)
+        .unwrap()
+        .unwrap()
+        .last_seen_at;
+    assert_eq!(
+        bob.announce_presence(true).await,
+        1,
+        "one comrade, one beacon"
+    );
+    assert!(
+        wait_until(RECV_TIMEOUT, || bob
+            .peer_presence(&alice_npub)
+            .unwrap()
+            .is_some_and(|p| p.last_seen_at > before))
+        .await,
+        "alice must answer bob's beacon with one of her own"
+    );
+
+    // Bob's app goes away (a lock, or the shell backgrounding) — Alice's dot
+    // goes grey now instead of aging out minutes later.
+    assert_eq!(bob.announce_presence(false).await, 1);
+    let event = wait_for(&mut alice_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::ComradePresence { online: false, .. })
+    })
+    .await
+    .expect("alice must be told bob went offline");
+    let BridgeEvent::ComradePresence { peer, .. } = event else {
+        unreachable!()
+    };
+    assert_eq!(peer, bob_npub);
+    assert!(!alice.comrades().unwrap()[0].online);
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn presence_reaches_only_the_peer_who_was_chosen() {
+    // The privacy claim, tested rather than asserted in a doc comment: a
+    // beacon goes to a chosen comrade and to nobody else — not to another
+    // accepted contact, and not to a relay in any readable form.
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let carol_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let carol = unlocked_runtime(&relay.url, &carol_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let carol_npub = carol.profile().unwrap().npub;
+    let mut alice_events = alice.subscribe_events();
+    let mut bob_events = bob.subscribe_events();
+    let mut carol_events = carol.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    // Alice is fully accepted with both Bob and Carol…
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+    become_accepted_contacts(&alice, &alice_npub, &carol, &carol_npub, &mut carol_events).await;
+    // …but chooses only Bob as her comrade.
+    alice.set_comrade(&bob_npub, true).unwrap();
+    assert_eq!(
+        alice.announce_presence(true).await,
+        1,
+        "one comrade, one beacon"
+    );
+
+    // Carol — an accepted contact who was not chosen — learns nothing.
+    assert!(
+        wait_for(&mut carol_events, ABSENCE_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::ComradePresence { .. }
+        ))
+        .await
+        .is_none(),
+        "an accepted contact who wasn't chosen must not receive presence"
+    );
+    assert!(carol.peer_presence(&alice_npub).unwrap().is_none());
+    // Nor does it turn up in her chat thread as a stray JSON message.
+    assert!(carol
+        .messages_with(&alice_npub)
+        .unwrap()
+        .iter()
+        .all(|m| !m.content.contains("comrade_presence")));
+
+    // Bob received it and can see she chose him — but since he has not chosen
+    // her, his app raises nothing and stays silent about him in return.
+    assert!(
+        wait_for(&mut bob_events, ABSENCE_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::ComradePresence { .. }
+        ))
+        .await
+        .is_none(),
+        "presence for a peer we haven't chosen is recorded, not announced"
+    );
+    let alices_presence = bob
+        .peer_presence(&alice_npub)
+        .unwrap()
+        .expect("bob recorded her beacon");
+    assert!(alices_presence.online);
+    assert!(alices_presence.peer_marked_us);
+
+    // Alice, meanwhile, still sees nothing about Bob: he never chose her, so
+    // his device never reports, and the UI has an honest reason to show.
+    let bobs_row = &alice.comrades().unwrap()[0];
+    assert!(!bobs_row.online);
+    assert!(
+        !bobs_row.peer_marked_us,
+        "she must not be told he's around until he opts in"
+    );
+    assert!(wait_for(&mut alice_events, ABSENCE_TIMEOUT, |e| matches!(
+        e,
+        BridgeEvent::ComradePresence { .. }
+    ))
+    .await
+    .is_none());
+
+    relay.stop().await;
+}

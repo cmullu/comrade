@@ -54,6 +54,8 @@ const TARA_TREE: &str = "tara_companion";
 const CONVERSATIONS_TREE: &str = "conversation_meta";
 /// Voice/video call log, keyed by call id.
 const CALLS_TREE: &str = "call_log";
+/// Last known presence of a comrade, keyed by their npub.
+const PRESENCE_TREE: &str = "peer_presence";
 
 const IDENTITY_KEY: &str = "self";
 const LEDGER_SNAPSHOT_KEY: &str = "hisab_kitab";
@@ -95,6 +97,40 @@ pub struct Contact {
     pub petname: String,
     #[serde(default)]
     pub relays: Vec<String>,
+    /// Whether the user chose this contact as a **comrade**: someone they
+    /// announce their presence to, and want to be told about when that
+    /// person comes online. Defaulted so contacts saved before the feature
+    /// existed keep deserialising as "not a comrade" (opt-in, never
+    /// retroactive — presence is disclosure, so it may only ever be turned
+    /// on deliberately).
+    #[serde(default)]
+    pub comrade: bool,
+}
+
+/// What a comrade's last presence beacon said, and until when to believe it.
+///
+/// This is *soft* state: a device that dies sends no goodbye, so `online`
+/// alone is never enough — every read must also check `expires_at` against
+/// the current clock (`comrade_core::presence::is_online_at`). Stored per
+/// peer so a green dot survives an app restart only for as long as the peer's
+/// own claim does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerPresence {
+    pub peer_npub: String,
+    /// What the last beacon claimed. Combine with `expires_at`, never alone.
+    pub online: bool,
+    /// Send time (unix seconds) of the last beacon received from this peer —
+    /// the honest "last seen" for the UI.
+    pub last_seen_at: u64,
+    /// When the last `online` claim stops being believable (unix seconds).
+    pub expires_at: u64,
+    /// Whether this peer has marked *us* as their comrade. Receiving any
+    /// beacon proves it: beacons are only ever sent to comrades. Drives the
+    /// "they chose you — choose them back to see when they're online" hint,
+    /// which is the only way a mutual-by-construction model stays
+    /// discoverable.
+    #[serde(default)]
+    pub peer_marked_us: bool,
 }
 
 /// A single cached public Chitthi (Kind-1 note) for instant offline rendering
@@ -246,6 +282,50 @@ impl EncryptedStore {
     /// List all saved contacts.
     pub fn list_contacts(&self) -> Result<Vec<Contact>, StorageError> {
         self.values(CONTACTS_TREE)
+    }
+
+    /// Mark (or unmark) a contact as a comrade, creating the contact record if
+    /// this key isn't saved yet — marking someone you've only ever chatted
+    /// with must not require adding them by hand first. Every other field of
+    /// an existing contact is preserved. Returns the stored contact.
+    pub fn set_contact_comrade(&self, npub: &str, comrade: bool) -> Result<Contact, StorageError> {
+        let mut contact = self.get_contact(npub)?.unwrap_or_else(|| Contact {
+            npub: npub.to_string(),
+            petname: String::new(),
+            relays: Vec::new(),
+            comrade: false,
+        });
+        contact.comrade = comrade;
+        self.upsert_contact(&contact)?;
+        Ok(contact)
+    }
+
+    /// Every contact the user has marked as a comrade.
+    pub fn list_comrades(&self) -> Result<Vec<Contact>, StorageError> {
+        Ok(self
+            .list_contacts()?
+            .into_iter()
+            .filter(|c| c.comrade)
+            .collect())
+    }
+
+    // Comrade presence -----------------------------------------------------------
+
+    /// Record a peer's latest presence, keyed by npub (one row per peer).
+    pub fn set_peer_presence(&self, presence: &PeerPresence) -> Result<(), StorageError> {
+        self.put(PRESENCE_TREE, &presence.peer_npub, presence)
+    }
+
+    /// The last recorded presence for a peer, if any beacon ever arrived.
+    pub fn get_peer_presence(&self, peer_npub: &str) -> Result<Option<PeerPresence>, StorageError> {
+        self.get(PRESENCE_TREE, peer_npub)
+    }
+
+    /// Every recorded presence row, newest sighting first.
+    pub fn list_peer_presence(&self) -> Result<Vec<PeerPresence>, StorageError> {
+        let mut rows: Vec<PeerPresence> = self.values(PRESENCE_TREE)?;
+        rows.sort_by_key(|p| std::cmp::Reverse(p.last_seen_at));
+        Ok(rows)
     }
 
     // Chitthi cache (public Sabha timeline) -----------------------------------
@@ -482,11 +562,13 @@ mod tests {
             npub: "npub1alice".into(),
             petname: "Alice".into(),
             relays: vec!["wss://relay.one".into()],
+            comrade: false,
         };
         let bob = Contact {
             npub: "npub1bob".into(),
             petname: "Bob".into(),
             relays: vec![],
+            comrade: false,
         };
         s.upsert_contact(&alice).unwrap();
         s.upsert_contact(&bob).unwrap();
@@ -494,6 +576,80 @@ mod tests {
         assert_eq!(s.get_contact("npub1alice").unwrap(), Some(alice));
         assert!(s.remove_contact("npub1bob").unwrap());
         assert_eq!(s.list_contacts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn comrade_flag_is_opt_in_preserves_the_contact_and_survives_old_rows() {
+        let (_d, s) = store();
+        s.upsert_contact(&Contact {
+            npub: "npub1alice".into(),
+            petname: "Alice".into(),
+            relays: vec!["wss://relay.one".into()],
+            comrade: false,
+        })
+        .unwrap();
+        assert!(s.list_comrades().unwrap().is_empty(), "opt-in, not default");
+
+        // Marking preserves the alias/relays the contact already had.
+        let marked = s.set_contact_comrade("npub1alice", true).unwrap();
+        assert!(marked.comrade);
+        assert_eq!(marked.petname, "Alice");
+        assert_eq!(marked.relays, vec!["wss://relay.one".to_string()]);
+        assert_eq!(s.list_comrades().unwrap().len(), 1);
+
+        // Marking a key with no contact record yet creates one (you can make
+        // someone a comrade straight from a conversation).
+        s.set_contact_comrade("npub1bob", true).unwrap();
+        assert_eq!(s.list_comrades().unwrap().len(), 2);
+        assert_eq!(s.get_contact("npub1bob").unwrap().unwrap().petname, "");
+
+        // Unmarking leaves the contact in place — only presence stops.
+        s.set_contact_comrade("npub1alice", false).unwrap();
+        assert_eq!(s.list_comrades().unwrap().len(), 1);
+        assert!(s.get_contact("npub1alice").unwrap().is_some());
+
+        // A contact row written before the field existed reads as "not a
+        // comrade" rather than failing to deserialise.
+        let legacy: Contact =
+            serde_json::from_str(r#"{"npub":"npub1old","petname":"Old"}"#).unwrap();
+        assert!(!legacy.comrade);
+        assert!(legacy.relays.is_empty());
+    }
+
+    #[test]
+    fn peer_presence_crud_and_ordering() {
+        let (_d, s) = store();
+        assert!(s.get_peer_presence("npub1alice").unwrap().is_none());
+        for (npub, online, seen, expires) in [
+            ("npub1alice", true, 100u64, 580u64),
+            ("npub1bob", false, 300, 300),
+        ] {
+            s.set_peer_presence(&PeerPresence {
+                peer_npub: npub.into(),
+                online,
+                last_seen_at: seen,
+                expires_at: expires,
+                peer_marked_us: true,
+            })
+            .unwrap();
+        }
+        let rows = s.list_peer_presence().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].peer_npub, "npub1bob", "newest sighting first");
+
+        // Same key upserts in place rather than duplicating.
+        s.set_peer_presence(&PeerPresence {
+            peer_npub: "npub1alice".into(),
+            online: false,
+            last_seen_at: 900,
+            expires_at: 900,
+            peer_marked_us: true,
+        })
+        .unwrap();
+        assert_eq!(s.list_peer_presence().unwrap().len(), 2);
+        let alice = s.get_peer_presence("npub1alice").unwrap().unwrap();
+        assert!(!alice.online);
+        assert_eq!(alice.last_seen_at, 900);
     }
 
     #[test]

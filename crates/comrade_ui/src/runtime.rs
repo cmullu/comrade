@@ -40,6 +40,10 @@ use comrade_core::media::{
     build_file_metadata_event, encrypt_media, fetch_and_decrypt_media, FileMetadata,
     MAX_MEDIA_BYTES,
 };
+use comrade_core::presence::{
+    is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
+    PRESENCE_HEARTBEAT_SECS,
+};
 use comrade_core::saathi::SaathiEngine;
 use comrade_core::sabha::{
     display_name_of, ChitthiCallback, FeedFilterSpec, FeedScope, SabhaEngine, DEFAULT_RELAYS,
@@ -431,6 +435,9 @@ pub struct ContactDto {
     /// The peer's own published @handle, from the local profile cache.
     /// Display precedence is alias → name → key; never trust name alone.
     pub name: Option<String>,
+    /// Whether the user chose this contact as a comrade — see
+    /// [`ComradeRuntime::set_comrade`].
+    pub comrade: bool,
 }
 
 /// One entry of the chat list: a peer plus the newest message in the thread.
@@ -445,6 +452,49 @@ pub struct ConversationDto {
     pub last_message: String,
     pub last_at: u64,
     pub last_outgoing: bool,
+    /// Whether this peer is one of the user's comrades.
+    pub comrade: bool,
+    /// Whether that comrade is online *right now* — always recomputed against
+    /// the clock, never a stored flag (see [`PresenceDto::online`]). Always
+    /// `false` for a peer who isn't a comrade: presence only flows between
+    /// comrades, so there is nothing to know.
+    pub online: bool,
+}
+
+/// A comrade: a contact the user chose to exchange presence with, plus what
+/// their last beacon said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ComradeDto {
+    pub npub: String,
+    /// The user-chosen local alias (petname). Empty = none set.
+    pub alias: String,
+    /// The peer's own published @handle, from the local profile cache.
+    pub name: Option<String>,
+    /// Live presence, recomputed against the current clock.
+    pub online: bool,
+    /// Send time (unix seconds) of their last beacon; `0` if none ever
+    /// arrived — i.e. they haven't marked us back (or haven't been online
+    /// since we marked them).
+    pub last_seen_at: u64,
+    /// Whether they have marked *us* as their comrade. `false` means we will
+    /// never see them online, however long we wait — the UI must say so
+    /// rather than showing a permanently grey dot with no explanation.
+    pub peer_marked_us: bool,
+}
+
+/// A single peer's presence, for a chat header or a contact row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct PresenceDto {
+    pub peer: String,
+    /// Whether the peer's last claim is still live at this instant. Computed
+    /// on every read from `expires_at`, so a stored "online" row can never
+    /// outlive the claim that produced it (a phone that dies sends no
+    /// goodbye).
+    pub online: bool,
+    /// Send time (unix seconds) of the last beacon received from this peer.
+    pub last_seen_at: u64,
+    /// Whether they have marked us as their comrade (any beacon proves it).
+    pub peer_marked_us: bool,
 }
 
 /// Locally cached snapshot of a peer's published Kind-0 profile. `name` is a
@@ -578,6 +628,20 @@ pub enum BridgeEvent {
     /// A peer shared (or updated) their display handle — e.g. by accepting our
     /// message request. The chat list should re-title their conversation.
     PeerProfileUpdated { peer: String, name: Option<String> },
+    /// A comrade came online (or went offline / aged out). Emitted only for
+    /// peers the user marked as comrades, and only on an actual transition —
+    /// a heartbeat from someone already known to be online is not news. The
+    /// `online == true` edge is what a frontend turns into "they're around".
+    ComradePresence {
+        peer: String,
+        /// Display name at the time of the event (alias → published handle),
+        /// so a notification can be raised without a store round-trip.
+        name: Option<String>,
+        online: bool,
+        /// Send time of the beacon (unix seconds) for the `online` edge; the
+        /// moment the claim lapsed for an aged-out `offline` edge.
+        at: u64,
+    },
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
     MeshStatusChanged(MeshStatusDto),
@@ -636,6 +700,10 @@ pub struct ComradeRuntime {
     /// branch. Behind an `Arc` so the vault callback (which outlives `&self`
     /// borrows) can hold its own clone.
     call_signal_dedup: Arc<CallSignalDedup>,
+    /// The comrade-presence heartbeat/expiry loop, tracked for the same
+    /// reason as [`Self::feed_task`] — [`Self::lock_vault`] must be able to
+    /// stop announcing "I'm online" the moment the user locks up.
+    presence_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for ComradeRuntime {
@@ -673,6 +741,7 @@ impl ComradeRuntime {
             sakha_sync_task: None,
             relays,
             call_signal_dedup: Arc::new(CallSignalDedup::new()),
+            presence_task: None,
         }
     }
 
@@ -813,6 +882,13 @@ impl ComradeRuntime {
     ///
     /// Idempotent: locking an already-locked runtime is a harmless no-op.
     pub async fn lock_vault(&mut self) {
+        // Say goodbye to the comrades before the engines go: a locked vault
+        // is not online, and leaving them to age the claim out would show a
+        // green dot next to a person who deliberately shut the door. The
+        // send is detached and holds only the vault engine (never the store,
+        // whose redb file lock the teardown below is about to reclaim), so a
+        // slow or unreachable relay can never make locking hang.
+        self.spawn_farewell_beacons();
         // `abort()` only *requests* cancellation at the task's next await
         // point — it does not synchronously drop the task's captured state.
         // Each of these tasks holds its own `Arc` clone of the store/engines
@@ -828,6 +904,7 @@ impl ComradeRuntime {
             self.feed_task.take(),
             self.vault_task.take(),
             self.sakha_sync_task.take(),
+            self.presence_task.take(),
         ]
         .into_iter()
         .flatten()
@@ -913,12 +990,43 @@ impl ComradeRuntime {
             }));
         }
 
+        self.spawn_presence_loop();
+
         // A pairing restored from a previous launch (see `restore_sakha_pairing`,
         // called from `unlock_vault`) should start syncing immediately too —
         // a fresh pairing via `pair_sakha` starts it itself.
         if self.sakha.as_ref().is_some_and(|s| s.is_paired()) {
             self.spawn_sakha_sync_loop();
         }
+    }
+
+    /// Start the comrade-presence loop: announce "I'm online" to every
+    /// comrade now and every [`PRESENCE_HEARTBEAT_SECS`] after, and on the
+    /// same tick age out any comrade whose own claim has lapsed (a phone
+    /// that dies sends no goodbye — see [`expire_stale_presence`]).
+    ///
+    /// Runs only while comrades exist, in the sense that a tick with an
+    /// empty comrade list does nothing at all: the feature is invisible and
+    /// free until someone opts in.
+    fn spawn_presence_loop(&mut self) {
+        if self.vault.is_none() {
+            return;
+        }
+        let handles = self.handles();
+        let tx = self.events.clone();
+        self.presence_task = Some(tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(PRESENCE_HEARTBEAT_SECS));
+            // The default `Burst` behaviour would fire back-to-back catch-up
+            // ticks after a suspended/backgrounded stretch, announcing several
+            // times in a row for no benefit.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                handles.announce_presence(true).await;
+                expire_stale_presence(handles.store.as_deref(), &tx);
+            }
+        }));
     }
 
     /// The public-feed subscription policy (AUDIT.md COMMS-04): self plus
@@ -1007,12 +1115,17 @@ impl ComradeRuntime {
     /// peers are excluded (see [`Self::message_requests`]).
     pub fn conversations(&self) -> Result<Vec<ConversationDto>, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        let aliases: std::collections::HashMap<String, String> = store
+        let contacts = store
             .list_contacts()
-            .map_err(|e| UiError::Storage(e.to_string()))?
-            .into_iter()
-            .map(|c| (c.npub, c.petname))
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let comrades: std::collections::HashSet<String> = contacts
+            .iter()
+            .filter(|c| c.comrade)
+            .map(|c| c.npub.clone())
             .collect();
+        let aliases: std::collections::HashMap<String, String> =
+            contacts.into_iter().map(|c| (c.npub, c.petname)).collect();
+        let now = now_secs();
         // Peers gated out of the chat list: pending requests + blocked. A peer
         // with no meta at all (e.g. history from before this feature) is treated
         // as an ordinary accepted conversation.
@@ -1037,15 +1150,22 @@ impl ComradeRuntime {
 
         let mut list: Vec<ConversationDto> = newest
             .into_values()
-            .map(|m| ConversationDto {
-                alias: aliases
-                    .get(&m.peer_npub)
-                    .and_then(|a| user_alias(a, &m.peer_npub)),
-                peer_name: cached_peer_name(store, &m.peer_npub),
-                peer: m.peer_npub,
-                last_message: m.content,
-                last_at: m.created_at,
-                last_outgoing: m.outgoing,
+            .map(|m| {
+                let comrade = comrades.contains(&m.peer_npub);
+                ConversationDto {
+                    alias: aliases
+                        .get(&m.peer_npub)
+                        .and_then(|a| user_alias(a, &m.peer_npub)),
+                    peer_name: cached_peer_name(store, &m.peer_npub),
+                    // Presence only exists between comrades — never imply
+                    // knowledge about anyone else's whereabouts.
+                    online: comrade && peer_is_online(store, &m.peer_npub, now),
+                    comrade,
+                    peer: m.peer_npub,
+                    last_message: m.content,
+                    last_at: m.created_at,
+                    last_outgoing: m.outgoing,
+                }
             })
             .collect();
         list.sort_by_key(|c| std::cmp::Reverse(c.last_at));
@@ -1228,6 +1348,19 @@ impl ComradeRuntime {
             peer_npub,
             peer,
         );
+    }
+
+    /// Fire-and-forget a final "offline" beacon to every comrade, for a
+    /// deliberate exit (vault lock). Reads the comrade list synchronously —
+    /// before [`Self::lock_vault`] drops the store — and hands only the vault
+    /// engine to the spawned send, so the store's file lock is free to be
+    /// reclaimed immediately regardless of how long the relay takes.
+    fn spawn_farewell_beacons(&self) {
+        let Some(store) = self.ui.store_ref() else {
+            return;
+        };
+        let peers = comrade_peers(store);
+        spawn_presence_beacons(self.vault.clone(), peers, PresenceBeacon::offline());
     }
 
     /// Fire-and-forget a receipt DM (delivered/read) to `peer`.
@@ -1527,6 +1660,7 @@ impl ComradeRuntime {
                     name: cached_peer_name(store, &contact.npub),
                     alias: user_alias(&contact.petname, &contact.npub).unwrap_or_default(),
                     npub: contact.npub,
+                    comrade: contact.comrade,
                 });
             }
         }
@@ -1542,10 +1676,20 @@ impl ComradeRuntime {
 
     fn write_contact(&self, npub: String, petname: String) -> Result<ContactDto, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        // Carry the record's existing state forward: editing an alias must
+        // never silently un-choose a comrade (presence is opt-in *and*
+        // opt-out — both only ever by an explicit act).
+        let existing = store
+            .get_contact(&npub)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
         let contact = comrade_storage::Contact {
             npub,
             petname,
-            relays: vec![],
+            relays: existing
+                .as_ref()
+                .map(|c| c.relays.clone())
+                .unwrap_or_default(),
+            comrade: existing.is_some_and(|c| c.comrade),
         };
         store
             .upsert_contact(&contact)
@@ -1555,6 +1699,7 @@ impl ComradeRuntime {
             name: cached_peer_name(store, &contact.npub),
             npub: contact.npub,
             alias: contact.petname,
+            comrade: contact.comrade,
         })
     }
 
@@ -1581,6 +1726,7 @@ impl ComradeRuntime {
             .map(|c| ContactDto {
                 name: cached_peer_name(store, &c.npub),
                 alias: user_alias(&c.petname, &c.npub).unwrap_or_default(),
+                comrade: c.comrade,
                 npub: c.npub,
             })
             .collect();
@@ -1626,6 +1772,133 @@ impl ComradeRuntime {
     /// refresher so the shared lock is not held across the network work.
     pub async fn refresh_peer_profiles(&self) -> Result<usize, UiError> {
         self.profile_refresher()?.run().await
+    }
+
+    // ── Comrades (chosen-peer presence — see `comrade_core::presence`) ───────
+
+    /// Choose (or un-choose) a contact as a **comrade**.
+    ///
+    /// What this actually does, stated plainly because it is a disclosure:
+    /// from now on this device tells *that one peer* — nobody else, and no
+    /// relay — when it is online, and it starts believing what they say about
+    /// their own presence. Turning it off sends them a final "offline" so
+    /// their view of us goes dark immediately instead of aging out.
+    ///
+    /// It does **not** subscribe us to their presence: nothing in a
+    /// serverless design can make their device report to us. We see them
+    /// online only once they have marked us too — [`ComradeDto::peer_marked_us`]
+    /// is what a UI shows so that wait is explained rather than mysterious.
+    ///
+    /// Marking a peer we have never saved creates the contact record (you can
+    /// make someone a comrade straight from their conversation). Idempotent.
+    ///
+    /// Must be called from within a Tokio runtime context — the beacon is
+    /// sent by a spawned task so the caller is never blocked on the network.
+    pub fn set_comrade(&self, npub: &str, comrade: bool) -> Result<ContactDto, UiError> {
+        let canonical = self.canonical_contact_npub(npub)?;
+        let peer = parse_pubkey(&canonical)?;
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let contact = store
+            .set_contact_comrade(&canonical, comrade)
+            .and_then(|c| store.flush().map(|()| c))
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        // Tell them straight away, either way: a new comrade shouldn't wait a
+        // heartbeat to see us, and a dropped one shouldn't keep seeing us.
+        let beacon = if comrade {
+            PresenceBeacon::online()
+        } else {
+            PresenceBeacon::offline()
+        };
+        spawn_presence_beacons(self.vault.clone(), vec![peer], beacon);
+
+        // If they had already chosen us, a live beacon of theirs may already
+        // be on file — recorded silently at the time, because presence for
+        // someone we hadn't chosen is not news. Choosing them is the moment
+        // it becomes news, so surface it now rather than leaving the user
+        // waiting on a "transition" that already happened.
+        if comrade && peer_is_online(store, &contact.npub, now_secs()) {
+            let at = store
+                .get_peer_presence(&contact.npub)
+                .ok()
+                .flatten()
+                .map(|p| p.last_seen_at)
+                .unwrap_or_else(now_secs);
+            let _ = self.events.send(BridgeEvent::ComradePresence {
+                name: presence_display_name(store, &contact.npub),
+                peer: contact.npub.clone(),
+                online: true,
+                at,
+            });
+        }
+
+        Ok(ContactDto {
+            name: cached_peer_name(store, &contact.npub),
+            alias: user_alias(&contact.petname, &contact.npub).unwrap_or_default(),
+            npub: contact.npub,
+            comrade: contact.comrade,
+        })
+    }
+
+    /// Every comrade with their live presence, online first, then by most
+    /// recently seen. Empty until the user marks someone — the feature costs
+    /// nothing (no beacons, no state) while nobody is chosen.
+    pub fn comrades(&self) -> Result<Vec<ComradeDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        let mut list: Vec<ComradeDto> = store
+            .list_comrades()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|c| {
+                let presence = store.get_peer_presence(&c.npub).ok().flatten();
+                ComradeDto {
+                    name: cached_peer_name(store, &c.npub),
+                    alias: user_alias(&c.petname, &c.npub).unwrap_or_default(),
+                    online: presence
+                        .as_ref()
+                        .is_some_and(|p| p.online && is_online_at(p.expires_at, now)),
+                    last_seen_at: presence.as_ref().map(|p| p.last_seen_at).unwrap_or(0),
+                    peer_marked_us: presence.as_ref().is_some_and(|p| p.peer_marked_us),
+                    npub: c.npub,
+                }
+            })
+            .collect();
+        list.sort_by(|a, b| {
+            b.online
+                .cmp(&a.online)
+                .then_with(|| b.last_seen_at.cmp(&a.last_seen_at))
+                .then_with(|| a.npub.cmp(&b.npub))
+        });
+        Ok(list)
+    }
+
+    /// A single peer's live presence, or `None` if no beacon has ever arrived
+    /// from them (they haven't marked us, or haven't been online since).
+    pub fn peer_presence(&self, npub: &str) -> Result<Option<PresenceDto>, UiError> {
+        let canonical = self.canonical_contact_npub(npub)?;
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        Ok(store
+            .get_peer_presence(&canonical)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .map(|p| PresenceDto {
+                online: p.online && is_online_at(p.expires_at, now),
+                last_seen_at: p.last_seen_at,
+                peer_marked_us: p.peer_marked_us,
+                peer: p.peer_npub,
+            }))
+    }
+
+    /// Announce this device's presence to every comrade and return how many
+    /// beacons were sent. Frontends call this on foreground/background
+    /// transitions; the heartbeat in [`Self::spawn_event_loops`] keeps it
+    /// fresh in between.
+    ///
+    /// Delegates to [`RuntimeHandles::announce_presence`] — see [`Self::send_dm`]
+    /// for why the network half never runs under the runtime lock.
+    pub async fn announce_presence(&self, online: bool) -> u64 {
+        self.handles().announce_presence(online).await
     }
 
     // ── Journal (wellbeing pillar #1 — strictly local, never networked) ──────
@@ -2247,6 +2520,42 @@ impl RuntimeHandles {
         Ok(dto)
     }
 
+    /// Announce presence to every comrade, one gift-wrapped beacon each, and
+    /// return how many were accepted by a relay.
+    ///
+    /// Never fails loudly: presence is a courtesy, and a relay hiccup must
+    /// not surface as an error in a UI that only ever calls this in the
+    /// background. Sends are sequential — the comrade list is a handful of
+    /// people by design, and a burst of parallel gift wraps buys nothing.
+    pub async fn announce_presence(&self, online: bool) -> u64 {
+        let Some(vault) = self.vault.clone() else {
+            return 0;
+        };
+        let Some(store) = self.store.as_deref() else {
+            return 0;
+        };
+        let peers = comrade_peers(store);
+        if peers.is_empty() {
+            return 0;
+        }
+        let beacon = if online {
+            PresenceBeacon::online()
+        } else {
+            PresenceBeacon::offline()
+        };
+        let Ok(json) = beacon.to_json() else {
+            return 0;
+        };
+        let mut sent = 0u64;
+        for peer in peers {
+            match vault.send_dm(&peer, &json).await {
+                Ok(_) => sent += 1,
+                Err(e) => tracing::debug!(%peer, "presence beacon not sent: {e}"),
+            }
+        }
+        sent
+    }
+
     pub async fn broadcast_chitthi(
         &self,
         content: &str,
@@ -2802,6 +3111,201 @@ fn share_profile_on_accept(
     });
 }
 
+// ── Comrade presence (see `comrade_core::presence` for the wire protocol) ────
+
+/// The public keys of every contact marked as a comrade. Unparseable keys are
+/// skipped rather than failing the whole fan-out — one corrupt row must not
+/// silence presence for everyone else.
+fn comrade_peers(store: &comrade_storage::EncryptedStore) -> Vec<PublicKey> {
+    store
+        .list_comrades()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|c| PublicKey::parse(&c.npub).ok())
+        .collect()
+}
+
+/// Fire-and-forget one `beacon` to each of `peers` over the encrypted DM
+/// channel. Holds nothing but the vault engine, so it is safe to call
+/// immediately before tearing the runtime down (see
+/// [`ComradeRuntime::spawn_farewell_beacons`]).
+fn spawn_presence_beacons(
+    vault: Option<Arc<VaultEngine>>,
+    peers: Vec<PublicKey>,
+    beacon: PresenceBeacon,
+) {
+    let Some(vault) = vault else { return };
+    if peers.is_empty() {
+        return;
+    }
+    let Ok(json) = beacon.to_json() else { return };
+    tokio::spawn(async move {
+        for peer in peers {
+            if let Err(e) = vault.send_dm(&peer, &json).await {
+                tracing::debug!(%peer, "presence beacon not sent: {e}");
+            }
+        }
+    });
+}
+
+/// Whether `peer`'s last beacon still claims them online at `now`. The one
+/// read path for stored presence, so an expired claim can never render as a
+/// green dot just because no sweep has run yet.
+fn peer_is_online(store: &comrade_storage::EncryptedStore, peer_npub: &str, now: u64) -> bool {
+    store
+        .get_peer_presence(peer_npub)
+        .ok()
+        .flatten()
+        .is_some_and(|p| p.online && is_online_at(p.expires_at, now))
+}
+
+/// Age out comrades whose "online" claim has lapsed, emitting one
+/// [`BridgeEvent::ComradePresence`] per transition so a UI dot goes grey
+/// without the peer having to send anything. This is the half of presence
+/// that handles the common, silent case: a phone that runs out of battery,
+/// loses signal, or is force-killed never sends a goodbye.
+fn expire_stale_presence(
+    store: Option<&comrade_storage::EncryptedStore>,
+    tx: &broadcast::Sender<BridgeEvent>,
+) {
+    let Some(store) = store else { return };
+    let now = now_secs();
+    let mut wrote = false;
+    for mut row in store.list_peer_presence().unwrap_or_default() {
+        if !row.online || is_online_at(row.expires_at, now) {
+            continue;
+        }
+        let expired_at = row.expires_at;
+        row.online = false;
+        if let Err(e) = store.set_peer_presence(&row) {
+            warn!("failed to expire stale presence: {e}");
+            continue;
+        }
+        wrote = true;
+        // Only *our* comrades are news; a lapsed row for someone we have
+        // since un-chosen is quietly cleaned up, not announced.
+        if store
+            .get_contact(&row.peer_npub)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.comrade)
+        {
+            let _ = tx.send(BridgeEvent::ComradePresence {
+                name: presence_display_name(store, &row.peer_npub),
+                peer: row.peer_npub,
+                online: false,
+                at: expired_at,
+            });
+        }
+    }
+    if wrote {
+        if let Err(e) = store.flush() {
+            warn!("failed to flush expired presence: {e}");
+        }
+    }
+}
+
+/// How a peer should be titled in a presence notification: the alias the user
+/// gave them, else the handle they published, else nothing (the frontend
+/// falls back to the shortened key, exactly as the chat list does).
+fn presence_display_name(
+    store: &comrade_storage::EncryptedStore,
+    peer_npub: &str,
+) -> Option<String> {
+    store
+        .get_contact(peer_npub)
+        .ok()
+        .flatten()
+        .and_then(|c| user_alias(&c.petname, peer_npub))
+        .or_else(|| cached_peer_name(store, peer_npub))
+}
+
+/// Apply one incoming [`PresenceBeacon`] from an accepted conversation:
+/// persist what it claims, emit an event on a real transition, and answer a
+/// comrade's fresh "I'm here" so they don't wait a heartbeat to see us.
+///
+/// Three rules keep this honest:
+///  * **Expired beacons are ignored entirely.** Relays redeliver
+///    at-least-once and the inbox backfills days on every launch — a replayed
+///    beacon must never light a green dot (`presence_expires_at` measures
+///    from the *send* time, so an old one is already spent).
+///  * **Only transitions are events.** A heartbeat from a peer already known
+///    to be online is state, not news, so it never re-notifies.
+///  * **Only chosen comrades are announced.** A beacon from someone we
+///    haven't marked is still recorded — it is the proof that *they* marked
+///    us, which is what makes the mutual model discoverable — but it raises
+///    nothing.
+fn handle_presence_beacon(
+    vault: &Arc<VaultEngine>,
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    tx: &broadcast::Sender<BridgeEvent>,
+    peer_npub: &str,
+    sender_hex: &str,
+    created_at: u64,
+    beacon: PresenceBeacon,
+) {
+    let Some(store) = store else { return };
+    let now = now_secs();
+    let expires_at = presence_expires_at(beacon.state, created_at, beacon.ttl_secs);
+    let online = beacon.state.is_online() && is_online_at(expires_at, now);
+    if beacon.state.is_online() && !online {
+        tracing::debug!(peer = %peer_npub, created_at, "dropping stale presence beacon");
+        return;
+    }
+
+    let previous = store.get_peer_presence(peer_npub).ok().flatten();
+    // An out-of-order beacon (relays do not guarantee ordering) must not
+    // rewind what a newer one already told us.
+    if previous
+        .as_ref()
+        .is_some_and(|p| p.last_seen_at > created_at)
+    {
+        tracing::debug!(peer = %peer_npub, created_at, "dropping out-of-order presence beacon");
+        return;
+    }
+    let was_online = previous
+        .as_ref()
+        .is_some_and(|p| p.online && is_online_at(p.expires_at, now));
+
+    let row = comrade_storage::PeerPresence {
+        peer_npub: peer_npub.to_string(),
+        online,
+        last_seen_at: created_at,
+        expires_at,
+        // Any beacon at all proves they chose us: beacons only go to comrades.
+        peer_marked_us: true,
+    };
+    if let Err(e) = store.set_peer_presence(&row).and_then(|()| store.flush()) {
+        warn!("failed to persist peer presence: {e}");
+    }
+
+    let is_our_comrade = store
+        .get_contact(peer_npub)
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.comrade);
+    if is_our_comrade && online != was_online {
+        let _ = tx.send(BridgeEvent::ComradePresence {
+            peer: peer_npub.to_string(),
+            name: presence_display_name(store, peer_npub),
+            online,
+            at: created_at,
+        });
+    }
+
+    // Answer only our own comrades: replying to someone we haven't chosen
+    // would disclose our presence to a peer we never opted into telling.
+    if is_our_comrade && beacon.wants_reply() {
+        if let Ok(peer) = PublicKey::parse(sender_hex) {
+            spawn_presence_beacons(
+                Some(vault.clone()),
+                vec![peer],
+                PresenceBeacon::online_reply(),
+            );
+        }
+    }
+}
+
 /// Fire a delivered receipt back to `sender_hex` for `message_id` (best-effort;
 /// only ever called for accepted conversations).
 fn send_delivered_receipt(vault: &Arc<VaultEngine>, sender_hex: &str, message_id: &str) {
@@ -2957,7 +3461,28 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 3) Call signaling — only from an established conversation, so a stranger
+    // 3) Presence beacon — a comrade saying "I'm here" / "I'm going". Only
+    //    from an established conversation: a stranger must not be able to
+    //    push presence state (or trigger a reply that discloses ours) before
+    //    their message request is accepted. Returns either way, so a beacon
+    //    from an unaccepted peer is dropped silently rather than surfacing as
+    //    a message request full of JSON.
+    if let Some(beacon) = parse_presence_beacon(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            handle_presence_beacon(
+                vault,
+                store,
+                tx,
+                &peer_npub,
+                &msg.sender_pubkey,
+                msg.created_at,
+                beacon,
+            );
+        }
+        return;
+    }
+
+    // 4) Call signaling — only from an established conversation, so a stranger
     //    cannot ring you before their message request is accepted. Stale or
     //    already-dispatched signals are dropped: offers older than the ring
     //    timeout are meaningless, and a redelivered wrapper (relay
@@ -2983,7 +3508,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 4) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 5) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         if let Some(store) = store {
@@ -3041,7 +3566,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 5) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 6) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
     if let Some(store) = store {
@@ -3976,6 +4501,7 @@ mod tests {
                 npub: peer.clone(),
                 petname: placeholder.clone(),
                 relays: vec![],
+                comrade: false,
             })
             .unwrap();
         store
@@ -4716,6 +5242,340 @@ mod tests {
             }
             other => panic!("expected PeerProfileUpdated, got {other:?}"),
         }
+    }
+
+    // ── Comrade presence ─────────────────────────────────────────────────────
+
+    /// An incoming DM stamped with a caller-chosen send time — presence is
+    /// all about freshness, so unlike [`incoming`] (fixed at epoch+3, which
+    /// every beacon would read as long expired) these tests set it per case.
+    fn incoming_at(
+        sender_hex: &str,
+        event_id: &str,
+        content: &str,
+        created_at: u64,
+    ) -> VaultMessage {
+        VaultMessage {
+            created_at,
+            ..incoming(sender_hex, event_id, content)
+        }
+    }
+
+    /// A store with `peer` as an accepted conversation, optionally marked as
+    /// one of our comrades — the two axes every presence rule turns on.
+    fn accepted_peer(store: &comrade_storage::EncryptedStore, peer: &str, our_comrade: bool) {
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.to_string(),
+                state: "accepted".into(),
+                profile_shared: true,
+                updated_at: 1,
+            })
+            .unwrap();
+        if our_comrade {
+            store.set_contact_comrade(peer, true).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn choosing_a_comrade_is_opt_in_reversible_and_visible_everywhere() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        assert!(matches!(rt.comrades(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.set_comrade("npub1x", true),
+            Err(UiError::VaultLocked)
+        ));
+
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        assert!(
+            rt.comrades().unwrap().is_empty(),
+            "nobody is chosen by default"
+        );
+
+        // Marking works straight from a conversation — no prior contact row.
+        let marked = rt.set_comrade(&peer, true).unwrap();
+        assert!(marked.comrade);
+        let comrades = rt.comrades().unwrap();
+        assert_eq!(comrades.len(), 1);
+        assert_eq!(comrades[0].npub, peer);
+        assert!(!comrades[0].online, "no beacon yet ⇒ not online");
+        assert_eq!(comrades[0].last_seen_at, 0);
+        assert!(
+            !comrades[0].peer_marked_us,
+            "choosing someone says nothing about whether they chose us"
+        );
+        assert!(rt.list_contacts().unwrap()[0].comrade);
+
+        // Editing the alias must not silently un-choose them.
+        rt.set_contact_alias(&peer, "Ana").unwrap();
+        assert!(rt.list_contacts().unwrap()[0].comrade);
+        assert_eq!(rt.comrades().unwrap()[0].alias, "Ana");
+
+        // …and un-choosing leaves the contact (and its alias) intact.
+        let unmarked = rt.set_comrade(&peer, false).unwrap();
+        assert!(!unmarked.comrade);
+        assert!(rt.comrades().unwrap().is_empty());
+        assert_eq!(rt.list_contacts().unwrap()[0].alias, "Ana");
+
+        assert!(matches!(
+            rt.set_comrade("junk", true),
+            Err(UiError::Engine(_))
+        ));
+        assert!(matches!(rt.peer_presence("junk"), Err(UiError::Engine(_))));
+    }
+
+    #[tokio::test]
+    async fn a_comrade_coming_online_is_announced_once_and_a_heartbeat_is_not() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = CallSignalDedup::new();
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, true);
+        let now = now_secs();
+
+        let beacon = PresenceBeacon::online().to_json().unwrap();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&hex, "e1", &beacon, now),
+        );
+        match rx.try_recv().unwrap() {
+            BridgeEvent::ComradePresence {
+                peer: p,
+                online,
+                at,
+                ..
+            } => {
+                assert_eq!(p, peer);
+                assert!(online);
+                assert_eq!(at, now);
+            }
+            other => panic!("expected ComradePresence, got {other:?}"),
+        }
+        // A beacon is never a chat message, a request, or a stored DM.
+        assert!(store.messages_with(&peer).unwrap().is_empty());
+
+        // The heartbeat that follows is state, not news.
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&hex, "e2", &beacon, now + 1),
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a heartbeat from someone already online must not re-notify"
+        );
+
+        // Going offline is a transition, so it is announced.
+        let bye = PresenceBeacon::offline().to_json().unwrap();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&hex, "e3", &bye, now + 2),
+        );
+        match rx.try_recv().unwrap() {
+            BridgeEvent::ComradePresence { online, .. } => assert!(!online),
+            other => panic!("expected an offline ComradePresence, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replayed_or_out_of_order_beacon_never_resurrects_a_green_dot() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = CallSignalDedup::new();
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, true);
+        let now = now_secs();
+        let beacon = PresenceBeacon::online().to_json().unwrap();
+
+        // The inbox backfills up to two days on every launch; that replay
+        // must not claim someone is online right now.
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&hex, "old", &beacon, now - 2 * 24 * 60 * 60),
+        );
+        assert!(rx.try_recv().is_err(), "a stale beacon emits nothing");
+        assert!(store.get_peer_presence(&peer).unwrap().is_none());
+
+        // A fresh one does, and a late-arriving *older* beacon can't undo it.
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&hex, "new", &beacon, now),
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::ComradePresence { online: true, .. }
+        ));
+        let stale_bye = PresenceBeacon::offline().to_json().unwrap();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&hex, "late-bye", &stale_bye, now - 60),
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an out-of-order goodbye must not rewind fresher state"
+        );
+        assert!(store.get_peer_presence(&peer).unwrap().unwrap().online);
+    }
+
+    #[tokio::test]
+    async fn presence_from_a_stranger_is_dropped_and_from_a_non_comrade_is_silent() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = CallSignalDedup::new();
+        let now = now_secs();
+        let beacon = PresenceBeacon::online().to_json().unwrap();
+
+        // An unaccepted stranger cannot push presence state at us — and their
+        // beacon must not leak into the requests bucket as raw JSON either.
+        let (stranger_hex, stranger_npub) = stranger();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&stranger_hex, "s1", &beacon, now),
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(store.get_peer_presence(&stranger_npub).unwrap().is_none());
+        assert!(store.messages_with(&stranger_npub).unwrap().is_empty());
+        assert!(store
+            .get_conversation_meta(&stranger_npub)
+            .unwrap()
+            .is_none());
+
+        // An accepted peer we have *not* chosen: recorded (it proves they
+        // chose us — the reciprocity hint) but never announced.
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            incoming_at(&hex, "a1", &beacon, now),
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "presence for someone we didn't choose is not news"
+        );
+        let recorded = store.get_peer_presence(&peer).unwrap().unwrap();
+        assert!(recorded.online);
+        assert!(recorded.peer_marked_us);
+    }
+
+    #[tokio::test]
+    async fn an_online_claim_ages_out_on_its_own_when_the_peer_just_vanishes() {
+        // The common case: no goodbye ever arrives (battery died, signal
+        // lost, app force-killed). Both the sweep and every read must stop
+        // claiming the peer is online once their own deadline passes.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        rt.set_comrade(&peer, true).unwrap();
+
+        let store = rt.ui.store_arc().unwrap();
+        let expired_at = now_secs() - 5;
+        store
+            .set_peer_presence(&comrade_storage::PeerPresence {
+                peer_npub: peer.clone(),
+                online: true,
+                last_seen_at: expired_at - 480,
+                expires_at: expired_at,
+                peer_marked_us: true,
+            })
+            .unwrap();
+
+        // Reads are computed against the clock, so the stale row never shows
+        // as online even before anything sweeps it.
+        assert!(!rt.comrades().unwrap()[0].online);
+        assert!(!rt.peer_presence(&peer).unwrap().unwrap().online);
+
+        let (tx, mut rx) = broadcast::channel(16);
+        expire_stale_presence(Some(&store), &tx);
+        match rx.try_recv().unwrap() {
+            BridgeEvent::ComradePresence {
+                peer: p,
+                online,
+                at,
+                ..
+            } => {
+                assert_eq!(p, peer);
+                assert!(!online);
+                assert_eq!(at, expired_at);
+            }
+            other => panic!("expected an aged-out ComradePresence, got {other:?}"),
+        }
+        assert!(!store.get_peer_presence(&peer).unwrap().unwrap().online);
+
+        // Idempotent: a second sweep has nothing left to announce.
+        expire_stale_presence(Some(&store), &tx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn the_chat_list_shows_presence_only_for_chosen_comrades() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        let store = rt.ui.store_arc().unwrap();
+        store
+            .save_message(&comrade_storage::StoredMessage {
+                id: "m1".into(),
+                peer_npub: peer.clone(),
+                content: "hi".into(),
+                created_at: 1,
+                outgoing: false,
+                status: None,
+                reply_to: None,
+            })
+            .unwrap();
+        store
+            .set_peer_presence(&comrade_storage::PeerPresence {
+                peer_npub: peer.clone(),
+                online: true,
+                last_seen_at: now_secs(),
+                expires_at: now_secs() + 300,
+                peer_marked_us: true,
+            })
+            .unwrap();
+
+        // They've marked us, so we have live presence for them — but we
+        // haven't chosen them, so the chat list claims nothing.
+        let before = &rt.conversations().unwrap()[0];
+        assert!(!before.comrade);
+        assert!(!before.online);
+
+        rt.set_comrade(&peer, true).unwrap();
+        let after = &rt.conversations().unwrap()[0];
+        assert!(after.comrade);
+        assert!(after.online);
     }
 
     // ── T1: call-signal freshness + dedup ────────────────────────────────────
