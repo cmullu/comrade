@@ -59,6 +59,7 @@ extension BridgeEventPatterns on BridgeEvent {
         incomingMessageRequest,
     TResult Function(BridgeEvent_MessageStatus value)? messageStatus,
     TResult Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
+    TResult Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
     required TResult orElse(),
@@ -81,6 +82,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return messageStatus(_that);
       case BridgeEvent_PeerProfileUpdated() when peerProfileUpdated != null:
         return peerProfileUpdated(_that);
+      case BridgeEvent_ComradePresence() when comradePresence != null:
+        return comradePresence(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -117,6 +120,8 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(BridgeEvent_MessageStatus value) messageStatus,
     required TResult Function(BridgeEvent_PeerProfileUpdated value)
         peerProfileUpdated,
+    required TResult Function(BridgeEvent_ComradePresence value)
+        comradePresence,
     required TResult Function(BridgeEvent_MeshStatusChanged value)
         meshStatusChanged,
     required TResult Function(BridgeEvent_LedgerUpdated value) ledgerUpdated,
@@ -137,6 +142,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return messageStatus(_that);
       case BridgeEvent_PeerProfileUpdated():
         return peerProfileUpdated(_that);
+      case BridgeEvent_ComradePresence():
+        return comradePresence(_that);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated():
@@ -167,6 +174,7 @@ extension BridgeEventPatterns on BridgeEvent {
         incomingMessageRequest,
     TResult? Function(BridgeEvent_MessageStatus value)? messageStatus,
     TResult? Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
+    TResult? Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult? Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult? Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
   }) {
@@ -188,6 +196,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return messageStatus(_that);
       case BridgeEvent_PeerProfileUpdated() when peerProfileUpdated != null:
         return peerProfileUpdated(_that);
+      case BridgeEvent_ComradePresence() when comradePresence != null:
+        return comradePresence(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -219,6 +229,8 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(String peer, List<String> messageIds, String status)?
         messageStatus,
     TResult Function(String peer, String? name)? peerProfileUpdated,
+    TResult Function(String peer, String? name, bool online, BigInt at)?
+        comradePresence,
     TResult Function(MeshStatusDto field0)? meshStatusChanged,
     TResult Function(String ledger)? ledgerUpdated,
     required TResult orElse(),
@@ -241,6 +253,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return messageStatus(_that.peer, _that.messageIds, _that.status);
       case BridgeEvent_PeerProfileUpdated() when peerProfileUpdated != null:
         return peerProfileUpdated(_that.peer, _that.name);
+      case BridgeEvent_ComradePresence() when comradePresence != null:
+        return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -274,6 +288,8 @@ extension BridgeEventPatterns on BridgeEvent {
             String peer, List<String> messageIds, String status)
         messageStatus,
     required TResult Function(String peer, String? name) peerProfileUpdated,
+    required TResult Function(String peer, String? name, bool online, BigInt at)
+        comradePresence,
     required TResult Function(MeshStatusDto field0) meshStatusChanged,
     required TResult Function(String ledger) ledgerUpdated,
   }) {
@@ -293,6 +309,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return messageStatus(_that.peer, _that.messageIds, _that.status);
       case BridgeEvent_PeerProfileUpdated():
         return peerProfileUpdated(_that.peer, _that.name);
+      case BridgeEvent_ComradePresence():
+        return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated():
@@ -322,6 +340,8 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(String peer, List<String> messageIds, String status)?
         messageStatus,
     TResult? Function(String peer, String? name)? peerProfileUpdated,
+    TResult? Function(String peer, String? name, bool online, BigInt at)?
+        comradePresence,
     TResult? Function(MeshStatusDto field0)? meshStatusChanged,
     TResult? Function(String ledger)? ledgerUpdated,
   }) {
@@ -343,6 +363,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return messageStatus(_that.peer, _that.messageIds, _that.status);
       case BridgeEvent_PeerProfileUpdated() when peerProfileUpdated != null:
         return peerProfileUpdated(_that.peer, _that.name);
+      case BridgeEvent_ComradePresence() when comradePresence != null:
+        return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -845,6 +867,95 @@ class _$BridgeEvent_PeerProfileUpdatedCopyWithImpl<$Res>
           ? _self.name
           : name // ignore: cast_nullable_to_non_nullable
               as String?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_ComradePresence extends BridgeEvent {
+  const BridgeEvent_ComradePresence(
+      {required this.peer, this.name, required this.online, required this.at})
+      : super._();
+
+  final String peer;
+  final String? name;
+  final bool online;
+  final BigInt at;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_ComradePresenceCopyWith<BridgeEvent_ComradePresence>
+      get copyWith => _$BridgeEvent_ComradePresenceCopyWithImpl<
+          BridgeEvent_ComradePresence>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_ComradePresence &&
+            (identical(other.peer, peer) || other.peer == peer) &&
+            (identical(other.name, name) || other.name == name) &&
+            (identical(other.online, online) || other.online == online) &&
+            (identical(other.at, at) || other.at == at));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, peer, name, online, at);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.comradePresence(peer: $peer, name: $name, online: $online, at: $at)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_ComradePresenceCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_ComradePresenceCopyWith(
+          BridgeEvent_ComradePresence value,
+          $Res Function(BridgeEvent_ComradePresence) _then) =
+      _$BridgeEvent_ComradePresenceCopyWithImpl;
+  @useResult
+  $Res call({String peer, String? name, bool online, BigInt at});
+}
+
+/// @nodoc
+class _$BridgeEvent_ComradePresenceCopyWithImpl<$Res>
+    implements $BridgeEvent_ComradePresenceCopyWith<$Res> {
+  _$BridgeEvent_ComradePresenceCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_ComradePresence _self;
+  final $Res Function(BridgeEvent_ComradePresence) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? peer = null,
+    Object? name = freezed,
+    Object? online = null,
+    Object? at = null,
+  }) {
+    return _then(BridgeEvent_ComradePresence(
+      peer: null == peer
+          ? _self.peer
+          : peer // ignore: cast_nullable_to_non_nullable
+              as String,
+      name: freezed == name
+          ? _self.name
+          : name // ignore: cast_nullable_to_non_nullable
+              as String?,
+      online: null == online
+          ? _self.online
+          : online // ignore: cast_nullable_to_non_nullable
+              as bool,
+      at: null == at
+          ? _self.at
+          : at // ignore: cast_nullable_to_non_nullable
+              as BigInt,
     ));
   }
 }

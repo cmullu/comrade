@@ -100,6 +100,21 @@ Future<String> broadcastChitthi({required String content, String? replyTo}) =>
     RustLib.instance.api
         .crateApiBroadcastChitthi(content: content, replyTo: replyTo);
 
+/// Broadcast a Chitthi under a throwaway or scoped persona instead of this
+/// device's identity — the anonymous-thoughts path.
+///
+/// `scope` of `None` signs the post with a key used exactly once, so two
+/// anonymous Chitthis cannot be linked to each other. `Some(label)` derives a
+/// stable persona for that label, so replies can reach the same pseudonym while
+/// it stays unlinkable to the identity. See `docs/BITCHAT_ADOPTION.md` for what
+/// this does and does not hide.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<String> broadcastAnonymousChitthi(
+        {required String content, String? scope}) =>
+    RustLib.instance.api
+        .crateApiBroadcastAnonymousChitthi(content: content, scope: scope);
+
 /// See [`broadcast_chitthi`] for the lock discipline.
 Future<MessageDto> sendDm({required String target, required String content}) =>
     RustLib.instance.api.crateApiSendDm(target: target, content: content);
@@ -109,6 +124,35 @@ Future<MessageDto> sendDmReply(
         {required String target, required String content, String? replyTo}) =>
     RustLib.instance.api.crateApiSendDmReply(
         target: target, content: content, replyTo: replyTo);
+
+/// Retry every DM sitting in the sender outbox because no relay would take it.
+/// Returns how many a relay accepted this pass.
+///
+/// A background loop already flushes on a cadence (and once at launch); call
+/// this when the platform reports connectivity came back, so a queued message
+/// goes out immediately instead of on the next tick.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<BigInt> flushOutbox() => RustLib.instance.api.crateApiFlushOutbox();
+
+/// How many DMs are waiting for a relay that will take them — for a "queued"
+/// indicator in the chat list.
+Future<BigInt> outboxPending() => RustLib.instance.api.crateApiOutboxPending();
+
+/// **Panic wipe.** Destroy every locally stored value — identity keys, DM
+/// history, journal, Tara thread, queued mail — then re-lock, leaving the
+/// runtime as it was before its first unlock.
+///
+/// Irreversible, and deliberately not a duress feature: it wipes rather than
+/// hides, and it needs the app open and unlocked. After it returns, send the
+/// user back to onboarding.
+Future<void> panicWipe() => RustLib.instance.api.crateApiPanicWipe();
+
+/// Device-local delivery counters — bare tallies with no identities, ids,
+/// content, or timestamps, for a diagnostics screen. Nothing here is ever
+/// uploaded; [`panic_wipe`] clears them.
+Future<List<MetricDto>> metricsSnapshot() =>
+    RustLib.instance.api.crateApiMetricsSnapshot();
 
 Future<List<ConversationDto>> conversations() =>
     RustLib.instance.api.crateApiConversations();
@@ -162,6 +206,37 @@ Future<List<FoundProfileDto>> searchProfiles({required String query}) =>
 /// round-trip (AUDIT P2).
 Future<BigInt> refreshPeerProfiles() =>
     RustLib.instance.api.crateApiRefreshPeerProfiles();
+
+/// Choose (or un-choose) a contact as a comrade.
+///
+/// What this discloses, stated plainly: from now on this device tells *that one
+/// peer* — nobody else, and no relay — when it is online, and it starts
+/// believing what they say about their own presence. It does **not** subscribe
+/// us to theirs; we see them only once they have marked us back, which is what
+/// [`ComradeDto`]'s `peer_marked_us` is for.
+///
+/// Async for the same reason as [`accept_request`]: the beacon telling that
+/// peer about the change is a background `tokio::spawn`, which needs a live
+/// reactor.
+Future<ContactDto> setComrade({required String npub, required bool comrade}) =>
+    RustLib.instance.api.crateApiSetComrade(npub: npub, comrade: comrade);
+
+/// Every comrade with their live presence, online first.
+Future<List<ComradeDto>> comrades() => RustLib.instance.api.crateApiComrades();
+
+/// One peer's live presence, or `None` if no beacon ever arrived from them
+/// (they haven't chosen us back, or haven't been online since).
+Future<PresenceDto?> peerPresence({required String npub}) =>
+    RustLib.instance.api.crateApiPeerPresence(npub: npub);
+
+/// Announce this device's presence to every comrade, returning how many beacons
+/// a relay accepted. Frontends call this on foreground/background transitions;
+/// the native heartbeat covers the rest. Never fails — presence is a courtesy,
+/// so a locked vault is a quiet `0`, not an error.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<BigInt> announcePresence({required bool online}) =>
+    RustLib.instance.api.crateApiAnnouncePresence(online: online);
 
 Future<JournalEntryDto> addJournalEntry({required String text, String? mood}) =>
     RustLib.instance.api.crateApiAddJournalEntry(text: text, mood: mood);
@@ -336,6 +411,12 @@ sealed class BridgeEvent with _$BridgeEvent {
     required String peer,
     String? name,
   }) = BridgeEvent_PeerProfileUpdated;
+  const factory BridgeEvent.comradePresence({
+    required String peer,
+    String? name,
+    required bool online,
+    required BigInt at,
+  }) = BridgeEvent_ComradePresence;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;
@@ -513,19 +594,61 @@ class ChitthiDto {
           replyTo == other.replyTo;
 }
 
+class ComradeDto {
+  final String npub;
+  final String alias;
+  final String? name;
+  final bool online;
+  final BigInt lastSeenAt;
+  final bool peerMarkedUs;
+
+  const ComradeDto({
+    required this.npub,
+    required this.alias,
+    this.name,
+    required this.online,
+    required this.lastSeenAt,
+    required this.peerMarkedUs,
+  });
+
+  @override
+  int get hashCode =>
+      npub.hashCode ^
+      alias.hashCode ^
+      name.hashCode ^
+      online.hashCode ^
+      lastSeenAt.hashCode ^
+      peerMarkedUs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ComradeDto &&
+          runtimeType == other.runtimeType &&
+          npub == other.npub &&
+          alias == other.alias &&
+          name == other.name &&
+          online == other.online &&
+          lastSeenAt == other.lastSeenAt &&
+          peerMarkedUs == other.peerMarkedUs;
+}
+
 class ContactDto {
   final String npub;
   final String alias;
   final String? name;
+  final bool comrade;
 
   const ContactDto({
     required this.npub,
     required this.alias,
     this.name,
+    required this.comrade,
   });
 
   @override
-  int get hashCode => npub.hashCode ^ alias.hashCode ^ name.hashCode;
+  int get hashCode =>
+      npub.hashCode ^ alias.hashCode ^ name.hashCode ^ comrade.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -534,7 +657,8 @@ class ContactDto {
           runtimeType == other.runtimeType &&
           npub == other.npub &&
           alias == other.alias &&
-          name == other.name;
+          name == other.name &&
+          comrade == other.comrade;
 }
 
 class ConversationDto {
@@ -544,6 +668,8 @@ class ConversationDto {
   final String lastMessage;
   final BigInt lastAt;
   final bool lastOutgoing;
+  final bool comrade;
+  final bool online;
 
   const ConversationDto({
     required this.peer,
@@ -552,6 +678,8 @@ class ConversationDto {
     required this.lastMessage,
     required this.lastAt,
     required this.lastOutgoing,
+    required this.comrade,
+    required this.online,
   });
 
   @override
@@ -561,7 +689,9 @@ class ConversationDto {
       peerName.hashCode ^
       lastMessage.hashCode ^
       lastAt.hashCode ^
-      lastOutgoing.hashCode;
+      lastOutgoing.hashCode ^
+      comrade.hashCode ^
+      online.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -573,7 +703,9 @@ class ConversationDto {
           peerName == other.peerName &&
           lastMessage == other.lastMessage &&
           lastAt == other.lastAt &&
-          lastOutgoing == other.lastOutgoing;
+          lastOutgoing == other.lastOutgoing &&
+          comrade == other.comrade &&
+          online == other.online;
 }
 
 class CrisisResourceDto {
@@ -907,6 +1039,58 @@ class MessageRequestDto {
           peer == other.peer &&
           lastMessage == other.lastMessage &&
           lastAt == other.lastAt;
+}
+
+class MetricDto {
+  final String key;
+  final BigInt value;
+
+  const MetricDto({
+    required this.key,
+    required this.value,
+  });
+
+  @override
+  int get hashCode => key.hashCode ^ value.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MetricDto &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          value == other.value;
+}
+
+class PresenceDto {
+  final String peer;
+  final bool online;
+  final BigInt lastSeenAt;
+  final bool peerMarkedUs;
+
+  const PresenceDto({
+    required this.peer,
+    required this.online,
+    required this.lastSeenAt,
+    required this.peerMarkedUs,
+  });
+
+  @override
+  int get hashCode =>
+      peer.hashCode ^
+      online.hashCode ^
+      lastSeenAt.hashCode ^
+      peerMarkedUs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PresenceDto &&
+          runtimeType == other.runtimeType &&
+          peer == other.peer &&
+          online == other.online &&
+          lastSeenAt == other.lastSeenAt &&
+          peerMarkedUs == other.peerMarkedUs;
 }
 
 class ProfileDto {

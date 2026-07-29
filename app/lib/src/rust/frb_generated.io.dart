@@ -57,6 +57,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MessageRequestDto dco_decode_box_autoadd_message_request_dto(dynamic raw);
 
   @protected
+  PresenceDto dco_decode_box_autoadd_presence_dto(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_u_16(dynamic raw);
 
   @protected
@@ -79,6 +82,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ChitthiDto dco_decode_chitthi_dto(dynamic raw);
+
+  @protected
+  ComradeDto dco_decode_comrade_dto(dynamic raw);
 
   @protected
   ContactDto dco_decode_contact_dto(dynamic raw);
@@ -129,6 +135,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ChitthiDto> dco_decode_list_chitthi_dto(dynamic raw);
 
   @protected
+  List<ComradeDto> dco_decode_list_comrade_dto(dynamic raw);
+
+  @protected
   List<ContactDto> dco_decode_list_contact_dto(dynamic raw);
 
   @protected
@@ -154,6 +163,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<MessageRequestDto> dco_decode_list_message_request_dto(dynamic raw);
+
+  @protected
+  List<MetricDto> dco_decode_list_metric_dto(dynamic raw);
 
   @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
@@ -189,16 +201,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MessageRequestDto dco_decode_message_request_dto(dynamic raw);
 
   @protected
+  MetricDto dco_decode_metric_dto(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
   IdentityDto? dco_decode_opt_box_autoadd_identity_dto(dynamic raw);
 
   @protected
+  PresenceDto? dco_decode_opt_box_autoadd_presence_dto(dynamic raw);
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_16(dynamic raw);
 
   @protected
   List<String>? dco_decode_opt_list_String(dynamic raw);
+
+  @protected
+  PresenceDto dco_decode_presence_dto(dynamic raw);
 
   @protected
   ProfileDto dco_decode_profile_dto(dynamic raw);
@@ -276,6 +297,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  PresenceDto sse_decode_box_autoadd_presence_dto(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
@@ -298,6 +322,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ChitthiDto sse_decode_chitthi_dto(SseDeserializer deserializer);
+
+  @protected
+  ComradeDto sse_decode_comrade_dto(SseDeserializer deserializer);
 
   @protected
   ContactDto sse_decode_contact_dto(SseDeserializer deserializer);
@@ -350,6 +377,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ChitthiDto> sse_decode_list_chitthi_dto(SseDeserializer deserializer);
 
   @protected
+  List<ComradeDto> sse_decode_list_comrade_dto(SseDeserializer deserializer);
+
+  @protected
   List<ContactDto> sse_decode_list_contact_dto(SseDeserializer deserializer);
 
   @protected
@@ -382,6 +412,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   List<MessageRequestDto> sse_decode_list_message_request_dto(
       SseDeserializer deserializer);
+
+  @protected
+  List<MetricDto> sse_decode_list_metric_dto(SseDeserializer deserializer);
 
   @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
@@ -422,6 +455,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  MetricDto sse_decode_metric_dto(SseDeserializer deserializer);
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
@@ -429,10 +465,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  PresenceDto? sse_decode_opt_box_autoadd_presence_dto(
+      SseDeserializer deserializer);
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
+
+  @protected
+  PresenceDto sse_decode_presence_dto(SseDeserializer deserializer);
 
   @protected
   ProfileDto sse_decode_profile_dto(SseDeserializer deserializer);
@@ -516,6 +559,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       MessageRequestDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_presence_dto(
+      PresenceDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer);
 
   @protected
@@ -539,6 +586,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_chitthi_dto(ChitthiDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_comrade_dto(ComradeDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_contact_dto(ContactDto self, SseSerializer serializer);
@@ -596,6 +646,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       List<ChitthiDto> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_comrade_dto(
+      List<ComradeDto> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_contact_dto(
       List<ContactDto> self, SseSerializer serializer);
 
@@ -630,6 +684,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_message_request_dto(
       List<MessageRequestDto> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_metric_dto(
+      List<MetricDto> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
@@ -672,6 +730,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       MessageRequestDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_metric_dto(MetricDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
@@ -679,10 +740,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       IdentityDto? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_presence_dto(
+      PresenceDto? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_presence_dto(PresenceDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_profile_dto(ProfileDto self, SseSerializer serializer);

@@ -32,6 +32,25 @@
 /// names the missing export. Returning a plausible-looking value instead
 /// (`unpaired`, `relayAvailable`) would be inventing an answer the core never
 /// gave, which is the one failure mode a privacy tool cannot afford.
+///
+/// ## What the bridge carries that this interface does not
+///
+/// The reverse gap, listed so it is a decision rather than an oversight.
+/// `api.rs` exports these to Dart — reaching parity with the uniffi/Kotlin
+/// ABI, so the two frontends can no longer drift — but [ComradeRepository]
+/// models no product surface for them yet, and inventing one here would be
+/// guessing at a screen nobody has designed:
+///
+/// * `broadcastAnonymousChitthi` — posting under a throwaway persona.
+/// * `flushOutbox` / `outboxPending` — the queued-mail retry and its counter.
+/// * `metricsSnapshot` — device-local delivery counters for a diagnostics
+///   screen.
+/// * `panicWipe` — the irreversible local-state destroy.
+///
+/// Each is a one-line addition to the interface plus a fake implementation
+/// when a screen wants it. Nothing here is half-wired: every method the
+/// interface declares is implemented by both this class and
+/// `FakeComradeRepository`.
 library;
 
 import 'dart:async';
@@ -169,6 +188,32 @@ class RustComradeRepository implements ComradeRepository {
       _contact(
         await _guard(() => rust.setContactAlias(npub: npub, alias: alias)),
       );
+
+  // ── Comrades (chosen-peer presence) ────────────────────────────────────────
+
+  @override
+  Future<ContactInfo> setComrade({
+    required String npub,
+    required bool comrade,
+  }) async =>
+      _contact(
+        await _guard(() => rust.setComrade(npub: npub, comrade: comrade)),
+      );
+
+  @override
+  Future<List<ComradeInfo>> comrades() async =>
+      (await _guard(rust.comrades)).map(_comrade).toList();
+
+  @override
+  Future<PresenceInfo?> peerPresence(String npub) async {
+    final rust.PresenceDto? dto =
+        await _guard(() => rust.peerPresence(npub: npub));
+    return dto == null ? null : _presence(dto);
+  }
+
+  @override
+  Future<int> announcePresence(bool online) async =>
+      (await _guard(() => rust.announcePresence(online: online))).toInt();
 
   // ── Conversations ──────────────────────────────────────────────────────────
 
@@ -643,6 +688,18 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
         :final String? name
       ) =>
         PeerProfileUpdated(peer: peer, name: name),
+      rust.BridgeEvent_ComradePresence(
+        :final String peer,
+        :final String? name,
+        :final bool online,
+        :final BigInt at
+      ) =>
+        ComradePresenceChanged(
+          peer: peer,
+          name: name,
+          online: online,
+          at: at.toInt(),
+        ),
       rust.BridgeEvent_MeshStatusChanged(:final rust.MeshStatusDto field0) =>
         MeshStatusChanged(_meshStatus(field0)),
       rust.BridgeEvent_LedgerUpdated(:final String ledger) =>
@@ -683,8 +740,28 @@ Profile _profile(rust.ProfileDto dto) =>
 FoundProfile _foundProfile(rust.FoundProfileDto dto) =>
     FoundProfile(npub: dto.npub, name: dto.name, about: dto.about);
 
-ContactInfo _contact(rust.ContactDto dto) =>
-    ContactInfo(npub: dto.npub, alias: dto.alias, name: dto.name);
+ContactInfo _contact(rust.ContactDto dto) => ContactInfo(
+      npub: dto.npub,
+      alias: dto.alias,
+      name: dto.name,
+      comrade: dto.comrade,
+    );
+
+ComradeInfo _comrade(rust.ComradeDto dto) => ComradeInfo(
+      npub: dto.npub,
+      alias: dto.alias,
+      name: dto.name,
+      online: dto.online,
+      lastSeenAt: dto.lastSeenAt.toInt(),
+      peerMarkedUs: dto.peerMarkedUs,
+    );
+
+PresenceInfo _presence(rust.PresenceDto dto) => PresenceInfo(
+      peer: dto.peer,
+      online: dto.online,
+      lastSeenAt: dto.lastSeenAt.toInt(),
+      peerMarkedUs: dto.peerMarkedUs,
+    );
 
 ConversationInfo _conversation(rust.ConversationDto dto) => ConversationInfo(
       peer: dto.peer,
@@ -693,6 +770,8 @@ ConversationInfo _conversation(rust.ConversationDto dto) => ConversationInfo(
       lastMessage: dto.lastMessage,
       lastAt: dto.lastAt.toInt(),
       lastOutgoing: dto.lastOutgoing,
+      comrade: dto.comrade,
+      online: dto.online,
     );
 
 MessageInfo _message(rust.MessageDto dto) => MessageInfo(

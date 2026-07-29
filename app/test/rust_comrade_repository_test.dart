@@ -193,6 +193,38 @@ void main() {
       expect(event.status.peerCount, 4);
     });
 
+    test('a comrade presence edge narrows its beacon time', () {
+      final BridgeEvent? mapped = mapBridgeEvent(
+        rust.BridgeEvent.comradePresence(
+          peer: 'npub1peer',
+          name: 'amma',
+          online: true,
+          at: BigInt.from(1730000002),
+        ),
+      );
+      final ComradePresenceChanged event = mapped! as ComradePresenceChanged;
+      expect(event.peer, 'npub1peer');
+      expect(event.name, 'amma');
+      expect(event.online, isTrue);
+      // BigInt narrowed at the boundary, like every other timestamp.
+      expect(event.at, 1730000002);
+    });
+
+    test('an offline edge with no cached name is still delivered', () {
+      // The name is a convenience for raising a notification without a store
+      // round-trip; its absence must not drop the transition.
+      final BridgeEvent? mapped = mapBridgeEvent(
+        rust.BridgeEvent.comradePresence(
+          peer: 'npub1peer',
+          online: false,
+          at: BigInt.from(1730000003),
+        ),
+      );
+      final ComradePresenceChanged event = mapped! as ComradePresenceChanged;
+      expect(event.name, isNull);
+      expect(event.online, isFalse);
+    });
+
     test('a receipt is parsed into the ranked MessageStatus', () {
       final BridgeEvent? mapped = mapBridgeEvent(
         const rust.BridgeEvent.messageStatus(
@@ -313,6 +345,12 @@ void main() {
           status: 'sent',
         ),
         const rust.BridgeEvent.peerProfileUpdated(peer: 'p', name: 'n'),
+        rust.BridgeEvent.comradePresence(
+          peer: 'p',
+          name: 'n',
+          online: true,
+          at: BigInt.zero,
+        ),
         rust.BridgeEvent.meshStatusChanged(
           rust.MeshStatusDto(active: false, peerCount: BigInt.zero),
         ),

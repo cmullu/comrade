@@ -1001,7 +1001,16 @@ mod tests {
         // Presence is a courtesy, never an error path — the Android shell
         // calls this on every foreground transition, including ones that
         // race the vault being open.
-        let c = Comrade::new();
+        //
+        // `isolated()`, not `Comrade::new()`: this asserts a *locked*
+        // precondition, and the process-global vault is unlocked partway
+        // through the run by
+        // `a_vault_unlocked_through_the_dart_abi_is_visible_through_the_kotlin_abi`
+        // — the one test that owns the global's lifecycle. Sharing the global
+        // here made this fail roughly one run in four (`set_comrade` returning
+        // `Ok` because the vault had just been opened underneath it), which is
+        // exactly what the note above that test warns about.
+        let c = isolated();
         assert_eq!(c.announce_presence(true).await, 0);
         assert!(matches!(
             c.set_comrade("npub1x".to_string(), true).await,
@@ -1179,6 +1188,10 @@ mod tests {
             let _ = api::conversations();
             let _ = api::message_requests();
             let _ = api::list_contacts();
+            let _ = api::comrades();
+            let _ = api::peer_presence("npub1x".to_string());
+            let _ = api::outbox_pending();
+            let _ = api::metrics_snapshot();
             let _ = api::journal_entries();
             let _ = api::tara_crisis_resources();
             let _ = api::turn_server_status();

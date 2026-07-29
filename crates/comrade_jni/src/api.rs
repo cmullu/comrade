@@ -72,11 +72,11 @@ use crate::frb_generated::StreamSink;
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 pub use comrade_ui::{
-    BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ContactDto,
+    BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto,
-    WorkspaceDto,
+    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto,
+    UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -168,6 +168,8 @@ pub struct _ConversationDto {
     pub last_message: String,
     pub last_at: u64,
     pub last_outgoing: bool,
+    pub comrade: bool,
+    pub online: bool,
 }
 
 #[frb(mirror(MessageRequestDto))]
@@ -195,6 +197,31 @@ pub struct _ContactDto {
     pub npub: String,
     pub alias: String,
     pub name: Option<String>,
+    pub comrade: bool,
+}
+
+#[frb(mirror(ComradeDto))]
+pub struct _ComradeDto {
+    pub npub: String,
+    pub alias: String,
+    pub name: Option<String>,
+    pub online: bool,
+    pub last_seen_at: u64,
+    pub peer_marked_us: bool,
+}
+
+#[frb(mirror(PresenceDto))]
+pub struct _PresenceDto {
+    pub peer: String,
+    pub online: bool,
+    pub last_seen_at: u64,
+    pub peer_marked_us: bool,
+}
+
+#[frb(mirror(MetricDto))]
+pub struct _MetricDto {
+    pub key: String,
+    pub value: u64,
 }
 
 #[frb(mirror(JournalEntryDto))]
@@ -349,6 +376,12 @@ pub enum _BridgeEvent {
     PeerProfileUpdated {
         peer: String,
         name: Option<String>,
+    },
+    ComradePresence {
+        peer: String,
+        name: Option<String>,
+        online: bool,
+        at: u64,
     },
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
@@ -507,6 +540,26 @@ pub async fn broadcast_chitthi(
     handles.broadcast_chitthi(&content, reply_to).await
 }
 
+/// Broadcast a Chitthi under a throwaway or scoped persona instead of this
+/// device's identity — the anonymous-thoughts path.
+///
+/// `scope` of `None` signs the post with a key used exactly once, so two
+/// anonymous Chitthis cannot be linked to each other. `Some(label)` derives a
+/// stable persona for that label, so replies can reach the same pseudonym while
+/// it stays unlinkable to the identity. See `docs/BITCHAT_ADOPTION.md` for what
+/// this does and does not hide.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn broadcast_anonymous_chitthi(
+    content: String,
+    scope: Option<String>,
+) -> Result<String, UiError> {
+    let handles = runtime().read().await.handles();
+    handles
+        .broadcast_anonymous_chitthi(&content, scope.as_deref())
+        .await
+}
+
 // ── Vault (E2E DMs) ──────────────────────────────────────────────────────────
 
 /// See [`broadcast_chitthi`] for the lock discipline.
@@ -525,6 +578,43 @@ pub async fn send_dm_reply(
     handles
         .send_dm_reply(&target, &content, reply_to.as_deref())
         .await
+}
+
+/// Retry every DM sitting in the sender outbox because no relay would take it.
+/// Returns how many a relay accepted this pass.
+///
+/// A background loop already flushes on a cadence (and once at launch); call
+/// this when the platform reports connectivity came back, so a queued message
+/// goes out immediately instead of on the next tick.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn flush_outbox() -> Result<u64, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.flush_outbox().await.map(|n| n as u64)
+}
+
+/// How many DMs are waiting for a relay that will take them — for a "queued"
+/// indicator in the chat list.
+pub fn outbox_pending() -> u64 {
+    runtime().blocking_read().outbox_pending() as u64
+}
+
+/// **Panic wipe.** Destroy every locally stored value — identity keys, DM
+/// history, journal, Tara thread, queued mail — then re-lock, leaving the
+/// runtime as it was before its first unlock.
+///
+/// Irreversible, and deliberately not a duress feature: it wipes rather than
+/// hides, and it needs the app open and unlocked. After it returns, send the
+/// user back to onboarding.
+pub async fn panic_wipe() -> Result<(), UiError> {
+    runtime().write().await.panic_wipe().await
+}
+
+/// Device-local delivery counters — bare tallies with no identities, ids,
+/// content, or timestamps, for a diagnostics screen. Nothing here is ever
+/// uploaded; [`panic_wipe`] clears them.
+pub fn metrics_snapshot() -> Vec<MetricDto> {
+    runtime().blocking_read().metrics_snapshot()
 }
 
 pub fn conversations() -> Result<Vec<ConversationDto>, UiError> {
@@ -600,6 +690,45 @@ pub async fn refresh_peer_profiles() -> Result<u64, UiError> {
     let refresher = runtime().read().await.profile_refresher()?;
     let changed = refresher.run().await?;
     Ok(changed as u64)
+}
+
+// ── Comrades (chosen-peer presence) ──────────────────────────────────────────
+
+/// Choose (or un-choose) a contact as a comrade.
+///
+/// What this discloses, stated plainly: from now on this device tells *that one
+/// peer* — nobody else, and no relay — when it is online, and it starts
+/// believing what they say about their own presence. It does **not** subscribe
+/// us to theirs; we see them only once they have marked us back, which is what
+/// [`ComradeDto`]'s `peer_marked_us` is for.
+///
+/// Async for the same reason as [`accept_request`]: the beacon telling that
+/// peer about the change is a background `tokio::spawn`, which needs a live
+/// reactor.
+pub async fn set_comrade(npub: String, comrade: bool) -> Result<ContactDto, UiError> {
+    runtime().read().await.set_comrade(&npub, comrade)
+}
+
+/// Every comrade with their live presence, online first.
+pub fn comrades() -> Result<Vec<ComradeDto>, UiError> {
+    runtime().blocking_read().comrades()
+}
+
+/// One peer's live presence, or `None` if no beacon ever arrived from them
+/// (they haven't chosen us back, or haven't been online since).
+pub fn peer_presence(npub: String) -> Result<Option<PresenceDto>, UiError> {
+    runtime().blocking_read().peer_presence(&npub)
+}
+
+/// Announce this device's presence to every comrade, returning how many beacons
+/// a relay accepted. Frontends call this on foreground/background transitions;
+/// the native heartbeat covers the rest. Never fails — presence is a courtesy,
+/// so a locked vault is a quiet `0`, not an error.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn announce_presence(online: bool) -> u64 {
+    let handles = runtime().read().await.handles();
+    handles.announce_presence(online).await
 }
 
 // ── Journal (strictly local) ─────────────────────────────────────────────────

@@ -63,9 +63,19 @@ class FakeComradeRepository implements ComradeRepository {
       'npub1stranger0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2l3jd2qk4h7p';
 
   void _seed() {
+    // Alice is a comrade who has marked us back and is online; Bhaskar is an
+    // ordinary contact. Both states are seeded because the interesting bug is
+    // a UI that renders only one of them.
     _contacts
-      ..add(const ContactInfo(npub: _alicePub, alias: 'Amma', name: 'alice'))
+      ..add(const ContactInfo(
+          npub: _alicePub, alias: 'Amma', name: 'alice', comrade: true))
       ..add(const ContactInfo(npub: _bobPub, alias: '', name: 'bhaskar'));
+    _presence[_alicePub] = PresenceInfo(
+      peer: _alicePub,
+      online: true,
+      lastSeenAt: _now - 45,
+      peerMarkedUs: true,
+    );
 
     // Two calendar days of history so the day separators actually render.
     final int yesterday = _now - 26 * 3600;
@@ -301,6 +311,7 @@ class FakeComradeRepository implements ComradeRepository {
           npub: npub,
           alias: alias,
           name: i >= 0 ? _contacts[i].name : null,
+          comrade: i >= 0 && _contacts[i].comrade,
         );
         if (i >= 0) {
           _contacts[i] = saved;
@@ -320,6 +331,7 @@ class FakeComradeRepository implements ComradeRepository {
           npub: npub,
           alias: alias,
           name: i >= 0 ? _contacts[i].name : null,
+          comrade: i >= 0 && _contacts[i].comrade,
         );
         if (i >= 0) {
           _contacts[i] = saved;
@@ -328,6 +340,93 @@ class FakeComradeRepository implements ComradeRepository {
         }
         return saved;
       });
+
+  // ── Comrades (chosen-peer presence) ──────────────────────────────────────
+
+  /// Last beacon heard from a peer, keyed by npub. Only peers seeded into
+  /// [_presence] can ever show as online — a fake that reported everyone
+  /// online would hide exactly the state the UI has to explain.
+  final Map<String, PresenceInfo> _presence = <String, PresenceInfo>{};
+
+  @override
+  Future<ContactInfo> setComrade({
+    required String npub,
+    required bool comrade,
+  }) =>
+      _io(() {
+        _requireUnlocked();
+        final int i = _contacts.indexWhere((ContactInfo c) => c.npub == npub);
+        final ContactInfo saved = ContactInfo(
+          npub: npub,
+          alias: i >= 0 ? _contacts[i].alias : '',
+          name: i >= 0 ? _contacts[i].name : null,
+          comrade: comrade,
+        );
+        if (i >= 0) {
+          _contacts[i] = saved;
+        } else {
+          // Marking someone never saved creates the contact, like the core.
+          _contacts.add(saved);
+        }
+        // Un-marking drops what we knew about them: presence stops flowing
+        // the moment the choice is withdrawn.
+        if (!comrade) _presence.remove(npub);
+        return saved;
+      });
+
+  @override
+  Future<List<ComradeInfo>> comrades() => _io(() {
+        _requireUnlocked();
+        final List<ComradeInfo> rows = <ComradeInfo>[
+          for (final ContactInfo c in _contacts)
+            if (c.comrade)
+              ComradeInfo(
+                npub: c.npub,
+                alias: c.alias,
+                name: c.name,
+                online: _presence[c.npub]?.online ?? false,
+                lastSeenAt: _presence[c.npub]?.lastSeenAt ?? 0,
+                peerMarkedUs: _presence.containsKey(c.npub),
+              ),
+        ]..sort((ComradeInfo a, ComradeInfo b) {
+            final int byOnline = (b.online ? 1 : 0).compareTo(a.online ? 1 : 0);
+            if (byOnline != 0) return byOnline;
+            final int bySeen = b.lastSeenAt.compareTo(a.lastSeenAt);
+            return bySeen != 0 ? bySeen : a.npub.compareTo(b.npub);
+          });
+        return List<ComradeInfo>.unmodifiable(rows);
+      });
+
+  @override
+  Future<PresenceInfo?> peerPresence(String npub) => _io(() {
+        _requireUnlocked();
+        return _presence[npub];
+      });
+
+  @override
+  Future<int> announcePresence(bool online) =>
+      // Never throws, even locked — presence is a courtesy, like the core.
+      _io(() =>
+          _unlocked ? _contacts.where((ContactInfo c) => c.comrade).length : 0);
+
+  /// Push a beacon as though [npub] had sent one, and emit the transition.
+  /// Test-facing, like [emit]: nothing in the fake's own flow makes a peer
+  /// come online, because nothing in it talks to a peer.
+  void seedPresence(String npub, {required bool online, int? at}) {
+    final int when = at ?? _clock;
+    _presence[npub] = PresenceInfo(
+      peer: npub,
+      online: online,
+      lastSeenAt: when,
+      peerMarkedUs: true,
+    );
+    emit(ComradePresenceChanged(
+      peer: npub,
+      name: _contactFor(npub)?.name,
+      online: online,
+      at: when,
+    ));
+  }
 
   // ── Conversations ────────────────────────────────────────────────────────
 
@@ -347,6 +446,11 @@ class FakeComradeRepository implements ComradeRepository {
               lastMessage: last.content,
               lastAt: last.createdAt,
               lastOutgoing: last.outgoing,
+              comrade: c?.comrade ?? false,
+              // Presence only flows between comrades, so a non-comrade is
+              // always offline here — there is nothing to know.
+              online:
+                  (c?.comrade ?? false) && (_presence[e.key]?.online ?? false),
             ),
           );
         }

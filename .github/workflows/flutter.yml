@@ -109,6 +109,40 @@ jobs:
         working-directory: app
         run: flutter pub get
 
+      # ── Codegen freshness ────────────────────────────────────────────────
+      # api.rs restates ~31 comrade_ui/comrade_core types as `#[frb(mirror(..))]`
+      # declarations, duplicating their field lists. When main added a
+      # BridgeEvent variant and two DTO fields, those mirrors went stale and the
+      # merge did not compile — see the merge commit. The compiler only catches
+      # a mirror whose decode path constructs the struct, so drift in the others
+      # is silent until something far downstream misbehaves.
+      #
+      # Regenerating and diffing catches all of it, and also catches the plain
+      # mistake of editing api.rs without re-running codegen. Codegen is
+      # byte-reproducible, so a clean tree in means a clean tree out.
+      - name: Install flutter_rust_bridge_codegen
+        run: |
+          # Version must match the `flutter_rust_bridge = "=2.12.0"` pin in
+          # crates/comrade_jni/Cargo.toml — generated code is only valid against
+          # its exact matching runtime. Guarded like cargo-ndk above, because
+          # ~/.cargo/bin may already hold it from the restored cache.
+          if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
+            echo "already present: $(flutter_rust_bridge_codegen --version)"
+          else
+            cargo install flutter_rust_bridge_codegen --locked --version 2.12.0
+          fi
+
+      - name: Generated bridge code is in sync with api.rs
+        run: |
+          flutter_rust_bridge_codegen generate \
+            --rust-input crate::api --rust-root crates/comrade_jni \
+            --dart-output app/lib/src/rust --no-add-mod-to-lib --no-web
+          if ! git diff --quiet -- crates/comrade_jni/src/frb_generated.rs app/lib/src/rust; then
+            echo "::error::Generated bridge code is stale. Re-run flutter_rust_bridge_codegen and commit the result."
+            git diff --stat -- crates/comrade_jni/src/frb_generated.rs app/lib/src/rust
+            exit 1
+          fi
+
       # `set -o pipefail` so a test failure is not swallowed by `tee`, and the
       # skip check because a skipped suite exits 0 — in this job, "skipped"
       # means the .so was not found and nothing was proven, which is a failure.

@@ -84,6 +84,37 @@ abstract interface class ComradeRepository {
   Future<ContactInfo> setContactAlias(
       {required String npub, required String alias});
 
+  // ── Comrades (chosen-peer presence) ──────────────────────────────────────
+
+  /// Choose (or un-choose) [npub] as a comrade.
+  ///
+  /// This is a disclosure, and the UI must present it as one: from then on
+  /// this device tells *that one peer* — nobody else, and no relay — when it
+  /// is online. It does **not** subscribe us to theirs; presence only arrives
+  /// once they have marked us back, which [ComradeInfo.peerMarkedUs] reports
+  /// so the wait can be explained rather than looking broken.
+  ///
+  /// Marking someone never saved creates the contact record. Idempotent.
+  Future<ContactInfo> setComrade({
+    required String npub,
+    required bool comrade,
+  });
+
+  /// Every comrade with their live presence, online first. Empty until the
+  /// user marks someone — the feature costs nothing while nobody is chosen.
+  Future<List<ComradeInfo>> comrades();
+
+  /// One peer's live presence, or `null` when no beacon has ever arrived from
+  /// them. `null` is an honest "we have never heard from them", which is not
+  /// the same as "offline" — do not collapse the two.
+  Future<PresenceInfo?> peerPresence(String npub);
+
+  /// Announce this device's presence to every comrade; returns how many
+  /// beacons a relay accepted. Called on foreground/background transitions —
+  /// the core's heartbeat covers the rest. Never throws: presence is a
+  /// courtesy, so a locked vault is a quiet `0`.
+  Future<int> announcePresence(bool online);
+
   // ── Conversations ────────────────────────────────────────────────────────
 
   Future<List<ConversationInfo>> conversations();

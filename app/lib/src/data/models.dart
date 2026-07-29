@@ -49,11 +49,21 @@ class FoundProfile {
 /// handle if one is cached.
 @immutable
 class ContactInfo {
-  const ContactInfo({required this.npub, required this.alias, this.name});
+  const ContactInfo({
+    required this.npub,
+    required this.alias,
+    this.name,
+    this.comrade = false,
+  });
 
   final String npub;
   final String alias;
   final String? name;
+
+  /// Whether the user chose this contact as a comrade — i.e. agreed to tell
+  /// *them alone* when this device is online. Defaults to `false` because that
+  /// is what an unmarked contact is; presence is never assumed.
+  final bool comrade;
 }
 
 /// One row of the chat list.
@@ -66,6 +76,8 @@ class ConversationInfo {
     required this.lastOutgoing,
     this.alias,
     this.peerName,
+    this.comrade = false,
+    this.online = false,
   });
 
   final String peer;
@@ -74,6 +86,60 @@ class ConversationInfo {
   final String lastMessage;
   final int lastAt;
   final bool lastOutgoing;
+
+  /// Whether this peer is one of the user's comrades.
+  final bool comrade;
+
+  /// Whether that comrade is online *right now*. Recomputed by the core on
+  /// every read, never a stored flag. Always `false` for a non-comrade — and
+  /// `false` is also the default here, because "we do not know" and "not
+  /// online" must render the same way: a grey dot, never a green one.
+  final bool online;
+}
+
+/// A comrade — a contact the user chose to exchange presence with — plus what
+/// their last beacon said.
+@immutable
+class ComradeInfo {
+  const ComradeInfo({
+    required this.npub,
+    required this.alias,
+    required this.online,
+    required this.lastSeenAt,
+    required this.peerMarkedUs,
+    this.name,
+  });
+
+  final String npub;
+  final String alias;
+  final String? name;
+
+  /// Live presence, recomputed against the current clock.
+  final bool online;
+
+  /// Send time (unix seconds) of their last beacon; `0` if none ever arrived.
+  final int lastSeenAt;
+
+  /// Whether they have marked *us* as their comrade. `false` means we will
+  /// never see them online however long we wait — the UI must say so rather
+  /// than showing a permanently grey dot with no explanation.
+  final bool peerMarkedUs;
+}
+
+/// One peer's presence, for a chat header or a contact row.
+@immutable
+class PresenceInfo {
+  const PresenceInfo({
+    required this.peer,
+    required this.online,
+    required this.lastSeenAt,
+    required this.peerMarkedUs,
+  });
+
+  final String peer;
+  final bool online;
+  final int lastSeenAt;
+  final bool peerMarkedUs;
 }
 
 /// Delivery states an outgoing message moves through, newest-wins.
@@ -449,6 +515,31 @@ class PeerProfileUpdated extends BridgeEvent {
   const PeerProfileUpdated({required this.peer, this.name});
   final String peer;
   final String? name;
+}
+
+/// A comrade came online, went offline, or aged out.
+///
+/// Emitted only for peers the user marked as comrades, and only on an actual
+/// transition — a heartbeat from someone already known to be online is not
+/// news.
+class ComradePresenceChanged extends BridgeEvent {
+  const ComradePresenceChanged({
+    required this.peer,
+    required this.online,
+    required this.at,
+    this.name,
+  });
+
+  final String peer;
+
+  /// Display name at the time of the event (alias → published handle), so a
+  /// notification can be raised without a store round-trip.
+  final String? name;
+  final bool online;
+
+  /// Send time of the beacon (unix seconds) for the `online` edge; the moment
+  /// the claim lapsed for an aged-out `offline` edge.
+  final int at;
 }
 
 class MeshStatusChanged extends BridgeEvent {
