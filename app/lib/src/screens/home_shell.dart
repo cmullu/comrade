@@ -130,6 +130,27 @@ class _HomeShellState extends ConsumerState<HomeShell> {
         );
   }
 
+  /// The in-call chat button: open the conversation with the person you are
+  /// talking to.
+  ///
+  /// Reuses whatever the chat list already knows about them (alias, @handle) so
+  /// the header is titled the same way it would be if you had navigated there
+  /// yourself — the call only carries one resolved label, not the parts.
+  void _openChatDuringCall(String peer, String label) {
+    final ConversationInfo? known = ref
+        .read(conversationsProvider)
+        .value
+        ?.where((ConversationInfo c) => c.peer == peer)
+        .firstOrNull;
+    _openConversation(
+      ChatTarget(
+        peer: peer,
+        alias: known?.alias,
+        username: known?.peerName,
+      ),
+    );
+  }
+
   Future<void> _editAlias() async {
     final ChatTarget? chat = _openChat;
     if (chat == null) return;
@@ -168,8 +189,11 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       child: Stack(
         children: <Widget>[
           shell,
-          // Call overlay — covers the app while a call is ringing/connected.
-          const CallOverlay(),
+          // Call overlay — covers the app while a call is ringing/connected,
+          // and shrinks to a corner tile when the in-call chat button sends it
+          // to picture-in-picture. `onOpenChat` is what makes that useful: the
+          // conversation opens *behind* the call as it shrinks.
+          CallOverlay(onOpenChat: _openChatDuringCall),
         ],
       ),
     );

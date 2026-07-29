@@ -115,7 +115,7 @@ enum CallQuality { good, medium, poor, unknown }
 
 /// One coherent snapshot of everything `CallManager` publishes.
 ///
-/// Delivered as a unit — the seven native `StateFlow`s are `combine`d before
+/// Delivered as a unit — the native `StateFlow`s are `combine`d before
 /// crossing — so the UI can never render a muted `idle` call from two
 /// half-applied updates.
 final class CallSnapshot {
@@ -126,7 +126,8 @@ final class CallSnapshot {
     required this.quality,
     required this.audioRoute,
     required this.availableRoutes,
-    required this.sasEmojis,
+    this.videoSuspended = false,
+    this.remoteVideoPaused = false,
   });
 
   static const idle = CallSnapshot(
@@ -136,7 +137,6 @@ final class CallSnapshot {
     quality: CallQuality.unknown,
     audioRoute: AudioRoute.earpiece,
     availableRoutes: [AudioRoute.earpiece, AudioRoute.speaker],
-    sasEmojis: null,
   );
 
   final CallPhase phase;
@@ -146,14 +146,17 @@ final class CallSnapshot {
   final AudioRoute audioRoute;
   final List<AudioRoute> availableRoutes;
 
-  /// The 4-emoji short authentication string, for the two participants to read
-  /// aloud and compare.
-  ///
-  /// **`null` means "cannot verify"** — either not connected yet, or neither
-  /// SDP carried a fingerprint to derive one from. That is a real, displayable
-  /// state and an honest one; do not coerce it to an empty list, and never
-  /// render a placeholder that could be mistaken for a real code.
-  final List<String>? sasEmojis;
+  /// Capture is stopped because nothing is displaying it — the app is
+  /// backgrounded without a picture-in-picture window. Distinct from
+  /// `!cameraOn`, which is the user's own decision and survives it: coming back
+  /// to the foreground resumes capture only if [cameraOn] was true all along.
+  final bool videoSuspended;
+
+  /// No decoded frames are arriving from the peer although their video track is
+  /// live — they turned their camera off, or their app stopped capturing
+  /// because it went to the background. Rendered as "Video paused" over their
+  /// avatar rather than as a frozen last frame.
+  final bool remoteVideoPaused;
 
   factory CallSnapshot.fromMap(Map<Object?, Object?> map) {
     String str(String k) => map[k] as String? ?? '';
@@ -201,7 +204,8 @@ final class CallSnapshot {
               .whereType<AudioRoute>()
               .toList(growable: false) ??
           const [AudioRoute.earpiece, AudioRoute.speaker],
-      sasEmojis: (map['sasEmojis'] as List?)?.cast<String>(),
+      videoSuspended: flag('videoSuspended'),
+      remoteVideoPaused: flag('remoteVideoPaused'),
     );
   }
 
@@ -308,6 +312,20 @@ class CallChannel {
   Future<void> toggleCamera() => _methods.invokeMethod<void>('toggleCamera');
 
   Future<void> switchCamera() => _methods.invokeMethod<void>('switchCamera');
+
+  /// Stop (or resume) camera capture because nothing is displaying it.
+  ///
+  /// Separate from [toggleCamera] on purpose: this is the app saying "no
+  /// surface is showing this video", not the user saying "don't send my
+  /// camera". The native side keeps both facts and captures only when *both*
+  /// allow it, so returning to the foreground with the camera deliberately off
+  /// does not switch it back on.
+  ///
+  /// The privacy half of this is the point: with the call backgrounded and no
+  /// picture-in-picture window, the camera hardware is released rather than
+  /// left running against a surface nobody can see.
+  Future<void> setVideoCaptureSuspended(bool suspended) => _methods
+      .invokeMethod<void>('setVideoCaptureSuspended', {'suspended': suspended});
 
   Future<void> cycleAudioRoute() =>
       _methods.invokeMethod<void>('cycleAudioRoute');
