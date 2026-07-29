@@ -169,6 +169,10 @@
     // Milestone 6: comms
     requests: [], // pending stranger DMs: [{ peer, last_message, last_at }]
     peerNames: new Map(), // peer pubkey -> published display handle
+    // Comrade presence: peer pubkey -> { comrade, online, lastSeenAt, peerMarkedUs }.
+    // Only ever populated for peers the user chose (and, for `peerMarkedUs`,
+    // whether they chose back) — see docs/PRESENCE.md.
+    presence: new Map(),
     replyTo: null, // { id, content, outgoing } while composing a reply
     call: null, // active call session (see newCallState)
     // Bounded memory of recently-ended call ids (see call_decisions.mjs
@@ -297,6 +301,7 @@
       await loadTimeline();
       await loadConversations();
       await loadRequests();
+      await loadComrades();
     } catch {
       /* error already toasted */
     } finally {
@@ -450,7 +455,20 @@
             class: "contact" + (k === state.activeContact ? " is-active" : ""),
             onClick: () => selectContact(k),
           },
-          el("span", { class: "contact-name", text: displayName(k) }),
+          el(
+            "div",
+            { class: "contact-title" },
+            ...(presenceOf(k).comrade
+              ? [
+                  el("span", {
+                    class: "presence-dot" + (presenceOf(k).online ? " is-online" : ""),
+                    title: presenceOf(k).online ? "Online now" : "Not online",
+                    "aria-label": presenceOf(k).online ? "Online now" : "Not online",
+                  }),
+                ]
+              : []),
+            el("span", { class: "contact-name", text: displayName(k) }),
+          ),
           el("span", {
             class: "contact-last",
             text: last
@@ -472,6 +490,10 @@
       return; // older backend without the command — live events still work
     }
     for (const c of convos || []) {
+      if (c.comrade) {
+        const prev = presenceOf(c.peer);
+        state.presence.set(c.peer, { ...prev, comrade: true, online: !!c.online });
+      }
       if (!state.dms.has(c.peer)) {
         state.dms.set(c.peer, [
           { content: c.last_message, created_at: c.last_at, outgoing: !!c.last_outgoing, upi: [] },
@@ -587,11 +609,34 @@
       return;
     }
     const peer = state.activeContact;
+    const presence = presenceOf(peer);
     head.append(
       el("span", { class: "chat-peer mono", text: displayName(peer) }),
+      el("span", {
+        class: "chat-presence" + (presence.online ? " is-online" : ""),
+        // Honest about the mutual model: a comrade who hasn't chosen back
+        // will never show as online, and the header says why rather than
+        // leaving a grey dot to be misread as "they're ignoring me".
+        text: !presence.comrade
+          ? ""
+          : presence.online
+            ? "online"
+            : presence.peerMarkedUs
+              ? "not online"
+              : "waiting for them to choose you back",
+      }),
       el(
         "div",
         { class: "chat-actions" },
+        el("button", {
+          class: "icon-btn" + (presence.comrade ? " is-on" : ""),
+          title: presence.comrade
+            ? "Remove as comrade (they stop seeing you online)"
+            : "Make a comrade (they see you online; you see them once they choose you back)",
+          "aria-label": presence.comrade ? "Remove as comrade" : "Make a comrade",
+          text: presence.comrade ? "★" : "☆",
+          onClick: () => toggleComrade(peer),
+        }),
         el("button", {
           class: "icon-btn",
           title: "Voice call",
@@ -722,6 +767,71 @@
     else state.peerNames.delete(p.peer);
     renderContacts();
     renderRequests();
+    if (state.activeContact === p.peer) renderConversation();
+  }
+
+  // ── Comrades (chosen-peer presence) ───────────────────────────────────────
+
+  function presenceOf(peer) {
+    return (
+      state.presence.get(peer) || { comrade: false, online: false, lastSeenAt: 0, peerMarkedUs: false }
+    );
+  }
+
+  /** Load who was chosen as a comrade, and what their last beacon said. */
+  async function loadComrades() {
+    let rows;
+    try {
+      rows = await safeInvoke("comrades", undefined, { silent: true });
+    } catch {
+      return; // older backend without the command
+    }
+    state.presence = new Map(
+      (Array.isArray(rows) ? rows : []).map((c) => [
+        c.npub,
+        {
+          comrade: true,
+          online: !!c.online,
+          lastSeenAt: c.last_seen_at || 0,
+          peerMarkedUs: !!c.peer_marked_us,
+        },
+      ]),
+    );
+    renderContacts();
+    if (state.activeContact) renderConversation();
+  }
+
+  /** Choose (or un-choose) a peer as a comrade. */
+  async function toggleComrade(peer) {
+    const wasComrade = presenceOf(peer).comrade;
+    try {
+      await safeInvoke("set_comrade", { npub: peer, comrade: !wasComrade });
+    } catch {
+      return; // safeInvoke already surfaced the error
+    }
+    showToast(
+      wasComrade
+        ? `${displayName(peer)} is no longer a comrade — they stop seeing you online.`
+        : `${displayName(peer)} is a comrade. They see you online, and you'll see them once they choose you back.`,
+      "info",
+    );
+    await loadComrades();
+  }
+
+  /** A comrade came online, went offline, or their claim aged out. */
+  function onComradePresence(p) {
+    if (!p.peer) return;
+    const prev = presenceOf(p.peer);
+    state.presence.set(p.peer, {
+      comrade: true,
+      online: !!p.online,
+      lastSeenAt: p.at || prev.lastSeenAt,
+      peerMarkedUs: true,
+    });
+    if (p.online && !prev.online) {
+      showToast(`${p.name || displayName(p.peer)} is online`, "info");
+    }
+    renderContacts();
     if (state.activeContact === p.peer) renderConversation();
   }
 
@@ -2040,6 +2150,8 @@
           onMessageStatus(p);
         } else if (p.type === "peer_profile_updated") {
           onPeerProfileUpdated(p);
+        } else if (p.type === "comrade_presence") {
+          onComradePresence(p);
         } else if (p.type === "ledger_updated") {
           onLedgerUpdated(p);
         }
@@ -2207,7 +2319,14 @@
         case "messages_with":
         case "media_with":
         case "list_contacts":
+        case "comrades":
           return [];
+        case "peer_presence":
+          return null;
+        case "set_comrade":
+          return { npub: args.npub, alias: "", name: null, comrade: !!args.comrade };
+        case "announce_presence":
+          return 0;
         case "current_profile":
           return { npub: "npub1mockdev0identity00000000000000000000000000000000", username: "mockuser" };
         case "extract_payments": {

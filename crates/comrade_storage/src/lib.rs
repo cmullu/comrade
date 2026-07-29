@@ -52,7 +52,7 @@ use zeroize::Zeroizing;
 pub use error::StorageError;
 pub use repository::{
     CallRecord, Chitthi, ChitthiCache, Contact, ConversationMeta, JournalEntry, LedgerState,
-    StoredIdentity, StoredMessage, TaraMessage, VaultCache,
+    PeerPresence, StoredIdentity, StoredMessage, TaraMessage, VaultCache,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────

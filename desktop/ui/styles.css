@@ -704,6 +704,29 @@ code {
   gap: 2px;
 }
 
+.contact-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Comrade presence: a small dot on the rows the user chose. Grey (not
+   hidden) when they are not around, so "chosen but not online" and "not
+   chosen at all" never look the same. */
+.presence-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.6;
+}
+
+.presence-dot.is-online {
+  background: var(--good);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--good);
+}
+
 .contact:hover {
   background: var(--panel-2);
 }
@@ -751,6 +774,24 @@ code {
 .chat-actions {
   display: flex;
   gap: 6px;
+}
+
+/* "online" / "waiting for them to choose you back" next to the peer key. */
+.chat-presence {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--muted);
+  margin-right: auto;
+}
+
+.chat-presence.is-online {
+  color: var(--good);
+}
+
+/* The ★ comrade toggle, lit while chosen. */
+.icon-btn.is-on {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 50%, transparent);
 }
 
 .chat-log {

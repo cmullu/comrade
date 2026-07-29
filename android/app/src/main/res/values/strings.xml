@@ -118,4 +118,18 @@
 
     <!-- Bluetooth call routing -->
     <string name="call_route_bluetooth_denied">Bluetooth audio needs the Bluetooth permission — falling back to speaker</string>
+
+    <!-- Comrades (chosen-peer presence) -->
+    <string name="comrades_title">Comrades</string>
+    <string name="comrade_online_title">%1$s is online</string>
+    <string name="comrade_online_text">Someone you chose as a comrade is around</string>
+    <string name="comrades_explainer">Choose the people whose company you want to know about. Your comrades — and nobody else, not even a relay — are told when you\'re online. You see them the same way: once they\'ve chosen you back.</string>
+    <string name="comrades_empty">No comrades yet. Pick a contact below, or tap the star in any conversation.</string>
+    <string name="comrades_no_contacts">Save a contact first — start a chat, and they\'ll show up here.</string>
+    <string name="comrade_online">Online now</string>
+    <string name="comrade_last_seen">Last seen %1$s ago</string>
+    <string name="comrade_never_seen">Not online yet</string>
+    <string name="comrade_awaiting_reciprocity">Waiting for them to choose you back</string>
+    <string name="comrade_add">Make a comrade</string>
+    <string name="comrade_remove">Remove as comrade</string>
 </resources>

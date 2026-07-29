@@ -143,6 +143,15 @@ class RelayConnectionService : Service() {
                 .getOrDefault(ComradeCore.MeshStatus(active = false, peerCount = 0))
         }
         MeshStatusMonitor.update(initialMesh)
+
+        // Seed the comrade dots from what the store already knows (a beacon
+        // that arrived before this launch may still be live), so the chat list
+        // is right on the first frame rather than after the next beacon.
+        val comrades = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.comrades() }.getOrDefault(emptyList())
+        }
+        PresenceMonitor.seed(comrades)
+
         ChatEventRouter.maybeRefreshNames()
 
         val appContext = applicationContext
@@ -335,6 +344,21 @@ object ChatEventRouter {
                 _chatTick.update { it + 1 }
                 // A DM from an unknown key may now be nameable.
                 maybeRefreshNames()
+            }
+            is BridgeEvent.ComradePresence -> {
+                val becameOnline = PresenceMonitor.update(event.peer, event.online)
+                // The chat list carries the dot too, so it has to re-read.
+                _chatTick.update { it + 1 }
+                // Don't tell someone their comrade is around while they are
+                // literally looking at that conversation — same rule the DM
+                // notification follows.
+                if (becameOnline && event.peer != _openConversationPeer.value) {
+                    Notifier.notifyComradeOnline(
+                        context,
+                        event.peer,
+                        event.name ?: shortNpub(event.peer),
+                    )
+                }
             }
             is BridgeEvent.MeshStatusChanged -> MeshStatusMonitor.update(
                 ComradeCore.MeshStatus(active = event.v1.active, peerCount = event.v1.peerCount.toInt()),
