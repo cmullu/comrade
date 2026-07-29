@@ -24,7 +24,12 @@ import kotlinx.coroutines.launch
  * safe: any later touch from another thread either finds the library ready or
  * briefly waits for this one instead of redoing the work.
  */
-class ComradeApplication : Application() {
+// `open` for the Flutter build's `ComradeFlutterApplication`, which extends this
+// to add one line (starting `CallStateReactor` at process start) while keeping
+// the native warm-up and [appScope] below — see
+// app/android/app/src/main/kotlin/mullu/comrade/PLATFORM_CHANNELS.md §4.3.
+// Nothing here is overridden and no behaviour changes for the Compose build.
+open class ComradeApplication : Application() {
 
     /**
      * Process-lifetime coroutine scope — not tied to any Activity/Service,

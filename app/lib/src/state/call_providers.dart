@@ -19,23 +19,30 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/models.dart';
+import '../platform/call_channel.dart' show AudioRoute, CallQuality;
 import 'providers.dart';
 
-/// Where call audio is playing. Mirrors `call/AudioRoute.kt`.
-enum AudioRoute {
-  earpiece('Earpiece'),
-  speaker('Speaker'),
-  bluetooth('Bluetooth'),
-  wired('Wired headset');
+// `AudioRoute` and `CallQuality` are declared ONCE, in the platform layer
+// (`platform/call_channel.dart`), because that is the wire contract with
+// `CallManager` — a second copy here would be a shape that can silently drift
+// from what the channel actually decodes. They are re-exported so screens keep
+// importing their call types from one place.
+export '../platform/call_channel.dart' show AudioRoute, CallQuality;
 
-  const AudioRoute(this.label);
-  final String label;
+/// Display text for an audio route.
+///
+/// Presentation-only, so it lives here rather than on the enum itself: the
+/// channel layer's job is to agree with Kotlin about the wire values, not to
+/// carry UI strings. Exhaustive `switch` — adding a route to the platform enum
+/// is a compile error here until it gets a label.
+extension AudioRouteLabel on AudioRoute {
+  String get label => switch (this) {
+        AudioRoute.earpiece => 'Earpiece',
+        AudioRoute.speaker => 'Speaker',
+        AudioRoute.bluetooth => 'Bluetooth',
+        AudioRoute.wired => 'Wired headset',
+      };
 }
-
-/// Coarse connection health. Mirrors `call/CallQuality.kt`. Only `medium`
-/// and `poor` are ever surfaced — `good`/`unknown` stay silent so the
-/// indicator adds no noise to the common case.
-enum CallQuality { unknown, good, medium, poor }
 
 /// The four call phases the UI renders, plus [CallIdle].
 /// Port of `call/CallUiState.kt`.

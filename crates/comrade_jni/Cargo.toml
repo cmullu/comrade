@@ -8,13 +8,34 @@ publish = false
 # cdylib = shared library (.so) loaded at runtime by the Android JVM — via
 # uniffi's generated JNA bindings, not a hand-written `System.loadLibrary` +
 # `external fun` pairing (see `uniffi::setup_scaffolding!` in lib.rs).
+#
+# ONE cdylib, TWO foreign ABIs: the uniffi scaffolding (`uniffi_comrade_*` /
+# `ffi_comrade_*` symbols, for Kotlin) and flutter_rust_bridge's PDE
+# dispatcher (`frb_*` symbols, for Dart) are both exported from this single
+# library, because two libraries would mean two copies of `lib.rs`'s statics
+# and therefore two `ComradeRuntime`s over one redb vault. See lib.rs's module
+# header.
 crate-type = ["cdylib"]
+
+# `#[frb(...)]` expands to code guarded by `#[cfg(frb_expand)]` — a cfg only the
+# codegen's `cargo expand` pass sets. Declare it so `-D warnings` does not trip
+# over `unexpected_cfgs` on every annotated item.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
 
 [dependencies]
 comrade_core  = { path = "../comrade_core" }
 comrade_state = { path = "../comrade_state" }
 comrade_ui    = { path = "../comrade_ui" }
 uniffi        = { workspace = true }
+# The Dart/Flutter ABI. Pinned to an exact version on purpose: the generated
+# `src/frb_generated.rs` is only valid against the runtime crate of the same
+# version, and `flutter_rust_bridge_codegen` rewrites this line to `=<its own
+# version>` if it ever disagrees. Regenerate with:
+#   flutter_rust_bridge_codegen generate --rust-input crate::api \
+#     --rust-root crates/comrade_jni --dart-output <flutter-app>/lib/src/rust \
+#     --no-add-mod-to-lib
+flutter_rust_bridge = "=2.12.0"
 # `CallSignal`'s wire form on the Vault DM channel is still a JSON string
 # (comrade_ui::ComradeRuntime::send_call_signal takes `signal_json: &str`);
 # this crate accepts the typed enum from Kotlin and encodes it once here.
