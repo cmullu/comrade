@@ -216,7 +216,7 @@ map 1:1 onto `ComradeCore.kt`'s methods and `commands.rs`'s commands.
   frames arrive; the local track mirrors wherever it renders and the remote
   never does; the four bars render UNKNOWN as empty (nothing measured is not
   zero signal); a side that stopped sending shows "Video paused", never a
-  frozen frame; the chat button shrinks the call into picture-in-picture
+  frozen frame; the chat button shrinks the call into an in-app corner tile
   (native window, or the draggable in-app `FloatingCallTile`).
 - **Not implemented**: the media engine itself. See D29 / §5.
 

@@ -254,9 +254,47 @@ void main() {
       t.container.read(callProvider.notifier).setRemoteVideoPaused(true);
       await tester.pump();
 
-      expect(find.byKey(const Key('remote-video')), findsNothing,
-          reason: 'the stale surface is dropped, not left frozen');
       expect(find.byKey(const Key('video-paused')), findsOneWidget);
+      // The surface stays mounted under the cover. Unmounting it detaches the
+      // renderer's sink from the track, so the frames that arrive when the peer
+      // un-pauses would have nowhere to land until a new renderer was built —
+      // which is how "they paused, then their video never came back" happened.
+      expect(find.byKey(const Key('remote-video')), findsOneWidget,
+          reason: 'covered, not torn down, so resuming is instant');
+
+      t.container.read(callProvider.notifier).setRemoteVideoPaused(false);
+      await tester.pump();
+      expect(find.byKey(const Key('video-paused')), findsNothing);
+      expect(find.byKey(const Key('remote-video')), findsOneWidget);
+    });
+
+    testWidgets('one side pausing leaves the other side alone',
+        (WidgetTester tester) async {
+      // The report this pins: "if one person pauses video the other should
+      // continue". Each direction is independent — our camera choice must not
+      // mark the peer paused, and the peer pausing must not stop our capture.
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: true);
+      final CallController controller = t.container.read(callProvider.notifier);
+
+      // They pause. We keep sending, and our self-view keeps its picture.
+      controller.setRemoteVideoPaused(true);
+      await tester.pump();
+      expect(t.container.read(callProvider).localVideoPaused, isFalse);
+      expect(t.engine.captureSuspensions, isEmpty,
+          reason: 'their pause must not stop our camera');
+      expect(find.byKey(const Key('local-video')), findsOneWidget);
+
+      // We pause. Their state is untouched, and their picture stays up.
+      controller.setRemoteVideoPaused(false);
+      await controller.toggleCamera();
+      await tester.pump();
+      expect(t.container.read(callProvider).remoteVideoPaused, isFalse,
+          reason: 'our camera being off says nothing about their video');
+      expect(find.byKey(const Key('remote-video')), findsOneWidget);
     });
 
     testWidgets('turning the camera off pauses the self-view too',
@@ -273,8 +311,9 @@ void main() {
       await tester.pump();
 
       expect(t.engine.cameraCalls, <bool>[false]);
-      expect(find.byKey(const Key('local-video')), findsNothing);
       expect(find.byKey(const Key('video-paused')), findsOneWidget);
+      expect(find.byKey(const Key('local-video')), findsOneWidget,
+          reason: 'covered, not torn down — same reason as the remote surface');
     });
   });
 
@@ -297,6 +336,40 @@ void main() {
       await controller.onAppLifecycleChanged(AppLifecycleState.resumed);
       expect(t.engine.captureSuspensions, <bool>[true, false]);
       expect(t.container.read(callProvider).videoSuspended, isFalse);
+    });
+
+    testWidgets('a glance at the notification shade does not pause the camera',
+        (WidgetTester tester) async {
+      // Android reports `inactive` for every transient loss of focus — the app
+      // switcher, a system dialog, the shade, and the instant before a PiP
+      // transition confirms. Suspending there told the peer "Video paused"
+      // because someone glanced at their notifications.
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: true);
+
+      await t.container
+          .read(callProvider.notifier)
+          .onAppLifecycleChanged(AppLifecycleState.inactive);
+
+      expect(t.engine.captureSuspensions, isEmpty);
+      expect(t.container.read(callProvider).videoSuspended, isFalse);
+    });
+
+    testWidgets('a hidden window does pause it', (WidgetTester tester) async {
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: true);
+
+      await t.container
+          .read(callProvider.notifier)
+          .onAppLifecycleChanged(AppLifecycleState.hidden);
+
+      expect(t.engine.captureSuspensions, <bool>[true]);
     });
 
     testWidgets('a picture-in-picture window counts as visible',
@@ -349,9 +422,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(openedPeer, _peer);
-      expect(t.pip.enterCalls, 1, reason: 'native PiP is asked for first');
-      expect(t.container.read(callProvider).pip, CallPipMode.inApp,
-          reason: 'and this platform has none, so the in-app tile takes over');
+      expect(t.container.read(callProvider).pip, CallPipMode.inApp);
       expect(find.byKey(const Key('call-floating-tile')), findsOneWidget);
       expect(find.byKey(const Key('call-hangup')), findsNothing,
           reason: 'the full-screen controls are gone with the full screen');
@@ -363,27 +434,33 @@ void main() {
       expect(find.byKey(const Key('call-hangup')), findsOneWidget);
     });
 
-    testWidgets('a platform with native PiP waits for the OS to confirm',
+    testWidgets('never hands the window to the OS — that would hide the chat',
         (WidgetTester tester) async {
+      // The regression this pins: the button used to prefer native PiP, which
+      // backgrounds the app. The conversation opened behind the launcher
+      // instead of behind the call, so the button read as "minimise the video
+      // and go nowhere". Even where native PiP is available, the chat button
+      // must keep the call in *our* window.
+      String? openedPeer;
       final ({
         ProviderContainer container,
         RecordingEngine engine,
         FakePipChannel pip
-      }) t = await pumpConnectedCall(tester, video: true, pipSupported: true);
+      }) t = await pumpConnectedCall(
+        tester,
+        video: true,
+        pipSupported: true,
+        onOpenChat: (String peer, String _) => openedPeer = peer,
+      );
 
       await tester.tap(find.byKey(const Key('call-chat')));
       await tester.pumpAndSettle();
 
-      expect(t.pip.enterCalls, 1);
-      expect(t.container.read(callProvider).pip, CallPipMode.none,
-          reason: 'the mode changes when the OS says so, not when we ask');
-
-      t.container.read(callProvider.notifier).onNativePipChanged(true);
-      await tester.pumpAndSettle();
-      expect(t.container.read(callProvider).pip, CallPipMode.native);
-      // In the OS thumbnail there is room for the picture and nothing else.
-      expect(find.byKey(const Key('call-hangup')), findsNothing);
-      expect(find.byKey(const Key('remote-video')), findsOneWidget);
+      expect(openedPeer, _peer, reason: 'the conversation still opens');
+      expect(t.pip.enterCalls, 0,
+          reason: 'no OS window: it would take the app off screen');
+      expect(t.container.read(callProvider).pip, CallPipMode.inApp);
+      expect(find.byKey(const Key('call-floating-tile')), findsOneWidget);
     });
 
     testWidgets('ending a call closes the picture-in-picture window',

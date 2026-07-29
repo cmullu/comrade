@@ -1182,6 +1182,52 @@ code {
   background: #05070f;
 }
 
+/* ── Minimised: the call shrunk onto the conversation ──────────────────────────
+   What the chat button produces. The full-screen overlay is opaque and covers
+   the whole app, so "open the chat" has to actually shrink it — PiP-ing just the
+   <video> element (which is what this used to do) left the conversation behind
+   an opaque sheet, i.e. the video minimised and no chat appeared.
+
+   Top-right, not bottom-right: the bottom right of a conversation is the send
+   button, and a call tile parked on it would defeat the point of the mode. */
+.call-active.is-minimized {
+  inset: auto;
+  top: 12px;
+  right: 12px;
+  width: 148px;
+  height: 208px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+  backdrop-filter: none;
+  cursor: pointer;
+  z-index: 320;
+}
+
+/* At that size only the picture and two controls fit. */
+.call-active.is-minimized .call-info,
+.call-active.is-minimized #call-camera,
+.call-active.is-minimized #call-chat,
+.call-active.is-minimized .call-local {
+  display: none;
+}
+
+.call-active.is-minimized .call-controls {
+  padding: 4px 0 8px;
+  gap: 8px;
+}
+
+.call-active.is-minimized .call-btn {
+  width: 32px;
+  height: 32px;
+  font-size: 14px;
+}
+
+.call-active.is-minimized .call-video-paused {
+  font-size: 11px;
+}
+
 .call-stage {
   position: relative;
   flex: 1;

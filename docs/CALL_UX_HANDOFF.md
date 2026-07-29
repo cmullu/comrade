@@ -4,11 +4,81 @@ _Branch: `claude/voice-video-call-ux-5up39x` · written 2026-07-29, for the next
 agent (or human) picking this up. Read this top to bottom before touching
 anything; the **Verification status** table is the most important part._
 
+## Post-merge fixes (round 2) — read this first
+
+Two bugs were reported from real use after PR #52 merged, and both were design
+mistakes in that first pass rather than typos. They are fixed on all three
+frontends; the notes below are what not to reintroduce.
+
+**1. "The chat icon minimises the video but doesn't open the chat."** Correct
+report, and the cause was choosing the wrong kind of picture-in-picture. The
+chat button asked for **OS-level PiP** (Android `enterPictureInPictureMode`;
+browser PiP on the desktop `<video>`). An OS PiP window *leaves the app*: on
+Android the conversation the shell had just opened sat behind the launcher, and
+on desktop the picture moved into its own window while the opaque full-screen
+call overlay stayed put, covering the thread. Either way the button looked like
+"shrink the video and go nowhere".
+
+Only one window can show a call *and* one of our own screens at the same time —
+ours. So the chat button now always shrinks the call into an **in-app floating
+tile**:
+
+- Dart: `CallController.openChat()` sets `CallPipMode.inApp` unconditionally and
+  never calls `PipChannel.enter()`.
+- Compose: `PipController.minimizeInApp()` + a new `MinimizedCallTile`, which is
+  deliberately **not** wrapped in `CallOverlay` (that composable's opaque
+  full-screen background would hide the conversation and swallow its taps).
+- Desktop: `minimizeCall()` adds `.is-minimized` to `#call-active` (CSS shrinks
+  it to a corner tile); browser PiP is no longer on this path.
+
+Native/OS PiP still exists and is still right for the case it was built for:
+**leaving the app** during a video call (`PipController`'s auto-enter). Don't
+wire the chat button back to it.
+
+The tile defaults to the **top**-right on every frontend, which is also a bug
+fix: the bottom-right of a conversation is the send button, and a call tile
+parked on top of it defeats the whole point of the mode.
+
+**2. "If one person pauses video the other should continue."** Two independent
+causes, both fixed:
+
+- *The paused surface was swapped out, not covered.* Replacing the video widget
+  with a placeholder unmounts the renderer, and unmounting a renderer detaches
+  its sink from the track (Flutter `CallVideoRenderer.dispose`, Compose
+  `SurfaceViewRenderer.release`). The frames that arrive when the peer un-pauses
+  then have nowhere to land until a brand-new renderer has been built and
+  re-attached — which is how a pause on one side could leave the other side's
+  picture not coming back. Both now keep the surface mounted and draw an opaque
+  cover over it (`_VideoSurface` in Dart, `CallVideoSurface` in Compose), which
+  is what the desktop already did with `#call-video-paused`. Resuming is instant
+  because nothing was ever torn down.
+- *`AppLifecycleState.inactive` was treated as "hidden".* Android reports
+  `inactive` for every transient loss of focus — the app switcher, a system
+  dialog, the notification shade, and the instant before a PiP transition
+  confirms. Suspending capture there told the peer "Video paused" because
+  someone glanced at their notifications, and it raced the PiP callback. Only
+  `paused`/`hidden`/`detached` count as backgrounded now.
+
+Regression tests pin both: `app/test/call_screen_test.dart` has "never hands the
+window to the OS — that would hide the chat", "one side pausing leaves the other
+side alone", "a glance at the notification shade does not pause the camera", and
+the two surfaces are asserted to stay mounted while covered.
+
+**Verification status of this round-2 commit: CI only.** The sandbox that wrote
+it could not run `flutter analyze`/`flutter test` (the tool that executes them
+was unavailable for the whole session), so unlike round 1 these changes were
+never run locally — the GitHub Actions lanes are the first thing that executes
+them. If the Flutter lane is red on this commit, that is why, and the failure is
+most likely mechanical (an import, a renamed key) rather than a design problem.
+Round 1's lesson applies: check the *Compose* module too, since nothing local
+compiles Kotlin either.
+
 ## What was asked for
 
 1. Replace the 4-emoji SAS verification with **Telegram-style signal-strength
    bars** on voice/video calls.
-2. An in-call **chat button** that sends the call to **picture-in-picture**.
+2. An in-call **chat button** that opens the conversation and shrinks the call
+   out of its way (see the round-2 note above: an in-app tile, *not* OS PiP).
 3. PiP when **leaving the app** during a video call.
 4. When the video is not displayed anywhere, show **"Video paused"** and **do
    not capture** from the camera.
@@ -111,8 +181,9 @@ Flutter app by `app/android/app/build.gradle.kts`):
   widgets, same numbers).
 - `call/CallScreen.kt` (Compose) — same new UX as the Flutter screen: chrome
   auto-hide (`CHROME_LINGER_MS = 4_000`), bars instead of SAS, slashed
-  mute/camera, "Video paused" placeholders, chat button → `onOpenChat` +
-  `PipController.enter()`, `PipVideoContent` while in PiP.
+  mute/camera, "Video paused" drawn *over* the renderer by `CallVideoSurface`,
+  chat button → `onOpenChat` + `PipController.minimizeInApp()`,
+  `MinimizedCallTile` for that mode, `PipVideoContent` while in OS PiP.
 - `call/CallService.kt` — notification actions: always CallStyle *Hang up*;
   when Active also **mute/unmute** and **audio route** (label = current route,
   tap cycles via `CallManager.cycleAudioRoute`). Re-posts on
@@ -184,7 +255,7 @@ Flutter-host Kotlin (`app/android/…/mullu/comrade/`):
    the user-gesture requirement is satisfied — if a webview still refuses,
    that is the documented degrade path.
 3. **Device pass** (needs hardware/emulator): ring → accept → chrome fades →
-   tap reveals; home during video call → OS PiP window; chat button → PiP over
+   tap reveals; home during video call → OS PiP window; chat button → tile over
    conversation; camera-off vs backgrounding both show "Video paused" on the
    peer; notification shows End (+ Mute/Route once active) and the route
    button cycles; return from PiP resumes capture only if camera was on.
