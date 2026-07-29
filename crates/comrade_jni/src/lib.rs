@@ -52,10 +52,11 @@ use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
 use comrade_state::AppWorkspace;
 use comrade_ui::{
-    BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto, ComradeRuntime, ContactDto,
+    BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
     ConversationDto, CrisisResourceDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto,
+    WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -510,6 +511,39 @@ impl Comrade {
         Ok(changed as u64)
     }
 
+    // ── Comrades (chosen-peer presence) ─────────────────────────────────────
+
+    /// Choose (or un-choose) a contact as a comrade — see
+    /// `comrade_ui::ComradeRuntime::set_comrade` for what that discloses.
+    ///
+    /// Async for the same reason as [`Comrade::accept_request`]: the beacon
+    /// telling that peer about the change is a background `tokio::spawn`,
+    /// which needs a live reactor.
+    pub async fn set_comrade(&self, npub: String, comrade: bool) -> Result<ContactDto, UiError> {
+        self.inner.read().await.set_comrade(&npub, comrade)
+    }
+
+    /// Every comrade with their live presence, online first.
+    pub fn comrades(&self) -> Result<Vec<ComradeDto>, UiError> {
+        self.inner.blocking_read().comrades()
+    }
+
+    /// One peer's live presence, or `None` if no beacon ever arrived from
+    /// them (they haven't chosen us back, or haven't been online since).
+    pub fn peer_presence(&self, npub: String) -> Result<Option<PresenceDto>, UiError> {
+        self.inner.blocking_read().peer_presence(&npub)
+    }
+
+    /// Announce this device's presence to every comrade, returning how many
+    /// beacons a relay accepted. Called by the Android shell on foreground /
+    /// background transitions; the native heartbeat covers the rest.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn announce_presence(&self, online: bool) -> u64 {
+        let handles = self.inner.read().await.handles();
+        handles.announce_presence(online).await
+    }
+
     // ── Journal (strictly local) ─────────────────────────────────────────────
 
     pub fn add_journal_entry(
@@ -781,6 +815,24 @@ mod tests {
         let c = Comrade::new();
         assert!(matches!(c.conversations(), Err(UiError::VaultLocked)));
         assert!(matches!(c.profile(), Err(UiError::NoIdentity)));
+        assert!(matches!(c.comrades(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            c.peer_presence("npub1x".to_string()),
+            Err(UiError::VaultLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn announcing_presence_before_unlock_is_a_quiet_zero_not_an_error() {
+        // Presence is a courtesy, never an error path — the Android shell
+        // calls this on every foreground transition, including ones that
+        // race the vault being open.
+        let c = Comrade::new();
+        assert_eq!(c.announce_presence(true).await, 0);
+        assert!(matches!(
+            c.set_comrade("npub1x".to_string(), true).await,
+            Err(UiError::VaultLocked)
+        ));
     }
 
     #[test]

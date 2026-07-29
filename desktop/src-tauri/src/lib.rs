@@ -116,6 +116,11 @@ pub fn run() {
             commands::refresh_peer_profiles,
             commands::list_contacts,
             commands::search_profiles,
+            // Comrades (chosen-peer presence over the DM channel)
+            commands::set_comrade,
+            commands::comrades,
+            commands::peer_presence,
+            commands::announce_presence,
             // Message requests + read/delivered receipts
             commands::message_requests,
             commands::accept_request,

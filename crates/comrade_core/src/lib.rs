@@ -7,6 +7,7 @@
  *   vault   — NIP-04 E2E DM engine + UPI /pay regex processor
  *   dm      — DM control envelopes (profile-share on accept, read/delivered receipts)
  *   call    — voice/video call signaling (WebRTC over the Vault DM channel)
+ *   presence— comrade presence beacons (online/offline, to chosen peers only)
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
  *   tara    — reflective-companion engine (deterministic, on-device, not therapy)
@@ -26,6 +27,7 @@ pub mod crypto;
 pub mod dm;
 pub mod error;
 pub mod media;
+pub mod presence;
 pub mod relay;
 pub mod saathi;
 pub mod sabha;

@@ -47,6 +47,15 @@ object Notifier {
      */
     const val CHANNEL_MODELS = "comrade_models"
 
+    /**
+     * A comrade came online. Its own channel so it can be silenced (or turned
+     * off entirely) from system settings without touching message or call
+     * alerts — "someone I chose is around" is a gentler class of notification
+     * than "someone messaged you", and a user who wants the dot but not the
+     * buzz should be able to say so in one place.
+     */
+    const val CHANNEL_COMRADES = "comrade_presence"
+
     private const val GROUP_MESSAGES = "comrade_messages_group"
 
     /** Register notification channels once (no-op on < O). */
@@ -86,6 +95,15 @@ object Notifier {
                 "Background connection",
                 NotificationManager.IMPORTANCE_MIN,
             ).apply { description = "Comrade is staying connected while unlocked in the background" },
+        )
+        mgr.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_COMRADES,
+                "Comrades online",
+                // DEFAULT, not HIGH: worth a glance, never worth interrupting
+                // what you were doing.
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply { description = "When someone you chose as a comrade comes online" },
         )
         mgr.createNotificationChannel(
             NotificationChannel(
@@ -205,12 +223,35 @@ object Notifier {
         NotificationManagerCompat.from(context).notify("missed:$peer".hashCode(), n)
     }
 
+    /**
+     * A comrade — someone the user deliberately chose — just came online.
+     *
+     * Content-light like the rest: a name and the fact itself, nothing about
+     * what they are doing (the beacon doesn't carry it, and the notification
+     * store is not the place for it either). Tapping opens the app;
+     * [clearForPeer] drops it when their chat is opened.
+     */
+    @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
+    fun notifyComradeOnline(context: Context, peer: String, title: String) {
+        if (!canPost(context)) return
+        val n = NotificationCompat.Builder(context, CHANNEL_COMRADES)
+            .setSmallIcon(android.R.drawable.presence_online)
+            .setContentTitle(context.getString(R.string.comrade_online_title, title.ifBlank { shortNpub(peer) }))
+            .setContentText(context.getString(R.string.comrade_online_text))
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setContentIntent(openAppIntent(context))
+            .build()
+        NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+    }
+
     /** Clear any notification we posted for `peer` (e.g. on opening the chat). */
     fun clearForPeer(context: Context, peer: String) {
         val mgr = NotificationManagerCompat.from(context)
         mgr.cancel(peer.hashCode())
         mgr.cancel("req:$peer".hashCode())
         mgr.cancel("call:$peer".hashCode())
+        mgr.cancel("online:$peer".hashCode())
     }
 
     /** Clear only the incoming-call notification for `peer` (call answered/ended). */

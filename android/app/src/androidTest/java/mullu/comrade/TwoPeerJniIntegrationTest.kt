@@ -108,4 +108,66 @@ class TwoPeerJniIntegrationTest {
         val request = (received as BridgeEvent.IncomingMessageRequest).v1
         assertEquals(aliceNpub, request.peer)
     }
+
+    /**
+     * The comrade-presence half of the same contract: a beacon crossing two
+     * real FFI instances, and the `ComradePresence` event arriving through the
+     * generated `BridgeEventListener`.
+     *
+     * The presence *rules* are proven in `two_peer_integration.rs`; what only a
+     * device can show is that the new bindings themselves work — `setComrade`
+     * as a generated `suspend fun`, and an enum variant with named fields
+     * (`peer`/`name`/`online`/`at`, unlike the tuple-shaped variants above)
+     * surviving the uniffi round-trip.
+     */
+    @Test
+    fun two_real_ffi_instances_exchange_comrade_presence() {
+        val relayUrl = InstrumentationRegistry.getArguments().getString("comradeTestRelayUrl")
+        org.junit.Assume.assumeTrue(
+            "requires an isolated test relay — pass -e comradeTestRelayUrl <ws-url> " +
+                "(see deploy/test-relay/README.md); skipping rather than hitting the public relay pool",
+            !relayUrl.isNullOrBlank(),
+        )
+        val testRelayUrl = requireNotNull(relayUrl)
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val aliceDir = File(context.filesDir, "jni-presence-alice")
+        val bobDir = File(context.filesDir, "jni-presence-bob")
+
+        val alice = Comrade.newWithRelays(listOf(testRelayUrl))
+        val bob = Comrade.newWithRelays(listOf(testRelayUrl))
+        val aliceEvents = RecordingListener()
+        val bobEvents = RecordingListener()
+
+        runBlocking {
+            alice.setEventListener(aliceEvents)
+            bob.setEventListener(bobEvents)
+            alice.unlockVault(aliceDir.absolutePath, "pin")
+            bob.unlockVault(bobDir.absolutePath, "pin")
+        }
+        val aliceNpub = requireNotNull(alice.currentIdentity()).npub
+        val bobNpub = requireNotNull(bob.currentIdentity()).npub
+
+        // Presence only flows inside an accepted conversation, so get past the
+        // stranger gate first — same path a real pair of users takes.
+        runBlocking {
+            alice.sendDm(bobNpub, "hi bob")
+            waitFor(bobEvents) { it is BridgeEvent.IncomingMessageRequest }
+            bob.acceptRequest(aliceNpub)
+            // Each side chooses the other; either beacon alone would tell the
+            // other nothing, which is the property the Rust suite covers.
+            alice.setComrade(bobNpub, true)
+            bob.setComrade(aliceNpub, true)
+        }
+
+        val presence = runBlocking {
+            waitFor(aliceEvents) { it is BridgeEvent.ComradePresence && it.online }
+        }
+        assertNotNull("alice's real Comrade instance must be told bob is online", presence)
+        assertEquals(bobNpub, (presence as BridgeEvent.ComradePresence).peer)
+
+        val bobRow = alice.comrades().single { it.npub == bobNpub }
+        assertEquals(true, bobRow.online)
+        assertEquals(true, bobRow.peerMarkedUs)
+    }
 }
