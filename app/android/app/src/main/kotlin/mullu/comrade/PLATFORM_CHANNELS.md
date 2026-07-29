@@ -259,7 +259,7 @@ its existing public API; it adds no state of its own.
 | `testTurnConnectivity` | `{timeoutMs: int?}` | `"noServer"\|"relayAvailable"\|"relayUnavailable"` | Off-main; up to `timeoutMs` (default 8000). |
 | `turnServerStatus` | — | `{configured: bool, url: String?}` | Never returns the credential. |
 | `setTurnServer` | `{url, username, credential}` | `null` | Write-only. Throws `ILLEGAL_TURN_URL` on a malformed URI. |
-| `callSas` | `{localSdp, remoteSdp}` | `List<String>?` | Rarely needed — SAS is already on the state channel. |
+| `setVideoCaptureSuspended` | `{suspended: bool}` | `null` | "No surface is showing the local video" — releases/reacquires the camera without touching the user's own camera choice. |
 
 `toggleMute`/`toggleCamera`/`switchCamera`/`cycleAudioRoute` return `null` immediately
 rather than the resulting state. The state channel is the only place state is read from;
@@ -297,7 +297,8 @@ partial ones):
   "quality": "good" | "medium" | "poor" | "unknown",
   "audioRoute": "earpiece" | "speaker" | "bluetooth" | "wired",
   "availableRoutes": ["earpiece", "speaker"],
-  "sasEmojis": ["🐢","🎺","🌵","🔔"]   // null until connected, or if underivable
+  "videoSuspended": false,       // capture stopped because nothing displays it
+  "remoteVideoPaused": false     // peer's frames stopped arriving ("Video paused")
 }
 ```
 
@@ -305,9 +306,16 @@ partial ones):
 the notification cannot disagree — the same reason `ChatEventRouter` reads it back off
 `CallUiState.Ringing` instead of re-deriving it (`RelayConnectionService.kt:352-358`).
 
-`sasEmojis` is `null` for "cannot verify" and that is a real, displayable state — an
-honest "no code" rather than a fabricated one (`ComradeCore.kt:491-498`). Dart must not
-coerce it to an empty list.
+`videoSuspended` and `cameraOn` are deliberately two facts, not one: `cameraOn` is the
+user's own choice and survives backgrounding; `videoSuspended` is the app saying "no
+surface is showing this video". Capture runs only while `cameraOn && !videoSuspended`,
+so returning to the foreground never switches a deliberately-off camera back on.
+
+Picture-in-picture rides its own pair — `mullu.comrade/pip` (methods: `isSupported`,
+`enter {aspectWidth, aspectHeight}`, `close`) and `mullu.comrade/pip/state` (a bool
+stream: in PiP right now). It is a *window* concern, not a media one; the behaviour
+lives in the shared `call/PipController.kt`, and auto-enter on leaving the app is
+handled natively in `MainActivity` because it must beat the Activity's stop.
 
 ### 5.2 What the state channel deliberately does not carry
 

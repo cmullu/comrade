@@ -9,8 +9,11 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,12 +27,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,6 +58,7 @@ import kotlinx.coroutines.delay
 import mullu.comrade.R
 import mullu.comrade.ui.CallEndIcon
 import mullu.comrade.ui.CallIcon
+import mullu.comrade.ui.ChatBubbleIcon
 import mullu.comrade.ui.FlipCameraIcon
 import mullu.comrade.ui.MicIcon
 import mullu.comrade.ui.PeerAvatar
@@ -69,10 +71,27 @@ import org.webrtc.VideoTrack
 
 /*
  * The full-screen call UI. It observes [CallManager.state] and renders the four
- * call phases the task specifies — Ringing, Connecting, Active, Ended — plus the
- * local/remote WebRTC video via [SurfaceViewRenderer]. Accept is routed through
- * [onAccept] (the host gates the mic/camera runtime permission there); every
- * other control talks to [CallManager] directly.
+ * call phases — Ringing, Connecting, Active, Ended — plus the local/remote
+ * WebRTC video via [SurfaceViewRenderer]. Accept is routed through [onAccept]
+ * (the host gates the mic/camera runtime permission there); every other control
+ * talks to [CallManager] directly.
+ *
+ * UX rules, shared with the Flutter port (`app/lib/src/screens/call_screen.dart`):
+ *  * a video call opens full screen and the controls fade out after a few
+ *    seconds; a tap anywhere brings them back (FaceTime). Audio calls keep
+ *    their controls — there is nothing underneath to reveal;
+ *  * four signal-strength bars (Telegram-style, [ConnectionStrengthIndicator])
+ *    sit where the 4-emoji verification row used to. The SAS was near-redundant
+ *    here: the SDP rides the NIP-44 gift-wrapped DM channel, so the
+ *    fingerprints are already authenticated by the peer's Nostr key
+ *    (`comrade_core::call::derive_sas` still exists and is still tested);
+ *  * mute/camera draw an animated slash over the glyph ([SlashedIcon]) rather
+ *    than swapping to a different icon;
+ *  * a side that stopped sending shows "Video paused" over the avatar — never
+ *    a frozen frame ([CallManager.remoteVideoPaused], camera-off, suspension);
+ *  * the chat button opens the conversation and shrinks the call into the OS
+ *    picture-in-picture window ([PipController]); while in PiP only the remote
+ *    picture renders.
  */
 
 private val CallBackground = Color(0xFF0E1621)
@@ -80,7 +99,13 @@ private val AcceptGreen = Color(0xFF2E7D32)
 private val HangupRed = Color(0xFFC62828)
 private val ControlIdle = Color(0x33FFFFFF)
 private val ControlActive = Color(0xFFFFFFFF)
-private val WeakConnectionAmber = Color(0xFFFFA000)
+
+/**
+ * How long a video call's controls stay up before fading — long enough to hit
+ * "mute" without hunting, short enough that the call is mostly the other
+ * person's face. Matches `_chromeLinger` in the Flutter port.
+ */
+private const val CHROME_LINGER_MS = 4_000L
 
 /**
  * Host entry point: shows the call overlay when a call is in flight, nothing
@@ -88,8 +113,13 @@ private val WeakConnectionAmber = Color(0xFFFFA000)
  * covers the app while ringing/connected.
  */
 @Composable
-fun CallScreen(onAccept: () -> Unit, modifier: Modifier = Modifier) {
+fun CallScreen(
+    onAccept: () -> Unit,
+    modifier: Modifier = Modifier,
+    onOpenChat: (peer: String, label: String) -> Unit = { _, _ -> },
+) {
     val state by CallManager.state.collectAsState()
+    val inPip by PipController.inPip.collectAsState()
     when (val s = state) {
         is CallUiState.Idle -> Unit
         is CallUiState.Ringing -> CallOverlay(modifier) { RingingContent(s, onAccept) }
@@ -101,15 +131,58 @@ fun CallScreen(onAccept: () -> Unit, modifier: Modifier = Modifier) {
         is CallUiState.Connecting, is CallUiState.Active -> CallOverlay(modifier) {
             val active = s as? CallUiState.Active
             val connecting = s as? CallUiState.Connecting
-            InCallContent(
-                peer = active?.peer ?: connecting!!.peer,
-                peerLabel = active?.peerLabel ?: connecting!!.peerLabel,
-                video = active?.video ?: connecting!!.video,
-                status = if (active == null) stringOf(R.string.call_connecting) else null,
-                connectedAtMs = active?.connectedAtMs ?: 0L,
-            )
+            if (inPip) {
+                // The OS is drawing us into a thumbnail: the picture is all
+                // that fits — controls belong to the PiP window's own chrome,
+                // and tapping it is the platform's restore gesture.
+                PipVideoContent(
+                    video = active?.video ?: connecting!!.video,
+                    peer = active?.peer ?: connecting!!.peer,
+                    peerLabel = active?.peerLabel ?: connecting!!.peerLabel,
+                )
+            } else {
+                InCallContent(
+                    peer = active?.peer ?: connecting!!.peer,
+                    peerLabel = active?.peerLabel ?: connecting!!.peerLabel,
+                    video = active?.video ?: connecting!!.video,
+                    status = if (active == null) stringOf(R.string.call_connecting) else null,
+                    connectedAtMs = active?.connectedAtMs ?: 0L,
+                    onOpenChat = onOpenChat,
+                )
+            }
         }
         is CallUiState.Ended -> CallOverlay(modifier) { EndedContent(s) }
+    }
+}
+
+/**
+ * What the picture-in-picture window shows: the remote picture, or — when the
+ * peer isn't sending — the avatar with an honest "Video paused" under it.
+ */
+@Composable
+private fun PipVideoContent(video: Boolean, peer: String, peerLabel: String) {
+    val remoteVideo by CallManager.remoteVideo.collectAsState()
+    val remotePaused by CallManager.remoteVideoPaused.collectAsState()
+    Box(Modifier.fillMaxSize()) {
+        val track = remoteVideo
+        if (video && track != null && !remotePaused) {
+            VideoRenderer(track, mirror = false, modifier = Modifier.fillMaxSize())
+        } else {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                PeerAvatar(peerLabel, seed = peer, size = 56.dp)
+                if (video && remotePaused) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        stringOf(R.string.call_video_paused),
+                        color = Color.White,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -179,6 +252,7 @@ private fun InCallContent(
     video: Boolean,
     status: String?,
     connectedAtMs: Long = 0L,
+    onOpenChat: (peer: String, label: String) -> Unit = { _, _ -> },
 ) {
     val muted by CallManager.muted.collectAsState()
     val cameraOn by CallManager.cameraOn.collectAsState()
@@ -187,7 +261,8 @@ private fun InCallContent(
     val remoteVideo by CallManager.remoteVideo.collectAsState()
     val localVideo by CallManager.localVideo.collectAsState()
     val connectionQuality by CallManager.connectionQuality.collectAsState()
-    val sasEmojis by CallManager.sasEmojis.collectAsState()
+    val videoSuspended by CallManager.videoSuspended.collectAsState()
+    val remoteVideoPaused by CallManager.remoteVideoPaused.collectAsState()
 
     // Audio calls: let the proximity sensor blank the screen when held to the ear.
     ProximityScreenControl(active = !video && status == null)
@@ -195,13 +270,26 @@ private fun InCallContent(
     val label = if (status != null) status else durationLabel(connectedAtMs)
     // Quality stats are only meaningful once the call is actually Active —
     // status == null is this composable's existing "are we Active" signal
-    // (see ProximityScreenControl above). GOOD/UNKNOWN stay silent so the
-    // indicator doesn't add visual noise to the common case.
-    val showWeakConnection = status == null &&
-        (connectionQuality == CallQuality.MEDIUM || connectionQuality == CallQuality.POOR)
-    // Same Active-only gating as showWeakConnection; a missing fingerprint on
-    // either side is a valid "can't verify" and shown as simply nothing.
-    val sas = sasEmojis?.takeIf { status == null && it.isNotEmpty() }
+    // (see ProximityScreenControl above). The bars render UNKNOWN as four
+    // empty bars and GOOD without a text label, so showing the indicator for
+    // every Active reading adds no noise to the healthy case.
+    val showIndicator = status == null
+
+    // Our own camera is not being sent, for whichever of the two reasons —
+    // the user turned it off, or capture is suspended because nothing was
+    // displaying it. From the peer's side they are the same thing.
+    val localVideoPaused = !cameraOn || videoSuspended
+
+    // FaceTime-style chrome: on a video call the controls and the name pill
+    // linger for a few seconds, then fade; a tap anywhere toggles them back.
+    // Audio calls keep their controls permanently.
+    var chromeVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(video, status, chromeVisible) {
+        if (video && status == null && chromeVisible) {
+            delay(CHROME_LINGER_MS)
+            chromeVisible = false
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         if (video) {
@@ -213,19 +301,44 @@ private fun InCallContent(
             val pipTrack = if (swapped) remoteVideo else localVideo
             val pipIsLocal = !swapped
 
-            if (mainTrack != null) {
+            // Whichever track each surface shows, "paused" means that side
+            // stopped *sending* — not a renderer that has no frames yet.
+            val mainPaused = if (swapped) localVideoPaused else remoteVideoPaused
+            val tilePaused = if (pipIsLocal) localVideoPaused else remoteVideoPaused
+
+            if (mainTrack != null && !mainPaused) {
                 // The local track is the front camera preview, so it mirrors
                 // wherever it renders; the remote track never mirrors.
                 VideoRenderer(mainTrack, mirror = swapped, modifier = Modifier.fillMaxSize())
             } else {
-                // No frames for the big view yet (the peer's video hasn't
-                // arrived, typically while still Connecting) — show who the
-                // call is with instead of a raw black screen.
-                PeerHeader(peer, peerLabel, status = null, modifier = Modifier.align(Alignment.Center))
+                // No picture: say which of the two reasons it is — paused, or
+                // simply no frames yet — instead of a black screen or, worse,
+                // a frozen last frame that reads as a broken connection.
+                PeerHeader(
+                    peer,
+                    peerLabel,
+                    status = if (mainPaused) stringOf(R.string.call_video_paused) else null,
+                    modifier = Modifier.align(Alignment.Center),
+                )
             }
 
+            // The tap target for revealing/dismissing the controls. Sits above
+            // the video but below the tile and the controls, so those keep
+            // their own taps; `indication = null` because a full-screen ripple
+            // on every chrome toggle would be absurd.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { chromeVisible = !chromeVisible },
+            )
+
             // Self-preview tile: swaps on tap; hosts the camera-flip control so
-            // the bottom bar keeps exactly one camera button.
+            // the bottom bar keeps exactly one camera button. Deliberately NOT
+            // part of the fading chrome — it is the only feedback that your
+            // own camera works.
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -235,7 +348,7 @@ private fun InCallContent(
                     .background(Color(0xFF17212B))
                     .clickable(onClickLabel = stringOf(R.string.call_swap_video)) { swapped = !swapped },
             ) {
-                if (pipTrack != null && (cameraOn || !pipIsLocal)) {
+                if (pipTrack != null && !tilePaused) {
                     VideoRenderer(
                         track = pipTrack,
                         mirror = pipIsLocal,
@@ -248,16 +361,27 @@ private fun InCallContent(
                         zOrderMediaOverlay = true,
                     )
                 } else {
-                    Icon(
-                        VideocamOffIcon,
-                        contentDescription = null,
-                        tint = Color(0x66FFFFFF),
-                        modifier = Modifier
-                            .size(30.dp)
-                            .align(Alignment.Center),
-                    )
+                    Column(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Icon(
+                            VideocamOffIcon,
+                            contentDescription = null,
+                            tint = Color(0x66FFFFFF),
+                            modifier = Modifier.size(30.dp),
+                        )
+                        if (tilePaused) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                stringOf(R.string.call_video_paused),
+                                color = Color.White,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
                 }
-                if (pipIsLocal && cameraOn) {
+                if (pipIsLocal && !localVideoPaused) {
                     CallActionButton(
                         icon = FlipCameraIcon,
                         desc = stringOf(R.string.call_switch_camera),
@@ -270,105 +394,130 @@ private fun InCallContent(
                 }
             }
 
-            // Name + duration/status pill, kept clear of the self-preview tile.
-            Column(
+            // Name + duration/status pill and the signal bars, kept clear of
+            // the self-preview tile. Fades with the rest of the chrome.
+            androidx.compose.animation.AnimatedVisibility(
+                visible = chromeVisible,
+                enter = fadeIn(),
+                exit = fadeOut(),
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(start = 16.dp, top = 20.dp, end = 142.dp),
             ) {
-                Column(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0x66000000))
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                ) {
-                    Text(
-                        peerLabel,
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = label,
-                        color = Color(0xFFB0BEC5),
-                        fontSize = 13.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
-                if (showWeakConnection) {
-                    Spacer(Modifier.height(6.dp))
-                    ConnectionQualityBadge(connectionQuality)
-                }
-                if (sas != null) {
-                    Spacer(Modifier.height(6.dp))
-                    SasRow(emojis = sas)
+                Column {
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0x66000000))
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            peerLabel,
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = label,
+                            color = Color(0xFFB0BEC5),
+                            fontSize = 13.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    if (showIndicator) {
+                        Spacer(Modifier.height(6.dp))
+                        ConnectionStrengthIndicator(
+                            connectionQuality,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0x66000000))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                        )
+                    }
                 }
             }
         } else {
             PeerHeader(peer, peerLabel, label, Modifier.align(Alignment.Center)) {
-                if (showWeakConnection) {
-                    Spacer(Modifier.height(6.dp))
-                    ConnectionQualityBadge(connectionQuality)
-                }
-                if (sas != null) {
-                    Spacer(Modifier.height(6.dp))
-                    SasRow(emojis = sas)
+                if (showIndicator) {
+                    Spacer(Modifier.height(10.dp))
+                    ConnectionStrengthIndicator(connectionQuality)
                 }
             }
         }
 
-        // Controls: mute, audio route, (camera on/off), hang up — uniform
-        // sizes with labels beneath; over video they sit on a scrim so they
-        // stay legible on top of bright frames.
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .then(
-                    if (video) {
-                        Modifier.background(
-                            Brush.verticalGradient(listOf(Color.Transparent, Color(0xB3000000))),
-                        )
-                    } else {
-                        Modifier
-                    },
-                ),
+        // Controls: mute, (camera), chat, audio route, hang up — uniform sizes
+        // with labels beneath; over video they sit on a scrim so they stay
+        // legible on top of bright frames, and they fade with the chrome.
+        androidx.compose.animation.AnimatedVisibility(
+            visible = chromeVisible || !video,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter),
         ) {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp)
-                    .padding(top = 28.dp, bottom = 36.dp),
-                horizontalArrangement = Arrangement.spacedBy(26.dp, Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.Top,
+                    .then(
+                        if (video) {
+                            Modifier.background(
+                                Brush.verticalGradient(listOf(Color.Transparent, Color(0xB3000000))),
+                            )
+                        } else {
+                            Modifier
+                        },
+                    ),
             ) {
-                CallActionButton(
-                    icon = MicIcon,
-                    desc = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
-                    bg = if (muted) ControlActive else ControlIdle,
-                    tint = if (muted) CallBackground else Color.White,
-                    size = 60.dp,
-                    label = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
-                ) { CallManager.toggleMute() }
-                AudioRouteButton(audioRoute, availableRoutes)
-                if (video) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(top = 28.dp, bottom = 36.dp),
+                    horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    // The mic slashes itself rather than swapping glyph — a
+                    // struck-through mic is "your mic is off"; a different
+                    // picture is just "the icon changed".
                     CallActionButton(
-                        icon = if (cameraOn) VideocamIcon else VideocamOffIcon,
-                        desc = stringOf(if (cameraOn) R.string.call_camera_off else R.string.call_camera_on),
-                        bg = if (!cameraOn) ControlActive else ControlIdle,
-                        tint = if (!cameraOn) CallBackground else Color.White,
+                        icon = MicIcon,
+                        desc = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
+                        bg = if (muted) ControlActive else ControlIdle,
+                        tint = if (muted) CallBackground else Color.White,
                         size = 60.dp,
-                        label = stringOf(R.string.call_camera),
-                    ) { CallManager.toggleCamera() }
+                        label = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
+                        slashed = muted,
+                    ) { CallManager.toggleMute() }
+                    if (video) {
+                        CallActionButton(
+                            icon = VideocamIcon,
+                            desc = stringOf(if (cameraOn) R.string.call_camera_off else R.string.call_camera_on),
+                            bg = if (!cameraOn) ControlActive else ControlIdle,
+                            tint = if (!cameraOn) CallBackground else Color.White,
+                            size = 60.dp,
+                            label = stringOf(R.string.call_camera),
+                            slashed = !cameraOn,
+                        ) { CallManager.toggleCamera() }
+                    }
+                    // Chat: open the conversation and shrink the call into
+                    // picture-in-picture — the call keeps running, it only
+                    // changes where it is drawn.
+                    CallActionButton(
+                        icon = ChatBubbleIcon,
+                        desc = stringOf(R.string.call_open_chat),
+                        bg = ControlIdle,
+                        size = 60.dp,
+                        label = stringOf(R.string.call_chat),
+                    ) { onOpenChat(peer, peerLabel) }
+                    AudioRouteButton(audioRoute, availableRoutes)
+                    CallActionButton(
+                        icon = CallEndIcon,
+                        desc = stringOf(R.string.call_hang_up),
+                        bg = HangupRed,
+                        size = 60.dp,
+                        label = stringOf(R.string.call_end_label),
+                    ) { CallManager.hangup() }
                 }
-                CallActionButton(
-                    icon = CallEndIcon,
-                    desc = stringOf(R.string.call_hang_up),
-                    bg = HangupRed,
-                    size = 60.dp,
-                    label = stringOf(R.string.call_end_label),
-                ) { CallManager.hangup() }
             }
         }
     }
@@ -432,62 +581,9 @@ private fun PeerHeader(
     }
 }
 
-/**
- * A small, unobtrusive dot + label shown only while a call is Active and the
- * connection has degraded — see [CallManager.connectionQuality]. Callers gate
- * on Active/MEDIUM-POOR themselves; this composable just renders the dot
- * (amber for MEDIUM, red for POOR) and the "weak connection" text next to it.
- */
-@Composable
-private fun ConnectionQualityBadge(quality: CallQuality) {
-    val dotColor = if (quality == CallQuality.POOR) HangupRed else WeakConnectionAmber
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(dotColor),
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(stringOf(R.string.call_weak_connection), color = Color.White, fontSize = 13.sp)
-    }
-}
-
-/**
- * The 4-emoji short authentication string ("Verify: 🐶 🦊 …"), shown only
- * while [CallManager.sasEmojis] has a non-empty value for the current
- * (Active) call. This is a real security signal, not decoration: it is
- * derived from both sides' DTLS-SRTP certificate fingerprints, so the same 4
- * emoji appearing on both phones is what rules out a man-in-the-middle on
- * the call's media path — tapping the row explains that rather than leaving
- * it unexplained.
- */
-@Composable
-private fun SasRow(emojis: List<String>, modifier: Modifier = Modifier) {
-    var showInfo by remember { mutableStateOf(false) }
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(ControlIdle)
-            .clickable(onClickLabel = stringOf(R.string.call_sas_explain_title)) { showInfo = true }
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(stringOf(R.string.call_sas_label), color = Color(0xFFB0BEC5), fontSize = 13.sp)
-        Spacer(Modifier.width(8.dp))
-        Text(emojis.joinToString(" "), fontSize = 20.sp)
-    }
-    if (showInfo) {
-        AlertDialog(
-            onDismissRequest = { showInfo = false },
-            confirmButton = {
-                TextButton(onClick = { showInfo = false }) { Text(stringOf(R.string.call_sas_dismiss)) }
-            },
-            title = { Text(stringOf(R.string.call_sas_explain_title)) },
-            text = { Text(stringOf(R.string.call_sas_explain_body)) },
-        )
-    }
-}
+// The connection-quality indicator (four Telegram-style signal bars) and the
+// animated slashed icons live in CallWidgets.kt, shared with nothing UI-toolkit
+// specific in their contracts so the Flutter port mirrors them exactly.
 
 @Composable
 private fun CallActionButton(
@@ -497,6 +593,7 @@ private fun CallActionButton(
     tint: Color = Color.White,
     size: Dp = 64.dp,
     label: String? = null,
+    slashed: Boolean = false,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
@@ -509,7 +606,16 @@ private fun CallActionButton(
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, contentDescription = desc, tint = tint, modifier = Modifier.size(size * 0.44f))
+            // The slash is drawn over the glyph (and animated) rather than the
+            // glyph swapped — see [SlashedIcon].
+            SlashedIcon(
+                icon = icon,
+                slashed = slashed,
+                color = tint,
+                cutoutColor = bg,
+                contentDescription = desc,
+                size = size * 0.44f,
+            )
         }
         if (label != null) {
             Spacer(Modifier.height(6.dp))

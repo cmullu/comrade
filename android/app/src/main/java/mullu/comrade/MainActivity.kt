@@ -101,6 +101,7 @@ import mullu.comrade.ui.theme.ComradeTheme
 import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallScreen
 import mullu.comrade.call.CallUiState
+import mullu.comrade.call.PipController
 import mullu.comrade.call.Ringer
 import uniffi.comrade_core.CallMediaKind
 
@@ -117,6 +118,9 @@ class MainActivity : ComponentActivity() {
         // the request so the shell honours it once it exists (the vault may
         // still need unlocking first).
         AppNavigation.request(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
+        // Picture-in-picture for a live video call — see [PipController]. The
+        // Activity is the only thing that receives the PiP lifecycle callbacks.
+        PipController.attachActivity(this)
         setContent {
             ComradeTheme {
                 Surface(
@@ -127,6 +131,30 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * Leaving the app during a video call floats it into a PiP window instead
+     * of stopping it (pre-31; from 31 up the platform's own auto-enter flag,
+     * which [PipController.applyAutoEnter] keeps current, handles it).
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        PipController.onUserLeaving()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: android.content.res.Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        PipController.onPipModeChanged(isInPictureInPictureMode)
+        PipController.onWindowVisibilityChanged(isInPictureInPictureMode)
+    }
+
+    override fun onDestroy() {
+        PipController.detachActivity(this)
+        super.onDestroy()
     }
 
     /**
@@ -156,6 +184,9 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStart() {
         super.onStart()
+        // The video surface is back: resume capture if a video call had it
+        // suspended (a no-op otherwise, and idempotent — see PipController).
+        PipController.onWindowVisibilityChanged(visible = true)
         val app = application as? ComradeApplication ?: return
         app.appScope.launch(Dispatchers.IO) {
             if (ComradeCore.isVaultUnlocked()) {
@@ -175,6 +206,9 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStop() {
         super.onStop()
+        // Nothing is displaying the local video any more — stop capturing it
+        // (unless a PiP window is showing the call). See PipController.
+        PipController.onWindowVisibilityChanged(visible = false)
         purgeDecryptedMedia(this)
     }
 }
@@ -754,11 +788,22 @@ private fun MainShell(
             }
         }
         // Call overlay — covers the app while a call is ringing/connected.
-        CallScreen(onAccept = {
-            (CallManager.state.value as? CallUiState.Ringing)?.let { ringing ->
-                withCallPermissions(ringing.video) { CallManager.accept(context) }
-            }
-        })
+        CallScreen(
+            onAccept = {
+                (CallManager.state.value as? CallUiState.Ringing)?.let { ringing ->
+                    withCallPermissions(ringing.video) { CallManager.accept(context) }
+                }
+            },
+            // The in-call chat button: open the conversation with the person on
+            // the call, then shrink the call into picture-in-picture so it
+            // floats over the thread. Mirrors the Flutter shell's onOpenChat.
+            onOpenChat = { peer, label ->
+                tab = MainTab.Chats
+                chatNav = ChatNav.Open(peer = peer, alias = label.ifBlank { null }, username = null)
+                settingsOpen = false
+                PipController.enter()
+            },
+        )
     }
 
     if (editingAlias && openChat != null) {

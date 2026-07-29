@@ -8,6 +8,7 @@ import mullu.comrade.channel.CallVideoChannel
 import mullu.comrade.channel.CallVideoViewFactory
 import mullu.comrade.channel.ModelDownloadChannel
 import mullu.comrade.channel.PermissionBridge
+import mullu.comrade.channel.PipChannel
 import mullu.comrade.channel.RelayConnectionChannel
 import mullu.comrade.channel.SystemChannel
 import mullu.comrade.channel.VoiceRecorderChannel
@@ -44,6 +45,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
 
     private var call: CallChannel? = null
     private var callVideo: CallVideoChannel? = null
+    private var pip: PipChannel? = null
     private var wakeWord: WakeWordChannel? = null
     private var relay: RelayConnectionChannel? = null
     private var models: ModelDownloadChannel? = null
@@ -63,6 +65,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
 
         call = CallChannel(messenger, context, permissions)
         callVideo = CallVideoChannel(messenger, binding.textureRegistry)
+        pip = PipChannel(messenger)
         wakeWord = WakeWordChannel(messenger, context, permissions)
         relay = RelayConnectionChannel(messenger, context)
         models = ModelDownloadChannel(messenger, context)
@@ -82,6 +85,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
         // textures before the engine's TextureRegistry goes away.
         callVideo?.dispose()
         call?.dispose()
+        pip?.dispose()
         wakeWord?.dispose()
         relay?.dispose()
         models?.dispose()
@@ -90,6 +94,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
 
         callVideo = null
         call = null
+        pip = null
         wakeWord = null
         relay = null
         models = null
@@ -101,6 +106,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         permissions.activity = binding.activity
+        pip?.activity = binding.activity
         binding.addRequestPermissionsResultListener(permissions)
     }
 
@@ -116,5 +122,6 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
      */
     override fun onDetachedFromActivity() {
         permissions.detachActivity()
+        pip?.activity = null
     }
 }

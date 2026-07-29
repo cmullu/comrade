@@ -164,6 +164,15 @@ object CallManager {
     /** Above this, jitter alone knocks an otherwise-GOOD RTT reading down to MEDIUM. */
     private const val JITTER_GOOD_MS = 30.0
 
+    /**
+     * How many consecutive stats polls may show no new decoded video frames
+     * before the peer's video is called *paused* — see
+     * [updateRemoteVideoPaused]. Two polls (~4 s at [STATS_POLL_MS]) rather
+     * than one, because a single dropped poll on a congested link is normal and
+     * a caption that flickers is worse than none.
+     */
+    private const val REMOTE_VIDEO_STALL_POLLS = 2
+
     private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
@@ -229,17 +238,35 @@ object CallManager {
     /** Which [AudioRoute]s are selectable right now — grows/shrinks as headsets connect. */
     val availableRoutes: StateFlow<List<AudioRoute>> = _availableRoutes.asStateFlow()
 
-    private val _sasEmojis = MutableStateFlow<List<String>?>(null)
+    private val _videoSuspended = MutableStateFlow(false)
 
     /**
-     * The 4-emoji short authentication string for the current call, once
-     * connected and both sides' SDPs are known — for the two participants to
-     * read aloud and compare, catching a man-in-the-middle that re-terminated
-     * the DTLS-SRTP media path. `null` before that point, or if it could not
-     * be derived at all (a missing fingerprint on either side): an honest
-     * "can't verify", never a fabricated code. See [onConnected].
+     * Capture is stopped because **nothing is displaying it** — the app is
+     * backgrounded with no picture-in-picture window, so the camera would be
+     * running against a surface no one can see.
+     *
+     * Deliberately a second flag rather than a write to [_cameraOn]: that one
+     * is the user's own decision and has to survive backgrounding. Capture runs
+     * only while `cameraOn && !videoSuspended` (see [applyCaptureState]), so
+     * coming back to the foreground with the camera deliberately off does not
+     * quietly switch it on. Set by [setVideoCaptureSuspended].
      */
-    val sasEmojis: StateFlow<List<String>?> = _sasEmojis.asStateFlow()
+    val videoSuspended: StateFlow<Boolean> = _videoSuspended.asStateFlow()
+
+    private val _remoteVideoPaused = MutableStateFlow(false)
+
+    /**
+     * The peer's video track is live but no new frames are being decoded — they
+     * turned their camera off, or their app stopped capturing because it went
+     * to the background.
+     *
+     * Derived from `framesDecoded` in the stats poll rather than signalled,
+     * because it needs no protocol change and it is true for *every* reason the
+     * frames stopped, including the ones the peer never announces. The UI draws
+     * "Video paused" over their avatar instead of leaving a frozen frame that
+     * looks like a broken connection. See [updateRemoteVideoPaused].
+     */
+    val remoteVideoPaused: StateFlow<Boolean> = _remoteVideoPaused.asStateFlow()
 
     // ── WebRTC singletons (lazily built on the first call, never at startup) ──
     // @Volatile: written under [factoryLock] (see ensureFactory) but read from
@@ -315,24 +342,6 @@ object CallManager {
         /** Callee only: the offer SDP, buffered from ring until Accept. */
         var offerSdp: String? = null
 
-        /**
-         * This side's negotiated local SDP — the offer for the caller, the
-         * answer for the callee — captured once `setLocalDescription`
-         * succeeds (see [setLocalThen]). Feeds SAS derivation in
-         * [onConnected] once [remoteSdp] is known too. Overwritten, not
-         * appended, on a renegotiation (ICE-restart TURN fallback, or an
-         * answered re-offer), so it never goes stale.
-         */
-        var localSdp: String? = null
-
-        /**
-         * The peer's negotiated remote SDP — the answer for the caller, the
-         * offer for the callee — captured once `setRemoteDescription`
-         * succeeds (see [setRemoteThen]). Same overwrite-on-renegotiation
-         * behavior as [localSdp].
-         */
-        var remoteSdp: String? = null
-
         val startedAtMs = System.currentTimeMillis()
         var connectedAtMs = 0L
         val isVideo get() = media == CallMediaKind.VIDEO
@@ -357,6 +366,22 @@ object CallManager {
 
         /** The connection-quality stats-polling loop, started on connect and cancelled on teardown. */
         var statsJob: Job? = null
+
+        /**
+         * What [applyCaptureState] last applied to the capturer, so a repeated
+         * suspend/resume never double-starts or double-stops it. Starts true
+         * because `setupPeer` starts the capture itself.
+         */
+        var capturing = true
+
+        /**
+         * `framesDecoded` from the previous stats poll, and how many polls in a
+         * row it has failed to grow — the two numbers behind
+         * [updateRemoteVideoPaused]. Null until the peer's video stats appear
+         * at all.
+         */
+        var lastRemoteVideoFrames: Long? = null
+        var remoteVideoStallPolls = 0
 
         /** Caller side: the callee's device has acked with a `Ringing` signal. */
         var remoteRinging = false
@@ -621,10 +646,14 @@ object CallManager {
 
     /**
      * Turn the local camera off/on mid-call (video calls only) — no
-     * renegotiation, matching [toggleMute]. Turning off both disables the
-     * track (so the peer, and the local self-preview, stop receiving frames)
-     * and stops the capturer (releasing the physical camera, not just muting
-     * it); turning back on resumes both. A no-op for audio calls.
+     * renegotiation, matching [toggleMute]. Off disables the track (so the
+     * peer, and the local self-preview, stop receiving frames) and stops the
+     * capturer, releasing the physical camera rather than merely muting it;
+     * on resumes both. A no-op for audio calls.
+     *
+     * This records the *user's* intent; [applyCaptureState] decides what the
+     * hardware actually does, because [videoSuspended] can independently keep
+     * the camera off while nothing is displaying it.
      */
     fun toggleCamera() {
         // Dispatched to [io] (see [reject]); startCapture/stopCapture are
@@ -633,18 +662,58 @@ object CallManager {
             synchronized(this@CallManager) {
                 val s = session ?: return@launch
                 if (!s.isVideo) return@launch
-                val next = !_cameraOn.value
-                if (next) {
-                    runCatching { s.capturer?.startCapture(CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS) }
-                        .onFailure { Log.w(TAG, "startCapture failed", it) }
-                    s.videoTrack?.setEnabled(true)
-                } else {
-                    s.videoTrack?.setEnabled(false)
-                    runCatching { s.capturer?.stopCapture() }.onFailure { Log.w(TAG, "stopCapture failed", it) }
-                }
-                _cameraOn.value = next
+                _cameraOn.value = !_cameraOn.value
+                applyCaptureState(s)
             }
         }
+    }
+
+    /**
+     * Stop or resume camera capture because the app's video surface went away
+     * (or came back) — **not** because the user asked.
+     *
+     * This is the privacy half of the camera story: with the call backgrounded
+     * and no picture-in-picture window, no surface is showing the local video,
+     * so the hardware is released instead of left running. A PiP window *is* a
+     * surface, so the caller (`CallChannel` / the Activity) keeps this false
+     * there. Idempotent, and a no-op for audio calls.
+     */
+    fun setVideoCaptureSuspended(suspended: Boolean) {
+        io.launch {
+            synchronized(this@CallManager) {
+                val s = session ?: return@launch
+                if (!s.isVideo) return@launch
+                if (_videoSuspended.value == suspended) return@launch
+                _videoSuspended.value = suspended
+                applyCaptureState(s)
+            }
+        }
+    }
+
+    /**
+     * Reconcile the camera hardware with the two independent reasons it may be
+     * off: the user turned it off ([cameraOn]) or nothing is showing it
+     * ([videoSuspended]). Capture runs only when both allow it.
+     *
+     * [Session.capturing] tracks what was last applied so a repeated
+     * start/stop — two suspensions in a row, a camera toggle while suspended —
+     * doesn't hand `CameraVideoCapturer` a transition it isn't in a state for.
+     *
+     * Must be called under this object's monitor, from [io]: the
+     * start/stopCapture pair blocks.
+     */
+    private fun applyCaptureState(s: Session) {
+        val wanted = _cameraOn.value && !_videoSuspended.value
+        if (wanted == s.capturing) return
+        if (wanted) {
+            runCatching { s.capturer?.startCapture(CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS) }
+                .onFailure { Log.w(TAG, "startCapture failed", it) }
+            s.videoTrack?.setEnabled(true)
+        } else {
+            s.videoTrack?.setEnabled(false)
+            runCatching { s.capturer?.stopCapture() }.onFailure { Log.w(TAG, "stopCapture failed", it) }
+        }
+        s.capturing = wanted
     }
 
     /** Cycle to the next available [AudioRoute] (earpiece → speaker → Bluetooth/wired → …). */
@@ -1242,7 +1311,6 @@ object CallManager {
         cancelRecoveryTimeout(s) // back to CONNECTED cancels any pending recovery countdown
         _state.value = CallUiState.Active(s.peer, s.peerLabel, s.isVideo, s.incoming, s.connectedAtMs)
         startStatsPolling(s)
-        maybeDeriveSas(s)
     }
 
     /**
@@ -1288,12 +1356,17 @@ object CallManager {
                 delay(STATS_POLL_MS)
                 val pc = synchronized(this@CallManager) { if (session === s && !s.ended) s.pc else null } ?: break
                 pc.getStats { report ->
-                    // classifyQuality is pure — safe on the WebRTC thread — but
-                    // the monitor is not (see [webRtcLane]).
+                    // classifyQuality and remoteVideoFramesDecoded are pure —
+                    // safe on the WebRTC thread — but the monitor is not (see
+                    // [webRtcLane]).
                     val quality = classifyQuality(report)
+                    val frames = remoteVideoFramesDecoded(report)
                     io.launch(webRtcLane) {
                         synchronized(this@CallManager) {
-                            if (session === s && !s.ended) _connectionQuality.value = quality
+                            if (session === s && !s.ended) {
+                                _connectionQuality.value = quality
+                                updateRemoteVideoPaused(s, frames)
+                            }
                         }
                     }
                 }
@@ -1347,27 +1420,52 @@ object CallManager {
     }
 
     /**
-     * Kick off short-authentication-string derivation once both this side's
-     * and the peer's SDP are known. Runs the (blocking, native) FFI call on
-     * [io] rather than inline — this fires from inside a `synchronized`
-     * block ([onConnected] is called from [peerObserver]'s
-     * `onConnectionChange`, itself synchronized) — and publishes the result
-     * back under a fresh `synchronized` block, matching [sendSignal]'s
-     * fire-and-forget shape. A missing fingerprint on either side yields
-     * `null` from [mullu.comrade.ComradeCore.callSasTyped] — a valid "can't
-     * verify" outcome, published as-is rather than hidden as an error.
+     * Total video frames the peer's stream has decoded so far, or `null` when
+     * there is no inbound video stream in this report yet (an audio call, or
+     * the first poll of a video one).
+     *
+     * Pure, so it is safe to run on the WebRTC stats thread. Reads every field
+     * as a nullable [Number] for the same reason [classifyQuality] does: a
+     * missing or renamed member degrades one poll rather than crashing.
      */
-    private fun maybeDeriveSas(s: Session) {
-        val local = s.localSdp
-        val remote = s.remoteSdp
-        if (local == null || remote == null) return
-        io.launch {
-            val sas = runCatching { ComradeCore.callSasTyped(local, remote) }
-                .onFailure { Log.w(TAG, "callSas failed", it) }
-                .getOrNull()
-            synchronized(this@CallManager) {
-                if (session === s && !s.ended) _sasEmojis.value = sas
-            }
+    private fun remoteVideoFramesDecoded(report: RTCStatsReport): Long? {
+        for (stat in report.statsMap.values) {
+            if (stat.type != "inbound-rtp") continue
+            if (stat.members["kind"] != "video" && stat.members["mediaType"] != "video") continue
+            val frames = (stat.members["framesDecoded"] as? Number)?.toLong() ?: continue
+            return frames
+        }
+        return null
+    }
+
+    /**
+     * Decide whether the peer's video has *paused* — frames stopped arriving
+     * while the track is still live — from consecutive `framesDecoded`
+     * readings.
+     *
+     * Two stalled polls ([REMOTE_VIDEO_STALL_POLLS] × [STATS_POLL_MS] ≈ 4 s)
+     * before saying so, because a single dropped poll is normal on a congested
+     * link and a "Video paused" caption that flickers on and off is worse than
+     * no caption at all. Any growth clears it immediately — resuming should
+     * look instant.
+     *
+     * Called under this object's monitor with [s] already re-checked as the
+     * live session.
+     */
+    private fun updateRemoteVideoPaused(s: Session, frames: Long?) {
+        if (!s.isVideo || frames == null) return
+        val previous = s.lastRemoteVideoFrames
+        s.lastRemoteVideoFrames = frames
+        // The first reading is a baseline, not a delta.
+        if (previous == null) return
+        if (frames > previous) {
+            s.remoteVideoStallPolls = 0
+            _remoteVideoPaused.value = false
+            return
+        }
+        s.remoteVideoStallPolls++
+        if (s.remoteVideoStallPolls >= REMOTE_VIDEO_STALL_POLLS) {
+            _remoteVideoPaused.value = true
         }
     }
 
@@ -1478,7 +1576,8 @@ object CallManager {
         _connectionQuality.value = CallQuality.UNKNOWN
         _audioRoute.value = AudioRoute.EARPIECE
         _availableRoutes.value = listOf(AudioRoute.EARPIECE, AudioRoute.SPEAKER)
-        _sasEmojis.value = null
+        _videoSuspended.value = false
+        _remoteVideoPaused.value = false
 
         io.launch {
             runCatching { capturerToDispose?.stopCapture() }.onFailure { Log.w(TAG, "stopCapture failed", it) }
@@ -1874,10 +1973,6 @@ object CallManager {
                     io.launch(webRtcLane) {
                         synchronized(this@CallManager) {
                             if (session !== s || s.ended) return@launch
-                            // The offer for the caller, the answer for the callee — and
-                            // whichever of the two on a renegotiation, overwriting the
-                            // prior value so it can never go stale (see [Session.localSdp]).
-                            s.localSdp = desc.description
                             onDone()
                         }
                     }
@@ -1906,10 +2001,6 @@ object CallManager {
                         synchronized(this@CallManager) {
                             if (session !== s || s.ended) return@launch
                             s.remoteSet = true
-                            // The answer for the caller, the offer for the callee — and
-                            // whichever of the two on a renegotiation, overwriting the
-                            // prior value so it can never go stale (see [Session.remoteSdp]).
-                            s.remoteSdp = desc.description
                             flushPendingIce(s)
                             onDone()
                         }

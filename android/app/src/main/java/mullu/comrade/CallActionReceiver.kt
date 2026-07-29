@@ -38,12 +38,21 @@ class CallActionReceiver : BroadcastReceiver() {
                 runCatching { context.stopService(Intent(context, CallService::class.java)) }
                 Notifier.clearCall(context, peer)
             }
+            // The ongoing-call notification's in-tray controls (Google-Phone
+            // style). Both are plain CallManager calls — safe with no UI, no
+            // engine, and even from a freshly-restarted process (they no-op on
+            // a null session). The notification itself is re-rendered by
+            // CallService, which observes the flows these mutate.
+            ACTION_TOGGLE_MUTE -> CallManager.toggleMute()
+            ACTION_CYCLE_ROUTE -> CallManager.cycleAudioRoute()
         }
     }
 
     companion object {
         const val ACTION_DECLINE = "mullu.comrade.call.DECLINE"
         const val ACTION_HANGUP = "mullu.comrade.call.HANGUP"
+        const val ACTION_TOGGLE_MUTE = "mullu.comrade.call.TOGGLE_MUTE"
+        const val ACTION_CYCLE_ROUTE = "mullu.comrade.call.CYCLE_ROUTE"
         const val EXTRA_PEER = "peer"
     }
 }

@@ -93,6 +93,14 @@
         android:label="Comrade"
         android:supportsRtl="true">
 
+        <!-- supportsPictureInPicture: a video call floats into a PiP window
+             when you leave the app, and when you tap the in-call chat button
+             (MainActivity.onUserLeaveHint / PipChannel). resizeableActivity is
+             its prerequisite, and the `screenSize|smallestScreenSize|
+             screenLayout|orientation` configChanges above are what keep the
+             Activity — and therefore the live PeerConnection — alive across the
+             resize into and out of that window instead of recreating it
+             mid-call. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -101,6 +109,8 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="true"
             android:windowSoftInputMode="adjustResize">
             <!-- Specifies an Android theme to apply to this Activity as soon as
                  the Android process has started. This theme is visible to the user
