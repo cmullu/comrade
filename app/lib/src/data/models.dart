@@ -1,0 +1,475 @@
+/// Plain Dart mirrors of the DTOs `comrade_ui` already exposes to both
+/// frontends (`ComradeCore.kt`'s `xxxInfo` data classes on Android, the
+/// snake_case JSON the Tauri commands return on desktop).
+///
+/// These are hand-written on purpose: they are the app's *view* model, not the
+/// generated bridge's. When `package:comrade/src/rust/api.dart` lands, the
+/// repository adapter maps generated types into these, so nothing above
+/// `lib/src/data/` ever depends on the bridge's shape.
+library;
+
+import 'dart:typed_data';
+
+import 'package:meta/meta.dart';
+
+/// The active identity: its key, and the `@handle` it published (if any).
+@immutable
+class Profile {
+  const Profile({required this.npub, this.username});
+
+  final String npub;
+  final String? username;
+
+  Profile copyWith({String? npub, String? username, bool clearUsername = false}) => Profile(
+        npub: npub ?? this.npub,
+        username: clearUsername ? null : (username ?? this.username),
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      other is Profile && other.npub == npub && other.username == username;
+
+  @override
+  int get hashCode => Object.hash(npub, username);
+}
+
+/// A profile found on the public directory relays.
+@immutable
+class FoundProfile {
+  const FoundProfile({required this.npub, this.name, this.about});
+
+  final String npub;
+  final String? name;
+  final String? about;
+}
+
+/// A pinned contact: the key, the alias *you* gave it, and their published
+/// handle if one is cached.
+@immutable
+class ContactInfo {
+  const ContactInfo({required this.npub, required this.alias, this.name});
+
+  final String npub;
+  final String alias;
+  final String? name;
+}
+
+/// One row of the chat list.
+@immutable
+class ConversationInfo {
+  const ConversationInfo({
+    required this.peer,
+    required this.lastMessage,
+    required this.lastAt,
+    required this.lastOutgoing,
+    this.alias,
+    this.peerName,
+  });
+
+  final String peer;
+  final String? alias;
+  final String? peerName;
+  final String lastMessage;
+  final int lastAt;
+  final bool lastOutgoing;
+}
+
+/// Delivery states an outgoing message moves through, newest-wins.
+///
+/// The desktop SPA carried this as a `STATUS_RANK` map so a late "delivered"
+/// could never undo a "read"; Android only rendered the glyph. The unified app
+/// keeps the ranking — see [MessageStatus.outranks].
+enum MessageStatus {
+  sent('sent', 1),
+  delivered('delivered', 2),
+  read('read', 3);
+
+  const MessageStatus(this.wire, this.rank);
+
+  final String wire;
+  final int rank;
+
+  static MessageStatus? fromWire(String? wire) {
+    if (wire == null) return null;
+    for (final MessageStatus s in MessageStatus.values) {
+      if (s.wire == wire) return s;
+    }
+    return null;
+  }
+
+  /// Whether this status may replace [other] (never regress).
+  bool outranks(MessageStatus? other) => rank >= (other?.rank ?? 0);
+}
+
+/// One text message in a conversation.
+@immutable
+class MessageInfo {
+  const MessageInfo({
+    required this.id,
+    required this.peer,
+    required this.content,
+    required this.createdAt,
+    required this.outgoing,
+    this.status,
+    this.replyTo,
+  });
+
+  final String id;
+  final String peer;
+  final String content;
+  final int createdAt;
+  final bool outgoing;
+  final MessageStatus? status;
+  final String? replyTo;
+
+  MessageInfo copyWith({MessageStatus? status}) => MessageInfo(
+        id: id,
+        peer: peer,
+        content: content,
+        createdAt: createdAt,
+        outgoing: outgoing,
+        status: status ?? this.status,
+        replyTo: replyTo,
+      );
+}
+
+/// A stranger's first DM, gated out of the chat list until accepted.
+@immutable
+class MessageRequestInfo {
+  const MessageRequestInfo({
+    required this.peer,
+    required this.lastMessage,
+    required this.lastAt,
+  });
+
+  final String peer;
+  final String lastMessage;
+  final int lastAt;
+}
+
+/// An encrypted NIP-94/96 attachment referenced from the DM channel.
+@immutable
+class MediaMessageInfo {
+  const MediaMessageInfo({
+    required this.eventId,
+    required this.url,
+    required this.mimeType,
+    required this.caption,
+    required this.sender,
+    required this.createdAt,
+    required this.size,
+    required this.outgoing,
+  });
+
+  final String eventId;
+  final String url;
+  final String mimeType;
+  final String caption;
+  final String sender;
+  final int createdAt;
+  final int size;
+  final bool outgoing;
+}
+
+/// Decrypted attachment bytes.
+///
+/// The Kotlin/JS bridges both carried base64; the repository interface takes
+/// raw bytes because `flutter_rust_bridge` passes `Vec<u8>` as a
+/// [Uint8List] natively, and a base64 round-trip of a 10 MB attachment is
+/// pure waste.
+@immutable
+class MediaBytes {
+  const MediaBytes({required this.mimeType, required this.bytes});
+
+  final String mimeType;
+  final Uint8List bytes;
+}
+
+/// A public post on the Sabha feed.
+@immutable
+class ChitthiInfo {
+  const ChitthiInfo({
+    required this.id,
+    required this.author,
+    required this.content,
+    required this.createdAt,
+    this.replyTo,
+  });
+
+  final String id;
+  final String author;
+  final String content;
+  final int createdAt;
+  final String? replyTo;
+}
+
+/// A journal entry — strictly local, never published.
+@immutable
+class JournalEntryInfo {
+  const JournalEntryInfo({
+    required this.id,
+    required this.text,
+    required this.createdAt,
+    this.mood,
+  });
+
+  final String id;
+  final String text;
+  final String? mood;
+  final int createdAt;
+}
+
+/// One turn of the Tara thread.
+@immutable
+class TaraMessageInfo {
+  const TaraMessageInfo({
+    required this.id,
+    required this.text,
+    required this.fromTara,
+    required this.crisis,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String text;
+
+  /// True for Tara's replies, false for the user's messages.
+  final bool fromTara;
+
+  /// True when the turn tripped the distress detector — the UI must show the
+  /// crisis card, and must NOT stream the reply.
+  final bool crisis;
+  final int createdAt;
+}
+
+/// A real place to turn, rendered under any reply that detected distress.
+@immutable
+class CrisisResourceInfo {
+  const CrisisResourceInfo({
+    required this.name,
+    required this.contact,
+    required this.note,
+  });
+
+  final String name;
+  final String contact;
+  final String note;
+}
+
+/// A logged voice/video call.
+@immutable
+class CallRecordInfo {
+  const CallRecordInfo({
+    required this.id,
+    required this.peer,
+    required this.media,
+    required this.incoming,
+    required this.outcome,
+    required this.startedAt,
+    required this.durationSecs,
+  });
+
+  final String id;
+  final String peer;
+
+  /// `"audio"` or `"video"` — the wire value the core stores.
+  final String media;
+  final bool incoming;
+
+  /// `connected | missed | declined | busy | cancelled | failed`.
+  final String outcome;
+  final int startedAt;
+  final int durationSecs;
+
+  bool get isVideo => media == 'video';
+}
+
+/// A relay's URL only — **never** the username/credential.
+///
+/// `set_turn_server` is write-only on both existing frontends (AUDIT COMMS-02):
+/// nothing reads a saved credential back, so nothing can leak it. The unified
+/// app keeps that discipline — this class has no credential field to populate.
+@immutable
+class TurnServerStatus {
+  const TurnServerStatus({required this.configured, this.url});
+
+  const TurnServerStatus.none() : configured = false, url = null;
+
+  final bool configured;
+  final String? url;
+}
+
+/// The honest outcome of "can a relay actually be reached?".
+enum TurnDiagnostic { noServerConfigured, relayAvailable, relayUnavailable }
+
+/// Off-grid Saathi mesh status.
+@immutable
+class MeshStatus {
+  const MeshStatus({required this.active, required this.peerCount});
+
+  const MeshStatus.idle() : active = false, peerCount = 0;
+
+  final bool active;
+  final int peerCount;
+}
+
+/// The active workspace (Base / Off-Grid Travel / Couple Sandbox).
+@immutable
+class WorkspaceInfo {
+  const WorkspaceInfo({
+    required this.key,
+    required this.label,
+    required this.relayConnected,
+    required this.meshActive,
+    required this.coupleSandbox,
+  });
+
+  const WorkspaceInfo.base()
+      : key = 'Base',
+        label = 'Base',
+        relayConnected = true,
+        meshActive = false,
+        coupleSandbox = false;
+
+  final String key;
+  final String label;
+  final bool relayConnected;
+  final bool meshActive;
+  final bool coupleSandbox;
+
+  /// `Sakhi` when the key ends in it, otherwise `Sakha`.
+  String get coupleRole => key.endsWith('Sakhi') ? 'Sakhi' : 'Sakha';
+}
+
+/// Sakha/Sakhi pairing state for the couple sandbox.
+@immutable
+class SakhaStatus {
+  const SakhaStatus({required this.paired, this.partnerNpub, this.role});
+
+  const SakhaStatus.unpaired() : paired = false, partnerNpub = null, role = null;
+
+  final bool paired;
+  final String? partnerNpub;
+
+  /// `sakha` | `sakhi`.
+  final String? role;
+}
+
+/// An ICE server the call engine should use.
+@immutable
+class IceServerInfo {
+  const IceServerInfo({required this.urls, this.username, this.credential});
+
+  final List<String> urls;
+  final String? username;
+  final String? credential;
+}
+
+/// The result of `place_call`: the id both sides key their signals by.
+@immutable
+class CallSessionInfo {
+  const CallSessionInfo({
+    required this.callId,
+    required this.peer,
+    required this.media,
+    required this.iceServers,
+  });
+
+  final String callId;
+  final String peer;
+  final String media;
+  final List<IceServerInfo> iceServers;
+}
+
+/// A UPI payment intent extracted from message text (`/pay 250 to a@upi`).
+@immutable
+class UpiIntent {
+  const UpiIntent({required this.amountInr, required this.vpa, required this.uri});
+
+  final double amountInr;
+  final String vpa;
+  final String uri;
+}
+
+// ── Bridge events ───────────────────────────────────────────────────────────
+
+/// Events pushed from the Rust core.
+///
+/// Mirrors `uniffi.comrade_ui.BridgeEvent` / the desktop `comrade://event`
+/// payloads. A sealed hierarchy so `switch` over it is exhaustive — the
+/// Kotlin side got that from `sealed interface`, the JS side got nothing.
+sealed class BridgeEvent {
+  const BridgeEvent();
+}
+
+class IncomingChitthi extends BridgeEvent {
+  const IncomingChitthi(this.chitthi);
+  final ChitthiInfo chitthi;
+}
+
+class IncomingDirectMessage extends BridgeEvent {
+  const IncomingDirectMessage(this.message);
+  final MessageInfo message;
+}
+
+class IncomingMedia extends BridgeEvent {
+  const IncomingMedia(this.media);
+  final MediaMessageInfo media;
+}
+
+class IncomingMessageRequest extends BridgeEvent {
+  const IncomingMessageRequest(this.request);
+  final MessageRequestInfo request;
+}
+
+/// Delivery/read receipts for a batch of our own outgoing messages.
+class MessageStatusChanged extends BridgeEvent {
+  const MessageStatusChanged({
+    required this.peer,
+    required this.messageIds,
+    required this.status,
+  });
+
+  final String peer;
+  final List<String> messageIds;
+  final MessageStatus status;
+}
+
+class PeerProfileUpdated extends BridgeEvent {
+  const PeerProfileUpdated({required this.peer, this.name});
+  final String peer;
+  final String? name;
+}
+
+class MeshStatusChanged extends BridgeEvent {
+  const MeshStatusChanged(this.status);
+  final MeshStatus status;
+}
+
+class LedgerUpdated extends BridgeEvent {
+  const LedgerUpdated(this.ledger);
+  final String ledger;
+}
+
+/// A call signal (offer/answer/ice/ringing/busy/hangup) from a peer.
+class IncomingCallSignal extends BridgeEvent {
+  const IncomingCallSignal({
+    required this.peer,
+    required this.callId,
+    required this.media,
+    required this.kind,
+    this.sdp,
+    this.candidate,
+    this.reason,
+  });
+
+  final String peer;
+  final String callId;
+  final String media;
+
+  /// `offer | answer | ice | ringing | busy | hangup`.
+  final String kind;
+  final String? sdp;
+  final String? candidate;
+  final String? reason;
+}
