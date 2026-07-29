@@ -1003,6 +1003,9 @@
         // Rolling framesDecoded state behind the "Video paused" caption; owned
         // here because decideRemoteVideoPaused is pure.
         videoPauseState: { lastFrames: null, stalledPolls: 0, paused: false },
+        // Shrunk into the corner tile by the chat button (see minimizeCall).
+        // Every call starts full screen.
+        minimized: false,
         ended: false,
       },
       base,
@@ -1722,7 +1725,7 @@
   // Every path degrades quietly — a webview without the API just leaves the
   // call full screen, which is a usable outcome, not an error.
 
-  async function openChatDuringCall() {
+  function openChatDuringCall() {
     const c = state.call;
     if (!c) return;
     // Open the thread first, so the call shrinks *onto* it. selectContact also
@@ -1730,20 +1733,36 @@
     // conversation by hand would do.
     switchTab("vault");
     selectContact(c.peer);
-    await enterPictureInPicture();
+    // Shrink our own overlay — deliberately NOT browser PiP on the <video>.
+    // That was the bug: PiP moves the picture into its own window but leaves
+    // this opaque full-screen overlay in place, so the conversation stayed
+    // hidden behind it and the button read as "minimise the video, open
+    // nothing". Only our own window can show the call and the thread together.
+    minimizeCall();
   }
 
-  async function enterPictureInPicture() {
-    const rv = $("#call-remote-video");
-    if (!rv || !document.pictureInPictureEnabled || rv.disablePictureInPicture) return false;
-    if (document.pictureInPictureElement === rv) return true;
-    try {
-      await rv.requestPictureInPicture();
-      return true;
-    } catch {
-      return false; // refused (no user gesture, unsupported webview) — stay full screen
-    }
+  /** Shrink the in-call overlay into the corner tile (see `.is-minimized`). */
+  function minimizeCall() {
+    const c = state.call;
+    if (!c) return;
+    c.minimized = true;
+    $("#call-active").classList.add("is-minimized");
   }
+
+  /** Back to the full-screen call — the tile was clicked, or the call ended. */
+  function restoreCall() {
+    const c = state.call;
+    if (c) c.minimized = false;
+    $("#call-active").classList.remove("is-minimized");
+  }
+
+  // No `enterPictureInPicture` here on purpose. The webview can PiP the remote
+  // <video> element, and the chat button used to do exactly that — but PiP moves
+  // the picture into a window of its own and leaves this overlay covering the
+  // app, so the conversation stayed hidden. `minimizeCall` is the answer to
+  // "get out of the way of the chat". The user can still PiP the video with the
+  // webview's own control, which is why the exit below stays: whatever put us in
+  // PiP, a call that ends must not leave a floating window behind.
 
   function exitPictureInPicture() {
     if (!document.pictureInPictureElement) return;
@@ -1790,6 +1809,7 @@
 
   function hideCallOverlay() {
     $("#call-active").hidden = true;
+    restoreCall(); // a tile must never outlive its call
     resetCallQuality();
     exitPictureInPicture();
     const mb = $("#call-mute");
@@ -2369,6 +2389,14 @@
     $("#call-camera").addEventListener("click", toggleCamera);
     $("#call-chat").addEventListener("click", openChatDuringCall);
     $("#call-hangup").addEventListener("click", hangupByUser);
+    // Clicking the minimised tile restores the call — but not when the click
+    // was meant for one of the two controls the tile still shows.
+    $("#call-active").addEventListener("click", (e) => {
+      const c = state.call;
+      if (!c || !c.minimized) return;
+      if (e.target.closest(".call-btn")) return;
+      restoreCall();
+    });
     // Nothing displaying the call means nothing should be captured for it.
     document.addEventListener("visibilitychange", applyVideoVisibility);
     $("#call-remote-video").addEventListener("leavepictureinpicture", applyVideoVisibility);

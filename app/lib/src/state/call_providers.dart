@@ -555,19 +555,22 @@ class CallController extends Notifier<CallSession> {
 
   // ── Picture-in-picture ────────────────────────────────────────────────────
 
-  /// The in-call chat button: shrink the call and get out of the way.
+  /// The in-call chat button: shrink the call onto the conversation.
   ///
-  /// Native PiP first, because a real floating window survives leaving the app
-  /// entirely; the in-app tile is the fallback where the OS won't give us one
-  /// (desktop, older or restricted Android). Either way the call keeps running
-  /// — this only changes where it is drawn.
+  /// **Deliberately the in-app tile, never native PiP.** This looked like the
+  /// wrong call at first and shipped as "native PiP, falling back to the tile",
+  /// which broke the feature outright: an OS picture-in-picture window *leaves
+  /// the app*. The conversation the shell had just opened ended up behind the
+  /// launcher, so the button read as "minimise the video and go nowhere". The
+  /// whole point of this button is having the call and the thread on screen
+  /// together, and only one window can do that — ours.
+  ///
+  /// Native PiP still exists, for the case it is actually right: leaving the app
+  /// during a video call (`PipController`'s auto-enter). That is the OS's job
+  /// and nothing here needs to ask for it.
   Future<void> openChat() async {
     if (state.state is CallIdle || state.state is CallEnded) return;
-    final bool native = await ref.read(pipChannelProvider).enter();
-    // A native request that succeeded still waits for the OS to confirm via
-    // [onNativePipChanged]; setting it here would leave the UI claiming PiP if
-    // the transition were refused after the fact.
-    if (!native) state = state.copyWith(pip: CallPipMode.inApp);
+    state = state.copyWith(pip: CallPipMode.inApp);
   }
 
   /// The OS entered or left picture-in-picture.
@@ -595,13 +598,31 @@ class CallController extends Notifier<CallSession> {
 
   /// Stop capturing when nothing can show the picture.
   ///
-  /// Called by the call overlay's lifecycle observer. A PiP window *is* a
-  /// surface showing the call, so it counts as visible even though Flutter
-  /// reports the Activity as no longer resumed — which is why this reads
-  /// [CallSession.pip] rather than trusting the lifecycle value alone.
+  /// Called by the call overlay's lifecycle observer.
+  ///
+  /// **[AppLifecycleState.inactive] does not count as hidden**, and getting that
+  /// wrong is a user-visible bug rather than a nicety. Android reports
+  /// `inactive` for every transient loss of focus — the app switcher, a system
+  /// dialog, the notification shade, *and the moment before a PiP transition is
+  /// confirmed*. Suspending there made the peer see "Video paused" because
+  /// someone glanced at their notifications, and it raced the PiP callback: tap
+  /// the chat button, get `inactive`, stop the camera, then have PiP arrive and
+  /// start it again. Only a genuinely backgrounded window ([AppLifecycleState
+  /// .paused], [AppLifecycleState.hidden], [AppLifecycleState.detached]) means
+  /// nothing is displaying the video.
+  ///
+  /// A native PiP window *is* something displaying the call, so it stays visible
+  /// even while the Activity is no longer resumed — hence the [CallSession.pip]
+  /// read rather than trusting the lifecycle value alone.
   Future<void> onAppLifecycleChanged(AppLifecycleState lifecycle) async {
-    final bool visible = lifecycle == AppLifecycleState.resumed ||
-        state.pip == CallPipMode.native;
+    final bool backgrounded = switch (lifecycle) {
+      AppLifecycleState.paused ||
+      AppLifecycleState.hidden ||
+      AppLifecycleState.detached =>
+        true,
+      AppLifecycleState.resumed || AppLifecycleState.inactive => false,
+    };
+    final bool visible = !backgrounded || state.pip == CallPipMode.native;
     await _applyVideoSuspended(!visible);
   }
 

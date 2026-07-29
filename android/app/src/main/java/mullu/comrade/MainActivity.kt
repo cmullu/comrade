@@ -847,13 +847,19 @@ private fun MainShell(
                 }
             },
             // The in-call chat button: open the conversation with the person on
-            // the call, then shrink the call into picture-in-picture so it
-            // floats over the thread. Mirrors the Flutter shell's onOpenChat.
+            // the call, then shrink the call into a floating tile *inside this
+            // window* so it sits over the thread.
+            //
+            // Deliberately minimizeInApp, not PipController.enter(): an OS
+            // picture-in-picture window leaves the app, so the conversation
+            // opened here would end up behind the launcher — which is exactly
+            // the bug this replaces ("the video minimises and no chat opens").
+            // Native PiP stays for leaving the app during a call.
             onOpenChat = { peer, label ->
                 tab = MainTab.Chats
                 chatNav = ChatNav.Open(peer = peer, alias = label.ifBlank { null }, username = null)
                 settingsOpen = false
-                PipController.enter()
+                PipController.minimizeInApp()
             },
         )
     }

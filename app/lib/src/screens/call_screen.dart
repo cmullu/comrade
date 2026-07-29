@@ -429,17 +429,13 @@ class _InCallContentState extends ConsumerState<_InCallContent>
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
-        if (mainView != null && !mainPaused)
-          mainView
-        else
-          // No picture: say which of the two reasons it is, rather than
-          // showing a black rectangle or a frozen frame.
-          _VideoPlaceholder(
-            peer: state.peer ?? '',
-            label: state.peerLabel,
-            paused: mainPaused,
-            large: true,
-          ),
+        _VideoSurface(
+          view: mainView,
+          peer: state.peer ?? '',
+          label: state.peerLabel,
+          paused: mainPaused,
+          large: true,
+        ),
         // The tap target for revealing/dismissing the controls. Below every
         // control in the stack, so buttons keep their own taps.
         Positioned.fill(
@@ -473,15 +469,13 @@ class _InCallContentState extends ConsumerState<_InCallContent>
                 child: Stack(
                   fit: StackFit.expand,
                   children: <Widget>[
-                    if (pipView != null && !tilePaused)
-                      pipView
-                    else
-                      _VideoPlaceholder(
-                        peer: pipIsLocal ? '' : (state.peer ?? ''),
-                        label: pipIsLocal ? 'You' : state.peerLabel,
-                        paused: tilePaused,
-                        large: false,
-                      ),
+                    _VideoSurface(
+                      view: pipView,
+                      peer: pipIsLocal ? '' : (state.peer ?? ''),
+                      label: pipIsLocal ? 'You' : state.peerLabel,
+                      paused: tilePaused,
+                      large: false,
+                    ),
                     if (pipIsLocal && !session.localVideoPaused)
                       Align(
                         alignment: Alignment.bottomCenter,
@@ -577,22 +571,70 @@ class _NativePipContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final CallUiState state = session.state;
-    final Widget? remote = engine.videoView(local: false, mirror: false);
-    if (!state.video || remote == null || session.remoteVideoPaused) {
-      return _VideoPlaceholder(
-        peer: state.peer ?? '',
-        label: state.peerLabel,
-        paused: session.remoteVideoPaused,
-        large: false,
-      );
-    }
-    return remote;
+    return _VideoSurface(
+      view: state.video ? engine.videoView(local: false, mirror: false) : null,
+      peer: state.peer ?? '',
+      label: state.peerLabel,
+      paused: state.video && session.remoteVideoPaused,
+      large: false,
+    );
   }
 }
 
-/// The call shrunk into a corner of this app, for platforms with no OS
-/// picture-in-picture window. Draggable, tappable to restore, and it keeps the
-/// two controls worth having at that size.
+/// One video surface: the live picture, with the "no picture" state drawn *over*
+/// it rather than in place of it.
+///
+/// The distinction is the whole point of this widget. Swapping the surface out
+/// for a placeholder — which is what this screen used to do — unmounts the
+/// renderer, and unmounting a renderer detaches its sink from the track. The
+/// frames the peer sends when they un-pause then have nowhere to land until a
+/// brand-new renderer has been built and re-attached, so a pause on one side
+/// could leave the other side's picture not coming back. Keeping the surface
+/// mounted and covering it means resuming is instant, because nothing was ever
+/// torn down: the cover simply lifts.
+///
+/// [view] is null only when the engine genuinely has no renderer for that track
+/// (an audio call, or before the media path exists), and then the cover is all
+/// there is.
+class _VideoSurface extends StatelessWidget {
+  const _VideoSurface({
+    required this.view,
+    required this.peer,
+    required this.label,
+    required this.paused,
+    required this.large,
+  });
+
+  final Widget? view;
+  final String peer;
+  final String label;
+  final bool paused;
+  final bool large;
+
+  @override
+  Widget build(BuildContext context) => Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          if (view != null) view!,
+          // Opaque, so a frozen last frame is never left showing underneath.
+          if (view == null || paused)
+            _VideoPlaceholder(
+              peer: peer,
+              label: label,
+              paused: paused,
+              large: large,
+            ),
+        ],
+      );
+}
+
+/// The call shrunk into a corner of this app — what the in-call chat button
+/// produces. Draggable, tappable to restore, and it keeps the two controls
+/// worth having at that size.
+///
+/// This, not an OS picture-in-picture window, is what "chat during a call"
+/// needs: only one window can show the call *and* the conversation at once, and
+/// it has to be ours. Native PiP is for leaving the app entirely.
 class FloatingCallTile extends ConsumerStatefulWidget {
   const FloatingCallTile({required this.session, super.key});
 
@@ -603,8 +645,10 @@ class FloatingCallTile extends ConsumerStatefulWidget {
 }
 
 class _FloatingCallTileState extends ConsumerState<FloatingCallTile> {
-  /// Bottom-right by default: the top-left of a chat is where the messages
-  /// are. Dragged position is kept as an offset from that corner.
+  /// **Top**-right by default, and that corner is a deliberate choice: the
+  /// bottom right of a conversation is the send button, and a call tile parked
+  /// on top of it would defeat the one thing this mode exists for. Dragged
+  /// position is kept as an offset from that corner.
   Offset _drag = Offset.zero;
 
   static const double _width = 132;
@@ -620,8 +664,8 @@ class _FloatingCallTileState extends ConsumerState<FloatingCallTile> {
         state.video ? engine.videoView(local: false, mirror: false) : null;
 
     return Positioned(
-      right: 16 - _drag.dx,
-      bottom: 16 - _drag.dy,
+      right: 12 - _drag.dx,
+      top: 12 + _drag.dy,
       child: GestureDetector(
         key: const Key('call-floating-tile'),
         onTap: controller.restoreFromPip,
@@ -637,15 +681,13 @@ class _FloatingCallTileState extends ConsumerState<FloatingCallTile> {
             child: Stack(
               fit: StackFit.expand,
               children: <Widget>[
-                if (remote != null && !session.remoteVideoPaused)
-                  remote
-                else
-                  _VideoPlaceholder(
-                    peer: state.peer ?? '',
-                    label: state.peerLabel,
-                    paused: state.video && session.remoteVideoPaused,
-                    large: false,
-                  ),
+                _VideoSurface(
+                  view: remote,
+                  peer: state.peer ?? '',
+                  label: state.peerLabel,
+                  paused: state.video && session.remoteVideoPaused,
+                  large: false,
+                ),
                 Align(
                   alignment: Alignment.topLeft,
                   child: Padding(

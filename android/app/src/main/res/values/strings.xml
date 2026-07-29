@@ -82,6 +82,7 @@
     <string name="call_chat">Chat</string>
     <string name="call_open_chat">Open chat and shrink the call</string>
     <string name="call_you">You</string>
+    <string name="call_restore">Back to the call</string>
 
     <!-- Call history -->
     <string name="call_history_title">Call history</string>

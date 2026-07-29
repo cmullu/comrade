@@ -64,6 +64,30 @@ object PipController {
      */
     val inPip: StateFlow<Boolean> = _inPip.asStateFlow()
 
+    private val _minimized = MutableStateFlow(false)
+
+    /**
+     * Whether the call is shrunk into a floating tile **inside our own window**
+     * — what the in-call chat button does.
+     *
+     * Separate from [inPip], and not a poor substitute for it: an OS PiP window
+     * leaves the app, so it cannot show the call and one of our own screens at
+     * the same time. The chat button needs exactly that, so it uses this. (It
+     * originally used [enter], which is why tapping chat minimised the video and
+     * appeared to open nothing — the conversation was behind the launcher.)
+     */
+    val minimized: StateFlow<Boolean> = _minimized.asStateFlow()
+
+    /** Shrink the call into the in-app tile. */
+    fun minimizeInApp() {
+        _minimized.value = true
+    }
+
+    /** Back to the full-screen call — the tile was tapped, or the call ended. */
+    fun restoreFromMinimized() {
+        _minimized.value = false
+    }
+
     fun attachActivity(activity: Activity) {
         activityRef = WeakReference(activity)
         applyAutoEnter()
@@ -74,6 +98,7 @@ object PipController {
             activityRef = null
             // The window went away, and any PiP window went with it.
             _inPip.value = false
+            _minimized.value = false
         }
     }
 

@@ -29,7 +29,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -64,7 +63,6 @@ import mullu.comrade.ui.MicIcon
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.SpeakerIcon
 import mullu.comrade.ui.VideocamIcon
-import mullu.comrade.ui.VideocamOffIcon
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoTrack
@@ -120,6 +118,14 @@ fun CallScreen(
 ) {
     val state by CallManager.state.collectAsState()
     val inPip by PipController.inPip.collectAsState()
+    val minimized by PipController.minimized.collectAsState()
+    // A call that ends while minimised must not leave the tile behind, and the
+    // next call must start full screen.
+    LaunchedEffect(state) {
+        if (state !is CallUiState.Active && state !is CallUiState.Connecting) {
+            PipController.restoreFromMinimized()
+        }
+    }
     when (val s = state) {
         is CallUiState.Idle -> Unit
         is CallUiState.Ringing -> CallOverlay(modifier) { RingingContent(s, onAccept) }
@@ -128,27 +134,39 @@ fun CallScreen(
         // them would dispose and recreate the whole video subtree (each
         // SurfaceViewRenderer re-inits and the remote sink detaches) right as
         // the first video frames arrive.
-        is CallUiState.Connecting, is CallUiState.Active -> CallOverlay(modifier) {
+        is CallUiState.Connecting, is CallUiState.Active -> {
             val active = s as? CallUiState.Active
             val connecting = s as? CallUiState.Connecting
-            if (inPip) {
+            val peer = active?.peer ?: connecting!!.peer
+            val peerLabel = active?.peerLabel ?: connecting!!.peerLabel
+            val video = active?.video ?: connecting!!.video
+            when {
+                // Shrunk into our own window by the chat button: deliberately
+                // NOT wrapped in CallOverlay, whose full-screen opaque
+                // background would hide the conversation this mode exists to
+                // show — and swallow every tap meant for it.
+                minimized -> MinimizedCallTile(
+                    peer = peer,
+                    peerLabel = peerLabel,
+                    video = video,
+                    modifier = modifier,
+                )
                 // The OS is drawing us into a thumbnail: the picture is all
                 // that fits — controls belong to the PiP window's own chrome,
                 // and tapping it is the platform's restore gesture.
-                PipVideoContent(
-                    video = active?.video ?: connecting!!.video,
-                    peer = active?.peer ?: connecting!!.peer,
-                    peerLabel = active?.peerLabel ?: connecting!!.peerLabel,
-                )
-            } else {
-                InCallContent(
-                    peer = active?.peer ?: connecting!!.peer,
-                    peerLabel = active?.peerLabel ?: connecting!!.peerLabel,
-                    video = active?.video ?: connecting!!.video,
-                    status = if (active == null) stringOf(R.string.call_connecting) else null,
-                    connectedAtMs = active?.connectedAtMs ?: 0L,
-                    onOpenChat = onOpenChat,
-                )
+                inPip -> CallOverlay(modifier) {
+                    PipVideoContent(video = video, peer = peer, peerLabel = peerLabel)
+                }
+                else -> CallOverlay(modifier) {
+                    InCallContent(
+                        peer = peer,
+                        peerLabel = peerLabel,
+                        video = video,
+                        status = if (active == null) stringOf(R.string.call_connecting) else null,
+                        connectedAtMs = active?.connectedAtMs ?: 0L,
+                        onOpenChat = onOpenChat,
+                    )
+                }
             }
         }
         is CallUiState.Ended -> CallOverlay(modifier) { EndedContent(s) }
@@ -156,31 +174,152 @@ fun CallScreen(
 }
 
 /**
- * What the picture-in-picture window shows: the remote picture, or — when the
- * peer isn't sending — the avatar with an honest "Video paused" under it.
+ * What the picture-in-picture window shows: the remote picture, with the "no
+ * picture" state drawn over it.
  */
 @Composable
 private fun PipVideoContent(video: Boolean, peer: String, peerLabel: String) {
     val remoteVideo by CallManager.remoteVideo.collectAsState()
     val remotePaused by CallManager.remoteVideoPaused.collectAsState()
-    Box(Modifier.fillMaxSize()) {
-        val track = remoteVideo
-        if (video && track != null && !remotePaused) {
-            VideoRenderer(track, mirror = false, modifier = Modifier.fillMaxSize())
-        } else {
+    CallVideoSurface(
+        track = if (video) remoteVideo else null,
+        mirror = false,
+        paused = video && remotePaused,
+        peer = peer,
+        peerLabel = peerLabel,
+        avatarSize = 56.dp,
+        captionSize = 11.sp,
+        modifier = Modifier.fillMaxSize(),
+    )
+}
+
+/**
+ * One video surface: the live picture, with the "no picture" state drawn *over*
+ * it rather than in place of it.
+ *
+ * The distinction is the whole point. A `SurfaceViewRenderer` that leaves the
+ * composition is released, and releasing it removes its sink from the track —
+ * so the frames arriving when the peer un-pauses have nowhere to land until a
+ * fresh renderer has been built and re-attached. That is how "they paused and
+ * their video never came back" happened. Keeping the renderer composed and
+ * covering it means resuming is instant: the cover just lifts.
+ */
+@Composable
+private fun CallVideoSurface(
+    track: VideoTrack?,
+    mirror: Boolean,
+    paused: Boolean,
+    peer: String,
+    peerLabel: String,
+    modifier: Modifier = Modifier,
+    avatarSize: Dp = 96.dp,
+    captionSize: androidx.compose.ui.unit.TextUnit = 16.sp,
+    zOrderMediaOverlay: Boolean = false,
+) {
+    Box(modifier) {
+        if (track != null) {
+            VideoRenderer(
+                track = track,
+                mirror = mirror,
+                modifier = Modifier.fillMaxSize(),
+                zOrderMediaOverlay = zOrderMediaOverlay,
+            )
+        }
+        // Opaque, so a frozen last frame is never left showing underneath.
+        if (track == null || paused) {
             Column(
-                modifier = Modifier.align(Alignment.Center),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(CallBackground),
                 horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
             ) {
-                PeerAvatar(peerLabel, seed = peer, size = 56.dp)
-                if (video && remotePaused) {
+                PeerAvatar(peerLabel, seed = peer, size = avatarSize)
+                if (paused) {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         stringOf(R.string.call_video_paused),
                         color = Color.White,
-                        fontSize = 11.sp,
+                        fontSize = captionSize,
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The call shrunk into a corner of our own window — what the chat button
+ * produces. Tap to restore.
+ *
+ * Top-right by default, and that corner matters: the bottom right of a
+ * conversation is the send button, and a call tile parked on it would defeat the
+ * one thing this mode exists for. The root [Box] draws nothing and takes no
+ * pointer input of its own, so every tap outside the tile reaches the
+ * conversation underneath.
+ */
+@Composable
+private fun MinimizedCallTile(
+    peer: String,
+    peerLabel: String,
+    video: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val remoteVideo by CallManager.remoteVideo.collectAsState()
+    val remotePaused by CallManager.remoteVideoPaused.collectAsState()
+    val muted by CallManager.muted.collectAsState()
+    val quality by CallManager.connectionQuality.collectAsState()
+    Box(modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(12.dp)
+                .size(width = 132.dp, height = 186.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF17212B))
+                .clickable(onClickLabel = stringOf(R.string.call_restore)) {
+                    PipController.restoreFromMinimized()
+                },
+        ) {
+            CallVideoSurface(
+                track = if (video) remoteVideo else null,
+                mirror = false,
+                paused = video && remotePaused,
+                peer = peer,
+                peerLabel = peerLabel,
+                avatarSize = 48.dp,
+                captionSize = 11.sp,
+                modifier = Modifier.fillMaxSize(),
+                // Over the conversation's own surfaces.
+                zOrderMediaOverlay = true,
+            )
+            SignalStrengthBars(
+                quality,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp),
+                height = 10.dp,
+            )
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CallActionButton(
+                    icon = MicIcon,
+                    desc = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
+                    bg = if (muted) ControlActive else Color(0x66000000),
+                    tint = if (muted) CallBackground else Color.White,
+                    size = 34.dp,
+                    slashed = muted,
+                ) { CallManager.toggleMute() }
+                CallActionButton(
+                    icon = CallEndIcon,
+                    desc = stringOf(R.string.call_hang_up),
+                    bg = HangupRed,
+                    size = 34.dp,
+                ) { CallManager.hangup() }
             }
         }
     }
@@ -306,21 +445,18 @@ private fun InCallContent(
             val mainPaused = if (swapped) localVideoPaused else remoteVideoPaused
             val tilePaused = if (pipIsLocal) localVideoPaused else remoteVideoPaused
 
-            if (mainTrack != null && !mainPaused) {
-                // The local track is the front camera preview, so it mirrors
-                // wherever it renders; the remote track never mirrors.
-                VideoRenderer(mainTrack, mirror = swapped, modifier = Modifier.fillMaxSize())
-            } else {
-                // No picture: say which of the two reasons it is — paused, or
-                // simply no frames yet — instead of a black screen or, worse,
-                // a frozen last frame that reads as a broken connection.
-                PeerHeader(
-                    peer,
-                    peerLabel,
-                    status = if (mainPaused) stringOf(R.string.call_video_paused) else null,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
+            // The local track is the front camera preview, so it mirrors
+            // wherever it renders; the remote track never mirrors. The paused
+            // state is drawn *over* the renderer, never in place of it — see
+            // CallVideoSurface for why that difference is load-bearing.
+            CallVideoSurface(
+                track = mainTrack,
+                mirror = swapped,
+                paused = mainPaused,
+                peer = peer,
+                peerLabel = peerLabel,
+                modifier = Modifier.fillMaxSize(),
+            )
 
             // The tap target for revealing/dismissing the controls. Sits above
             // the video but below the tile and the controls, so those keep
@@ -348,39 +484,21 @@ private fun InCallContent(
                     .background(Color(0xFF17212B))
                     .clickable(onClickLabel = stringOf(R.string.call_swap_video)) { swapped = !swapped },
             ) {
-                if (pipTrack != null && !tilePaused) {
-                    VideoRenderer(
-                        track = pipTrack,
-                        mirror = pipIsLocal,
-                        modifier = Modifier.fillMaxSize(),
-                        // Two overlapping SurfaceViews have no defined z-order
-                        // between their surfaces unless the small one is
-                        // explicitly marked as a media overlay — without this
-                        // the tile can composite under the full-screen surface
-                        // and simply never show.
-                        zOrderMediaOverlay = true,
-                    )
-                } else {
-                    Column(
-                        modifier = Modifier.align(Alignment.Center),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Icon(
-                            VideocamOffIcon,
-                            contentDescription = null,
-                            tint = Color(0x66FFFFFF),
-                            modifier = Modifier.size(30.dp),
-                        )
-                        if (tilePaused) {
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                stringOf(R.string.call_video_paused),
-                                color = Color.White,
-                                fontSize = 11.sp,
-                            )
-                        }
-                    }
-                }
+                CallVideoSurface(
+                    track = pipTrack,
+                    mirror = pipIsLocal,
+                    paused = tilePaused,
+                    peer = if (pipIsLocal) "" else peer,
+                    peerLabel = if (pipIsLocal) stringOf(R.string.call_you) else peerLabel,
+                    avatarSize = 44.dp,
+                    captionSize = 11.sp,
+                    modifier = Modifier.fillMaxSize(),
+                    // Two overlapping SurfaceViews have no defined z-order
+                    // between their surfaces unless the small one is explicitly
+                    // marked as a media overlay — without this the tile can
+                    // composite under the full-screen surface and never show.
+                    zOrderMediaOverlay = true,
+                )
                 if (pipIsLocal && !localVideoPaused) {
                     CallActionButton(
                         icon = FlipCameraIcon,
