@@ -1,6 +1,7 @@
 package mullu.comrade.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -52,6 +53,7 @@ import mullu.comrade.BackgroundConnectivityPreference
 import mullu.comrade.ComradeCore
 import mullu.comrade.R
 import mullu.comrade.RelayConnectionService
+import mullu.comrade.ScreenSecurity
 import mullu.comrade.call.CallManager
 import mullu.comrade.voice.CommandDispatcher
 import mullu.comrade.voice.ComradeCoreBackend
@@ -131,6 +133,7 @@ fun SettingsScreen(
         }
 
         BackgroundConnectivitySection()
+        ScreenshotSection()
         TurnRelaySection()
         VaultLockSection(onLock = onLock)
 
@@ -277,6 +280,59 @@ private fun BackgroundConnectivitySection() {
                     enabled = checked
                     BackgroundConnectivityPreference.setEnabled(context, checked)
                     if (checked) RelayConnectionService.start(context) else RelayConnectionService.stop(context)
+                },
+                modifier = Modifier.padding(start = 12.dp),
+            )
+        }
+    }
+}
+
+// ── Screenshots (FLAG_SECURE) ────────────────────────────────────────────────
+
+/**
+ * Screenshots are allowed everywhere in the app by default; this is the switch
+ * that turns them off.
+ *
+ * See [mullu.comrade.ScreenSecurity] for why the default changed — in short, the
+ * unconditional `FLAG_SECURE` this replaces blocked every screen to protect key
+ * material that no screen shows, and could never have stopped a photograph of
+ * the display. The copy says exactly that, because a privacy control that
+ * overstates itself is worse than none.
+ *
+ * Applied to the live window immediately, not on the next launch.
+ */
+@Composable
+private fun ScreenshotSection() {
+    val context = LocalContext.current
+    val activity = context as? Activity
+    var blocked by remember { mutableStateOf(ScreenSecurity.isBlocked(context)) }
+
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.settings_block_screenshots_title),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    stringResource(R.string.settings_block_screenshots_summary),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            Switch(
+                checked = blocked,
+                onCheckedChange = { checked ->
+                    blocked = checked
+                    ScreenSecurity.setBlocked(context, checked)
+                    activity?.let { ScreenSecurity.apply(it, checked) }
                 },
                 modifier = Modifier.padding(start = 12.dp),
             )

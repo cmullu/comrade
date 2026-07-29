@@ -3,13 +3,16 @@ package mullu.comrade
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import mullu.comrade.channel.ActivityResultBridge
 import mullu.comrade.channel.CallChannel
 import mullu.comrade.channel.CallVideoChannel
 import mullu.comrade.channel.CallVideoViewFactory
+import mullu.comrade.channel.MediaChannel
 import mullu.comrade.channel.ModelDownloadChannel
 import mullu.comrade.channel.PermissionBridge
 import mullu.comrade.channel.PipChannel
 import mullu.comrade.channel.RelayConnectionChannel
+import mullu.comrade.channel.ScreenSecurityChannel
 import mullu.comrade.channel.SystemChannel
 import mullu.comrade.channel.VoiceRecorderChannel
 import mullu.comrade.channel.WakeWordChannel
@@ -43,6 +46,13 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
 
     private val permissions = PermissionBridge()
 
+    /**
+     * Shared for the same reason as [permissions]: picking a file and taking a
+     * photo both come back through `onActivityResult`, and their request codes
+     * must not collide.
+     */
+    private val activityResults = ActivityResultBridge()
+
     private var call: CallChannel? = null
     private var callVideo: CallVideoChannel? = null
     private var pip: PipChannel? = null
@@ -50,6 +60,8 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
     private var relay: RelayConnectionChannel? = null
     private var models: ModelDownloadChannel? = null
     private var recorder: VoiceRecorderChannel? = null
+    private var media: MediaChannel? = null
+    private var screen: ScreenSecurityChannel? = null
     private var system: SystemChannel? = null
 
     /**
@@ -70,6 +82,8 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
         relay = RelayConnectionChannel(messenger, context)
         models = ModelDownloadChannel(messenger, context)
         recorder = VoiceRecorderChannel(messenger, context, permissions)
+        media = MediaChannel(messenger, context, activityResults)
+        screen = ScreenSecurityChannel(messenger, context)
         system = SystemChannel(messenger, context, permissions)
 
         // The SurfaceViewRenderer fallback for call video. Registered so it is
@@ -90,6 +104,10 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
         relay?.dispose()
         models?.dispose()
         recorder?.dispose()
+        // Drops the audio buffer and anything staged for an external viewer: a
+        // detached engine has no UI holding decrypted media open.
+        media?.dispose()
+        screen?.dispose()
         system?.dispose()
 
         callVideo = null
@@ -99,6 +117,8 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
         relay = null
         models = null
         recorder = null
+        media = null
+        screen = null
         system = null
     }
 
@@ -106,8 +126,12 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         permissions.activity = binding.activity
+        activityResults.activity = binding.activity
         pip?.activity = binding.activity
+        // Re-applies the effective FLAG_SECURE state to the new window.
+        screen?.activity = binding.activity
         binding.addRequestPermissionsResultListener(permissions)
+        binding.addActivityResultListener(activityResults)
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) =
@@ -122,6 +146,10 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
      */
     override fun onDetachedFromActivity() {
         permissions.detachActivity()
+        // Also completes any in-flight pick/capture as cancelled, so the Dart
+        // future does not hang for the life of the app.
+        activityResults.detachActivity()
         pip?.activity = null
+        screen?.activity = null
     }
 }

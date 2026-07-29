@@ -42,6 +42,14 @@ abstract final class Channels {
 
   static const recorder = 'mullu.comrade/recorder';
 
+  /// Attachments: pick, capture, play in memory, hand to another app.
+  static const media = 'mullu.comrade/media';
+
+  /// `FLAG_SECURE` — a *window* concern like [pip], not a media one. Screenshots
+  /// are allowed by default; this carries the user's opt-in block and any
+  /// screen-scoped hold.
+  static const screen = 'mullu.comrade/screen';
+
   static const system = 'mullu.comrade/system';
 }
 

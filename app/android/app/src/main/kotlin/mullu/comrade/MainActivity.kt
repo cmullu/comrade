@@ -47,6 +47,13 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Screenshots are allowed unless the user asked for them to be blocked.
+        // Applied here, before the first frame, because the preference has to
+        // hold before any Flutter engine exists — a window that starts
+        // unprotected and is secured a frame later has already been captured by
+        // the recents thumbnail. See ScreenSecurityChannel for why the
+        // Compose app's unconditional FLAG_SECURE is gone.
+        ScreenSecurity.applyPreference(this)
         CallStateReactor.attachActivity(this)
         forwardRequestedTab(intent)
         // A video call that starts (or ends) has to update the platform's

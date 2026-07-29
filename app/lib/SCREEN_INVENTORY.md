@@ -13,10 +13,12 @@ port, and (2) so every place the two platforms **disagree** is decided on
 purpose, in writing, rather than by whichever file the porter happened to read
 first. §3 is the divergence ledger; it is the part worth arguing with.
 
-> **Status.** `flutter analyze` is clean and `flutter test` is green (80 tests)
-> against the in-memory fake. Nothing here has been run against the real Rust
-> core, on a real device, or on a desktop window manager — the bridge does not
-> exist yet. Read §5 before believing anything is finished.
+> **Status.** `flutter analyze --fatal-infos` is clean and `flutter test` is
+> green (169 tests, 4 skipped) against the in-memory fake. The media seams now
+> have a real Android implementation behind them (picker, camera, in-memory
+> playback, `FLAG_SECURE`) — but *none of that native half has been run*: no
+> device, no emulator, and no Android SDK in the environment it was written in.
+> Read §5 before believing anything is finished.
 
 ---
 
@@ -29,8 +31,9 @@ first. §3 is the divergence ledger; it is the part worth arguing with.
 | Conversation | ✅ | ✅ | ✅ |
 | Message requests | ✅ banner + inbox | ✅ inline in sidebar | ✅ banner + inbox |
 | New chat / directory search | ✅ | ✗ | ✅ |
-| Encrypted media | ✅ inline image/audio/video | ⚠️ download-then-view | ✅ inline images; audio/video via a platform delegate |
-| Voice notes (record) | ✅ hold-to-talk | ✗ | ✗ — see D13 |
+| Encrypted media | ✅ inline image/audio/video | ⚠️ download-then-view | ✅ inline images; audio in memory; video/files handed to the system viewer from memory |
+| Attach / camera | ✅ `GetContent` picker | ⚠️ `<input type=file>` | ✅ document picker + camera photo/video, capability-gated |
+| Voice notes (record) | ✅ hold-to-talk | ✗ | ✅ tap-to-record — see D13 |
 | Sabha feed | ✅ | ✅ + char cap | ✅ union |
 | Journal | ✅ | ✗ | ✅ |
 | Tara | ✅ | ✗ | ✅ |
@@ -99,7 +102,17 @@ map 1:1 onto `ComradeCore.kt`'s methods and `commands.rs`'s commands.
 `chats/conversation_screen.dart` ← `ChatsScreen.kt:412-993` + `main.js:580-717`
 
 - **Tree**: `Stack`[ `ListView` of merged items · jump-to-latest FAB ] → error
-  line → reply chip → composer(attach · pill field · send).
+  line → reply chip → `MessageComposer`.
+- **The composer is Telegram's** (`widgets/composer.dart`): emoji **inside the
+  field on the left**, paper clip **inside it on the right**, and one round
+  button outside on the right that is **Send** whenever there is text and
+  otherwise the current capture control — with a small **swap** button beside it
+  cycling voice → photo → video through whatever this device actually has.
+  Telegram hides that switch behind a press-and-hold on the mic; here it is
+  visible, because a hidden gesture sharing a target with "start recording" is
+  the worst of both. Recording replaces the whole row with discard · elapsed ·
+  send. Every control is capability-gated: a platform with no recorder and no
+  camera shows a plain Send button rather than one that fails on tap.
 - **Item**: optional `DaySeparator` (inside the item, so indices still match
   the merged list) then either a `MediaAttachmentBubble` or a `MessageBubble`
   (quoted preview · text · `clockTime` · status ticks when outgoing).
@@ -250,10 +263,10 @@ divergence that gets re-litigated.
 | D8 | Unknown reply target | render no quote | render "Original message" | **Android** | A placeholder implies we know something about a message we cannot see. |
 | D9 | **Message requests** | banner → dedicated inbox screen | inline list in the contacts sidebar, Accept/Block per row | **Android** | Accept shares your @handle with a stranger. Inline buttons in a scrolling sidebar make that one mis-tap away. |
 | D10 | Request row identity | `shortNpub` only | `displayName(peer)` (may show a handle) | **Android** | Same reasoning as D3, at the moment it matters most. |
-| D11 | **Media plaintext** | images → bounded in-memory LRU; audio/video → `cacheDir/media`, purged on background (AUDIT S-4) | object URLs, never revoked | **Android, improved** | Flutter decodes images from bytes, so the unified app keeps *everything* in a bounded in-memory LRU and writes **nothing** to disk. One whole class of at-rest leak stops existing, and there is no purge to forget to call. |
+| D11 | **Media plaintext** | images → bounded in-memory LRU; audio/video → `cacheDir/media`, purged on background (AUDIT S-4) | object URLs, never revoked | **Android, improved** | Flutter decodes images from bytes, so the unified app keeps *everything* in a bounded in-memory LRU and writes **nothing** to disk — audio plays from a `MediaDataSource` over the bytes, and anything handed to another app is served from memory by `InMemoryMediaProvider` (a seekable proxy descriptor, not a pipe, because viewers seek). One whole class of at-rest leak stops existing. The cache is still dropped on background and on vault lock, because the recents thumbnail and an unlocked phone are the other half of the same concern. Desktop's never-revoked object URLs were a real leak of the same shape and are now a bounded, revocable cache too. |
 | D12 | Media auto-load | images auto-load | everything needs "Download & view" | **Android** | Images are the common, low-risk case; a tap-to-load image feed is worse UX for no privacy gain (the fetch is E2E either way). |
-| D13 | **Voice notes (record)** | hold-to-talk mic in the composer | none | **Neither, for now** | Press-and-hold is meaningless with a mouse, and `VoiceRecorder` is a `MediaRecorder` wrapper. Received voice notes still render and play. Filed with the platform-channel work. |
-| D14 | Attachment picker filter | `*/*` | `image/*,audio/*` | **Android** | The core sends arbitrary MIME types already; the desktop filter is narrower than the backend. |
+| D13 | **Voice notes (record)** | hold-to-talk mic in the composer | none | **Android's feature, not its gesture** | Revisited: press-and-hold is what has no meaning with a mouse — the *feature* was worth keeping. The composer's mic is tap-to-start / tap-to-send, with an explicit discard, and it is hidden entirely where no recorder exists. The recorder itself is the preserved native `VoiceRecorder`; the Dart side reads its clip once and deletes it, which is the deletion discipline that channel's path-not-bytes contract asks for. |
+| D14 | Attachment picker filter | `*/*` | `image/*,audio/*` | **Android** | The core sends arbitrary MIME types already; the desktop filter is narrower than the backend. The unified picker is `ACTION_OPEN_DOCUMENT` with an any-type filter. |
 | D15 | UPI `/pay` preview | none (voice command only) | live debounced `extract_payments` in the composer + chips under bubbles | **Desktop — carried but not yet wired** | `extractPayments` is on the repository interface; the composer preview is **not** re-implemented in this pass. An honest gap, not a decision. |
 | D16 | Feed length cap | none | 2,000 chars + live counter | **Desktop** | Without it a post is silently rejected by the relay. |
 | D17 | Feed "is this mine?" | compares `author == "you"` — a sentinel it invents when optimistically prepending, which never matches a real npub | compares against `state.identity.npub` | **Desktop** | Android's comparison cannot match a real event; it only ever works on the optimistic local copy. |
@@ -328,17 +341,33 @@ kind of wrong.
 2. **No media engine.** `CallEngine`'s default does nothing. The call *UI* is
    complete and driveable; a call is not. This is D3 of the strategy document
    and it is the largest single unresolved item in the migration.
-3. **No audio/video playback, no file picker, no file open-out.** Delegates
-   with honest "not wired up on this platform yet" messages.
-4. **No voice note recording, no dictation, no wake word** (D13, D21).
+3. ~~**No audio/video playback, no file picker, no file open-out.**~~ **Done on
+   Android** (`channel/MediaChannel.kt` + `platform/media_channel.dart`): the
+   document picker, camera photo/video, in-memory audio playback, and
+   open-in-another-app through an in-memory content provider. Still absent on
+   desktop, where the seams keep their honest defaults — there is no in-app
+   **video** player on any platform (video goes out to the system player), which
+   is the one piece of this deliberately not built: it needs a PlatformView and a
+   media engine of its own.
+4. **No dictation, no wake word** (D21). Voice-note *recording* now exists
+   (D13); dictation is the Vosk path, which stays native and unreachable.
 5. **No UPI `/pay` composer preview** (D15).
 6. **Preferences are in-memory.** Tara's opt-in and the background-connectivity
    toggle do not survive a relaunch yet — `AppPreferences` is the seam.
 7. **Vault path is a constant.** Android resolved `filesDir/comrade-vault`,
    desktop `appDataDir()/comrade-vault`; that belongs in the bridge, not in the
    UI doing path arithmetic.
-8. **Screenshot blocking (`FLAG_SECURE`) is not reimplemented.** It is an
-   Android window flag; it belongs on the native side.
-9. **Never run.** `flutter analyze` is clean and 80 tests pass in the
-   Flutter test harness. No device, no desktop window, no golden tests, no
-   real relay.
+8. **Screenshot blocking (`FLAG_SECURE`) is reimplemented, with the default
+   reversed.** It is an Android window flag and it lives natively
+   (`channel/ScreenSecurityChannel.kt`), but **screenshots now work everywhere by
+   default**. The Compose app blocked them for its entire window to protect key
+   material no screen renders — an npub is public — while blocking every ordinary
+   use (screenshot a plan, keep a journal entry, attach a picture to a bug
+   report) and stopping no realistic threat, since a phone can be photographed.
+   Blocking is now a Settings switch (off by default, shared with the Compose
+   frontend through `ScreenSecurity`), plus a screen-scoped `SecureScreen` hold —
+   used in one place, the passphrase field while it is revealed.
+9. **Never run.** `flutter analyze --fatal-infos` is clean and 169 tests pass
+   (4 skipped) in the Flutter test harness. No device, no desktop window, no
+   golden tests, no real relay — and the Kotlin written for the media and
+   screen-security channels has never been compiled, let alone exercised.

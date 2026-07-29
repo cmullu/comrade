@@ -16,6 +16,7 @@ import '../../data/models.dart';
 import '../../state/chat_providers.dart';
 import '../../util/chat_thread.dart';
 import '../../widgets/app_chrome.dart';
+import '../../widgets/composer.dart';
 import '../../widgets/media_attachment.dart';
 import '../../widgets/message_bubble.dart';
 
@@ -134,18 +135,9 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     if (mounted) _composerFocus.requestFocus();
   }
 
-  Future<void> _attach() async {
-    final PickedAttachment? picked =
-        await ref.read(attachmentPickerProvider).pick();
-    if (picked == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(
-          content: Text('No file picker is wired up on this platform yet.'),
-        ),
-      );
-      return;
-    }
+  /// Send one attachment, however it was obtained — picked, photographed, or
+  /// recorded. The composer owns *getting* it; this owns sending it.
+  Future<void> _sendAttachment(PickedAttachment picked) async {
     await ref.read(conversationProvider(widget.peer).notifier).attach(
           mimeType: picked.mimeType,
           bytes: picked.bytes,
@@ -297,61 +289,16 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         ),
       );
 
-  /// Attach + pill input + send.
-  ///
-  /// Android's composer swapped the send button for a hold-to-talk mic when
-  /// the draft was empty. That is **not** ported: press-and-hold has no
-  /// meaning with a mouse, and `VoiceRecorder` is a `MediaRecorder` wrapper
-  /// with no cross-platform equivalent here. Voice notes still arrive and
-  /// render; recording one is filed with the other platform-channel work
-  /// rather than faked with a button that cannot record.
-  Widget _composer(BuildContext context, ConversationState state) => Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: <Widget>[
-            IconButton(
-              key: const Key('dm-attach'),
-              tooltip: 'Attach encrypted media (max 10 MB)',
-              onPressed: state.attaching ? null : _attach,
-              icon: state.attaching
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.attach_file),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextField(
-                key: const Key('dm-input'),
-                controller: _draft,
-                focusNode: _composerFocus,
-                minLines: 1,
-                maxLines: 4,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _send(),
-                decoration: InputDecoration(
-                  hintText: 'Message',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(26),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            IconButton.filled(
-              key: const Key('dm-send'),
-              tooltip: 'Send',
-              onPressed: state.sending ? null : _send,
-              icon: state.sending
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.send),
-            ),
-          ],
-        ),
+  /// Emoji · text · paper clip, then one round button that is Send or the
+  /// swappable mic/camera — see [MessageComposer], which owns the layout and the
+  /// capability gating.
+  Widget _composer(BuildContext context, ConversationState state) =>
+      MessageComposer(
+        controller: _draft,
+        focusNode: _composerFocus,
+        sending: state.sending,
+        attaching: state.attaching,
+        onSend: _send,
+        onAttachment: _sendAttachment,
       );
 }

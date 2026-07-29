@@ -37,9 +37,11 @@
 library;
 
 import 'call_channel.dart';
+import 'media_channel.dart';
 import 'model_download_channel.dart';
 import 'pip_channel.dart';
 import 'relay_channel.dart';
+import 'screen_channel.dart';
 import 'system_channel.dart';
 import 'voice_recorder_channel.dart';
 import 'wake_word_channel.dart';
@@ -47,9 +49,11 @@ import 'wake_word_channel.dart';
 export 'call_channel.dart';
 export 'call_video.dart';
 export 'channels.dart';
+export 'media_channel.dart';
 export 'model_download_channel.dart';
 export 'pip_channel.dart';
 export 'relay_channel.dart';
+export 'screen_channel.dart';
 export 'system_channel.dart';
 export 'voice_recorder_channel.dart';
 export 'wake_word_channel.dart';
@@ -68,6 +72,8 @@ class ComradePlatform {
     RelayChannel? relay,
     ModelDownloadChannel? models,
     VoiceRecorderChannel? recorder,
+    MediaChannel? media,
+    ScreenSecurityChannel? screen,
     SystemChannel? system,
   })  : call = call ?? CallChannel(),
         pip = pip ?? PipChannel(),
@@ -75,6 +81,8 @@ class ComradePlatform {
         relay = relay ?? RelayChannel(),
         models = models ?? ModelDownloadChannel(),
         recorder = recorder ?? VoiceRecorderChannel(),
+        media = media ?? MediaChannel(),
+        screen = screen ?? ScreenSecurityChannel(),
         system = system ?? SystemChannel();
 
   final CallChannel call;
@@ -83,6 +91,8 @@ class ComradePlatform {
   final RelayChannel relay;
   final ModelDownloadChannel models;
   final VoiceRecorderChannel recorder;
+  final MediaChannel media;
+  final ScreenSecurityChannel screen;
   final SystemChannel system;
 
   void dispose() => system.dispose();
