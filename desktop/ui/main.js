@@ -992,8 +992,17 @@
         startedAt: null, // connect time (unix secs) that drives the timer
         initAt: nowSecs(), // call-initiation time; the log's started_at fallback
         timerId: null,
+        statsId: null, // getStats poll driving the signal bars (startStatsPolling)
         connectTimeoutId: null, // connect-phase timeout handle (see armConnectTimeout)
         muted: false,
+        // The user's own camera choice, kept separate from videoSuspended
+        // ("nothing is displaying this") so returning to a visible window
+        // never switches a deliberately-off camera back on.
+        cameraOn: true,
+        videoSuspended: false,
+        // Rolling framesDecoded state behind the "Video paused" caption; owned
+        // here because decideRemoteVideoPaused is pure.
+        videoPauseState: { lastFrames: null, stalledPolls: 0, paused: false },
         ended: false,
       },
       base,
@@ -1481,76 +1490,113 @@
       clearConnectTimeout(c);
       startDurationTimer();
     }
-    // Re-derive the SAS on every connected transition, not just the first —
-    // mirrors Android's onConnected calling maybeDeriveSas unconditionally on
-    // every CONNECTED observation (CallManager.kt:1101-1108), so a mid-call
-    // ICE-restart reconnect (WP3's TURN fallback) recomputes against the
-    // fresh post-restart SDPs instead of leaving a stale pre-restart code on
-    // screen. Fire-and-forget: a DOM update, nothing here needs to block on it.
-    updateCallSas(c);
+    // Start (or restart) the stats poll that drives the signal-strength bars
+    // and the "Video paused" caption. Restarting on every connected transition
+    // — not just the first — mirrors Android's onConnected calling
+    // startStatsPolling unconditionally (CallManager.kt), so a mid-call
+    // ICE-restart reconnect samples the fresh path instead of carrying a stale
+    // reading, and re-baselines the frame counter that the restart resets.
+    startStatsPolling(c);
   }
 
-  // ── SAS (short authentication string) — encryption verification (WP4) ────
+  // ── Connection quality + remote video pause (the signal bars) ────────────
   //
-  // Once a call is connected, both sides' negotiated SDPs carry a DTLS-SRTP
-  // certificate fingerprint (`a=fingerprint:` line); `call_sas` derives a
-  // 4-emoji code from the pair that must match on both ends to rule out a
-  // man-in-the-middle on the call's media path — mirrors Android's
-  // maybeDeriveSas (CallManager.kt:1207-1230), fired from the same
-  // connected-transition site (onConnected there, onCallConnected here).
-  // `call_sas` returns None/null when either side's SDP has no fingerprint
-  // line at all — an honest "can't verify", never a fabricated code (see
-  // crates/comrade_ui/src/runtime.rs:1258-1270) — which this renders as
-  // visible text on the call panel (see renderSasResult below).
+  // This replaced the 4-emoji SAS row. The SAS was an out-of-band
+  // man-in-the-middle check on the media path, and it was near-redundant here:
+  // Comrade's SDP rides the NIP-44 gift-wrapped DM channel, so both sides'
+  // DTLS fingerprints are already authenticated by the peer's Nostr key before
+  // a call is answered. `comrade_core::call::derive_sas` and the Tauri
+  // `call_sas` command still exist and are still tested — nothing in the UI
+  // surfaces them. What people actually need mid-call is signal strength.
+  //
+  // Both readings come off one `getStats()` poll every STATS_POLL_MS, matching
+  // Android's cadence and thresholds; the classification itself is pure and
+  // lives in call_decisions.mjs so the two frontends cannot drift.
 
-  /** Hide/clear the SAS row. Called whenever the call panel (re)opens for a
-   * call that hasn't been verified yet (ringing/connecting) and when the
-   * call ends, so a new or absent call never shows a stale SAS. */
-  function resetSasRow() {
-    const row = $("#call-sas");
-    if (!row) return;
-    row.hidden = true;
-    row.classList.remove("no-sas");
-    $("#call-sas-value").textContent = "";
+  const STATS_POLL_MS = 2000;
+
+  /** Reset the indicator to "nothing measured yet" and hide the paused caption. */
+  function resetCallQuality() {
+    renderSignal(null);
+    renderVideoPaused(false);
   }
 
-  /** Fetch both SDPs off the live pc and ask the backend to derive the SAS,
-   * then paint the result. Guards against the call having ended or been
-   * replaced by the time the (async) invoke returns, both before and after
-   * the network round-trip, per WP4. */
-  async function updateCallSas(c) {
-    if (!c || !c.pc) return;
-    const localSdp = c.pc.localDescription && c.pc.localDescription.sdp;
-    const remoteSdp = c.pc.remoteDescription && c.pc.remoteDescription.sdp;
-    let sas = null;
-    if (localSdp && remoteSdp) {
+  /**
+   * Poll `getStats()` for as long as this call is the live one. Every read is
+   * guarded on liveness both before and after the await, exactly as
+   * updateCallSas was: the call can end while a poll is in flight.
+   */
+  function startStatsPolling(c) {
+    stopStatsPolling(c);
+    c.videoPauseState = { lastFrames: null, stalledPolls: 0, paused: false };
+    const poll = async () => {
+      if (!c || c.ended || state.call !== c || !c.pc) return;
+      let report = null;
       try {
-        sas = await safeInvoke(
-          "call_sas",
-          { localSdp, remoteSdp },
-          { silent: true }, // honest "can't verify" is not an error toast
-        );
+        report = await c.pc.getStats();
       } catch {
-        sas = null; // treat a transport error the same as an honest can't-verify
+        return; // a getStats failure degrades this poll, nothing more
       }
-    }
-    // Re-check liveness after the await: the call may have ended, or been
-    // replaced by a newer one, while the invoke was in flight.
-    if (!c || c.ended || state.call !== c) return;
-    const { formatSas } = await callDecisionsReady;
-    renderSasResult(formatSas(sas));
+      if (!c || c.ended || state.call !== c) return;
+      const {
+        classifyCallQuality,
+        remoteVideoFramesDecoded,
+        decideRemoteVideoPaused,
+      } = await callDecisionsReady;
+      if (!c || c.ended || state.call !== c) return;
+      // An RTCStatsReport is iterable over its stat objects, which is exactly
+      // what the pure classifier takes.
+      const stats = Array.from(report.values ? report.values() : report);
+      renderSignal(classifyCallQuality(stats));
+      if (c.media === "video") {
+        c.videoPauseState = decideRemoteVideoPaused({
+          frames: remoteVideoFramesDecoded(stats),
+          ...c.videoPauseState,
+        });
+        renderVideoPaused(c.videoPauseState.paused);
+      }
+    };
+    poll();
+    c.statsId = setInterval(poll, STATS_POLL_MS);
   }
 
-  /** Paint the call panel's SAS row from an already-formatted string (or
-   * `null` for the honest can't-verify state). Always updates the same fixed
-   * DOM nodes — never appends — so re-deriving after an ICE restart repaints
-   * in place instead of duplicating anything. */
-  function renderSasResult(formatted) {
-    const row = $("#call-sas");
+  function stopStatsPolling(c) {
+    const call = c || state.call;
+    if (call && call.statsId) {
+      clearInterval(call.statsId);
+      call.statsId = null;
+    }
+  }
+
+  /**
+   * Paint the bars. `null` means "no call / nothing measured", which hides the
+   * row entirely; an `unknown` reading shows the row with zero bars lit —
+   * honest about having no number rather than inventing one.
+   */
+  function renderSignal(quality) {
+    const row = $("#call-signal");
     if (!row) return;
-    row.hidden = false;
-    row.classList.toggle("no-sas", !formatted);
-    $("#call-sas-value").textContent = formatted || "Can't verify — no encryption fingerprint";
+    if (quality == null) {
+      row.hidden = true;
+      row.removeAttribute("data-quality");
+      $("#call-signal-label").textContent = "";
+      row.querySelector(".call-bars").dataset.filled = "0";
+      return;
+    }
+    Promise.resolve(callDecisionsReady).then(({ signalBarsFor, signalLabelFor }) => {
+      const live = $("#call-signal");
+      if (!live || !state.call || state.call.ended) return;
+      live.hidden = false;
+      live.dataset.quality = quality;
+      live.querySelector(".call-bars").dataset.filled = String(signalBarsFor(quality));
+      $("#call-signal-label").textContent = signalLabelFor(quality) || "";
+    });
+  }
+
+  /** Show/hide the "Video paused" cover over the remote frame. */
+  function renderVideoPaused(paused) {
+    const node = $("#call-video-paused");
+    if (node) node.hidden = !paused;
   }
 
   // Best-effort call-log write (never surfaces its own error).
@@ -1579,6 +1625,7 @@
     const { rememberEndedCall } = await callDecisionsReady;
     state.endedCallIds = rememberEndedCall(state.endedCallIds, c.callId);
     stopDurationTimer();
+    stopStatsPolling(c);
     const duration = c.startedAt ? Math.max(0, nowSecs() - c.startedAt) : 0;
     if (sendHangup) {
       try {
@@ -1636,9 +1683,88 @@
     c.muted = !c.muted;
     for (const t of c.localStream.getAudioTracks()) t.enabled = !c.muted;
     const btn = $("#call-mute");
-    btn.classList.toggle("is-muted", c.muted);
-    btn.textContent = c.muted ? "🔇" : "🎙";
+    // The glyph stays the same and a slash is drawn over it (see
+    // .call-btn.is-off in styles.css) — the same explicitness the Flutter and
+    // Compose SlashedIcon gives, rather than swapping 🎙 for 🔇.
+    btn.classList.toggle("is-off", c.muted);
+    btn.classList.toggle("is-muted", c.muted); // kept: existing styling hook
     btn.title = c.muted ? "Unmute microphone" : "Mute microphone";
+    btn.setAttribute("aria-label", btn.title);
+  }
+
+  /**
+   * Turn the local camera off/on mid-call.
+   *
+   * Disabling the track stops frames reaching the peer (their UI shows "Video
+   * paused"); `stop()`ing it would release the hardware but cannot be undone
+   * without renegotiating, so this mirrors Android's `toggleCamera`, which
+   * disables the track and stops the *capturer* while keeping the sender.
+   */
+  function toggleCamera() {
+    const c = state.call;
+    if (!c || !c.localStream || c.media !== "video") return;
+    c.cameraOn = c.cameraOn === false ? true : false;
+    for (const t of c.localStream.getVideoTracks()) t.enabled = c.cameraOn;
+    const btn = $("#call-camera");
+    btn.classList.toggle("is-off", !c.cameraOn);
+    btn.title = c.cameraOn ? "Turn camera off" : "Turn camera on";
+    btn.setAttribute("aria-label", btn.title);
+    // Our own preview should agree with what we are sending.
+    $("#call-local-video").hidden = !c.cameraOn;
+  }
+
+  // ── Picture-in-picture ────────────────────────────────────────────────────
+  //
+  // The desktop equivalent of Android's PipController: the chat button gets the
+  // call out of the way of the conversation. There is no OS-level PiP for a
+  // Tauri window, but the webview gives us PiP on the remote <video> element
+  // itself, which is the same idea and survives the window being backgrounded.
+  // Every path degrades quietly — a webview without the API just leaves the
+  // call full screen, which is a usable outcome, not an error.
+
+  async function openChatDuringCall() {
+    const c = state.call;
+    if (!c) return;
+    // Open the thread first, so the call shrinks *onto* it. selectContact also
+    // marks it read and pulls the history, which is exactly what opening the
+    // conversation by hand would do.
+    switchTab("vault");
+    selectContact(c.peer);
+    await enterPictureInPicture();
+  }
+
+  async function enterPictureInPicture() {
+    const rv = $("#call-remote-video");
+    if (!rv || !document.pictureInPictureEnabled || rv.disablePictureInPicture) return false;
+    if (document.pictureInPictureElement === rv) return true;
+    try {
+      await rv.requestPictureInPicture();
+      return true;
+    } catch {
+      return false; // refused (no user gesture, unsupported webview) — stay full screen
+    }
+  }
+
+  function exitPictureInPicture() {
+    if (!document.pictureInPictureElement) return;
+    document.exitPictureInPicture().catch(() => {});
+  }
+
+  /**
+   * Stop sending video the moment nothing is displaying it, and resume when it
+   * is again — the browser twin of `CallManager.setVideoCaptureSuspended`.
+   *
+   * A PiP window *is* something displaying the call, so it does not suspend.
+   * `cameraOn` is the user's own choice and is kept separate: a call that was
+   * backgrounded with the camera deliberately off does not come back on.
+   */
+  function applyVideoVisibility() {
+    const c = state.call;
+    if (!c || c.media !== "video" || !c.localStream) return;
+    const displayed = !document.hidden || !!document.pictureInPictureElement;
+    c.videoSuspended = !displayed;
+    const shouldSend = displayed && c.cameraOn !== false;
+    for (const t of c.localStream.getVideoTracks()) t.enabled = shouldSend;
   }
 
   // ── Call overlay / media-element plumbing ──────────────────────────────────
@@ -1648,7 +1774,9 @@
     $("#call-peer").textContent = displayName(c.peer);
     $("#call-media-label").textContent = c.media === "video" ? "Video call" : "Voice call";
     $("#call-timer").hidden = true;
-    resetSasRow(); // this call hasn't reached connected yet — no SAS to show
+    resetCallQuality(); // no reading yet — four empty bars, no caption
+    // The camera button only exists on a video call.
+    $("#call-camera").hidden = c.media !== "video";
     attachLocalMedia();
     attachRemoteMedia();
     $("#call-active").hidden = false;
@@ -1656,11 +1784,14 @@
 
   function hideCallOverlay() {
     $("#call-active").hidden = true;
-    resetSasRow();
+    resetCallQuality();
+    exitPictureInPicture();
     const mb = $("#call-mute");
-    mb.classList.remove("is-muted");
-    mb.textContent = "🎙";
+    mb.classList.remove("is-off");
     mb.title = "Mute microphone";
+    const cb = $("#call-camera");
+    cb.classList.remove("is-off");
+    cb.hidden = true;
   }
 
   function showRingingOverlay() {
@@ -2229,7 +2360,13 @@
     $("#ring-accept").addEventListener("click", acceptIncoming);
     $("#ring-decline").addEventListener("click", declineIncoming);
     $("#call-mute").addEventListener("click", toggleMute);
+    $("#call-camera").addEventListener("click", toggleCamera);
+    $("#call-chat").addEventListener("click", openChatDuringCall);
     $("#call-hangup").addEventListener("click", hangupByUser);
+    // Nothing displaying the call means nothing should be captured for it.
+    document.addEventListener("visibilitychange", applyVideoVisibility);
+    $("#call-remote-video").addEventListener("leavepictureinpicture", applyVideoVisibility);
+    $("#call-remote-video").addEventListener("enterpictureinpicture", applyVideoVisibility);
 
     $("#modal-partner").addEventListener("click", (e) => {
       if (e.target === $("#modal-partner")) closePartnerModal();
@@ -2404,10 +2541,6 @@
           // set (the widened list equals the STUN-only one). Keeps WP3's caller
           // TURN-fallback path from throwing "unknown command" in preview.
           return ICE_DEMO.slice();
-        case "call_sas":
-          // Fixed 4-emoji demo code so the SAS row is visible in browser
-          // preview without a real WebRTC connection or backend (WP4).
-          return ["🐶", "🦊", "🐝", "🐳"];
         case "set_turn_server":
           return null;
         case "place_call":

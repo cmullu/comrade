@@ -289,9 +289,18 @@ pub async fn call_ice_servers_for(
 }
 
 /// The 4-emoji short authentication string (SAS) for the in-progress call's
-/// `local_sdp`/`remote_sdp`, to read aloud and compare. `None` when either
-/// side's SDP has no `a=fingerprint:` line to derive one from — an honest
-/// "can't verify", not an error. See `comrade_ui::ComradeRuntime::call_sas`.
+/// `local_sdp`/`remote_sdp`. `None` when either side's SDP has no
+/// `a=fingerprint:` line to derive one from — an honest "can't verify", not an
+/// error. See `comrade_ui::ComradeRuntime::call_sas`.
+///
+/// **No frontend calls this any more.** The in-call SAS row was replaced by a
+/// network-strength indicator: Comrade's SDP rides the NIP-44 gift-wrapped DM
+/// channel, so both fingerprints are already authenticated by the peer's Nostr
+/// key before a call is answered, which made the out-of-band read-aloud check
+/// near-redundant. The primitive and its tests are kept deliberately — it is
+/// the one piece a future explicit "verify this call" flow would need, and
+/// deleting a tested crypto primitive to save a registration line is the wrong
+/// trade.
 #[tauri::command]
 pub async fn call_sas(
     state: tauri::State<'_, Runtime>,

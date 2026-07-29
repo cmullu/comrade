@@ -56,6 +56,37 @@ anything; the **Verification status** table is the most important part._
   "audio calls never suspend"), chat-button → in-app tile → restore, native
   PiP waits for OS confirmation, PiP closed on hangup, mute keeps `Icons.mic`.
 
+### Desktop SPA (`desktop/ui/`) — VERIFIED (50 node tests green; DOM glue unrun)
+
+- `call_decisions.mjs` — `formatSas` **removed**; added `CALL_QUALITY`,
+  `classifyCallQuality` (same RTT/jitter thresholds as `CallManager.kt`:
+  ≤150 ms + ≤30 ms jitter = good, ≤400 ms = medium, else poor; unparseable =
+  unknown), `signalBarsFor`/`signalLabelFor` (identical mapping to the other
+  two frontends), `remoteVideoFramesDecoded`, `decideRemoteVideoPaused`
+  (2-stalled-poll hysteresis), `REMOTE_VIDEO_STALL_POLLS`.
+- `call_decisions.test.mjs` — the 6 `formatSas` tests replaced by 20 vectors
+  covering the thresholds (incl. both inclusive boundaries), the
+  candidate-pair fallback, worst-stream-wins, unknown-never-poor, junk-report
+  tolerance, the bar/label mapping, and the pause hysteresis + instant clear +
+  counter-reset case. **50/50 pass** (`node --test desktop/ui/*.test.mjs`).
+- `index.html` — `#call-sas` row replaced by `#call-signal` (four `<i>` bars +
+  label), `#call-video-paused` cover, and two new buttons (`#call-camera`,
+  `#call-chat`); button glyphs wrapped in `.call-btn-glyph` for the slash.
+- `styles.css` — `.call-sas*` replaced by `.call-signal`/`.call-bars`
+  (`data-filled` lights the first N, empties stay at 0.25 opacity),
+  `.call-video-paused`, and `.call-btn.is-off .call-btn-glyph::after` (the
+  animated slash, `call-slash-in` keyframes).
+- `main.js` — `updateCallSas`/`renderSasResult`/`resetSasRow` and the
+  `call_sas` invoke + preview stub removed; added `startStatsPolling`
+  (2 s `getStats`, liveness-guarded before *and* after every await, restarted
+  on each connected transition so an ICE restart re-baselines),
+  `renderSignal`, `renderVideoPaused`, `toggleCamera`, `openChatDuringCall`
+  (`switchTab("vault")` + `selectContact` + browser PiP on the remote
+  `<video>`), `enterPictureInPicture`/`exitPictureInPicture`,
+  `applyVideoVisibility` (`visibilitychange` + PiP enter/leave → disable the
+  local video track when nothing displays it; PiP counts as displayed), and
+  the mute button now toggles `.is-off` instead of swapping 🎙 for 🔇.
+
 ### Kotlin — WRITTEN BUT NOT COMPILED (no Android SDK in this container)
 
 Shared services (`android/app/src/main/java/mullu/comrade/…`, staged into the
@@ -123,7 +154,7 @@ Flutter-host Kotlin (`app/android/…/mullu/comrade/`):
 | `flutter test` (fake repo, no FFI) | ✅ 124 pass (4 FFI tests self-skip; CI `bridge` job runs them) |
 | Kotlin (both Gradle modules) | ❌ **not compiled** — no Android SDK here. CI lanes `android` + `flutter/apk` are the gate |
 | Rust | untouched (`derive_sas` + tests intentionally kept) |
-| Desktop JS | untouched — **still shows the SAS row** (see next steps) |
+| Desktop JS (`node --test desktop/ui/*.test.mjs`) | ✅ **50 pass** (pure decision layer). The DOM/WebRTC glue in `main.js` has no test harness — unrun |
 | On-device behaviour | ❌ nothing run on a device/emulator |
 
 ## Next steps, in order
@@ -138,15 +169,15 @@ Flutter-host Kotlin (`app/android/…/mullu/comrade/`):
    referenced SAS (grepped), but `toggleCamera` behaviour changed shape
    (`applyCaptureState`); if a test drove `toggleCamera` and asserted capturer
    calls, re-read it against the new reconciliation.
-2. **Desktop parity** (`desktop/ui/`): remove the SAS row
-   (`index.html` `#call-sas`, `styles.css` `.call-sas*`, `main.js`
-   `updateCallSas/renderSasResult/formatSas` and the `call_sas` invoke) and
-   add signal bars driven by a 2 s `pc.getStats()` poll — reuse
-   `CallManager.kt`'s thresholds (RTT ≤150 ms good w/ jitter ≤30 ms, ≤400 ms
-   medium, else poor). The Tauri `call_sas` command + `ComradeRuntime::call_sas`
-   can stay (backend, tested) — only the UI stops calling it. Alternatively,
-   if the Flutter Linux bundle is about to replace the SPA (owner decision in
-   `docs/FRONTEND_STRATEGY.md` §10), record that decision in the PR instead.
+2. **Desktop manual pass** (needs the Tauri shell, or a browser preview):
+   the pure layer is tested but the DOM glue is not. Check that the bars
+   appear on connect and move with the network, that the chat button opens the
+   thread *and* the PiP window (a webview that refuses `requestPictureInPicture`
+   should leave the call full screen, not break it), that minimising the window
+   stops the outbound video and restoring resumes it, and that the mute slash
+   animates. Note `enterPictureInPicture` is called from a click handler, so
+   the user-gesture requirement is satisfied — if a webview still refuses,
+   that is the documented degrade path.
 3. **Device pass** (needs hardware/emulator): ring → accept → chrome fades →
    tap reveals; home during video call → OS PiP window; chat button → PiP over
    conversation; camera-off vs backgrounding both show "Video paused" on the
@@ -154,9 +185,11 @@ Flutter-host Kotlin (`app/android/…/mullu/comrade/`):
    button cycles; return from PiP resumes capture only if camera was on.
 4. **`SlashedIcon` on the Compose side** uses `size * 0.44f` inside a 60 dp
    disc — eyeball the slash endpoints against the Flutter one on device.
-5. **Docs**: `README.md` calls row still says "encryption-emoji (SAS)
-   verification" — update once CI is green. `AUDIT.md` may reference the SAS
-   as a shipped feature; grep `AUDIT.md` for `SAS`/`emoji` and amend.
+5. **Docs**: done — the `README.md` calls row now describes the indicator, PiP,
+   video-paused, self-hiding controls and notification controls. `AUDIT.md` was
+   grepped and has no SAS references. The Tauri `call_sas` command and
+   `ComradeRuntime::call_sas` are deliberately retained with a doc note saying
+   no frontend calls them.
 6. Consider surfacing `videoSuspended` in the *peer's* UI copy ("Paused — they
    left the app") — the wire only says paused; a `reason` field on the
    heuristic is a natural follow-up.
