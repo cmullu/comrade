@@ -1,0 +1,176 @@
+name: Flutter
+
+# The unified Flutter frontend (app/). Runs alongside — NOT instead of — the
+# existing `android` and `desktop*` lanes in ci.yml: the Compose app and the
+# Tauri shell are still the shipping frontends until app/ reaches parity, and
+# deleting their CI before the replacement is proven would leave the shipped
+# artifacts untested. See docs/FRONTEND_STRATEGY.md §7 for the retirement
+# trigger; the removal is Phase 4's last step, not its first.
+#
+# Same trigger discipline as ci.yml: push-only, no `pull_request` (all PRs come
+# from same-repo branches, so a second trigger would only duplicate runs).
+on:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: flutter-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pinned rather than `stable`: an unpinned channel means an upstream Flutter
+  # release can turn CI red on a commit that changed nothing. Bump deliberately.
+  FLUTTER_VERSION: "3.44.8"
+
+jobs:
+  # ── Dart: analyze + unit/widget tests ────────────────────────────────────
+  # Cheapest signal, so it runs on its own and gates nothing else. Needs no
+  # Rust toolchain: the generated bridge bindings are committed, and the
+  # widget tests run against the in-memory fake repository rather than FFI.
+  analyze:
+    name: Flutter — analyze + test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # `--fatal-infos` deliberately: this repo gates clippy at -D warnings, so
+      # the Dart lane holds the same line rather than accumulating lint debt.
+      - name: flutter analyze
+        working-directory: app
+        run: flutter analyze --fatal-infos
+
+      - name: dart format --set-exit-if-changed
+        working-directory: app
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: flutter test
+        working-directory: app
+        run: flutter test
+
+  # ── Linux desktop bundle ─────────────────────────────────────────────────
+  # Proves the desktop target links against the Rust cdylib. Linux is the only
+  # desktop OS buildable on a free ubuntu runner; macOS/Windows lanes come with
+  # the release workflow once parity lands (they need their own runner images).
+  linux:
+    name: Flutter — Linux desktop bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux desktop toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtk-3-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-flutter-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-flutter-
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      - name: flutter build linux --release
+        working-directory: app
+        run: flutter build linux --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comrade-linux-x64
+          path: app/build/linux/x64/release/bundle/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Android APK ──────────────────────────────────────────────────────────
+  # Cross-compiles the Rust cdylib for both shipped ABIs via cargo-ndk, then
+  # assembles. Mirrors android-apk.yml's ABI set (arm64-v8a for handsets,
+  # x86_64 for the emulator lanes) so the two builds stay comparable.
+  apk:
+    name: Flutter — Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Rust stable + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cargo-ndk-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ndk-
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked --version ^4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # Debug APK only for now. Release signing reuses the SIGNING_* secrets
+      # android/app/build.gradle.kts already consumes; wiring that into app/ is
+      # part of the release-workflow change, which lands with parity, not here.
+      - name: flutter build apk --debug
+        working-directory: app
+        run: flutter build apk --debug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comrade-flutter-debug-apk
+          path: app/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
