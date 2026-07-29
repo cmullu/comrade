@@ -116,10 +116,12 @@ pub struct PresenceBeacon {
     /// uniform.
     pub ttl_secs: u64,
     /// `true` when this beacon exists only to answer someone else's — a
-    /// comrade coming online learns immediately that we are here, instead of
+    /// comrade *arriving* learns immediately that we are here, instead of
     /// waiting up to [`PRESENCE_HEARTBEAT_SECS`] for our next heartbeat. A
-    /// reply is never itself answered, which is what stops two online
-    /// devices from ping-ponging beacons forever.
+    /// reply is never itself answered, which is what stops two online devices
+    /// from ping-ponging beacons forever; the receiving side additionally only
+    /// answers an arrival, not every heartbeat from a peer it already knows to
+    /// be online (which would say nothing new at double the traffic).
     #[serde(default)]
     pub reply: bool,
 }

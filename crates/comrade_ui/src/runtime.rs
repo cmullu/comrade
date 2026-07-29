@@ -3244,7 +3244,7 @@ fn presence_display_name(
 ///  * **Only chosen comrades are announced.** A beacon from someone we
 ///    haven't marked is still recorded — it is the proof that *they* marked
 ///    us, which is what makes the mutual model discoverable — but it raises
-///    nothing.
+///    nothing, and is never answered.
 fn handle_presence_beacon(
     vault: &Arc<VaultEngine>,
     store: Option<&Arc<comrade_storage::EncryptedStore>>,
@@ -3303,9 +3303,14 @@ fn handle_presence_beacon(
         });
     }
 
-    // Answer only our own comrades: replying to someone we haven't chosen
-    // would disclose our presence to a peer we never opted into telling.
-    if is_our_comrade && beacon.wants_reply() {
+    // Answer a comrade who has just *arrived* — that is the case the reply
+    // exists for, and the only one where it carries information: if we already
+    // had them online, our own heartbeat is already keeping their view of us
+    // fresh, and answering every heartbeat would double this feature's relay
+    // traffic to say nothing new. Only our own comrades are ever answered:
+    // replying to a peer we haven't chosen would disclose our presence to
+    // someone we never opted into telling.
+    if is_our_comrade && beacon.wants_reply() && !was_online {
         if let Ok(peer) = PublicKey::parse(sender_hex) {
             spawn_presence_beacons(
                 Some(vault.clone()),

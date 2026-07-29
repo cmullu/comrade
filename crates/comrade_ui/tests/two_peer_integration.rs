@@ -695,31 +695,6 @@ async fn comrades_see_each_other_come_online_and_go_offline() {
         "his beacon is the proof he chose her back"
     );
 
-    // The answering half: when one comrade announces, the other answers on
-    // the spot rather than leaving them to wait out a heartbeat interval. A
-    // beacon carries second granularity, so cross a second boundary first —
-    // then Bob's record of Alice must freshen purely because she answered
-    // (the heartbeat is minutes away).
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    let before = bob
-        .peer_presence(&alice_npub)
-        .unwrap()
-        .unwrap()
-        .last_seen_at;
-    assert_eq!(
-        bob.announce_presence(true).await,
-        1,
-        "one comrade, one beacon"
-    );
-    assert!(
-        wait_until(RECV_TIMEOUT, || bob
-            .peer_presence(&alice_npub)
-            .unwrap()
-            .is_some_and(|p| p.last_seen_at > before))
-        .await,
-        "alice must answer bob's beacon with one of her own"
-    );
-
     // Bob's app goes away (a lock, or the shell backgrounding) — Alice's dot
     // goes grey now instead of aging out minutes later.
     assert_eq!(bob.announce_presence(false).await, 1);
@@ -733,6 +708,42 @@ async fn comrades_see_each_other_come_online_and_go_offline() {
     };
     assert_eq!(peer, bob_npub);
     assert!(!alice.comrades().unwrap()[0].online);
+
+    // The answering half: when Bob comes *back*, Alice answers on the spot
+    // rather than leaving him to wait out a heartbeat interval. A beacon
+    // carries second granularity, so cross a second boundary first — then
+    // Bob's record of Alice must freshen purely because she answered (her own
+    // heartbeat is minutes away). An arrival is the only thing answered: a
+    // heartbeat from a peer already known to be online gets no reply, which is
+    // what keeps two idle comrades from doubling this feature's traffic.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let before = bob
+        .peer_presence(&alice_npub)
+        .unwrap()
+        .unwrap()
+        .last_seen_at;
+    assert_eq!(
+        bob.announce_presence(true).await,
+        1,
+        "one comrade, one beacon"
+    );
+    assert!(
+        wait_for(&mut alice_events, RECV_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::ComradePresence { online: true, .. }
+        ))
+        .await
+        .is_some(),
+        "alice must see bob arrive again"
+    );
+    assert!(
+        wait_until(RECV_TIMEOUT, || bob
+            .peer_presence(&alice_npub)
+            .unwrap()
+            .is_some_and(|p| p.last_seen_at > before))
+        .await,
+        "alice must answer bob's arrival with a beacon of her own"
+    );
 
     relay.stop().await;
 }

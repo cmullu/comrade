@@ -112,9 +112,11 @@ Beacons are sent when:
 3. a comrade is chosen or un-chosen (`online` / `offline` respectively, so
    neither side waits on a heartbeat to learn about the change);
 4. the app returns to the foreground (Android) — freshness, not mechanism;
-5. **a comrade's own fresh `online` beacon arrives** — we answer with
-   `reply: true`, so someone coming online learns we are already here instead
-   of waiting up to a heartbeat.
+5. **a comrade we thought was offline arrives** — we answer with
+   `reply: true`, so they learn we are already here instead of waiting up to a
+   heartbeat. Only an *arrival* is answered: a heartbeat from a peer we already
+   have online says nothing new, and answering it would double this feature's
+   relay traffic for two idle comrades. A reply is never itself answered.
 
 And an `offline` beacon is sent when the vault locks. Process death sends
 nothing, by definition — that is what the TTL is for.
