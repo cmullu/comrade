@@ -25,6 +25,7 @@ import {
   remoteVideoFramesDecoded,
   decideRemoteVideoPaused,
   REMOTE_VIDEO_STALL_POLLS,
+  shouldSendLocalVideo,
 } from "./call_decisions.mjs";
 
 // ── decideOfferDisposition ───────────────────────────────────────────────────
@@ -565,4 +566,44 @@ test("decideRemoteVideoPaused treats a frame counter that went backwards as a st
   // so it must not clear the caption early — but it re-baselines.
   const s = decideRemoteVideoPaused({ frames: 3, lastFrames: 900, stalledPolls: 0, paused: false });
   assert.deepEqual(s, { lastFrames: 3, stalledPolls: 1, paused: false });
+});
+
+// ── shouldSendLocalVideo ──────────────────────────────────────────────────
+// "Don't capture video nobody is displaying", as a pure rule. The two facts
+// must stay independent: collapsing them is what makes a minimised call come
+// back with the camera silently on (or off).
+
+test("shouldSendLocalVideo sends while the window is shown and the camera is on", () => {
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: false, inPictureInPicture: false, cameraOn: true }),
+    true,
+  );
+});
+
+test("shouldSendLocalVideo stops sending when nothing is displaying the call", () => {
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: true, inPictureInPicture: false, cameraOn: true }),
+    false,
+  );
+});
+
+test("shouldSendLocalVideo keeps sending in picture-in-picture — that window IS displaying it", () => {
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: true, inPictureInPicture: true, cameraOn: true }),
+    true,
+    "floating a video call is pointless if it stops sending",
+  );
+});
+
+test("shouldSendLocalVideo never overrides the user's camera choice", () => {
+  // Visible, but the user turned the camera off: stays off.
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: false, inPictureInPicture: false, cameraOn: false }),
+    false,
+  );
+  // And coming back into view does not switch it on behind their back.
+  assert.equal(
+    shouldSendLocalVideo({ documentHidden: true, inPictureInPicture: true, cameraOn: false }),
+    false,
+  );
 });

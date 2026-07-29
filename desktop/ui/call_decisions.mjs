@@ -451,6 +451,30 @@ export function decideRemoteVideoPaused({ frames, lastFrames, stalledPolls, paus
   };
 }
 
+/**
+ * Whether the local camera should be *sending* right now.
+ *
+ * Two independent facts decide it, and collapsing them is the bug this shape
+ * exists to prevent: `cameraOn` is the user's own choice, and "is anything
+ * displaying this call" is the app's. Capture runs only when both allow it, so
+ * a window that was minimised with the camera deliberately off does not come
+ * back sending. Mirrors `CallManager.applyCaptureState` and the Dart
+ * `CallSession.localVideoPaused`.
+ *
+ * A picture-in-picture window **is** something displaying the call, so it keeps
+ * sending — that is the whole point of floating a video call.
+ *
+ * @param {object} input
+ * @param {boolean} input.documentHidden `document.hidden` — the window/tab is not being shown.
+ * @param {boolean} input.inPictureInPicture A PiP window is up.
+ * @param {boolean} input.cameraOn The user's camera choice.
+ * @returns {boolean} Whether video tracks should be enabled.
+ */
+export function shouldSendLocalVideo({ documentHidden, inPictureInPicture, cameraOn }) {
+  const displayed = !documentHidden || !!inPictureInPicture;
+  return displayed && cameraOn !== false;
+}
+
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }

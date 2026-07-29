@@ -1524,7 +1524,7 @@
   /**
    * Poll `getStats()` for as long as this call is the live one. Every read is
    * guarded on liveness both before and after the await, exactly as
-   * updateCallSas was: the call can end while a poll is in flight.
+   * the SAS derivation used to be: the call can end while a poll is in flight.
    */
   function startStatsPolling(c) {
     stopStatsPolling(c);
@@ -1758,12 +1758,18 @@
    * `cameraOn` is the user's own choice and is kept separate: a call that was
    * backgrounded with the camera deliberately off does not come back on.
    */
-  function applyVideoVisibility() {
+  async function applyVideoVisibility() {
     const c = state.call;
     if (!c || c.media !== "video" || !c.localStream) return;
-    const displayed = !document.hidden || !!document.pictureInPictureElement;
-    c.videoSuspended = !displayed;
-    const shouldSend = displayed && c.cameraOn !== false;
+    const { shouldSendLocalVideo } = await callDecisionsReady;
+    if (!c || c.ended || state.call !== c) return;
+    const inPip = !!document.pictureInPictureElement;
+    c.videoSuspended = document.hidden && !inPip;
+    const shouldSend = shouldSendLocalVideo({
+      documentHidden: document.hidden,
+      inPictureInPicture: inPip,
+      cameraOn: c.cameraOn,
+    });
     for (const t of c.localStream.getVideoTracks()) t.enabled = shouldSend;
   }
 
