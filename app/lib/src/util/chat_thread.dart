@@ -5,8 +5,6 @@
 /// as `ChatThreadTest.kt` does on Android.
 library;
 
-import 'display_name.dart' show dayLabel;
-
 export 'display_name.dart' show dayLabel;
 
 /// Whether a message at [epochSecs] opens a new calendar day relative to the
@@ -25,8 +23,10 @@ bool startsNewDay(
 }
 
 int _dayKey(int epochSecs, {required bool utc, required Duration offset}) {
-  final DateTime raw = DateTime.fromMillisecondsSinceEpoch(epochSecs * 1000, isUtc: true);
-  final DateTime t = offset != Duration.zero ? raw.add(offset) : (utc ? raw : raw.toLocal());
+  final DateTime raw =
+      DateTime.fromMillisecondsSinceEpoch(epochSecs * 1000, isUtc: true);
+  final DateTime t =
+      offset != Duration.zero ? raw.add(offset) : (utc ? raw : raw.toLocal());
   return t.year * 10000 + t.month * 100 + t.day;
 }
 

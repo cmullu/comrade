@@ -35,7 +35,8 @@ final Provider<AppPreferences> appPreferencesProvider =
 /// listens for the events it cares about. Same single-consumer property (the
 /// repository owns the drain), without the polling.
 final StreamProvider<BridgeEvent> bridgeEventsProvider =
-    StreamProvider<BridgeEvent>((Ref ref) => ref.watch(comradeRepositoryProvider).events);
+    StreamProvider<BridgeEvent>(
+        (Ref ref) => ref.watch(comradeRepositoryProvider).events);
 
 /// Subscribe to the subset of [BridgeEvent]s [matches] accepts, running
 /// [onEvent] for each. Returns nothing; wire it inside a provider's `build`.
@@ -80,11 +81,14 @@ class AppPhaseController extends AsyncNotifier<AppPhase> {
     final Profile? profile = await repo.currentProfile();
     // An already-unlocked runtime (a hot restart, or an Activity recreation on
     // Android) skips the door entirely — same rule as `ComradeApp`.
-    return profile != null ? AppReady(profile) : const AppLocked(vaultExists: true);
+    return profile != null
+        ? AppReady(profile)
+        : const AppLocked(vaultExists: true);
   }
 
   /// Called by onboarding once a passphrase has produced a profile.
-  void markReady(Profile profile) => state = AsyncData<AppPhase>(AppReady(profile));
+  void markReady(Profile profile) =>
+      state = AsyncData<AppPhase>(AppReady(profile));
 
   /// Reflect a profile edit (a claimed/changed @handle) without re-reading.
   void updateProfile(Profile profile) {
@@ -127,8 +131,10 @@ class MeshStatusController extends AsyncNotifier<MeshStatus> {
   }
 }
 
-final AsyncNotifierProvider<MeshStatusController, MeshStatus> meshStatusProvider =
-    AsyncNotifierProvider<MeshStatusController, MeshStatus>(MeshStatusController.new);
+final AsyncNotifierProvider<MeshStatusController, MeshStatus>
+    meshStatusProvider =
+    AsyncNotifierProvider<MeshStatusController, MeshStatus>(
+        MeshStatusController.new);
 
 // ── Workspace (Base / Off-Grid Travel / Couple Sandbox) ─────────────────────
 
@@ -145,8 +151,10 @@ class WorkspaceController extends AsyncNotifier<WorkspaceInfo> {
   }
 }
 
-final AsyncNotifierProvider<WorkspaceController, WorkspaceInfo> workspaceProvider =
-    AsyncNotifierProvider<WorkspaceController, WorkspaceInfo>(WorkspaceController.new);
+final AsyncNotifierProvider<WorkspaceController, WorkspaceInfo>
+    workspaceProvider =
+    AsyncNotifierProvider<WorkspaceController, WorkspaceInfo>(
+        WorkspaceController.new);
 
 // ── Contacts (used for display-name resolution across screens) ──────────────
 
@@ -161,7 +169,8 @@ class ContactsController extends AsyncNotifier<List<ContactInfo>> {
     return ref.watch(comradeRepositoryProvider).contacts();
   }
 
-  Future<ContactInfo> setAlias({required String npub, required String alias}) async {
+  Future<ContactInfo> setAlias(
+      {required String npub, required String alias}) async {
     final ContactInfo saved = await ref
         .read(comradeRepositoryProvider)
         .setContactAlias(npub: npub, alias: alias);
@@ -170,8 +179,10 @@ class ContactsController extends AsyncNotifier<List<ContactInfo>> {
   }
 }
 
-final AsyncNotifierProvider<ContactsController, List<ContactInfo>> contactsProvider =
-    AsyncNotifierProvider<ContactsController, List<ContactInfo>>(ContactsController.new);
+final AsyncNotifierProvider<ContactsController, List<ContactInfo>>
+    contactsProvider =
+    AsyncNotifierProvider<ContactsController, List<ContactInfo>>(
+        ContactsController.new);
 
 /// Contacts indexed by key, for the O(1) lookups call history and the chat
 /// list do per row.

@@ -1,0 +1,225 @@
+/// The responsive shell, and the display-name rules the header enforces.
+///
+/// One codebase, two navigation idioms: bottom navigation below 840 logical
+/// pixels, the desktop sidebar at or above it. These tests drag the window
+/// across that line and assert the shell follows.
+library;
+
+import 'package:comrade/src/data/fake_comrade_repository.dart';
+import 'package:comrade/src/screens/home_shell.dart';
+import 'package:comrade/src/state/chat_providers.dart';
+import 'package:comrade/src/theme/breakpoints.dart';
+import 'package:comrade/src/theme/comrade_theme.dart';
+import 'package:comrade/src/util/display_name.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'helpers.dart';
+
+Widget _shell(FakeComradeRepository repo, {ChatTarget? open}) => ProviderScope(
+      overrides: <Override>[
+        ...fakeOverrides(repo),
+        if (open != null)
+          openConversationProvider.overrideWith((Ref ref) => open),
+      ],
+      child: MaterialApp(
+        theme: ComradeTheme.dark(),
+        home: const HomeShell(),
+      ),
+    );
+
+void main() {
+  group('Breakpoints', () {
+    test('classify follows the widths the existing CSS already uses', () {
+      expect(Breakpoints.classify(390), ComradeWindowClass.compact);
+      expect(Breakpoints.classify(700), ComradeWindowClass.medium);
+      expect(Breakpoints.classify(840), ComradeWindowClass.expanded);
+      expect(Breakpoints.classify(1440), ComradeWindowClass.expanded);
+      expect(Breakpoints.classify(1600), ComradeWindowClass.ultrawide);
+    });
+
+    test('only the wide classes get a sidebar and two panes', () {
+      expect(ComradeWindowClass.compact.usesBottomNav, isTrue);
+      expect(ComradeWindowClass.medium.usesBottomNav, isTrue);
+      expect(ComradeWindowClass.expanded.usesSidebar, isTrue);
+      expect(ComradeWindowClass.ultrawide.supportsTwoPane, isTrue);
+      expect(ComradeWindowClass.compact.supportsTwoPane, isFalse);
+    });
+
+    test('the sidebar track is clamped like clamp(232px, 15vw, 288px)', () {
+      expect(Breakpoints.sidebarWidth(900), 232);
+      expect(Breakpoints.sidebarWidth(1600), 240);
+      expect(Breakpoints.sidebarWidth(3440), 288);
+    });
+
+    test(
+        'the conversation list track is clamped like clamp(240px, 18vw, 320px)',
+        () {
+      expect(Breakpoints.conversationListWidth(1000), 240);
+      expect(Breakpoints.conversationListWidth(3440), 320);
+    });
+
+    test('the feed column is clamped like clamp(720px, 66vw, 1280px)', () {
+      expect(Breakpoints.feedColumnWidth(900), 720);
+      expect(Breakpoints.feedColumnWidth(3440), 1280);
+    });
+  });
+
+  group('navigation presentation', () {
+    testWidgets('a phone-width window uses bottom navigation',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(_shell(repo));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(find.byKey(const Key('nav-drawer-button')), findsOneWidget);
+    });
+
+    testWidgets('a desktop-width window uses the sidebar and no bottom bar',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(1400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(_shell(repo));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(NavigationBar), findsNothing);
+      // The sidebar's own labels, plus the secondary group Android kept in a
+      // drawer.
+      expect(find.text('Journal'), findsOneWidget);
+      expect(find.text('Call history'), findsOneWidget);
+      expect(find.text('Settings'), findsOneWidget);
+    });
+
+    testWidgets('resizing across the breakpoint swaps the chrome live',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(1400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(_shell(repo));
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsNothing);
+
+      tester.view.physicalSize = const Size(400, 900);
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationBar), findsOneWidget);
+    });
+
+    testWidgets('the wide layout shows list and thread side by side',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(1400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        _shell(repo, open: const ChatTarget(peer: FakePeers.alice)),
+      );
+      await tester.pumpAndSettle();
+
+      // The composer (detail pane) and the chat list are both mounted.
+      expect(find.byKey(const Key('dm-input')), findsOneWidget);
+      expect(find.text('Amma'), findsWidgets);
+    });
+
+    testWidgets('the narrow layout gives the thread the whole screen',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        _shell(repo, open: const ChatTarget(peer: FakePeers.alice)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('dm-input')), findsOneWidget);
+      // The conversation view owns the screen — no bottom bar beneath it.
+      expect(find.byType(NavigationBar), findsNothing);
+    });
+  });
+
+  group('conversation header naming', () {
+    testWidgets('shows the alias, and always the npub tail beside it',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        _shell(
+          repo,
+          open: const ChatTarget(
+            peer: FakePeers.alice,
+            alias: 'Amma',
+            username: 'alice',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Alias wins the title…
+      expect(find.text('Amma'), findsWidgets);
+      // …and the key stays on screen regardless, because a published @handle
+      // is a self-declared claim and the key is the identity.
+      expect(find.text(shortNpub(FakePeers.alice)), findsWidgets);
+    });
+
+    testWidgets('falls back to the published handle when there is no alias',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        _shell(
+          repo,
+          open: const ChatTarget(peer: FakePeers.bhaskar, username: 'bhaskar'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('@bhaskar'), findsWidgets);
+      expect(find.text(shortNpub(FakePeers.bhaskar)), findsWidgets);
+    });
+
+    testWidgets('falls back to the shortened key when neither name exists',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        _shell(repo, open: const ChatTarget(peer: FakePeers.stranger)),
+      );
+      await tester.pumpAndSettle();
+
+      // Title and key line are both the short key — two matches, never a name.
+      expect(find.text(shortNpub(FakePeers.stranger)), findsWidgets);
+      expect(find.textContaining('@'), findsNothing);
+    });
+  });
+
+  group('chat list', () {
+    testWidgets('surfaces the message-requests banner with its count',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(_shell(repo));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Message requests (1)'), findsOneWidget);
+    });
+
+    testWidgets('titles rows by alias, then handle, then key',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(400, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(_shell(repo));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Amma'), findsOneWidget);
+      expect(find.text('@bhaskar'), findsOneWidget);
+    });
+  });
+}

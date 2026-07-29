@@ -12,8 +12,9 @@ library;
 /// `SCREEN_INVENTORY.md`; Android's is the one the unified app keeps because
 /// its unit test pins the exact output and the conversation header renders it
 /// beside a 36 dp avatar where four tail characters still fit on a phone.
-String shortNpub(String npub) =>
-    npub.length > 16 ? '${npub.substring(0, 10)}…${npub.substring(npub.length - 4)}' : npub;
+String shortNpub(String npub) => npub.length > 16
+    ? '${npub.substring(0, 10)}…${npub.substring(npub.length - 4)}'
+    : npub;
 
 /// Display title for a peer, in trust order:
 ///  1. the alias *you* chose for the contact (yours, can't be spoofed),
@@ -61,9 +62,11 @@ String relativeTime(int epochSecs, {DateTime? now}) {
 /// unlike a relative "3d" that drifts while the screen is open. [utc] is
 /// injectable (in place of Kotlin's `ZoneId`) so the rule is unit-testable:
 /// Dart only offers "local" and "UTC", and the tests pin the UTC rendering.
-String clockTime(int epochSecs, {bool utc = false, Duration offset = Duration.zero}) {
+String clockTime(int epochSecs,
+    {bool utc = false, Duration offset = Duration.zero}) {
   final DateTime t =
-      DateTime.fromMillisecondsSinceEpoch(epochSecs * 1000, isUtc: true).add(offset);
+      DateTime.fromMillisecondsSinceEpoch(epochSecs * 1000, isUtc: true)
+          .add(offset);
   final DateTime local = utc || offset != Duration.zero ? t : t.toLocal();
   return '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
 }
@@ -117,7 +120,8 @@ String dayLabel(
 }
 
 DateTime _zoned(int epochSecs, {required bool utc, required Duration offset}) {
-  final DateTime t = DateTime.fromMillisecondsSinceEpoch(epochSecs * 1000, isUtc: true);
+  final DateTime t =
+      DateTime.fromMillisecondsSinceEpoch(epochSecs * 1000, isUtc: true);
   if (offset != Duration.zero) return t.add(offset);
   return utc ? t : t.toLocal();
 }

@@ -28,7 +28,8 @@ const Duration kTaraDefaultChunkDelay = Duration(milliseconds: 28);
 /// Split [text] into successive pieces of at least [targetChars] that each end
 /// on whitespace (the final piece takes whatever is left). Concatenating the
 /// result reproduces [text] exactly.
-List<String> chunkText(String text, {int targetChars = kTaraDefaultChunkChars}) {
+List<String> chunkText(String text,
+    {int targetChars = kTaraDefaultChunkChars}) {
   if (targetChars <= 0) {
     throw ArgumentError.value(targetChars, 'targetChars', 'must be positive');
   }
@@ -87,7 +88,9 @@ Stream<String> streamTaraReply(
   final StringBuffer soFar = StringBuffer();
   final List<String> pieces = chunkText(text, targetChars: targetChars);
   for (var i = 0; i < pieces.length; i++) {
-    if (i > 0 && perChunkDelay > Duration.zero) await Future<void>.delayed(perChunkDelay);
+    if (i > 0 && perChunkDelay > Duration.zero) {
+      await Future<void>.delayed(perChunkDelay);
+    }
     soFar.write(pieces[i]);
     yield soFar.toString();
   }

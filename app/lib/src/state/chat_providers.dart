@@ -36,7 +36,8 @@ final AsyncNotifierProvider<ConversationsController, List<ConversationInfo>>
 
 // ── Message requests ────────────────────────────────────────────────────────
 
-class MessageRequestsController extends AsyncNotifier<List<MessageRequestInfo>> {
+class MessageRequestsController
+    extends AsyncNotifier<List<MessageRequestInfo>> {
   @override
   Future<List<MessageRequestInfo>> build() async {
     listenToEvents(
@@ -93,7 +94,8 @@ class ChatTarget {
   /// The peer's own published @handle, when known.
   final String? username;
 
-  ChatTarget copyWith({String? alias, String? username, bool clearAlias = false}) =>
+  ChatTarget copyWith(
+          {String? alias, String? username, bool clearAlias = false}) =>
       ChatTarget(
         peer: peer,
         alias: clearAlias ? null : (alias ?? this.alias),
@@ -213,7 +215,8 @@ class ConversationState {
   }
 }
 
-class ConversationController extends FamilyAsyncNotifier<ConversationState, String> {
+class ConversationController
+    extends FamilyAsyncNotifier<ConversationState, String> {
   String get _peer => arg;
 
   @override
@@ -227,7 +230,8 @@ class ConversationController extends FamilyAsyncNotifier<ConversationState, Stri
     listenToEvents(
       ref,
       matches: (BridgeEvent e) => switch (e) {
-        IncomingDirectMessage(:final MessageInfo message) => message.peer == _peer,
+        IncomingDirectMessage(:final MessageInfo message) =>
+          message.peer == _peer,
         IncomingMedia(:final MediaMessageInfo media) => media.sender == _peer,
         MessageStatusChanged(:final String peer) => peer == _peer,
         _ => false,
@@ -262,7 +266,11 @@ class ConversationController extends FamilyAsyncNotifier<ConversationState, Stri
           ref.read(comradeRepositoryProvider).markConversationRead(_peer),
         );
       case IncomingMedia(:final MediaMessageInfo media):
-        if (_state.media.any((MediaMessageInfo m) => m.eventId == media.eventId)) return;
+        if (_state.media.any(
+          (MediaMessageInfo m) => m.eventId == media.eventId,
+        )) {
+          return;
+        }
         state = AsyncData<ConversationState>(
           _state.copyWith(media: <MediaMessageInfo>[..._state.media, media]),
         );
@@ -295,11 +303,11 @@ class ConversationController extends FamilyAsyncNotifier<ConversationState, Stri
     }
   }
 
-  void startReply(MessageInfo message) =>
-      state = AsyncData<ConversationState>(_state.copyWith(replyingTo: message));
+  void startReply(MessageInfo message) => state =
+      AsyncData<ConversationState>(_state.copyWith(replyingTo: message));
 
-  void cancelReply() =>
-      state = AsyncData<ConversationState>(_state.copyWith(clearReplyingTo: true));
+  void cancelReply() => state =
+      AsyncData<ConversationState>(_state.copyWith(clearReplyingTo: true));
 
   void clearError() =>
       state = AsyncData<ConversationState>(_state.copyWith(clearError: true));
@@ -380,16 +388,18 @@ class ConversationController extends FamilyAsyncNotifier<ConversationState, Stri
       return false;
     } catch (_) {
       state = AsyncData<ConversationState>(
-        _state.copyWith(attaching: false, error: 'Could not send the attachment.'),
+        _state.copyWith(
+            attaching: false, error: 'Could not send the attachment.'),
       );
       return false;
     }
   }
 }
 
-final AsyncNotifierProviderFamily<ConversationController, ConversationState, String>
-    conversationProvider = AsyncNotifierProvider.family<ConversationController,
-        ConversationState, String>(ConversationController.new);
+final AsyncNotifierProviderFamily<ConversationController, ConversationState,
+        String> conversationProvider =
+    AsyncNotifierProvider.family<ConversationController, ConversationState,
+        String>(ConversationController.new);
 
 /// Fire a background call whose failure must not crash the app or the zone.
 ///

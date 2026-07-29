@@ -33,7 +33,8 @@ class FakeComradeRepository implements ComradeRepository {
 
   final int _now;
   final Random _random = Random(0x0C0FFEE);
-  final StreamController<BridgeEvent> _events = StreamController<BridgeEvent>.broadcast();
+  final StreamController<BridgeEvent> _events =
+      StreamController<BridgeEvent>.broadcast();
 
   Profile? _profile;
   bool _unlocked = false;
@@ -44,8 +45,10 @@ class FakeComradeRepository implements ComradeRepository {
   MeshStatus _mesh = const MeshStatus.idle();
 
   final List<ContactInfo> _contacts = <ContactInfo>[];
-  final Map<String, List<MessageInfo>> _messages = <String, List<MessageInfo>>{};
-  final Map<String, List<MediaMessageInfo>> _media = <String, List<MediaMessageInfo>>{};
+  final Map<String, List<MessageInfo>> _messages =
+      <String, List<MessageInfo>>{};
+  final Map<String, List<MediaMessageInfo>> _media =
+      <String, List<MediaMessageInfo>>{};
   final List<MessageRequestInfo> _requests = <MessageRequestInfo>[];
   final List<ChitthiInfo> _feed = <ChitthiInfo>[];
   final List<JournalEntryInfo> _journal = <JournalEntryInfo>[];
@@ -147,7 +150,8 @@ class FakeComradeRepository implements ComradeRepository {
       ..add(ChitthiInfo(
         id: 'c2',
         author: _bobPub,
-        content: 'Off-grid mesh held up for the whole trek. No towers, no relays.',
+        content:
+            'Off-grid mesh held up for the whole trek. No towers, no relays.',
         createdAt: _now - 90,
         replyTo: 'c1',
       ));
@@ -196,7 +200,8 @@ class FakeComradeRepository implements ComradeRepository {
     if (!_unlocked) throw const ComradeException('The vault is locked.');
   }
 
-  String _id(String prefix) => '$prefix-${_random.nextInt(1 << 32).toRadixString(16)}';
+  String _id(String prefix) =>
+      '$prefix-${_random.nextInt(1 << 32).toRadixString(16)}';
 
   int get _clock => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
@@ -212,13 +217,15 @@ class FakeComradeRepository implements ComradeRepository {
   Future<String> version() async => '0.1.0-fake';
 
   @override
-  Future<Profile> unlockVault({required String path, required String passphrase}) =>
+  Future<Profile> unlockVault(
+          {required String path, required String passphrase}) =>
       _io(() {
         if (passphrase.trim().isEmpty) {
           throw const ComradeException('Enter your passcode.');
         }
         if (passphrase == 'wrong') {
-          throw const ComradeException('Vault unlock failed: wrong passphrase.');
+          throw const ComradeException(
+              'Vault unlock failed: wrong passphrase.');
         }
         _unlocked = true;
         _profile ??= const Profile(
@@ -246,11 +253,13 @@ class FakeComradeRepository implements ComradeRepository {
           throw const ComradeException('Username must be 3–24 characters.');
         }
         if (!RegExp(r'^\w+$').hasMatch(handle)) {
-          throw const ComradeException('Only letters, numbers and _ are allowed.');
+          throw const ComradeException(
+              'Only letters, numbers and _ are allowed.');
         }
         _profile = (_profile ??
                 const Profile(
-                  npub: 'npub1youridentity0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2q7m4te',
+                  npub:
+                      'npub1youridentity0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2q7m4te',
                 ))
             .copyWith(username: handle);
         return _profile!;
@@ -259,7 +268,8 @@ class FakeComradeRepository implements ComradeRepository {
   @override
   Future<List<FoundProfile>> searchProfiles(String query) => _io(() {
         _requireUnlocked();
-        final String q = query.trim().replaceFirst(RegExp('^@'), '').toLowerCase();
+        final String q =
+            query.trim().replaceFirst(RegExp('^@'), '').toLowerCase();
         if (q.isEmpty) return const <FoundProfile>[];
         return <FoundProfile>[
           for (final ContactInfo c in _contacts)
@@ -267,7 +277,8 @@ class FakeComradeRepository implements ComradeRepository {
               FoundProfile(npub: c.npub, name: c.name, about: 'known contact'),
           if ('charlie'.contains(q))
             const FoundProfile(
-              npub: 'npub1charlie0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2l3jd2q9r2f',
+              npub:
+                  'npub1charlie0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2l3jd2q9r2f',
               name: 'charlie',
               about: 'reachable on the public relays',
             ),
@@ -279,7 +290,8 @@ class FakeComradeRepository implements ComradeRepository {
       _io(() => List<ContactInfo>.unmodifiable(_contacts));
 
   @override
-  Future<ContactInfo> addContact({required String npub, String alias = ''}) => _io(() {
+  Future<ContactInfo> addContact({required String npub, String alias = ''}) =>
+      _io(() {
         _requireUnlocked();
         if (!npub.startsWith('npub1') || npub.length < 20) {
           throw const ComradeException("That doesn't look like a valid key.");
@@ -299,7 +311,8 @@ class FakeComradeRepository implements ComradeRepository {
       });
 
   @override
-  Future<ContactInfo> setContactAlias({required String npub, required String alias}) =>
+  Future<ContactInfo> setContactAlias(
+          {required String npub, required String alias}) =>
       _io(() {
         _requireUnlocked();
         final int i = _contacts.indexWhere((ContactInfo c) => c.npub == npub);
@@ -337,7 +350,8 @@ class FakeComradeRepository implements ComradeRepository {
             ),
           );
         }
-        rows.sort((ConversationInfo a, ConversationInfo b) => b.lastAt.compareTo(a.lastAt));
+        rows.sort((ConversationInfo a, ConversationInfo b) =>
+            b.lastAt.compareTo(a.lastAt));
         return rows;
       });
 
@@ -351,7 +365,8 @@ class FakeComradeRepository implements ComradeRepository {
   @override
   Future<List<MessageInfo>> messages(String peer) => _io(() {
         _requireUnlocked();
-        return List<MessageInfo>.unmodifiable(_messages[peer] ?? const <MessageInfo>[]);
+        return List<MessageInfo>.unmodifiable(
+            _messages[peer] ?? const <MessageInfo>[]);
       });
 
   @override
@@ -454,7 +469,8 @@ class FakeComradeRepository implements ComradeRepository {
           3, 1, 1, 0, 24, 221, 141, 219, 0, 0, 0, 0, 73, 69, 78, 68, //
           174, 66, 96, 130,
         ];
-        return MediaBytes(mimeType: 'image/png', bytes: Uint8List.fromList(png));
+        return MediaBytes(
+            mimeType: 'image/png', bytes: Uint8List.fromList(png));
       });
 
   // ── Sabha ────────────────────────────────────────────────────────────────
@@ -509,7 +525,8 @@ class FakeComradeRepository implements ComradeRepository {
       });
 
   @override
-  Future<JournalEntryInfo> addJournalEntry({required String text, String? mood}) =>
+  Future<JournalEntryInfo> addJournalEntry(
+          {required String text, String? mood}) =>
       _io(() {
         _requireUnlocked();
         final JournalEntryInfo entry = JournalEntryInfo(
@@ -610,12 +627,14 @@ class FakeComradeRepository implements ComradeRepository {
         final List<CallRecordInfo> rows = <CallRecordInfo>[
           for (final CallRecordInfo r in _calls)
             if (peer == null || r.peer == peer) r,
-        ]..sort((CallRecordInfo a, CallRecordInfo b) => b.startedAt.compareTo(a.startedAt));
+        ]..sort((CallRecordInfo a, CallRecordInfo b) =>
+            b.startedAt.compareTo(a.startedAt));
         return List<CallRecordInfo>.unmodifiable(rows);
       });
 
   @override
-  Future<CallSessionInfo> placeCall({required String peer, required String media}) =>
+  Future<CallSessionInfo> placeCall(
+          {required String peer, required String media}) =>
       _io(() {
         _requireUnlocked();
         return CallSessionInfo(
@@ -677,7 +696,8 @@ class FakeComradeRepository implements ComradeRepository {
           ]);
 
   @override
-  Future<List<String>?> callSas({required String localSdp, required String remoteSdp}) =>
+  Future<List<String>?> callSas(
+          {required String localSdp, required String remoteSdp}) =>
       _io(() {
         if (localSdp.isEmpty || remoteSdp.isEmpty) return null;
         return const <String>['🐶', '🦊', '🐝', '🐳'];
@@ -741,9 +761,11 @@ class FakeComradeRepository implements ComradeRepository {
   Future<SakhaStatus> sakhaStatus() => _io(() => _sakha);
 
   @override
-  Future<SakhaStatus> pairSakha({required String partnerNpub, required String role}) =>
+  Future<SakhaStatus> pairSakha(
+          {required String partnerNpub, required String role}) =>
       _io(() {
-        if (!RegExp(r'^npub1[0-9a-z]+$', caseSensitive: false).hasMatch(partnerNpub)) {
+        if (!RegExp(r'^npub1[0-9a-z]+$', caseSensitive: false)
+            .hasMatch(partnerNpub)) {
           throw const ComradeException("Enter your partner's npub public key.");
         }
         _sakha = SakhaStatus(
@@ -780,7 +802,7 @@ class FakeComradeRepository implements ComradeRepository {
             'No shared secret available — pairing handshake incomplete.',
           );
         }
-        return 'sync-${_clock}';
+        return 'sync-$_clock';
       });
 
   // ── Events ───────────────────────────────────────────────────────────────

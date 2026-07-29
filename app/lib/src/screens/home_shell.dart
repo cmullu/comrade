@@ -1,0 +1,800 @@
+/// The one shell that is both frontends.
+///
+/// Below [Breakpoints.expanded] it is Android's: a top app bar with a
+/// hamburger, a bottom navigation bar with four destinations, a drawer holding
+/// the profile header and the secondary destinations, and a conversation that
+/// takes over the whole screen when opened.
+///
+/// At or above it, it is desktop's: a persistent left sidebar with the brand,
+/// the destinations, a "Modes" group and a status/identity footer — and the
+/// chat tab becomes the two-pane list+thread layout `styles.css`'s
+/// `.view-vault` grid describes. There is no second widget tree; the same
+/// state drives both, and dragging a desktop window across 840 px moves
+/// between them live.
+library;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../data/models.dart';
+import '../state/call_providers.dart';
+import '../state/chat_providers.dart';
+import '../state/providers.dart';
+import '../theme/breakpoints.dart';
+import '../theme/comrade_theme.dart';
+import '../util/display_name.dart';
+import '../widgets/app_chrome.dart';
+import '../widgets/peer_avatar.dart';
+import 'call_screen.dart';
+import 'chats/call_history_screen.dart';
+import 'chats/chats_list_screen.dart';
+import 'chats/conversation_screen.dart';
+import 'chats/edit_alias_dialog.dart';
+import 'chats/new_chat_screen.dart';
+import 'chats/requests_screen.dart';
+import 'couple_screen.dart';
+import 'feed_screen.dart';
+import 'journal_screen.dart';
+import 'settings_screen.dart';
+import 'tara_screen.dart';
+
+/// Primary destinations, in on-screen order.
+///
+/// Tara sits **last** deliberately: messaging/journal/feed are the daily
+/// surfaces, and the companion is the one you reach for on purpose.
+enum MainTab {
+  chats('Chats', Icons.chat_bubble_outline, Icons.chat_bubble),
+  journal('Journal', Icons.book_outlined, Icons.book),
+  feed('Feed', Icons.article_outlined, Icons.article),
+  tara('Tara', Icons.favorite_outline, Icons.favorite);
+
+  const MainTab(this.label, this.icon, this.selectedIcon);
+
+  final String label;
+  final IconData icon;
+  final IconData selectedIcon;
+}
+
+/// Destinations that are not bottom-nav tabs. On Android these lived in the
+/// navigation drawer; on desktop, in the sidebar's "Modes" group.
+enum SecondaryDestination {
+  callHistory('Call history', Icons.call),
+  partnerPortal('Partner Portal', Icons.favorite_border),
+  settings('Settings', Icons.settings);
+
+  const SecondaryDestination(this.label, this.icon);
+
+  final String label;
+  final IconData icon;
+}
+
+/// Sub-navigation inside the Chats tab.
+enum ChatNav { list, newChat, requests }
+
+class HomeShell extends ConsumerStatefulWidget {
+  const HomeShell({super.key});
+
+  @override
+  ConsumerState<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends ConsumerState<HomeShell> {
+  MainTab _tab = MainTab.chats;
+  ChatNav _chatNav = ChatNav.list;
+  SecondaryDestination? _secondary;
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  ChatTarget? get _openChat => ref.read(openConversationProvider);
+
+  void _openConversation(ChatTarget target) {
+    ref.read(openConversationProvider.notifier).state = target;
+    setState(() {
+      _tab = MainTab.chats;
+      _chatNav = ChatNav.list;
+      _secondary = null;
+    });
+  }
+
+  void _closeConversation() {
+    ref.read(openConversationProvider.notifier).state = null;
+    setState(() {});
+  }
+
+  /// Back priority, innermost first: a pushed secondary screen closes, then a
+  /// Chats sub-screen returns to the list, then an open conversation closes.
+  /// Mirrors the Compose `BackHandler` chain.
+  bool _handleBack() {
+    if (_secondary != null) {
+      setState(() => _secondary = null);
+      return true;
+    }
+    if (_tab == MainTab.chats && _chatNav != ChatNav.list) {
+      setState(() => _chatNav = ChatNav.list);
+      return true;
+    }
+    if (_tab == MainTab.chats && _openChat != null) {
+      _closeConversation();
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _startCall({required bool video}) async {
+    final ChatTarget? chat = _openChat;
+    if (chat == null) return;
+    await ref.read(callProvider.notifier).startOutgoing(
+          peer: chat.peer,
+          peerLabel: peerTitle(chat.peer, chat.alias, chat.username),
+          video: video,
+        );
+  }
+
+  Future<void> _editAlias() async {
+    final ChatTarget? chat = _openChat;
+    if (chat == null) return;
+    final ContactInfo? saved = await showEditAliasDialog(
+      context,
+      peer: chat.peer,
+      currentAlias: chat.alias,
+    );
+    if (saved == null) return;
+    ref.read(openConversationProvider.notifier).state = chat.copyWith(
+      alias: saved.alias.isEmpty ? null : saved.alias,
+      clearAlias: saved.alias.isEmpty,
+      username: chat.username ?? saved.name,
+    );
+    // The chat list titles change too.
+    ref.read(conversationsProvider.notifier).refresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ComradeWindowClass windowClass = windowClassOf(context);
+    // Reading it here (rather than in a callback) keeps the header, the FAB
+    // and the two-pane selection in sync on every rebuild.
+    final ChatTarget? openChat = ref.watch(openConversationProvider);
+
+    final Widget shell = windowClass.usesSidebar
+        ? _wideShell(context, openChat)
+        : _narrowShell(context, openChat);
+
+    return PopScope<Object?>(
+      canPop: false,
+      onPopInvokedWithResult: (bool didPop, Object? _) {
+        if (didPop) return;
+        if (!_handleBack()) SystemNavigator.pop();
+      },
+      child: Stack(
+        children: <Widget>[
+          shell,
+          // Call overlay — covers the app while a call is ringing/connected.
+          const CallOverlay(),
+        ],
+      ),
+    );
+  }
+
+  // ── Narrow: Android's shell ───────────────────────────────────────────────
+
+  Widget _narrowShell(BuildContext context, ChatTarget? openChat) {
+    final bool inConversation = _tab == MainTab.chats && openChat != null;
+    return Scaffold(
+      key: _scaffoldKey,
+      appBar: _appBar(context, openChat),
+      drawer: _Drawer(
+        onSelect: (SecondaryDestination d) {
+          Navigator.of(context).pop();
+          setState(() => _secondary = d);
+        },
+      ),
+      // The conversation view owns the whole screen, Telegram-style.
+      bottomNavigationBar: (inConversation || _secondary != null)
+          ? null
+          : NavigationBar(
+              selectedIndex: _tab.index,
+              onDestinationSelected: (int i) => setState(() {
+                _tab = MainTab.values[i];
+                _chatNav = ChatNav.list;
+              }),
+              destinations: <Widget>[
+                for (final MainTab t in MainTab.values)
+                  NavigationDestination(
+                    icon: Icon(t.icon),
+                    selectedIcon: Icon(t.selectedIcon),
+                    label: t.label,
+                  ),
+              ],
+            ),
+      floatingActionButton: (_secondary == null &&
+              _tab == MainTab.chats &&
+              _chatNav == ChatNav.list &&
+              openChat == null)
+          ? FloatingActionButton(
+              onPressed: () => setState(() => _chatNav = ChatNav.newChat),
+              tooltip: 'New chat',
+              child: const Icon(Icons.create),
+            )
+          : null,
+      body: Column(
+        children: <Widget>[
+          const MeshStatusBanner(),
+          Expanded(child: _body(context, openChat, twoPane: false)),
+        ],
+      ),
+    );
+  }
+
+  // ── Wide: the desktop shell ───────────────────────────────────────────────
+
+  Widget _wideShell(BuildContext context, ChatTarget? openChat) => Scaffold(
+        body: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            SizedBox(
+              width: Breakpoints.sidebarWidth(MediaQuery.sizeOf(context).width),
+              child: _Sidebar(
+                tab: _tab,
+                secondary: _secondary,
+                onTab: (MainTab t) => setState(() {
+                  _tab = t;
+                  _chatNav = ChatNav.list;
+                  _secondary = null;
+                }),
+                onSecondary: (SecondaryDestination d) =>
+                    setState(() => _secondary = d),
+              ),
+            ),
+            VerticalDivider(width: 1, color: context.surfaces.border),
+            Expanded(
+              child: Column(
+                children: <Widget>[
+                  const MeshStatusBanner(),
+                  _WideHeader(
+                    title: _headerTitle(openChat),
+                    subtitle: _headerSubtitle(openChat),
+                    leading: _headerLeading(openChat),
+                    actions: _headerActions(context, openChat),
+                  ),
+                  Divider(height: 1, color: context.surfaces.border),
+                  Expanded(child: _body(context, openChat, twoPane: true)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+
+  // ── Shared header pieces ──────────────────────────────────────────────────
+
+  PreferredSizeWidget _appBar(BuildContext context, ChatTarget? openChat) {
+    if (_secondary != null) {
+      return AppBar(
+        leading: BackButton(onPressed: () => setState(() => _secondary = null)),
+        title: Text(_secondary!.label),
+      );
+    }
+    if (_tab == MainTab.chats && openChat != null) {
+      final String title =
+          peerTitle(openChat.peer, openChat.alias, openChat.username);
+      return AppBar(
+        leading: BackButton(onPressed: _closeConversation),
+        titleSpacing: 0,
+        title: Row(
+          children: <Widget>[
+            PeerAvatar(title: title, seed: openChat.peer, size: 36),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  // The header always shows the key tail beside the name: a
+                  // published @handle is a self-declared claim, so the thing
+                  // that actually identifies the peer stays on screen.
+                  KeyText(openChat.peer,
+                      style: Theme.of(context).textTheme.labelSmall),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: _headerActions(context, openChat),
+      );
+    }
+    if (_tab == MainTab.chats && _chatNav != ChatNav.list) {
+      return AppBar(
+        leading: BackButton(
+            onPressed: () => setState(() => _chatNav = ChatNav.list)),
+        title:
+            Text(_chatNav == ChatNav.newChat ? 'New chat' : 'Message requests'),
+      );
+    }
+    return AppBar(
+      centerTitle: true,
+      leading: IconButton(
+        key: const Key('nav-drawer-button'),
+        tooltip: 'Open navigation menu',
+        icon: const Icon(Icons.menu),
+        onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+      ),
+      title: Text(_tab == MainTab.chats ? 'Comrade' : _tab.label),
+    );
+  }
+
+  String _headerTitle(ChatTarget? openChat) {
+    if (_secondary != null) return _secondary!.label;
+    if (_tab == MainTab.chats) {
+      return switch (_chatNav) {
+        ChatNav.newChat => 'New chat',
+        ChatNav.requests => 'Message requests',
+        ChatNav.list => openChat == null
+            ? 'Chats'
+            : peerTitle(openChat.peer, openChat.alias, openChat.username),
+      };
+    }
+    return _tab.label;
+  }
+
+  String? _headerSubtitle(ChatTarget? openChat) => (_secondary == null &&
+          _tab == MainTab.chats &&
+          _chatNav == ChatNav.list &&
+          openChat != null)
+      ? shortNpub(openChat.peer)
+      : null;
+
+  Widget? _headerLeading(ChatTarget? openChat) {
+    if (_secondary != null) {
+      return BackButton(onPressed: () => setState(() => _secondary = null));
+    }
+    if (_tab == MainTab.chats && _chatNav != ChatNav.list) {
+      return BackButton(
+          onPressed: () => setState(() => _chatNav = ChatNav.list));
+    }
+    if (_tab == MainTab.chats && openChat != null) {
+      return PeerAvatar(
+        title: peerTitle(openChat.peer, openChat.alias, openChat.username),
+        seed: openChat.peer,
+        size: 32,
+      );
+    }
+    return null;
+  }
+
+  List<Widget> _headerActions(BuildContext context, ChatTarget? openChat) {
+    if (_secondary != null || _tab != MainTab.chats) return const <Widget>[];
+    if (openChat != null) {
+      return <Widget>[
+        IconButton(
+          tooltip: 'Voice call',
+          icon: const Icon(Icons.call),
+          onPressed: () => _startCall(video: false),
+        ),
+        IconButton(
+          tooltip: 'Video call',
+          icon: const Icon(Icons.videocam),
+          onPressed: () => _startCall(video: true),
+        ),
+        IconButton(
+          key: const Key('edit-alias'),
+          tooltip: 'Set alias',
+          icon: const Icon(Icons.edit),
+          onPressed: _editAlias,
+        ),
+      ];
+    }
+    if (_chatNav == ChatNav.list) {
+      return <Widget>[
+        IconButton(
+          tooltip: 'New chat',
+          icon: const Icon(Icons.create),
+          onPressed: () => setState(() => _chatNav = ChatNav.newChat),
+        ),
+      ];
+    }
+    return const <Widget>[];
+  }
+
+  // ── Body ──────────────────────────────────────────────────────────────────
+
+  Widget _body(BuildContext context, ChatTarget? openChat,
+      {required bool twoPane}) {
+    if (_secondary != null) {
+      return switch (_secondary!) {
+        SecondaryDestination.callHistory => CallHistoryScreen(
+            onCallBack: (String peer, String label, bool video) => ref
+                .read(callProvider.notifier)
+                .startOutgoing(peer: peer, peerLabel: label, video: video),
+          ),
+        SecondaryDestination.partnerPortal => const CoupleScreen(),
+        SecondaryDestination.settings => const SettingsScreen(),
+      };
+    }
+    return switch (_tab) {
+      MainTab.chats => _chatsBody(context, openChat, twoPane: twoPane),
+      MainTab.journal => const JournalScreen(),
+      MainTab.feed => const FeedScreen(),
+      MainTab.tara => const TaraScreen(),
+    };
+  }
+
+  Widget _chatsBody(BuildContext context, ChatTarget? openChat,
+      {required bool twoPane}) {
+    switch (_chatNav) {
+      case ChatNav.newChat:
+        return NewChatScreen(onOpen: _openConversation);
+      case ChatNav.requests:
+        return RequestsScreen(onOpen: _openConversation);
+      case ChatNav.list:
+        final Widget list = ChatsListScreen(
+          onOpen: _openConversation,
+          onNewChat: () => setState(() => _chatNav = ChatNav.newChat),
+          onOpenRequests: () => setState(() => _chatNav = ChatNav.requests),
+          selectedPeer: twoPane ? openChat?.peer : null,
+        );
+        return ListDetailPane(
+          list: list,
+          hasSelection: openChat != null,
+          detail: () => ConversationScreen(peer: openChat!.peer),
+          placeholder: const EmptyState(
+            title: 'Select a conversation',
+            body: 'Incoming encrypted DMs appear on the left automatically.',
+          ),
+        );
+    }
+  }
+}
+
+/// The wide-window header. Not an [AppBar]: it sits inside the content column
+/// beside the sidebar, so it must not claim the whole window width.
+class _WideHeader extends StatelessWidget {
+  const _WideHeader({
+    required this.title,
+    this.subtitle,
+    this.leading,
+    this.actions = const <Widget>[],
+  });
+
+  final String title;
+  final String? subtitle;
+  final Widget? leading;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        height: 60,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        color: context.surfaces.panel,
+        child: Row(
+          children: <Widget>[
+            if (leading != null) ...<Widget>[
+              leading!,
+              const SizedBox(width: 10)
+            ],
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  if (subtitle != null)
+                    KeyText(
+                      subtitle!,
+                      short: false,
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                ],
+              ),
+            ),
+            ...actions,
+          ],
+        ),
+      );
+}
+
+/// The persistent desktop sidebar: brand + workspace badge, destinations,
+/// modes, and the network/identity footer.
+class _Sidebar extends ConsumerWidget {
+  const _Sidebar({
+    required this.tab,
+    required this.secondary,
+    required this.onTab,
+    required this.onSecondary,
+  });
+
+  final MainTab tab;
+  final SecondaryDestination? secondary;
+  final ValueChanged<MainTab> onTab;
+  final ValueChanged<SecondaryDestination> onSecondary;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ComradeSurfaces surfaces = context.surfaces;
+    final WorkspaceInfo workspace =
+        ref.watch(workspaceProvider).value ?? const WorkspaceInfo.base();
+    final Profile? profile = ref.watch(profileProvider);
+    final int requests = ref.watch(messageRequestCountProvider);
+
+    return Material(
+      color: surfaces.panel,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 12, 8),
+            child: Row(
+              children: <Widget>[
+                Text(
+                  '⬢',
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Comrade',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                _Pill(
+                  label: workspace.meshActive
+                      ? 'Off-Grid'
+                      : workspace.coupleSandbox
+                          ? 'Couples'
+                          : 'Base',
+                  on: !workspace.meshActive,
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              children: <Widget>[
+                for (final MainTab t in MainTab.values)
+                  _SidebarItem(
+                    icon: t.icon,
+                    label: t.label,
+                    selected: secondary == null && tab == t,
+                    badge: t == MainTab.chats && requests > 0 ? requests : null,
+                    onTap: () => onTab(t),
+                  ),
+                const SizedBox(height: 12),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                  child: Text(
+                    'MORE',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.primary,
+                          letterSpacing: 0.8,
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                ),
+                for (final SecondaryDestination d
+                    in SecondaryDestination.values)
+                  _SidebarItem(
+                    icon: d.icon,
+                    label: d.label,
+                    selected: secondary == d,
+                    onTap: () => onSecondary(d),
+                  ),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: surfaces.border),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    _Pill(label: 'relays', on: workspace.relayConnected),
+                    const SizedBox(width: 6),
+                    _Pill(label: 'mesh', on: workspace.meshActive),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                if (profile != null)
+                  InkWell(
+                    onTap: () async {
+                      await Clipboard.setData(
+                        ClipboardData(text: profile.npub),
+                      );
+                      if (context.mounted) {
+                        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                          const SnackBar(content: Text('npub copied')),
+                        );
+                      }
+                    },
+                    child: Row(
+                      children: <Widget>[
+                        PeerAvatar(
+                          title: profile.username ?? profile.npub,
+                          seed: profile.npub,
+                          size: 26,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(child: KeyText(profile.npub)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SidebarItem extends StatelessWidget {
+  const _SidebarItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.badge,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final int? badge;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Material(
+        color: selected ? colors.primaryContainer.withValues(alpha: 0.5) : null,
+        borderRadius: BorderRadius.circular(ComradeRadii.extraSmall),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(ComradeRadii.extraSmall),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  icon,
+                  size: 20,
+                  color: selected ? colors.primary : colors.onSurfaceVariant,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.normal,
+                        ),
+                  ),
+                ),
+                if (badge != null)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: colors.primary,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      '$badge',
+                      style: TextStyle(color: colors.onPrimary, fontSize: 11),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Pill extends StatelessWidget {
+  const _Pill({required this.label, required this.on});
+
+  final String label;
+  final bool on;
+
+  @override
+  Widget build(BuildContext context) {
+    final ComradeSurfaces surfaces = context.surfaces;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: on
+            ? surfaces.good.withValues(alpha: 0.18)
+            : surfaces.border.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: on ? surfaces.good : Theme.of(context).colorScheme.outline,
+            ),
+      ),
+    );
+  }
+}
+
+/// The navigation drawer: a profile header (tap → Settings) over the app-wide
+/// destinations that don't belong in the bottom bar. Message requests
+/// deliberately stay in the chat list, not here.
+class _Drawer extends ConsumerWidget {
+  const _Drawer({required this.onSelect});
+
+  final ValueChanged<SecondaryDestination> onSelect;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final Profile? profile = ref.watch(profileProvider);
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            if (profile != null)
+              InkWell(
+                key: const Key('drawer-profile'),
+                onTap: () => onSelect(SecondaryDestination.settings),
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Row(
+                    children: <Widget>[
+                      PeerAvatar(
+                        title: profile.username ?? profile.npub,
+                        seed: profile.npub,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            Text(
+                              profile.username != null
+                                  ? '@${profile.username}'
+                                  : 'No username yet',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            KeyText(profile.npub),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            const Divider(height: 1),
+            for (final SecondaryDestination d in SecondaryDestination.values)
+              ListTile(
+                key: Key('drawer-${d.name}'),
+                leading: Icon(d.icon),
+                title: Text(d.label),
+                onTap: () => onSelect(d),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}

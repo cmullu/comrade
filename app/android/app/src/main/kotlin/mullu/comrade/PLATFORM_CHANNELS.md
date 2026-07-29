@@ -3,14 +3,18 @@
 _Phase 2 of the Flutter migration: the native Android services stay native, and this
 document is the whole of what Flutter is allowed to say to them._
 
-> **Verification honesty.** Nothing in this directory has been compiled. No Android SDK is
-> installed in the environment this was authored in and `dl.google.com` is blocked by the
-> proxy, so neither Gradle nor `flutter build` has ever run over it. The Kotlin is written
-> against the exact APIs the existing `android/` sources already use (same `org.webrtc`
-> artifact, same coroutines version) and against Flutter's published embedding API, but it
-> is **unverified**. This repository has a documented history of shipping unverified
-> Android changes (`AUDIT.md`, the 2026-07-15 entries) — treat every file here as
-> unreviewed-by-a-compiler until CI's Android lane runs it. See §10.
+> **Verification honesty.** This phase was expected to be uncompilable — every prior
+> Android change in this repo was written blind (`AUDIT.md`, the 2026-07-15 entries).
+> It turned out **the environment had both toolchains**: Flutter 3.44.8 and Android SDK
+> 36.0.0. So this layer is the first Android work here that a compiler has actually seen.
+>
+> **Verified:** `dart analyze lib/src/platform` → clean; `./gradlew :app:compileDebugKotlin`
+> → success, over the channel layer *and* all 6,955 preserved service lines together;
+> `./gradlew :app:assembleDebug` → a complete APK, manifest merged and resources linked.
+>
+> **Not verified: any behaviour whatsoever.** Nothing has been run, on a device or an
+> emulator. There is no test for a single line of this. And the APK does not yet contain
+> `libcomrade_jni.so`, so it cannot start. See §10 for the precise line between the two.
 
 ---
 
@@ -21,33 +25,50 @@ The 6,955 LOC of production Kotlin this phase preserves are still at
 about 1,400 LOC of new Kotlin that references those classes by their existing package
 names (`mullu.comrade.call.CallManager`, `mullu.comrade.voice.WakeWordService`, …).
 
-Because the packages are identical, wiring the two together is a source-set entry, not an
-edit to any preserved file. In `app/android/app/build.gradle.kts`:
+Because the packages are identical, wiring the two together is a build-file change, not an
+edit to any preserved file. `app/android/app/build.gradle.kts` does it with a `Sync` task
+(`stagePreservedServices`) that copies the legacy source root into `build/preserved/java`
+minus the thirteen Compose files Flutter replaces, and adds that staging directory as a
+Kotlin source dir alongside the uniffi-generated bindings.
 
-```kotlin
-android {
-    sourceSets {
-        getByName("main") {
-            // Phase 2: consume the preserved services in place. The Compose UI
-            // under ui/, call/CallScreen.kt and MainActivity.kt must be excluded —
-            // they are what Flutter replaces.
-            java.srcDir("../../../android/app/src/main/java")
-            // …plus the uniffi-generated Kotlin, exactly as
-            // android/app/build.gradle.kts:22 and :202 already do.
-        }
-    }
-}
-```
+A `Sync` rather than `sourceSets.filter.exclude` for a concrete reason: exclude patterns
+are matched relative to *every* source root, and `mullu/comrade/MainActivity.kt` names both
+the Compose Activity being dropped and the Flutter one being kept. An exclude would remove
+both.
+
+The legacy `res/` is added as a second resource directory — the services reference
+`R.string.*`, and the manifest references `@xml/interaction_service`,
+`@xml/recognition_service` and `@xml/file_paths`. No resource name collides with Flutter's
+own `res/` (`LaunchTheme`/`NormalTheme`, the `mipmap-*dpi` PNGs); verified by
+`mergeDebugResources` succeeding.
 
 Physically moving the sources is a mechanical follow-up. Doing it as a separate commit
 keeps this one reviewable: a reviewer can diff the channel layer without a 7,000-line
 move drowning it.
 
+The Compose files filtered out (the full list is `composeOnlySources` in the build file):
+`MainActivity.kt`, `call/CallScreen.kt`, `ui/AppIcons.kt`, `ui/MediaAttachment.kt`,
+`ui/VoiceModelDownloadDialog.kt`, `ui/theme/**`, and the seven `ui/*Screen.kt`. Nothing
+else under the legacy root imports `androidx.compose` — the 41%/59% UI-versus-services
+split `docs/FRONTEND_STRATEGY.md` measured turns out to be a clean file-level partition,
+which is why this staging works at all.
+
 **Excluded from the source set** (Flutter replaces these): `ui/**`, `call/CallScreen.kt`,
-`call/CallUiState.kt`'s *rendering* (the type itself stays — the channel serialises it),
-`MainActivity.kt`, `AppNavigation.kt`, `ComradeApp`. **`ComradeApplication.kt` stays**: it
-owns the native-library warm-up and the `appScope` that `initializeEventBridge()` is
+`MainActivity.kt`, `ComradeApp`. `call/CallUiState.kt` **stays** — the type is what the
+state channel serialises. `AppNavigation.kt` stays for its `EXTRA_OPEN_TAB` constant, which
+`ModelDownloadService` puts on its notification intent. **`ComradeApplication.kt` stays**:
+it owns the native-library warm-up and the `appScope` that `initializeEventBridge()` is
 awaited on, neither of which has anything to do with which UI toolkit is on top.
+
+### The one edit to a preserved file
+
+`ComradeApplication` is now `open class` instead of `class` (one keyword,
+`android/app/src/main/java/mullu/comrade/ComradeApplication.kt`). `ComradeFlutterApplication`
+extends it to add a single line — starting `CallStateReactor` at process start (§4.3) —
+while inheriting the warm-up and `appScope` rather than duplicating them and letting the
+two drift. Nothing is overridden and the Compose build's behaviour is unchanged.
+
+That is the *only* change to a preserved file in this phase. Everything else is additive.
 
 ---
 
@@ -146,9 +167,9 @@ designed to keep running through exactly that. Under Flutter, three things follo
 No service calls `invokeMethod` and awaits a reply as part of a correctness path. The only
 `invokeMethod` in this layer at all is `mullu.comrade/system#openTab` (the model-download
 "ready" notification's return-to-tab), and it is fire-and-forget: if the engine is not
-attached, the tab request is stashed in `PendingNavigation` and delivered on the next
-`onListen`. A service that blocked on Dart would be a service that stops working when the
-screen is off, which is the failure this phase exists to prevent.
+attached, `SystemChannel` stashes the tab and Dart collects it with `consumePendingTab` at
+its next start. A service that blocked on Dart would be a service that stops working when
+the screen is off, which is the failure this phase exists to prevent.
 
 ### 4.2 Detach is lossless, because every event channel is snapshot-based
 
@@ -166,9 +187,13 @@ side of it all happened natively anyway (§4.3). There is deliberately **no** re
 a queue would let a stale "Ringing" arrive seconds after the call was already over.
 
 The one place that needed care is the Sabha feed, which *is* an accumulating list rather
-than a scalar. `mullu.comrade/relay/state` handles it by sending the whole capped list
-(≤ 500 items, `ChatEventRouter.FEED_CAP`) once on `onListen`, then one item per delta. The
-native list stays authoritative for dedup and cap; Dart's copy is a projection.
+than a scalar. `ChatEventRouter.feedItems` is itself a `StateFlow<List<…>>` capped at 500
+(`ChatEventRouter.FEED_CAP`), so the relay sends the whole list on each emission — which
+is once per arriving Chitthi, and bounded. The native list stays authoritative for dedup
+and cap; Dart's copy is a projection of it, not a second source of truth. A per-item delta
+form was considered and rejected: the native side keeps no change log to derive one from,
+so it would mean adding change tracking to a preserved file to save a bounded 500-element
+list on an event that fires at human speed.
 
 ### 4.3 Anything a user can perceive happens natively
 
@@ -386,9 +411,10 @@ that matter for a full-screen video call:
   compose in widget order and that whole class of bug disappears.
 - **`SurfaceView` and the Flutter surface do not fight** over the window.
 
-`CallVideoPlatformView.kt` keeps a `PlatformView` fallback behind the same channel contract
-for devices where the texture path misbehaves; `createRenderer` takes a `mode` argument.
-Only the texture path is wired by default.
+`CallVideoPlatformView.kt` keeps the `SurfaceViewRenderer` path available as a registered
+`PlatformView` (view type `mullu.comrade/call/video/surface`, creation params
+`{source, mirror, overlay}`) so a device where the texture path misbehaves has a one-line
+switch rather than a feature gap. It is registered but not used by the default widget.
 
 ### 6.4 The video contract
 
@@ -500,12 +526,26 @@ that off the recogniser's main-looper callback. Dart decides what to do with the
 ### `mullu.comrade/wakeword/state`
 
 ```jsonc
-{ "running": true, "status": "listening" | "goAhead" | "modelMissing" | "micError", "modelAvailable": true }
+{ "running": true, "status": "idle" | "listening" | "goAhead" | "modelMissing" | "micError", "modelAvailable": true }
 ```
 
 `status` is an enum key, not a localised string: the localised text belongs in Dart's
 `.arb` files now, not in `R.string`. The service still sets its own notification text from
 `R.string` (it must — it owns the notification), so the two live side by side.
+
+> **Known gap, stated rather than papered over.** The handler currently only emits `idle`
+> and `listening`. `WakeWordService`'s internal `State` enum and its error paths (`onError`
+> → `voice_mic_error`, the `VoskModel` failure → `voice_model_missing`) are private and
+> reach the user only through the service's own notification text. Surfacing `goAhead` /
+> `micError` / `modelMissing` needs a small `StateFlow<Status>` added to the preserved
+> service — a two-line change, but a change to a preserved file, so it is deliberately not
+> bundled with the channel layer. The Dart enum already carries all five values so adding
+> them later is a Kotlin-only edit.
+>
+> Relatedly, `running` is **polled** (500 ms) rather than pushed, because
+> `WakeWordService.isRunning` is a `@Volatile` companion boolean set in the service's own
+> `onCreate`/`onDestroy`, not a flow. Two boolean reads per tick, `distinctUntilChanged` so
+> Dart only sees transitions. The same `StateFlow` would remove the poll.
 
 ### `MicHolderSet` is not exposed, and must not be
 
@@ -566,17 +606,11 @@ route observer. **Dart must clear it on detach** — the wrapper does this from
     "criticalDepth": 0, "coalescedDepth": 1, "feedDepth": 12,
     "feedDrops": 0, "coalesceSuppressions": 7, "lastDequeueLagMs": 3
   },
-  "feed": {                // snapshot form, sent once on onListen
-    "revision": 118,
+  "feed": {                // whole capped list; see §4.2
+    "revision": 118,       // == items.length — lets Dart cheaply detect a change
     "items": [ { "id": "…", "author": "npub1…", "content": "…", "createdAt": 1753…, "replyTo": null } ]
   }
 }
-```
-
-and the delta form for a newly-arrived Chitthi:
-
-```jsonc
-{ "feed": { "revision": 119, "latest": { "id": "…", … } }, … }
 ```
 
 The tick fields are counters, not payloads, on purpose (§1). `eventBus` is exposed because
@@ -654,28 +688,61 @@ untouched by this phase and Dart has no way to create a channel.
 
 ## 10. Status of this code
 
-**Uncompiled and untested.** Specifically:
+### What was actually run
 
-- No Gradle build, no `flutter build`, no `flutter analyze`, no `dart analyze` was run.
-- The Kotlin is written against `io.flutter.embedding.engine.plugins.FlutterPlugin`,
-  `ActivityAware`, `TextureRegistry` and `PluginRegistry.RequestPermissionsResultListener`
-  as published; API drift across embedding versions has not been checked against the
-  Flutter SDK actually pinned for this project.
-- `TextureVideoRenderer` extends `org.webrtc.EglRenderer` and calls
-  `init(EglBase.Context, int[], RendererCommon.GlDrawer)` / `createEglSurface(SurfaceTexture)`.
-  Those are stable public members of the libwebrtc Android SDK and the project already
-  depends on `io.github.webrtc-sdk:android:125.6422.07`, which keeps the `org.webrtc.*`
-  namespace — but the class has not been compiled against that artifact here.
-- The source-set wiring in §0 is written, not executed. Nothing has resolved
-  `mullu.comrade.call.CallManager` from this module.
-- No behaviour was exercised on a device or emulator. Every "preserved invariant" claim in
-  this document is a claim about *unchanged native code plus a channel that does not reach
-  it* — which is checkable by reading, and was read — not a claim that anything ran.
+| Command | Result |
+|---|---|
+| `dart analyze lib/src/platform` | **clean**, no issues |
+| `./gradlew :app:compileDebugKotlin` | **success** — channel layer + all preserved services |
+| `./gradlew :app:assembleDebug` | **success** — `app-debug.apk` produced |
 
-The first honest verification step is the repo's own Android CI lane plus
-`connectedDebugAndroidTest`, with `CallManagerLifecycleTest` and
-`CallManagerDeadlockRegressionTest` still green: those two are the ones that would catch a
-channel handler taking `CallManager`'s monitor from the wrong thread.
+Checked in the build output rather than assumed:
+
+- The merged manifest carries all seven services with the right
+  `foregroundServiceType`s (`camera|microphone`, `microphone`, `dataSync` ×2), the
+  `CallActionReceiver`, the `FileProvider`, and both assist intent filters
+  (`android.service.voice.VoiceInteractionService`, `android.speech.RecognitionService`).
+  `android:name` resolves to `mullu.comrade.ComradeFlutterApplication`.
+- The dex contains `CallManager`, `CallStateReactor`, `ComradePlugin`, every
+  `channel/*Channel`, and `TextureVideoRenderer`. So `TextureVideoRenderer extends
+  org.webrtc.EglRenderer` — the one piece of this design that was a genuine API bet —
+  compiles and links against `io.github.webrtc-sdk:android:125.6422.07`.
+- The APK ships `libjingle_peerconnection_so.so`, `libvosk.so` and `libjnidispatch.so`.
+
+Two real defects were found by compiling, not by reading, and are fixed:
+`ComradePlugin` exposed an `internal` type through a public property; and the wake-word
+state flow hit the filesystem (`VoskModel.isAvailable`) on the main thread twice a second,
+because `EventChannelRelay` collects on `Dispatchers.Main.immediate` — now `flowOn(IO)`.
+That is the argument for compiling, in two data points.
+
+### What is *not* verified — the important half
+
+- **No behaviour was exercised. Nothing has been run.** Not on a device, not on an
+  emulator, not in a unit test. Compiling proves the types line up; it proves nothing
+  about whether a call rings, a texture renders a frame, or a permission dialog resumes
+  the right deferred action.
+- **There are no tests for this layer.** The preserved services keep their existing suites
+  (`CallManagerTest`, `WakeWordServiceTest`, `CallManagerLifecycleTest`,
+  `CallManagerDeadlockRegressionTest`, …) in the `android/` module, and those are exactly
+  the ones that would catch a channel handler taking `CallManager`'s monitor from the
+  wrong thread — but they have not been run against this module, and no channel-layer
+  test exists. Wiring the JVM suites into this module and re-running
+  `connectedDebugAndroidTest` is the next step, and it is a real gap, not a formality.
+- **The APK cannot start.** `libcomrade_jni.so` is not in it. The legacy build gets the
+  Android-ABI Rust core from a `cargo ndk` step in `.github/workflows/android-apk.yml:113`
+  that writes into `android/app/src/main/jniLibs/`; this module has no equivalent yet, so
+  the first `ComradeCore` touch would fail to load the library. Adding a `jniLibs` source
+  dir (or the matching CI step) is required before anyone runs this.
+- **The video path is the least-proven part.** `TextureVideoRenderer` compiles, but
+  whether it renders a correct, correctly-rotated frame into a Flutter `Texture` is
+  exactly the thing that needs a device. Same for the `PlatformView` fallback. Neither
+  has displayed a pixel.
+- **`flutter analyze` was run over `lib/src/platform` only**, not the whole app — the rest
+  of `lib/` belongs to other work in flight.
+
+Every "preserved invariant" claim in this document remains a claim about *unchanged native
+code plus a channel that cannot reach it* — checkable by reading, and read. It is not a
+claim that anything ran.
 
 ## 11. Standing tension worth recording
 

@@ -4,7 +4,7 @@
 # tightens the rules that matter for a UI codebase this size: every public API
 # in `lib/src` is consumed across screen boundaries, so relaxed typing there
 # turns into runtime surprises.
-include: package:flutter_lints/lints.yaml
+include: package:flutter_lints/flutter.yaml
 
 analyzer:
   language:

@@ -50,6 +50,15 @@ internal class CallChannel(
 
     // ── State ────────────────────────────────────────────────────────────────
 
+    /** The five non-phase flows, bundled so the outer `combine` stays typed. */
+    private data class Controls(
+        val muted: Boolean,
+        val cameraOn: Boolean,
+        val quality: CallQuality,
+        val route: AudioRoute,
+        val available: List<AudioRoute>,
+    )
+
     /**
      * All seven of `CallManager`'s observable flows, combined into one
      * conflated snapshot.
@@ -60,26 +69,33 @@ internal class CallChannel(
      * shows a muted Idle call. `combine` also gives the snapshot-on-subscribe
      * behaviour the relay contract depends on, since every input is a
      * `StateFlow` with a current value.
+     *
+     * Nested as 5 + 3 rather than one 7-way `combine` so both calls hit the
+     * *typed* overloads. The vararg overload would work too, but it hands the
+     * lambda an `Array<Any?>` and seven unchecked casts — and this file cannot
+     * be compiled here, so the version the type checker can verify wins.
      */
-    private fun callStateFlow(): Flow<Any?> = combine(
-        CallManager.state,
-        CallManager.muted,
-        CallManager.cameraOn,
-        CallManager.connectionQuality,
-        CallManager.audioRoute,
-        CallManager.availableRoutes,
-        CallManager.sasEmojis,
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        encodeState(
-            state = values[0] as CallUiState,
-            muted = values[1] as Boolean,
-            cameraOn = values[2] as Boolean,
-            quality = values[3] as CallQuality,
-            route = values[4] as AudioRoute,
-            available = values[5] as List<AudioRoute>,
-            sas = values[6] as List<String>?,
-        )
+    private fun callStateFlow(): Flow<Any?> {
+        val controls = combine(
+            CallManager.muted,
+            CallManager.cameraOn,
+            CallManager.connectionQuality,
+            CallManager.audioRoute,
+            CallManager.availableRoutes,
+        ) { muted, cameraOn, quality, route, available ->
+            Controls(muted, cameraOn, quality, route, available)
+        }
+        return combine(CallManager.state, controls, CallManager.sasEmojis) { phase, c, sas ->
+            encodeState(
+                state = phase,
+                muted = c.muted,
+                cameraOn = c.cameraOn,
+                quality = c.quality,
+                route = c.route,
+                available = c.available,
+                sas = sas,
+            )
+        }
     }
 
     private fun encodeState(

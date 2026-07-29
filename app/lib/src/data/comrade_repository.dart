@@ -56,7 +56,8 @@ abstract interface class ComradeRepository {
   ///
   /// Returns the active profile. Throws [ComradeException] on a wrong
   /// passphrase.
-  Future<Profile> unlockVault({required String path, required String passphrase});
+  Future<Profile> unlockVault(
+      {required String path, required String passphrase});
 
   /// The active profile, or `null` when the vault is locked.
   ///
@@ -80,7 +81,8 @@ abstract interface class ComradeRepository {
   Future<ContactInfo> addContact({required String npub, String alias = ''});
 
   /// Set (or, with a blank [alias], clear) the local petname for a contact.
-  Future<ContactInfo> setContactAlias({required String npub, required String alias});
+  Future<ContactInfo> setContactAlias(
+      {required String npub, required String alias});
 
   // ── Conversations ────────────────────────────────────────────────────────
 
@@ -133,7 +135,8 @@ abstract interface class ComradeRepository {
 
   Future<List<JournalEntryInfo>> journal();
 
-  Future<JournalEntryInfo> addJournalEntry({required String text, String? mood});
+  Future<JournalEntryInfo> addJournalEntry(
+      {required String text, String? mood});
 
   Future<bool> deleteJournalEntry(String id);
 
@@ -156,7 +159,8 @@ abstract interface class ComradeRepository {
 
   Future<List<CallRecordInfo>> callHistory({String? peer});
 
-  Future<CallSessionInfo> placeCall({required String peer, required String media});
+  Future<CallSessionInfo> placeCall(
+      {required String peer, required String media});
 
   Future<void> sendCallSignal({
     required String peer,
@@ -187,7 +191,8 @@ abstract interface class ComradeRepository {
   /// The 4-emoji short authentication string, or `null` when either side's SDP
   /// carried no DTLS fingerprint. `null` is an honest "can't verify", not an
   /// error — never fabricate a code.
-  Future<List<String>?> callSas({required String localSdp, required String remoteSdp});
+  Future<List<String>?> callSas(
+      {required String localSdp, required String remoteSdp});
 
   // ── Settings ─────────────────────────────────────────────────────────────
 
@@ -219,7 +224,8 @@ abstract interface class ComradeRepository {
 
   Future<SakhaStatus> sakhaStatus();
 
-  Future<SakhaStatus> pairSakha({required String partnerNpub, required String role});
+  Future<SakhaStatus> pairSakha(
+      {required String partnerNpub, required String role});
 
   /// Append an entry to the shared CRDT ledger; returns the rendered ledger.
   Future<String> sakhaAddEntry({

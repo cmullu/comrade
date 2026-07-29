@@ -20,7 +20,9 @@ class Profile {
   final String npub;
   final String? username;
 
-  Profile copyWith({String? npub, String? username, bool clearUsername = false}) => Profile(
+  Profile copyWith(
+          {String? npub, String? username, bool clearUsername = false}) =>
+      Profile(
         npub: npub ?? this.npub,
         username: clearUsername ? null : (username ?? this.username),
       );
@@ -293,7 +295,9 @@ class CallRecordInfo {
 class TurnServerStatus {
   const TurnServerStatus({required this.configured, this.url});
 
-  const TurnServerStatus.none() : configured = false, url = null;
+  const TurnServerStatus.none()
+      : configured = false,
+        url = null;
 
   final bool configured;
   final String? url;
@@ -307,7 +311,9 @@ enum TurnDiagnostic { noServerConfigured, relayAvailable, relayUnavailable }
 class MeshStatus {
   const MeshStatus({required this.active, required this.peerCount});
 
-  const MeshStatus.idle() : active = false, peerCount = 0;
+  const MeshStatus.idle()
+      : active = false,
+        peerCount = 0;
 
   final bool active;
   final int peerCount;
@@ -346,7 +352,10 @@ class WorkspaceInfo {
 class SakhaStatus {
   const SakhaStatus({required this.paired, this.partnerNpub, this.role});
 
-  const SakhaStatus.unpaired() : paired = false, partnerNpub = null, role = null;
+  const SakhaStatus.unpaired()
+      : paired = false,
+        partnerNpub = null,
+        role = null;
 
   final bool paired;
   final String? partnerNpub;
@@ -384,7 +393,8 @@ class CallSessionInfo {
 /// A UPI payment intent extracted from message text (`/pay 250 to a@upi`).
 @immutable
 class UpiIntent {
-  const UpiIntent({required this.amountInr, required this.vpa, required this.uri});
+  const UpiIntent(
+      {required this.amountInr, required this.vpa, required this.uri});
 
   final double amountInr;
   final String vpa;

@@ -321,7 +321,8 @@ abstract final class ComradeTheme {
   /// semi-bold so lists scan by name first, metadata second (`Theme.kt`'s
   /// `ComradeTypography`).
   static TextTheme _typography(TextTheme base) => base.copyWith(
-        headlineMedium: base.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
+        headlineMedium:
+            base.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
         titleLarge: base.titleLarge?.copyWith(fontWeight: FontWeight.w600),
         titleMedium: base.titleMedium?.copyWith(fontWeight: FontWeight.w600),
         titleSmall: base.titleSmall?.copyWith(
