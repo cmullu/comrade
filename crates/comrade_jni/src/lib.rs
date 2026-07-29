@@ -10,13 +10,33 @@
  * manual panic guard (uniffi's scaffolding catches panics itself and turns
  * them into a `PanicException` on the Kotlin side).
  *
+ * # Two foreign ABIs, one runtime
+ *
+ * This cdylib exports **two** independent FFI surfaces:
+ *
+ *  1. the uniffi scaffolding below (`uniffi_comrade_*` / `ffi_comrade_*`
+ *     symbols), which Kotlin — the app *and* the background services
+ *     (`WakeWordService`, `RelayConnectionService`, `ModelDownloadService`,
+ *     `CommandDispatcher`) — drives through the generated JNA bindings, and
+ *  2. the flutter_rust_bridge scaffolding in [`api`] (`frb_*` symbols), which
+ *     a Dart/Flutter UI drives.
+ *
+ * They must live in **one** shared library, because two cdylibs would each get
+ * their own copy of this crate's `static`s, hence two [`ComradeRuntime`]s, and
+ * `comrade_storage::EncryptedStore::open` opens the vault with
+ * `redb::Database::create` — redb takes an exclusive file lock, so the second
+ * unlock of the same vault directory fails outright. Hence
+ * [`global_runtime`]: the single, process-lifetime `ComradeRuntime` that both
+ * ABIs read and write. See `docs/FRONTEND_STRATEGY.md` §4 D2.
+ *
  * Shape:
  *  • Free functions ([`version`], [`generate_keypair`], …) — stateless crypto
  *    and workspace-metadata helpers that don't need a live runtime.
  *  • [`Comrade`] — an opaque uniffi `Object` (handed to Kotlin as a single
- *    `Comrade()` instance, constructed once and reused — the same
- *    "one shared instance for the process" shape as the desktop's
- *    `Arc<RwLock<ComradeRuntime>>` managed state) wrapping every
+ *    `Comrade()` instance, constructed once and reused) that is now a thin
+ *    handle onto [`global_runtime`] rather than the owner of its own
+ *    `ComradeRuntime` — the same "one shared instance for the process" shape
+ *    as the desktop's `Arc<RwLock<ComradeRuntime>>` managed state, wrapping every
  *    [`comrade_ui::ComradeRuntime`] method the Vault (DMs/calls/media),
  *    Sabha (public feed) and Identity (profile/contacts/workspace) engines
  *    expose. Methods that only read/write `ComradeRuntime`'s own fields stay
@@ -46,7 +66,7 @@
  */
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
@@ -61,6 +81,49 @@ use tokio::sync::RwLock;
 use tracing::warn;
 
 uniffi::setup_scaffolding!("comrade");
+
+pub mod api;
+mod frb_generated;
+
+// ── The process-global runtime ────────────────────────────────────────────────
+
+/// The one [`ComradeRuntime`] for the whole process, shared by *both* foreign
+/// ABIs this cdylib exports (see the module header). Not `pub` — nothing
+/// outside this crate should be able to build a second one.
+static RUNTIME: OnceLock<Arc<RwLock<ComradeRuntime>>> = OnceLock::new();
+
+/// The process-global [`ComradeRuntime`], created on first use.
+///
+/// Both [`Comrade`] (uniffi → Kotlin) and every function in [`api`]
+/// (flutter_rust_bridge → Dart) resolve to *this* handle, so an unlock done
+/// through one ABI is immediately visible through the other and the vault's
+/// redb file is only ever opened once.
+pub(crate) fn global_runtime() -> &'static Arc<RwLock<ComradeRuntime>> {
+    RUNTIME.get_or_init(|| Arc::new(RwLock::new(ComradeRuntime::new())))
+}
+
+/// [`global_runtime`], but seeding it with an explicit relay set if — and only
+/// if — it has not been created yet (AUDIT.md COMMS-03's isolated-relay test
+/// hook, reached from [`Comrade::new_with_relays`]).
+///
+/// First caller wins: there is exactly one runtime per process, so a later
+/// call cannot retarget engines that may already be connected. That is logged
+/// rather than silently ignored, and never fails — the caller still gets a
+/// working handle.
+fn global_runtime_with_relays(relays: Vec<String>) -> &'static Arc<RwLock<ComradeRuntime>> {
+    let mut seeded = false;
+    let runtime = RUNTIME.get_or_init(|| {
+        seeded = true;
+        Arc::new(RwLock::new(ComradeRuntime::with_relays(relays)))
+    });
+    if !seeded {
+        warn!(
+            "new_with_relays: the process-global runtime already exists; \
+             keeping its current relay set"
+        );
+    }
+    runtime
+}
 
 // ── Stateless helpers (no ComradeRuntime instance needed) ────────────────────
 
@@ -253,25 +316,46 @@ fn spawn_event_forwarder(
 
 // ── Comrade — the live runtime handle ────────────────────────────────────────
 
-/// The single, process-lifetime handle to the native core. Kotlin constructs
-/// this exactly once (mirroring the desktop's `Arc<RwLock<ComradeRuntime>>`
-/// managed state) and calls every method on that one instance — uniffi hands
-/// it to Kotlin as `Arc<Comrade>` under the hood, so cloning the reference is
+/// The Kotlin-facing handle to the native core. Kotlin constructs this
+/// exactly once and calls every method on that one instance — uniffi hands it
+/// to Kotlin as `Arc<Comrade>` under the hood, so cloning the reference is
 /// cheap and every method call is thread-safe.
+///
+/// The handle no longer *owns* a [`ComradeRuntime`]: every instance borrows
+/// the process-global one (see [`global_runtime`]) so the Dart ABI in [`api`]
+/// drives the same engines, the same unlocked store, and the same event bus.
+/// Constructing two `Comrade`s is therefore harmless — they are two references
+/// to one runtime, not two runtimes.
 #[derive(uniffi::Object)]
 pub struct Comrade {
-    inner: RwLock<ComradeRuntime>,
+    inner: Arc<RwLock<ComradeRuntime>>,
+    /// Per-handle, deliberately *not* process-global: each `Comrade` may
+    /// register (at most) one listener, exactly as before this became a shared
+    /// runtime. Two handles registering two listeners means two forwarders
+    /// over the same broadcast channels, which is correct — `broadcast`
+    /// fans out to every receiver.
     listener_registered: AtomicBool,
+}
+
+impl Comrade {
+    /// Build a handle over an explicit runtime. Not exported over FFI: the
+    /// only foreign-reachable constructors are [`Comrade::new`] and
+    /// [`Comrade::new_with_relays`], both of which bind the process-global
+    /// runtime. Tests use this to get an isolated runtime (and therefore an
+    /// isolated redb vault) per test.
+    fn with_runtime(inner: Arc<RwLock<ComradeRuntime>>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            listener_registered: AtomicBool::new(false),
+        })
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Comrade {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inner: RwLock::new(ComradeRuntime::new()),
-            listener_registered: AtomicBool::new(false),
-        })
+        Self::with_runtime(global_runtime().clone())
     }
 
     /// Like [`Comrade::new`], but connecting new engines to `relays` instead
@@ -279,12 +363,12 @@ impl Comrade {
     /// hook: a two-installation/two-instance device test points both sides
     /// at one local relay instead of the public internet. Not used by the
     /// shipping app (which always calls [`Comrade::new`]).
+    ///
+    /// Only takes effect if it is what first creates the process-global
+    /// runtime — see [`global_runtime_with_relays`].
     #[uniffi::constructor]
     pub fn new_with_relays(relays: Vec<String>) -> Arc<Self> {
-        Arc::new(Self {
-            inner: RwLock::new(ComradeRuntime::with_relays(relays)),
-            listener_registered: AtomicBool::new(false),
-        })
+        Self::with_runtime(global_runtime_with_relays(relays).clone())
     }
 
     // ── Push events ───────────────────────────────────────────────────────

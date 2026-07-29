@@ -1,0 +1,687 @@
+# Comrade — Android platform-channel contract
+
+_Phase 2 of the Flutter migration: the native Android services stay native, and this
+document is the whole of what Flutter is allowed to say to them._
+
+> **Verification honesty.** Nothing in this directory has been compiled. No Android SDK is
+> installed in the environment this was authored in and `dl.google.com` is blocked by the
+> proxy, so neither Gradle nor `flutter build` has ever run over it. The Kotlin is written
+> against the exact APIs the existing `android/` sources already use (same `org.webrtc`
+> artifact, same coroutines version) and against Flutter's published embedding API, but it
+> is **unverified**. This repository has a documented history of shipping unverified
+> Android changes (`AUDIT.md`, the 2026-07-15 entries) — treat every file here as
+> unreviewed-by-a-compiler until CI's Android lane runs it. See §10.
+
+---
+
+## 0. Where the services live
+
+The 6,955 LOC of production Kotlin this phase preserves are still at
+`android/app/src/main/java/mullu/comrade/**`. This directory adds only the channel layer —
+about 1,400 LOC of new Kotlin that references those classes by their existing package
+names (`mullu.comrade.call.CallManager`, `mullu.comrade.voice.WakeWordService`, …).
+
+Because the packages are identical, wiring the two together is a source-set entry, not an
+edit to any preserved file. In `app/android/app/build.gradle.kts`:
+
+```kotlin
+android {
+    sourceSets {
+        getByName("main") {
+            // Phase 2: consume the preserved services in place. The Compose UI
+            // under ui/, call/CallScreen.kt and MainActivity.kt must be excluded —
+            // they are what Flutter replaces.
+            java.srcDir("../../../android/app/src/main/java")
+            // …plus the uniffi-generated Kotlin, exactly as
+            // android/app/build.gradle.kts:22 and :202 already do.
+        }
+    }
+}
+```
+
+Physically moving the sources is a mechanical follow-up. Doing it as a separate commit
+keeps this one reviewable: a reviewer can diff the channel layer without a 7,000-line
+move drowning it.
+
+**Excluded from the source set** (Flutter replaces these): `ui/**`, `call/CallScreen.kt`,
+`call/CallUiState.kt`'s *rendering* (the type itself stays — the channel serialises it),
+`MainActivity.kt`, `AppNavigation.kt`, `ComradeApp`. **`ComradeApplication.kt` stays**: it
+owns the native-library warm-up and the `appScope` that `initializeEventBridge()` is
+awaited on, neither of which has anything to do with which UI toolkit is on top.
+
+---
+
+## 1. The one rule
+
+> **Channels carry state and control. They never carry data the Rust core can serve.**
+
+The other half of this migration makes one cdylib export both uniffi (for these Kotlin
+services) and `flutter_rust_bridge` (for Dart) over one process-global `ComradeRuntime`.
+So Dart reads conversations, messages, the timeline, contacts, call history and profiles
+**directly from Rust via FRB** — never over a channel. What a channel carries is:
+
+- **control** — "start the wake-word service", "accept the call", "cancel that download";
+- **state** — "the call is Active", "the model is 43% downloaded", "the mesh has 3 peers";
+- **invalidation** — "the DM history changed, re-read it" (`chatTick`).
+
+This is not stylistic. `ChatEventRouter` already publishes `chatTick`/`requestTick` rather
+than message payloads, precisely so there is one source of truth. Putting DM content on a
+channel would create a second copy of the store in a second language.
+
+The corollary the services depend on: **`ComradeCore.pollEvent()` is drained by
+`RelayConnectionService` and by nothing else, ever.** Dart has no method that reaches it.
+`EventBus`'s three-tier priority discipline (critical never-dropped / coalesced
+latest-per-key / feed bounded-lossy — `ComradeCore.kt:627-739`, AUDIT COMMS-04) is only
+correct with a single consumer; a second drainer in Dart would silently steal call
+signals from the router that raises the ringing notification.
+
+---
+
+## 2. Channel inventory
+
+Every service gets a **method channel** (control, request/response) and, where it has
+observable state, an **event channel** (state, snapshot-then-delta). Names are `const`s in
+`channel/ChannelNames.kt` and mirrored in `lib/src/platform/channels.dart`; nothing
+outside those two files spells a channel name as a literal.
+
+| Service | Method channel | Event channel | Handler |
+|---|---|---|---|
+| Calls (`CallManager`, `CallService`, `Ringer`) | `mullu.comrade/call` | `mullu.comrade/call/state` | `CallChannel` |
+| Call video (texture renderers) | `mullu.comrade/call/video` | `mullu.comrade/call/video/events` | `CallVideoChannel` |
+| Wake word (`WakeWordService`, `VoskModel`) | `mullu.comrade/wakeword` | `mullu.comrade/wakeword/state` | `WakeWordChannel` |
+| Relay connection (`RelayConnectionService`, `ChatEventRouter`, `MeshStatusMonitor`) | `mullu.comrade/relay` | `mullu.comrade/relay/state` | `RelayConnectionChannel` |
+| Model downloads (`ModelDownloadService`) | `mullu.comrade/models` | `mullu.comrade/models/state` | `ModelDownloadChannel` |
+| Voice notes (`VoiceRecorder`) | `mullu.comrade/recorder` | — | `VoiceRecorderChannel` |
+| Notifications + runtime permissions (`Notifier`) | `mullu.comrade/system` | — | `SystemChannel` |
+
+All seven are constructed by `ComradePlugin` (`FlutterPlugin`, `ActivityAware`) and
+registered from `MainActivity.configureFlutterEngine`.
+
+---
+
+## 3. Threading rules
+
+These are absolute; the handlers enforce them and the helper in
+`channel/EventChannelRelay.kt` exists so no handler has to remember them individually.
+
+1. **`MethodChannel.setMethodCallHandler` runs on the platform (main) thread.** Flutter
+   guarantees it, and `MethodChannel.Result.success/error` must be invoked on that same
+   thread. Every reply in this layer therefore goes through `Result.postSuccess(…)` /
+   `Result.postError(…)` extensions that `Handler(Looper.getMainLooper()).post` if they
+   are not already on it.
+
+2. **No method handler blocks the main thread.** Anything that can take longer than a
+   frame — `testTurnConnectivity` (up to 8 s), `VoskModel.isAvailable` (touches the
+   filesystem), any `ComradeCore` call that `runBlocking`s an FFI round-trip — is
+   dispatched to `Dispatchers.IO` and replies from the posted continuation. This is not a
+   preference: the reason `factoryLock` exists at all (`CallManager.kt:253-264`) is that
+   holding `CallManager`'s monitor on the main thread during native init produced an ANR.
+   The channel layer must not reintroduce that class of bug from the other side.
+
+3. **`EventChannel.EventSink` is main-thread-only.** `success`/`error`/`endOfStream` must
+   be called on the platform thread. `EventChannelRelay` collects its `StateFlow`s on a
+   `Dispatchers.Main.immediate` scope, so emission is already there.
+
+4. **A WebRTC callback never enters this layer.** `CallManager`'s `webRtcLane` invariant
+   (`CallManager.kt:169-199`) — a callback delivered on a WebRTC signalling thread must
+   never take `CallManager`'s monitor inline — is unchanged and unchallenged here: the
+   channel layer only ever *observes* `CallManager`'s `StateFlow`s (safe from any thread)
+   and *calls* its already-`@Synchronized` public methods from a coroutine, never from a
+   WebRTC thread. No channel code runs inside a `PeerConnection.Observer`.
+
+5. **`startForeground()` promptness is never mediated by Dart.** See §5.
+
+---
+
+## 4. Lifecycle: what "the engine is detached" means
+
+This is the point of the whole phase, so it is worth being exact about.
+
+A `FlutterEngine` can be detached while the process lives: the user backgrounds the app,
+the Activity is destroyed, the engine is released. Every Android service in this app is
+designed to keep running through exactly that. Under Flutter, three things follow.
+
+### 4.1 Nothing native waits on Dart
+
+No service calls `invokeMethod` and awaits a reply as part of a correctness path. The only
+`invokeMethod` in this layer at all is `mullu.comrade/system#openTab` (the model-download
+"ready" notification's return-to-tab), and it is fire-and-forget: if the engine is not
+attached, the tab request is stashed in `PendingNavigation` and delivered on the next
+`onListen`. A service that blocked on Dart would be a service that stops working when the
+screen is off, which is the failure this phase exists to prevent.
+
+### 4.2 Detach is lossless, because every event channel is snapshot-based
+
+Every event channel here publishes a **conflated current value**, not a stream of
+deliver-once events:
+
+- `onListen` immediately emits a full snapshot of the current state, then deltas.
+- `onCancel` (engine detaching) drops the sink and **cancels the collection job**. Nothing
+  is buffered.
+- The next `onListen` emits a fresh snapshot.
+
+So a call that rang, connected and ended entirely while the engine was detached leaves the
+reattached UI seeing `Idle` — which is correct, and the notification/call-history/ringtone
+side of it all happened natively anyway (§4.3). There is deliberately **no** replay queue:
+a queue would let a stale "Ringing" arrive seconds after the call was already over.
+
+The one place that needed care is the Sabha feed, which *is* an accumulating list rather
+than a scalar. `mullu.comrade/relay/state` handles it by sending the whole capped list
+(≤ 500 items, `ChatEventRouter.FEED_CAP`) once on `onListen`, then one item per delta. The
+native list stays authoritative for dedup and cap; Dart's copy is a projection.
+
+### 4.3 Anything a user can perceive happens natively
+
+Under Compose, `MainActivity`'s `LaunchedEffect(callState)` (`MainActivity.kt:373-411`)
+owned four user-visible side effects: `Ringer.start/stop`, `Notifier.clearCall`,
+`Notifier.notifyMissedCall`, and the lock-screen bypass. Three of those must fire whether
+or not any UI is alive — an incoming call has to ring with the screen off.
+
+Phase 2 therefore moves them out of the UI into **`CallStateReactor`**, an app-scoped
+object that collects `CallManager.state` on `ComradeApplication.appScope` and is started
+from `Application.onCreate`. It is engine-independent by construction. The fourth effect
+(`setShowOverLockScreen`) genuinely needs an Activity, so `CallStateReactor` holds a
+`WeakReference<Activity>` that `MainActivity` registers in `onCreate` and clears in
+`onDestroy`; when it is null that effect is simply skipped, exactly as it is skipped today
+when no Activity is composed.
+
+This is a **behaviour-preserving relocation, not a rewrite** — the `when (state)` arms are
+copied verbatim, including the subtle one: a call is "missed" only when
+`outcome == "missed" && incoming`, because the caller's own unanswered outgoing call is
+not missed on this device.
+
+> If you change nothing else from this document, keep this: **the ringtone must not depend
+> on the Flutter engine.** Under Compose it depended on the Activity, which was already
+> the weaker of the two guarantees; under Flutter it would be strictly worse.
+
+### 4.4 Foreground services outlive the engine, and start without it
+
+`RelayConnectionService`, `WakeWordService`, `CallService` and `ModelDownloadService` are
+all started with `startForegroundService()` and all call `startForeground()` in
+`onCreate`/first thing in `onStartCommand`. **No channel call sits between
+`startForegroundService()` and `startForeground()`.** The method-channel handlers only
+ever call the existing `Companion.start(context)` helpers, which is exactly what the
+Compose UI does today.
+
+`CallService.onCreate` (`CallService.kt:32-46`) goes foreground with a placeholder before
+`onStartCommand` even runs, because missing that window is a hard process kill
+(`ForegroundServiceDidNotStartInTimeException`), not a logged warning. `ModelDownloadService`
+re-posts the *in-flight* download's notification at *its* current progress before any early
+return (`ModelDownloadService.kt:52-63`). Both behaviours are untouched.
+
+---
+
+## 5. `mullu.comrade/call` — call control
+
+`CallManager` remains a process-global `object`. The channel is a thin, typed facade over
+its existing public API; it adds no state of its own.
+
+### Methods
+
+| Method | Arguments | Returns | Notes |
+|---|---|---|---|
+| `placeCall` | `{peer: String, peerLabel: String, video: bool}` | `null` | Gates mic (+camera) permission first; see §5.3. Maps to `startOutgoingCall`. |
+| `accept` | — | `null` | Gates permission. Maps to `accept(context)`. |
+| `reject` | — | `null` | |
+| `hangup` | — | `null` | |
+| `toggleMute` | — | `null` | Fire-and-forget; the result lands on the state channel. |
+| `toggleCamera` | — | `null` | |
+| `switchCamera` | — | `null` | |
+| `cycleAudioRoute` | — | `null` | |
+| `setAudioRoute` | `{route: "earpiece"\|"speaker"\|"bluetooth"\|"wired"}` | `null` | Bluetooth path requests `BLUETOOTH_CONNECT`; see §5.4. |
+| `testTurnConnectivity` | `{timeoutMs: int?}` | `"noServer"\|"relayAvailable"\|"relayUnavailable"` | Off-main; up to `timeoutMs` (default 8000). |
+| `turnServerStatus` | — | `{configured: bool, url: String?}` | Never returns the credential. |
+| `setTurnServer` | `{url, username, credential}` | `null` | Write-only. Throws `ILLEGAL_TURN_URL` on a malformed URI. |
+| `callSas` | `{localSdp, remoteSdp}` | `List<String>?` | Rarely needed — SAS is already on the state channel. |
+
+`toggleMute`/`toggleCamera`/`switchCamera`/`cycleAudioRoute` return `null` immediately
+rather than the resulting state. The state channel is the only place state is read from;
+a method that returned it would give Dart two clocks.
+
+### Error codes
+
+`error(code, message, details)` with a stable `code`:
+
+| Code | Meaning |
+|---|---|
+| `PERMISSION_DENIED` | Mic or camera refused. `details` = the list of denied permissions. |
+| `NO_ACTIVITY` | A permission-gated method was called with no Activity attached (engine running headless). |
+| `ILLEGAL_TURN_URL` | `comrade_core::call::validate_turn_url` rejected the URI. |
+| `CORE_ERROR` | Any `IllegalStateException` out of `ComradeCore`. `message` is the already-user-safe text `rethrowing()` produced. |
+
+### 5.1 `mullu.comrade/call/state` — the state event channel
+
+One conflated map, emitted whenever *any* of `CallManager`'s seven state flows changes
+(they are `combine`d, so Dart gets one coherent snapshot rather than seven interleaved
+partial ones):
+
+```jsonc
+{
+  "phase": "idle" | "ringing" | "connecting" | "active" | "ended",
+  "peer": "npub1…",              // absent when phase == "idle"
+  "peerLabel": "Asha",           // already alias→@handle→shortNpub resolved, natively
+  "video": true,
+  "incoming": false,
+  "remoteRinging": false,        // ringing only: callee acked ("Ringing…" vs "Calling…")
+  "connectedAtMs": 1753800000000,// active only; seeds the duration timer
+  "outcome": "missed",           // ended only
+  "muted": false,
+  "cameraOn": true,
+  "quality": "good" | "medium" | "poor" | "unknown",
+  "audioRoute": "earpiece" | "speaker" | "bluetooth" | "wired",
+  "availableRoutes": ["earpiece", "speaker"],
+  "sasEmojis": ["🐢","🎺","🌵","🔔"]   // null until connected, or if underivable
+}
+```
+
+`peerLabel` is resolved natively (`CallManager.upgradePeerLabel`) so the ringing screen and
+the notification cannot disagree — the same reason `ChatEventRouter` reads it back off
+`CallUiState.Ringing` instead of re-deriving it (`RelayConnectionService.kt:352-358`).
+
+`sasEmojis` is `null` for "cannot verify" and that is a real, displayable state — an
+honest "no code" rather than a fabricated one (`ComradeCore.kt:491-498`). Dart must not
+coerce it to an empty list.
+
+### 5.2 What the state channel deliberately does not carry
+
+`CallQuality` is refreshed every 2 s from `PeerConnection.getStats`; that is already the
+cheapest useful cadence, and the conflated flow means a burst of changes collapses. There
+is no per-frame or per-packet telemetry on this channel. If a stats screen ever wants raw
+`RTCStatsReport`, it gets its own channel with its own explicit subscribe/unsubscribe —
+not this one.
+
+### 5.3 Permission gating stays native
+
+Under Compose, `MainActivity.withCallPermissions` (`MainActivity.kt:352-364`) collected
+`RECORD_AUDIO` (+`CAMERA` for video), then ran the deferred action. That logic moves into
+`CallChannel` unchanged, using `ActivityAware`'s Activity and
+`ActivityCompat.requestPermissions` with a `PluginRegistry.RequestPermissionsResultListener`.
+
+It is native rather than a Dart `permission_handler` call for a specific reason: the
+deferred-action shape matters. `accept` must run *after* the grant, in the same gesture,
+while the call is still ringing. Round-tripping the grant through Dart adds two channel
+hops to a path that is already racing a 45 s ring timeout, and would leave the pending
+action's lifetime owned by a widget that can be disposed mid-dialog.
+
+### 5.4 Bluetooth (AUDIT COMMS-06) is preserved exactly
+
+`setAudioRoute("bluetooth")` on API 31+ requests `BLUETOOTH_CONNECT` at that moment — not
+at startup — and **on denial calls `CallManager.onBluetoothPermissionDenied()`**, which
+drops Bluetooth from `availableRoutes` for the rest of the call. Dart then sees a shortened
+`availableRoutes` on the state channel and renders the speaker fallback. The channel
+replies `PERMISSION_DENIED` so the UI can also toast.
+
+The one thing that must not happen: silently doing nothing. That was the pre-COMMS-06 bug.
+
+---
+
+## 6. `mullu.comrade/call/video` — the `VideoTrack` problem
+
+### 6.1 The problem
+
+`org.webrtc.VideoTrack` is a handle to a native object. It cannot be serialised, cannot
+cross a `MethodChannel`, and has no meaning in the Dart isolate. `CallScreen.kt:589-628`
+renders it by sinking it into an `org.webrtc.SurfaceViewRenderer` inside an `AndroidView`.
+`CallManager` publishes two of them as `StateFlow<VideoTrack?>` (`CallManager.kt:205-211`).
+
+`docs/FRONTEND_STRATEGY.md` D3 states the two real options. This section picks one.
+
+### 6.2 Recommendation: **(b)** — keep `CallManager` native, render through a Flutter `Texture`
+
+Not because (a) is impossible. Because (a) breaks the architecture this phase is built on.
+
+**The decisive argument is not risk, it is the event path.** Incoming call signals arrive
+as `BridgeEvent.IncomingCallSignal` on `ComradeCore.pollEvent()`, drained by
+`RelayConnectionService` — a foreground `dataSync` service that runs specifically when no
+UI is alive — and handed to `CallManager.onIncomingSignal`, whose `true` return raises the
+ringing notification (`RelayConnectionService.kt:342-363`). Under option (a) the
+`PeerConnection` lives in the Dart isolate. An offer arriving with the engine detached
+would then have nowhere to go: the service would have to spin up a headless Dart isolate,
+keep it warm for the life of the vault unlock, and route every ICE candidate through two
+channel hops before `addIceCandidate`. That re-creates precisely the "keep the Flutter
+engine alive to receive a call" dependency that keeping the services native is meant to
+eliminate. It also contradicts this phase's own stated architecture: services reach Rust
+through uniffi and do **not** round-trip through Dart.
+
+Three supporting arguments:
+
+1. **Option (a)'s acceptance checklist is nine hard-won fixes deep** (§6.5), several of
+   which were found only by line-by-line re-reads because this environment cannot compile
+   Android code. Reproducing them against a different API surface, unverifiable locally,
+   is the largest single risk in the migration — and `AUDIT.md`'s own record is that three
+   regressions were introduced *by the review pass on those very fixes* and caught only by
+   a full manual re-read.
+
+2. **Option (b) is much smaller than D3 implies.** D3 frames it as "leaves the call UI in
+   Kotlin and un-unified." With a `Texture` it does not: the only Kotlin left is a leaf
+   video *surface* (~200 LOC). Every piece of call chrome — the avatar, the duration
+   timer, the SAS emoji row, the quality pill, mute/camera/route/hangup buttons, the
+   picture-in-picture layout — is a Flutter widget driven by §5.1. Two `Texture` widgets
+   in a `Stack` is not an un-unified screen.
+
+3. **It is the same mechanism `flutter_webrtc` uses internally.** `flutter_webrtc`'s
+   Android renderer is a `SurfaceTextureRenderer extends org.webrtc.EglRenderer` drawing
+   into a `TextureRegistry.SurfaceTextureEntry`. Option (b) reuses that rendering approach
+   with our own `PeerConnection` instead of adopting the package's. So (b) is not the
+   exotic branch: it is (a)'s renderer without (a)'s rewrite.
+
+**Cost of (b), stated plainly.** It is Android-only. When iOS arrives, this scaffolding
+buys nothing and the video path must be built again against `AVSampleBufferDisplayLayer` or
+`flutter_webrtc` — and at that point option (a) becomes the right answer, because iOS is
+also the strongest argument for Flutter in the first place (`FRONTEND_STRATEGY.md` §5).
+**(b) is the right call for an Android-and-desktop app; it is a bet against imminent iOS.**
+If iOS is on the near roadmap, revisit before writing more of this.
+
+### 6.3 Why `Texture`, not `PlatformView`
+
+A `PlatformView` (either virtual-display or hybrid composition) would also work and is a
+smaller conceptual jump from the existing `AndroidView`. `Texture` wins on three counts
+that matter for a full-screen video call:
+
+- **No composition penalty.** Hybrid composition forces Flutter into a slower raster path
+  for the whole frame; a `Texture` is a plain layer the engine composites like any other.
+- **Transforms and z-order work.** The current Compose code has an explicit
+  `setZOrderMediaOverlay` hack (`CallScreen.kt:612-615`) because the PiP tile's surface
+  and the full-screen renderer's surface have undefined z-order otherwise. `Texture`s
+  compose in widget order and that whole class of bug disappears.
+- **`SurfaceView` and the Flutter surface do not fight** over the window.
+
+`CallVideoPlatformView.kt` keeps a `PlatformView` fallback behind the same channel contract
+for devices where the texture path misbehaves; `createRenderer` takes a `mode` argument.
+Only the texture path is wired by default.
+
+### 6.4 The video contract
+
+**Methods on `mullu.comrade/call/video`:**
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `createRenderer` | `{source: "local"\|"remote", mirror: bool}` | `{rendererId: int, textureId: int}` |
+| `setMirror` | `{rendererId: int, mirror: bool}` | `null` |
+| `disposeRenderer` | `{rendererId: int}` | `null` |
+
+**Events on `mullu.comrade/call/video/events`** — one stream carrying all renderers:
+
+```jsonc
+{ "rendererId": 3, "width": 1280, "height": 720, "rotation": 90 }
+```
+
+Emitted on the first frame and whenever the rotated frame dimensions change. Dart uses it
+to size the `Texture` with the right `AspectRatio`; a renderer that has produced no frame
+yet has no entry and the widget shows black, matching today's `egl == null` behaviour.
+
+**Lifecycle.**
+
+- A renderer is created on demand by the Dart widget's `initState` and disposed in
+  `dispose`. `CallVideoChannel` observes `CallManager.localVideo`/`remoteVideo` and
+  add/removes the sink as the flow emits — Dart never sees the track.
+- **EGL is lazy.** `CallManager.eglBaseContext` is null until `ensureFactory` has run
+  (`CallManager.kt:266-267`), which happens during call setup. So `createRenderer` returns
+  a texture id immediately and defers `EglRenderer.init` until the first non-null track
+  arrives — by which point the context is guaranteed, because both flows are only
+  populated inside `setupPeer`, after `ensureFactory`.
+- **Renderers die with the engine, and that is correct.** `SurfaceTextureEntry` belongs to
+  the engine's `TextureRegistry`; `onDetachedFromEngine` releases every renderer. The call
+  itself — audio, signalling, `CallService`, the notification — is untouched. There is no
+  visible surface to render to while detached, so nothing is lost. On reattach Dart
+  re-creates renderers and the sinks re-attach from the still-live flows. **This is the
+  only thing in this contract that legitimately dies with the engine.**
+
+### 6.5 If option (a) is chosen anyway — the acceptance checklist
+
+Everything below is a shipped, documented fix in `AUDIT.md`'s 2026-07-15 entries. A
+`flutter_webrtc` rewrite is not done until each has an equivalent *and a test*. Several
+have existing tests (`CallManagerTest`, `WakeWordServiceTest`, `CallManagerLifecycleTest`,
+`CallManagerDeadlockRegressionTest`) that would need porting, not just re-passing.
+
+1. **COMMS-05 — provisional session before the async round-trip.** `startOutgoingCall`
+   builds its `Session` *synchronously*, before `placeCallTyped`'s round-trip, so a
+   `hangup()` during that window finds a session instead of no-oping and letting the
+   delayed continuation send an offer after the UI went idle. `endWith` also cancels the
+   in-flight `placingJob`. (`CallManager.kt:415-470`; `CallManagerLifecycleTest`.)
+2. **Deterministic glare resolution by npub comparison.** Mutual simultaneous calls
+   resolve by `ourNpub < remoteNpub` rather than both sides self-`Busy`ing.
+   (`decideGlare`/`isGlareCandidate`, `CallManager.kt:1079-1082`, `1819-1830`; unit-tested.)
+3. **Caller-driven STUN→TURN ICE restart.** On post-answer ICE failure the caller re-offers
+   with `IceRestart=true` against `IceStrategy.STUN_AND_TURN`; `triedTurn` makes it
+   once-only. (`CallManager.kt:1198-1238`.)
+4. **15 s / 20 s media-recovery countdowns.** A call that reached `Active` and lost its
+   media path (ICE `FAILED`, or `DISCONNECTED` past `DISCONNECT_GRACE_MS` = 15 s) arms a
+   `RECOVERY_TIMEOUT_MS` = 20 s countdown and ends honestly instead of sitting "Active"
+   with dead audio — the callee has no TURN retry of its own.
+   (`armRecoveryTimeout`, `CallManager.kt:122-138`, `1255`, `1999-2005`.)
+5. **Audio-focus mute/restore.** An `OnAudioFocusChangeListener` mutes the local track on
+   transient focus loss and restores it after, dispatched to `io` rather than handled on
+   the main thread it is delivered on. (`CallManager.kt:1497-1573`.)
+6. **`ensureFactory` double-init race.** `ensureFactory` takes the monitor *itself*
+   (`synchronized(this)`), not relying on callers, because moving native init off the main
+   thread put it in `io.launch` before the monitor was taken — two overlapping setups
+   could both see `factory == null`. Note the paired constraint: init must **not** hold the
+   main-thread monitor (`factoryLock`, `CallManager.kt:253-264`) or hanging up on a
+   "Connecting…" screen ANRs. Both halves must survive together.
+7. **Bluetooth route permission handling (COMMS-06).** §5.4.
+8. **`MicHolderSet` overlap.** §7.
+9. **Idempotency triad.** `decideAnswer` (duplicate `Answer` dropped unless
+   `signalingState == HAVE_LOCAL_OFFER`), `decideOfferForExistingSession` (same-call
+   duplicate `Offer` pre-accept is a no-op, not a busy-reject), and the bounded
+   `endedCallIds` ring (cap 32) that drops a redelivered terminal `Offer` instead of
+   re-ringing. All three are extracted as pure, WebRTC-free functions with unit tests
+   precisely so they survive a renderer change — port the tests first.
+
+Also on the checklist, outside `CallManager`: the deadlock invariant (`webRtcLane`,
+`CallManagerDeadlockRegressionTest`), `setLocalDescription` failure ending the call the
+same way `setRemoteDescription` failure does, and the busy-reject history row not logging
+`startedAt = 0`.
+
+---
+
+## 7. `mullu.comrade/wakeword`
+
+### Methods
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `start` | — | `null` |
+| `stop` | — | `null` |
+| `isRunning` | — | `bool` |
+| `isModelAvailable` | — | `bool` (off-main: touches assets + filesDir) |
+| `listenOnce` | `{timeoutMs: int?}` | `String` (recognised text, possibly empty) |
+
+`start` gates `RECORD_AUDIO` through the same Activity-backed path as §5.3, then calls
+`WakeWordService.start(context)`. `isRunning` reads the service's own `@Volatile isRunning`
+companion flag — deliberately, because the toggle must re-seed from the *service*, not from
+a remembered widget state (`WakeWordService.kt:324-330`).
+
+`listenOnce` wraps `OneShotRecognizer` for tap-to-talk and dictation. It replies on the
+main thread from the recogniser's callback, and it does **not** dispatch a
+`CommandDispatcher` action itself — AUDIT's 2026-07-15 entry specifically records moving
+that off the recogniser's main-looper callback. Dart decides what to do with the text.
+
+### `mullu.comrade/wakeword/state`
+
+```jsonc
+{ "running": true, "status": "listening" | "goAhead" | "modelMissing" | "micError", "modelAvailable": true }
+```
+
+`status` is an enum key, not a localised string: the localised text belongs in Dart's
+`.arb` files now, not in `R.string`. The service still sets its own notification text from
+`R.string` (it must — it owns the notification), so the two live side by side.
+
+### `MicHolderSet` is not exposed, and must not be
+
+`WakeWordService.pause(MicHolder)` / `resume(MicHolder)` take a holder token and only
+actually restart the recogniser once **every** holder has released
+(`WakeWordService.kt:45-55`, `305-317`). The holders are `CALL` and `VOICE_NOTE`, and they
+are acquired/released by `CallManager` (`:933`, `:1429`) and `VoiceRecorder`
+(`VoiceRecorder.kt:55`, `:124`, `:137`) — both native, both already correct.
+
+**No channel method calls `pause`/`resume`.** If Dart could, the two-touch sequence AUDIT
+found reachable (hold record, answer a call, release record) would come back the moment
+some widget's `dispose` fired an unbalanced `resume`. The invariant survives by *not*
+having an entry point, which is stronger than having a documented one.
+
+Same reasoning applies to `VoskModel`'s refcount: `acquire`/`release` are called only by
+the four native recogniser owners (`WakeWordService`, `OneShotRecognizer`, the assist
+session, `ComradeRecognitionService`), each of which releases in its own teardown. Dart
+gets `isModelAvailable` — a read — and nothing else. A Dart-held reference would be a
+reference no `onDestroy` can guarantee returning, and the 30 s `CLOSE_LINGER_MS` reclaim
+would silently stop happening.
+
+---
+
+## 8. `mullu.comrade/relay`
+
+### Methods
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `start` | — | `bool` (false if the user disabled the feature) |
+| `stop` | — | `null` |
+| `isEnabled` | — | `bool` |
+| `setEnabled` | `{enabled: bool}` | `null` |
+| `setOpenConversation` | `{peer: String?}` | `null` |
+| `bumpChatTick` | — | `null` |
+| `refreshNames` | — | `null` |
+
+`start` respects `BackgroundConnectivityPreference` exactly as `RelayConnectionService.start`
+does (returns `false` rather than starting when the user opted out) — the preference stays
+in `SharedPreferences`, native-side, because the *service* is what reads it at start time.
+
+`setOpenConversation` is the notification-suppression hook: it must be called when a chat
+thread becomes visible and cleared when it is not, or the user gets notified for the thread
+they are reading. Under Compose this was an Activity-scoped effect; under Flutter it is a
+route observer. **Dart must clear it on detach** — the wrapper does this from
+`WidgetsBindingObserver.didChangeAppLifecycleState`, because a detached engine cannot mean
+"still reading this thread".
+
+### `mullu.comrade/relay/state`
+
+```jsonc
+{
+  "running": true,
+  "chatTick": 41,          // bumped when DM history changed — re-read from Rust
+  "requestTick": 3,        // bumped when a message request arrived
+  "mesh": { "active": true, "peerCount": 3 },
+  "eventBus": {            // EventBus.Stats — for the diagnostics screen
+    "criticalDepth": 0, "coalescedDepth": 1, "feedDepth": 12,
+    "feedDrops": 0, "coalesceSuppressions": 7, "lastDequeueLagMs": 3
+  },
+  "feed": {                // snapshot form, sent once on onListen
+    "revision": 118,
+    "items": [ { "id": "…", "author": "npub1…", "content": "…", "createdAt": 1753…, "replyTo": null } ]
+  }
+}
+```
+
+and the delta form for a newly-arrived Chitthi:
+
+```jsonc
+{ "feed": { "revision": 119, "latest": { "id": "…", … } }, … }
+```
+
+The tick fields are counters, not payloads, on purpose (§1). `eventBus` is exposed because
+`EventBus.Stats` exists specifically to make a stuck drain loop visible, and a diagnostics
+screen that can see `criticalDepth` climbing is worth more than one that cannot.
+
+---
+
+## 9. Remaining channels
+
+### `mullu.comrade/models`
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `startDownload` | `{modelId: "speech"\|"companion"}` | `null` |
+| `cancelDownload` | `{modelId}` | `null` |
+| `isInstalled` | `{modelId}` | `bool` |
+| `catalog` | — | `List<{id, displayName, downloadBytes, configured, returnTab}>` |
+| `reofferIfGone` | `{modelId}` | `null` |
+
+State (`mullu.comrade/models/state`), one entry per catalog model:
+
+```jsonc
+{ "speech": { "status": "downloading", "bytesRead": 17825792, "totalBytes": 41205931 },
+  "companion": { "status": "idle" } }
+```
+
+`status` ∈ `idle | downloading | installing | ready | failed`; `failed` carries `message`.
+`configured == false` (the companion model is deliberately unpinned —
+`ModelCatalog.kt:47-75`) must be surfaced as "not available", never as a download offer.
+The sha256 pinning, zip-slip guard and atomic install all stay in `ModelInstaller`; the
+channel cannot reach them and cannot weaken them.
+
+### `mullu.comrade/recorder`
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `start` | — | `bool` (false = could not start; nothing to clean up) |
+| `stop` | — | `{path: String, mimeType: "audio/aac"}` or `null` if too short (< 500 ms) |
+| `cancel` | — | `null` |
+| `isRecording` | — | `bool` |
+
+Deliberately returns a **path**, not bytes: the clip goes straight to
+`ComradeCore.sendMediaBytesTyped` via FRB's own file read, and the caller must delete the
+file the moment the encrypted send resolves (the plaintext voice note must not outlive the
+send — AUDIT S-4). Returning base64 over a channel would put a plaintext copy in the Dart
+heap with no deletion discipline at all.
+
+`VoiceRecorder` is *not thread-safe* by design (one gesture drives it), so the handler
+holds a single instance and serialises every method onto the main thread.
+
+### `mullu.comrade/system`
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `ensureNotificationChannels` | — | `null` |
+| `hasNotificationPermission` | — | `bool` |
+| `requestNotificationPermission` | — | `bool` |
+| `clearForPeer` | `{peer}` | `null` |
+| `clearCall` | `{peer}` | `null` |
+| `consumePendingTab` | — | `String?` |
+
+Plus one **outbound** call, Kotlin → Dart: `openTab` with `{tab: String}`, fired when the
+Activity is (re)started from a notification carrying `AppNavigation.EXTRA_OPEN_TAB`. If the
+engine is not attached it is stashed and `consumePendingTab` returns it on the next start.
+
+**Notification channel ids are frozen.** `comrade_calls_v2` in particular: the `_v2` suffix
+exists because channel settings are sticky once created, so silencing the original id would
+never have taken effect for upgrading installs, and it carries `setSound(null, null)` so
+`Ringer` is the only thing that rings (`Notifier.kt:31-40`, `:70-82`). Changing the id or
+restoring a sound double-rings every incoming call on every existing install. `Notifier` is
+untouched by this phase and Dart has no way to create a channel.
+
+---
+
+## 10. Status of this code
+
+**Uncompiled and untested.** Specifically:
+
+- No Gradle build, no `flutter build`, no `flutter analyze`, no `dart analyze` was run.
+- The Kotlin is written against `io.flutter.embedding.engine.plugins.FlutterPlugin`,
+  `ActivityAware`, `TextureRegistry` and `PluginRegistry.RequestPermissionsResultListener`
+  as published; API drift across embedding versions has not been checked against the
+  Flutter SDK actually pinned for this project.
+- `TextureVideoRenderer` extends `org.webrtc.EglRenderer` and calls
+  `init(EglBase.Context, int[], RendererCommon.GlDrawer)` / `createEglSurface(SurfaceTexture)`.
+  Those are stable public members of the libwebrtc Android SDK and the project already
+  depends on `io.github.webrtc-sdk:android:125.6422.07`, which keeps the `org.webrtc.*`
+  namespace — but the class has not been compiled against that artifact here.
+- The source-set wiring in §0 is written, not executed. Nothing has resolved
+  `mullu.comrade.call.CallManager` from this module.
+- No behaviour was exercised on a device or emulator. Every "preserved invariant" claim in
+  this document is a claim about *unchanged native code plus a channel that does not reach
+  it* — which is checkable by reading, and was read — not a claim that anything ran.
+
+The first honest verification step is the repo's own Android CI lane plus
+`connectedDebugAndroidTest`, with `CallManagerLifecycleTest` and
+`CallManagerDeadlockRegressionTest` still green: those two are the ones that would catch a
+channel handler taking `CallManager`'s monitor from the wrong thread.
+
+## 11. Standing tension worth recording
+
+`docs/FRONTEND_STRATEGY.md` (2026-07-29, `AUDIT.md` line 31) recommends **against** this
+migration and names D3 — this document's §6 — as the defect the plan does not survive.
+That recommendation has not been withdrawn, and this document does not withdraw it: it
+resolves D3 for the Android case only, by choosing option (b), and §6.2 states plainly
+that the choice is a bet against imminent iOS. If iOS enters the roadmap the analysis in
+`FRONTEND_STRATEGY.md` §5 inverts and so does §6.2's conclusion.
