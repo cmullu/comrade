@@ -15,10 +15,10 @@
 use std::sync::Arc;
 
 use comrade_ui::{
-    CallRecordDto, CallSessionDto, ChitthiDto, ComradeRuntime, ContactDto, ConversationDto,
-    CrisisResourceDto, FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto,
-    MediaMessageDto, MessageDto, MessageRequestDto, ProfileDto, SakhaStatusDto, TaraMessageDto,
-    TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
+    ConversationDto, CrisisResourceDto, FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto,
+    MediaBytesDto, MediaMessageDto, MessageDto, MessageRequestDto, PresenceDto, ProfileDto,
+    SakhaStatusDto, TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -482,6 +482,47 @@ pub async fn refresh_peer_profiles(state: tauri::State<'_, Runtime>) -> Result<u
 #[tauri::command]
 pub async fn list_contacts(state: tauri::State<'_, Runtime>) -> Result<Vec<ContactDto>, String> {
     state.read().await.list_contacts().map_err(|e| e.to_string())
+}
+
+// ── Comrades (chosen-peer presence) ───────────────────────────────────────────
+
+/// Choose (or un-choose) a contact as a comrade: announce our presence to
+/// them, and start believing what they say about theirs. See
+/// `comrade_ui::ComradeRuntime::set_comrade` for what that discloses (and
+/// what it deliberately cannot do — presence is mutual by construction).
+#[tauri::command]
+pub async fn set_comrade(
+    state: tauri::State<'_, Runtime>,
+    npub: String,
+    comrade: bool,
+) -> Result<ContactDto, String> {
+    state.read().await.set_comrade(&npub, comrade).map_err(|e| e.to_string())
+}
+
+/// Every comrade with their live presence, online first.
+#[tauri::command]
+pub async fn comrades(state: tauri::State<'_, Runtime>) -> Result<Vec<ComradeDto>, String> {
+    state.read().await.comrades().map_err(|e| e.to_string())
+}
+
+/// One peer's live presence, or `null` if no beacon ever arrived from them.
+#[tauri::command]
+pub async fn peer_presence(
+    state: tauri::State<'_, Runtime>,
+    npub: String,
+) -> Result<Option<PresenceDto>, String> {
+    state.read().await.peer_presence(&npub).map_err(|e| e.to_string())
+}
+
+/// Announce this window's presence to every comrade (on focus/blur, or on the
+/// way out), returning how many beacons a relay accepted. Never errors: a
+/// relay hiccup must not surface in a UI that only calls this in passing.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn announce_presence(state: tauri::State<'_, Runtime>, online: bool) -> u64 {
+    let handles = state.read().await.handles();
+    handles.announce_presence(online).await
 }
 
 /// Best-effort people search by handle over NIP-50-capable relays.
