@@ -33,7 +33,28 @@ val cargoBuildHostCdylib = tasks.register<Exec>("cargoBuildHostCdylib") {
     workingDir = cargoWorkspaceRoot
     commandLine("cargo", "build", "-p", "comrade_jni")
     outputs.file(hostCdylibPath)
-    outputs.upToDateWhen { hostCdylibPath.exists() }
+    // Cargo decides whether a rebuild is needed, not Gradle. It fingerprints
+    // every input that matters (sources, Cargo.lock, features, toolchain) and
+    // no-ops in well under a second when nothing changed.
+    //
+    // This used to be `upToDateWhen { hostCdylibPath.exists() }`, which skipped
+    // cargo entirely whenever *any* .so was already lying in target/debug —
+    // even one built from different sources. Change Rust, rebuild Android, and
+    // the generated Kotlin bindings still described the previous FFI surface;
+    // the failure then surfaced as a wall of type errors inside
+    // ComradeCore.kt rather than as anything pointing at a stale artifact. CI
+    // never caught it because a fresh runner has no target/ to go stale.
+    //
+    // Declaring the Rust sources as Gradle inputs instead would trade one
+    // staleness bug for a subtler one: the input set has to enumerate every
+    // .rs file, both manifests, Cargo.lock, build scripts and the toolchain
+    // file, and anything forgotten silently reintroduces exactly this class of
+    // failure. Cargo already tracks all of it correctly.
+    //
+    // The cost is one no-op cargo invocation per build. It does not cascade:
+    // generateUniffiBindings keys off this task's *output*, so an unchanged
+    // .so leaves the (much slower) bindgen step up-to-date.
+    outputs.upToDateWhen { false }
 }
 
 val generateUniffiBindings = tasks.register<Exec>("generateUniffiBindings") {
