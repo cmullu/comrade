@@ -152,23 +152,28 @@ Flutter-host Kotlin (`app/android/…/mullu/comrade/`):
 | Dart analyze (`--fatal-infos`) | ✅ clean |
 | `dart format --set-exit-if-changed` | ✅ clean |
 | `flutter test` (fake repo, no FFI) | ✅ 124 pass (4 FFI tests self-skip; CI `bridge` job runs them) |
-| Kotlin (both Gradle modules) | ❌ **not compiled** — no Android SDK here. CI lanes `android` + `flutter/apk` are the gate |
+| Kotlin — Flutter host module (`app/android`) | ✅ **compiled in CI**: the `Flutter` workflow (analyze/bridge/linux/**apk**) went green on dc05539, and its APK lane builds `app/android` *plus* the staged legacy services — so `CallManager`, `PipController`, `PipChannel` and `CallChannel` all compile |
+| Kotlin — Compose module (`android/`) | ⚠️ first run failed on a real bug in my `CallWidgets.kt` (missing `androidx.compose.runtime.getValue` for `by animateFloatAsState`, which cascaded into four confusing "Float.times ambiguity" errors); fixed in 0048079. Re-run pending at the time of writing — **check it** |
 | Rust | untouched (`derive_sas` + tests intentionally kept) |
-| Desktop JS (`node --test desktop/ui/*.test.mjs`) | ✅ **50 pass** (pure decision layer). The DOM/WebRTC glue in `main.js` has no test harness — unrun |
+| Desktop JS (`node --test desktop/ui/*.test.mjs`) | ✅ **54 pass** (pure decision layer, incl. `shouldSendLocalVideo`). The remaining DOM/WebRTC glue in `main.js` has no test harness — unrun |
 | On-device behaviour | ❌ nothing run on a device/emulator |
 
 ## Next steps, in order
 
-1. **Get CI green.** Watch the `android`, `flutter` (analyze/bridge/linux/apk)
-   lanes. Likeliest Kotlin nits: unused imports left behind in
-   `CallScreen.kt`/`CallManager.kt` after the SAS removal, the fully-qualified
-   `androidx.compose.animation.AnimatedVisibility` calls in `CallScreen.kt`
-   (fine, but ktlint may prefer an import), and `CallWidgets.kt` import order.
-   `android` lane also runs the JVM tests: `CallManagerTest`,
-   `CallManagerDeadlockRegressionTest`, `CallManagerLifecycleTest` — none
-   referenced SAS (grepped), but `toggleCamera` behaviour changed shape
-   (`applyCaptureState`); if a test drove `toggleCamera` and asserted capturer
-   calls, re-read it against the new reconciliation.
+1. **Finish getting CI green.** `Flutter` is green. The `CI` workflow's
+   "Android — JVM unit tests" job and the `Android APK` workflow both failed
+   once on the `CallWidgets.kt` missing-import bug (fixed in 0048079); confirm
+   the re-run passes. If the JVM test job fails on something else, note that
+   `toggleCamera`'s shape changed (it now records intent and defers to
+   `applyCaptureState`) — a test that asserted capturer start/stop calls
+   directly may need re-reading against the reconciliation, though none did at
+   the time of writing. The two device-test jobs only failed because the APK
+   never built; they should recover with it.
+
+   A useful trick learned here: a Kotlin "overload resolution ambiguity on
+   Float.times" is often *not* an arithmetic problem — it is a `by` delegate
+   that failed to resolve (missing `getValue`), making the delegated value an
+   error type at every use site.
 2. **Desktop manual pass** (needs the Tauri shell, or a browser preview):
    the pure layer is tested but the DOM glue is not. Check that the bars
    appear on connect and move with the network, that the chat button opens the
