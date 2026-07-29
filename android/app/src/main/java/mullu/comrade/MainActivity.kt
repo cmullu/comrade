@@ -78,6 +78,7 @@ import mullu.comrade.ui.BookIcon
 import mullu.comrade.ui.CallHistoryScreen
 import mullu.comrade.ui.ChatBubbleIcon
 import mullu.comrade.ui.ChatsScreen
+import mullu.comrade.ui.ComradesScreen
 import mullu.comrade.ui.ConversationScreen
 import mullu.comrade.ui.FeedScreen
 import mullu.comrade.ui.HeartIcon
@@ -85,8 +86,11 @@ import mullu.comrade.ui.JournalScreen
 import mullu.comrade.ui.NewChatScreen
 import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
+import mullu.comrade.ui.PresenceDot
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
+import mullu.comrade.ui.StarIcon
+import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.purgeDecryptedMedia
@@ -133,6 +137,32 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         AppNavigation.request(intent.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
+    }
+
+    /**
+     * Coming back to the foreground re-announces our presence to the comrades.
+     *
+     * The native side already beacons on unlock and heartbeats every few
+     * minutes, so this is a freshness nicety rather than the mechanism: it
+     * means someone who picks their phone up shows as around to the people
+     * they chose immediately, instead of up to a heartbeat later. Deliberately
+     * *not* paired with an "offline" on backgrounding — the connection service
+     * keeps delivering while backgrounded, so the app really is still
+     * reachable; the honest "offline" moments are a vault lock (which the Rust
+     * side announces) and process death (which the beacon's own TTL covers).
+     *
+     * Runs on the application scope, off the main thread: the beacon send is a
+     * relay round-trip per comrade.
+     */
+    override fun onStart() {
+        super.onStart()
+        val app = application as? ComradeApplication ?: return
+        app.appScope.launch(Dispatchers.IO) {
+            if (ComradeCore.isVaultUnlocked()) {
+                runCatching { ComradeCore.announcePresenceTyped(online = true) }
+                    .onFailure { Log.w("ComradeApp", "presence announce failed", it) }
+            }
+        }
     }
 
     /**
@@ -243,6 +273,11 @@ fun ComradeApp() {
             onProfileChange = { phase = AppPhase.Ready(it) },
             onLock = {
                 RelayConnectionService.stop(context)
+                // Comrades' dots are derived from an unlocked store; drop them
+                // with it rather than letting a stale green dot outlive the
+                // lock. (The native side has already told those comrades we are
+                // going offline — see `ComradeRuntime::lock_vault`.)
+                PresenceMonitor.clear()
                 phase = AppPhase.Locked(vaultExists = true)
             },
         )
@@ -269,6 +304,7 @@ private sealed interface ChatNav {
     data object NewChat : ChatNav
     data object Requests : ChatNav
     data object CallHistory : ChatNav
+    data object Comrades : ChatNav
     data class Open(
         val peer: String,
         /** User-chosen alias for the peer, when one exists. */
@@ -412,6 +448,19 @@ private fun MainShell(
 
     val openChat = chatNav as? ChatNav.Open
     var editingAlias by remember { mutableStateOf(false) }
+    // Whether the open conversation's peer is a comrade, and whether they are
+    // around — read from the store on open (and after a toggle), with the dot
+    // then following the live presence flow.
+    var comradeToggleTick by remember { mutableStateOf(0) }
+    var isComrade by remember(openChat?.peer) { mutableStateOf(false) }
+    LaunchedEffect(openChat?.peer, comradeToggleTick) {
+        val peer = openChat?.peer
+        isComrade = peer != null && withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.comrades().any { it.npub == peer } }.getOrDefault(false)
+        }
+    }
+    val onlineNow by PresenceMonitor.online.collectAsState()
+    val comradeOnline = openChat?.peer?.let { onlineNow[it] == true } == true
     // Back priority, innermost first: an open drawer closes, then a pushed
     // Settings screen closes, then a Chats sub-screen returns to the list.
     BackHandler(
@@ -449,6 +498,11 @@ private fun MainShell(
                             tab = MainTab.Chats
                             chatNav = ChatNav.CallHistory
                         },
+                        onOpenComrades = {
+                            scope.launch { drawerState.close() }
+                            tab = MainTab.Chats
+                            chatNav = ChatNav.Comrades
+                        },
                     )
                 },
             ) {
@@ -470,20 +524,65 @@ private fun MainShell(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                                     ) {
-                                        PeerAvatar(title, seed = openChat.peer, size = 36.dp)
+                                        Box(contentAlignment = Alignment.BottomEnd) {
+                                            PeerAvatar(title, seed = openChat.peer, size = 36.dp)
+                                            if (isComrade) PresenceDot(comradeOnline, size = 10.dp)
+                                        }
                                         Column {
                                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            // The npub tail always stays visible (handles are
+                                            // claims, keys are identity); presence, when we have
+                                            // it, rides alongside rather than replacing it.
                                             Text(
-                                                shortNpub(openChat.peer),
+                                                if (isComrade && comradeOnline) {
+                                                    stringResource(R.string.comrade_online) +
+                                                        " · " + shortNpub(openChat.peer)
+                                                } else {
+                                                    shortNpub(openChat.peer)
+                                                },
                                                 style = MaterialTheme.typography.labelSmall,
                                                 fontFamily = FontFamily.Monospace,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                color = if (isComrade && comradeOnline) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                },
                                             )
                                         }
                                     }
                                 },
                                 actions = {
                                     val callLabel = peerTitle(openChat.peer, openChat.alias, openChat.username)
+                                    IconButton(
+                                        onClick = {
+                                            val next = !isComrade
+                                            scope.launch {
+                                                val saved = withContext(Dispatchers.IO) {
+                                                    runCatching {
+                                                        ComradeCore.setComradeTyped(openChat.peer, next)
+                                                    }.getOrNull()
+                                                }
+                                                if (saved != null) {
+                                                    comradeToggleTick++
+                                                    // Chat-list rows carry the dot too.
+                                                    ChatEventRouter.bumpChatTick()
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("toggle-comrade"),
+                                    ) {
+                                        Icon(
+                                            if (isComrade) StarIcon else StarOutlineIcon,
+                                            contentDescription = stringResource(
+                                                if (isComrade) R.string.comrade_remove else R.string.comrade_add,
+                                            ),
+                                            tint = if (isComrade) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                        )
+                                    }
                                     IconButton(onClick = {
                                         withCallPermissions(video = false) {
                                             CallManager.startOutgoingCall(
@@ -533,6 +632,14 @@ private fun MainShell(
                                     }
                                 },
                                 title = { Text(stringResource(R.string.call_history_title)) },
+                            )
+                            tab == MainTab.Chats && chatNav == ChatNav.Comrades -> TopAppBar(
+                                navigationIcon = {
+                                    IconButton(onClick = { chatNav = ChatNav.List }) {
+                                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                                    }
+                                },
+                                title = { Text(stringResource(R.string.comrades_title)) },
                             )
                             tab == MainTab.Chats && chatNav == ChatNav.List -> CenterAlignedTopAppBar(
                                 navigationIcon = {
@@ -610,6 +717,13 @@ private fun MainShell(
                                 },
                                 modifier = content,
                             )
+                            ChatNav.Comrades -> ComradesScreen(
+                                chatTick = chatTick,
+                                onOpen = { peer, alias, username ->
+                                    chatNav = ChatNav.Open(peer, alias, username)
+                                },
+                                modifier = content,
+                            )
                             ChatNav.CallHistory -> CallHistoryScreen(
                                 onCallBack = { peer, peerLabel, video ->
                                     withCallPermissions(video) {
@@ -677,6 +791,7 @@ private fun ComradeDrawerSheet(
     profile: ComradeCore.Profile,
     onOpenSettings: () -> Unit,
     onOpenCallHistory: () -> Unit,
+    onOpenComrades: () -> Unit,
 ) {
     ModalDrawerSheet {
         Row(
@@ -703,6 +818,13 @@ private fun ComradeDrawerSheet(
             }
         }
         HorizontalDivider()
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.comrades_title)) },
+            icon = { Icon(StarIcon, contentDescription = null) },
+            selected = false,
+            onClick = onOpenComrades,
+            modifier = Modifier.testTag("drawer-comrades"),
+        )
         NavigationDrawerItem(
             label = { Text(stringResource(R.string.call_history_title)) },
             icon = { Icon(CallIcon, contentDescription = null) },

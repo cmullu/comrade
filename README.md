@@ -19,6 +19,7 @@ entirely in Rust, with a shared view-model layer driving an Android
 | **Sabha** | Nostr Kind-1 + NIP-10 | Public microblogging — the **Chitthi Feed**, with nested `ChitthiThread` reply trees | ✅ Wired (desktop + Android: broadcast + live feed; reply threading in live feed pending) |
 | **Vault** | NIP-44 + NIP-17/NIP-59 (gift-wrapped); legacy NIP-04 read-only | End-to-end encrypted direct messages; replies (NIP-10 `e` tag), delivered/read receipts, `/pay` UPI intent detection | ✅ Send + receive wired (desktop + Android), offline chat history persisted. New DMs are NIP-44-encrypted and gift-wrapped (no sender/content metadata leaks to relays); a peer's older NIP-04 DMs still decrypt |
 | **Message requests** | Conversation gate + Kind-4 profile share | A stranger's DM lands in a *requests* bucket, not your chat list; **your @handle is shared only when you accept**; accept / block; blocked keys are dropped | ✅ Engine + bridges tested; UI wired (desktop + Android) |
+| **Comrades** | Presence beacons over the NIP-44/NIP-17 DM channel | Mark a contact as your **comrade** and get told when they come online — a green dot in the chat list and a notification. Presence is disclosed to the peers you choose and to no one else (never to a relay: the beacon is gift-wrapped), is **mutual by construction** (you see them once they choose you back — the UI says so), and expires on its own so a phone that dies doesn't leave a permanent green dot | ✅ Wired (Android: Comrades screen + ★ toggle in any conversation + presence dots + notification channel; desktop: ★ toggle, dots, toast; engine, storage and both bridges tested) |
 | **Profiles** | Nostr Kind-0 + NIP-50 | @username display handles: published with retry **and republished on every launch**, searched on dedicated NIP-50 relays; peers' handles cached locally so chats are titled by name; per-contact aliases | ✅ Wired (Android onboarding + settings + chat UI; desktop backend commands) |
 | **Saathi** | libp2p mDNS + Gossipsub | Off-grid local mesh — works without internet | 🧪 Experimental — engine + tests only, not started by any frontend |
 | **Sakha/Sakhi** | Yrs CRDT + AES-256-GCM | Cryptographically isolated shared ledger for couples | 🧪 Engine built; pairing handshake not yet reachable from any UI |
@@ -29,6 +30,11 @@ entirely in Rust, with a shared view-model layer driving an Android
 | **Voice** | Vosk (offline) + Android TTS | "Hey Comrade" wake word, tap-to-talk, and assist-app role — all on-device, no cloud; the speech model ships in the APK or is offered as a one-time sha256-verified in-app download on first use | ⚠️ Recognition/dispatch work; `post`/`read timeline` need a vault-unlock screen the Android UI doesn't have yet |
 | **Tara** | On-device reply engine (no network, no cloud) | Reflective companion — a private space to think out loud: feeling-mirroring, reflective prompts, brainstorming scaffolds, journaling nudges from mood markers. Replies **stream in** word-by-word (crisis hand-offs never do — those appear complete). **Not therapy, and it says so**: distress cues switch the reply into a hand-off to real crisis helplines. Thread sealed in the encrypted store; *clear conversation* built in | ⚠️ v1 deterministic template engine wired end-to-end (Android **Tara** tab — last in the bottom nav — with opt-in explainer, streaming replies + crisis card; desktop backend commands, web UI pending). The engine seam is ready for an **on-device** LLM once [`AUDIT.md` OQ9](AUDIT.md) is decided — a cloud model is ruled out by design. See [`docs/TARA.md`](docs/TARA.md) |
 | **Model downloads** | One pinned-checksum pipeline for every on-device model | Shared fetch/verify/install for the **speech** model ("Hey Comrade") and Tara's future companion model: sha256-pinned, zip-slip-guarded, atomic install. Runs in a **foreground service** so the transfer survives backgrounding, with live progress in the **notification bar** and a tappable "ready" notification that deep-links back to where the model is used | ✅ Wired for the speech model (Android). ⚠️ The companion-model entry ships deliberately **unpinned** until OQ9 picks a model, so no unverifiable download is ever offered |
+| **Dak** (store & forward) | Sender outbox + sealed courier envelopes | A DM no relay will accept is **queued, not lost**: persisted in the encrypted store, retried on a cadence and at every launch, cleared by the peer's receipt, and marked *failed* — visibly — after 8 attempts or 24 h. Alongside it, an engine for handing sealed mail to a peer who may physically meet the recipient: day-rotating recipient tags (`HMAC(recipient key, ctx‖UTC day)`), trust-tier quotas, spray-and-wait copy budgets | ✅ Outbox wired (queue → retry → receipt/fail, survives an app kill). 🧪 Courier engine + tests only, no transport drives it yet |
+| **Anonymous Chitthi** | Per-post ephemeral keys / device-seed personas | A public post signed by a key that is **not your identity**: a throwaway key per post (two anonymous posts cannot be linked to each other) or a stable per-scope persona so replies reach the same pseudonym. `created_at` coarsened to the hour | ✅ Engine + `ComradeRuntime`/Android bridge command; UI surface pending. Honest about limits: the key is unlinkable, the network path (IP, timing) is not |
+| **Location channels** | Geohash-scoped Nostr rooms (kinds 20000/20001) | Public rooms scoped to a place instead of a follow graph, spoken under a per-cell persona. Presence heartbeats **only** at region/province/city precision — never street level — and an empty fine-precision channel reports "?" rather than a misleading 0 | 🧪 Engine + tests only (publish/subscribe/presence + geohash arithmetic); no UI yet |
+| **Panic wipe** | Whole-store shred + re-lock | One call destroys every stored value — identity keys, DM history, journal, Tara thread, queued mail — then re-locks to a pre-onboarding state. Enumerates the database's *actual* tables, so a store added later cannot be forgotten | ✅ Wired (`ComradeRuntime::panic_wipe`, Android bridge command); a UI entry point is the follow-up. Wipes rather than hides, and needs the app unlocked — deliberately **not** a duress feature |
+| **Metrics** | Device-local counters | Delivery-behaviour tallies (queued/resent/delivered/dropped, courier deposits and handovers, dedup drops) with **no** peer, message id, content, or timestamp — so they can never become a record of who talked to whom. No exporter, no endpoint; cleared by the panic wipe | ✅ Wired at the outbox/courier call sites + `metrics_snapshot()`; diagnostics screen pending |
 
 > **Status honesty.** 🧪 rows are working, unit-tested library code that no
 > frontend invokes yet — they describe the architecture's direction, not
@@ -36,8 +42,17 @@ entirely in Rust, with a shared view-model layer driving an Android
 
 > **Nomenclature.** A public post is a **Chitthi** (Hindi for *letter*) throughout
 > the application layer — `ChitthiNode`/`ChitthiThread`, `broadcast_chitthi`,
-> `subscribe_chitthi_feed`, the `chitthi_cache`. Nostr protocol constants
-> (`Kind::TextNote`, NIP-44) are kept intact at the wire level.
+> `subscribe_chitthi_feed`, the `chitthi_cache`. **Dak** (डाक — *post, mail*) is
+> the store-and-forward layer, and a courier carrying someone's mail is its
+> *dakiya*. Nostr protocol constants (`Kind::TextNote`, NIP-44) are kept intact
+> at the wire level.
+
+> **Prior art.** The store-and-forward stack, the privacy mechanics (padding,
+> panic wipe, identity-free metrics), the anonymity primitives, and the location
+> channels are adapted from [bitchat](https://github.com/permissionlesstech/bitchat).
+> [`docs/BITCHAT_ADOPTION.md`](docs/BITCHAT_ADOPTION.md) is the full ledger:
+> every mechanism examined, what landed, what was adapted because Comrade's
+> stack differs, and what was deliberately declined.
 
 ## Identity & usernames
 
@@ -75,6 +90,40 @@ unreliable. The model instead:
 - The opt-in path to *verified* unique names (NIP-05 DNS mapping) is future
   work.
 
+## Comrades — knowing when your person is around
+
+Mark a contact as your **comrade** (the ★ in any conversation, or the Comrades
+screen in the navigation drawer) and Comrade tells you when they come online.
+
+Presence is the one feature here that tells someone else something about you,
+so the rules are deliberately narrow and stated in the UI itself:
+
+- **Only the people you chose are told, and no relay ever is.** A presence
+  beacon is a tiny envelope inside a gift-wrapped E2E DM — the same channel
+  read receipts and call signals already ride. Nostr's public status
+  convention (NIP-38) was rejected on purpose: a replaceable public event
+  would publish a minute-by-minute log of when you are holding your phone, to
+  everyone, forever. See [`docs/PRESENCE.md`](docs/PRESENCE.md).
+- **It is mutual by construction.** You announce to whom you marked; you see
+  whoever marked you. Choosing someone cannot subscribe you to their presence
+  — with no server, nothing can make their device report to you — so until
+  they choose you back their row honestly reads *"waiting for them to choose
+  you back"* rather than showing an unexplained grey dot. Choose someone who
+  already chose you and their presence appears immediately.
+- **A green dot expires.** A beacon says "online for the next few minutes",
+  measured from when it was *sent*, so a phone that dies (or is force-killed,
+  or loses signal) fades out on its own, and a beacon replayed out of the
+  relay backfill can never resurrect a stale dot. Locking your vault sends a
+  goodbye immediately.
+- **Nothing else leaks.** A beacon carries "online / offline" and how long to
+  believe it. No activity, no location, no last-seen timeline for
+  non-comrades, no typing indicators.
+
+Honest limit: presence needs the app process alive, exactly like calls and
+message delivery (there is no push wakeup — see the notes on
+`RelayConnectionService` below). A killed process is offline, and its
+comrades' dots go grey when the claim lapses.
+
 The **Progressive-Disclosure state machine** (`comrade_state`) gates which engines are active:
 
 ```
@@ -89,6 +138,9 @@ Base ──────── Sabha (public feed) + Vault (E2E DMs)
 crates/
   comrade_state/   State machine (no I/O dependencies)
   comrade_core/    Protocol engines: crypto, sabha, vault, saathi, sakha, relay, media
+                   plus dak (outbox + couriers), gcs (history reconciliation),
+                   anon (unlinkable personas), geo (location channels),
+                   pad / seen / metrics (padding, dedup, local counters)
   comrade_storage/ Encrypted-at-rest persistence (redb + Argon2id + AES-256-GCM)
   comrade_ui/      Framework-agnostic view-model / service layer (UiService + DTOs)
   comrade_jni/     JNI bridge — compiled to libcomrade_jni.so for Android

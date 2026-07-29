@@ -14,8 +14,11 @@
  *
  * Each envelope carries a distinct required marker field (`comrade_profile`,
  * `comrade_receipt`), so its `parse_*` function accepts only its own shape and
- * returns `None` for chat text, media/call envelopes, or any other JSON. That
- * lets the runtime try each handler in turn and fall through to a plain DM.
+ * returns `None` for chat text, media/call/presence envelopes, or any other
+ * JSON. That lets the runtime try each handler in turn and fall through to a
+ * plain DM. The same pattern is used by [`crate::call::CallEnvelope`]
+ * (`comrade_call`) and [`crate::presence::PresenceBeacon`]
+ * (`comrade_presence`), which live next to their own protocols.
  *
  * Pure and framework-free — fully unit-tested here.
  */
@@ -165,6 +168,9 @@ mod tests {
             r#"{"comrade_media":1,"event_id":"e","url":"u","mime":"m","caption":"","size":1}"#;
         assert!(parse_profile_share(media).is_none());
         assert!(parse_receipt(media).is_none());
+        let presence = r#"{"comrade_presence":1,"state":"online","ttl_secs":480}"#;
+        assert!(parse_profile_share(presence).is_none());
+        assert!(parse_receipt(presence).is_none());
     }
 
     #[test]

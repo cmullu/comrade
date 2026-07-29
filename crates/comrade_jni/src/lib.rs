@@ -72,10 +72,11 @@ use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
 use comrade_state::AppWorkspace;
 use comrade_ui::{
-    BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto, ComradeRuntime, ContactDto,
+    BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
     ConversationDto, CrisisResourceDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto,
+    WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -495,6 +496,28 @@ impl Comrade {
         handles.broadcast_chitthi(&content, reply_to).await
     }
 
+    /// Broadcast a Chitthi under a throwaway or scoped persona instead of this
+    /// device's identity — the anonymous-thoughts path.
+    ///
+    /// `scope` of `None` signs the post with a key used exactly once, so two
+    /// anonymous Chitthis cannot be linked to each other. `Some(label)` derives
+    /// a stable persona for that label, so replies can reach the same pseudonym
+    /// while it stays unlinkable to the identity. See
+    /// `comrade_ui::ComradeRuntime::broadcast_anonymous_chitthi`, and
+    /// `docs/BITCHAT_ADOPTION.md` for what this does and does not hide.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn broadcast_anonymous_chitthi(
+        &self,
+        content: String,
+        scope: Option<String>,
+    ) -> Result<String, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .broadcast_anonymous_chitthi(&content, scope.as_deref())
+            .await
+    }
+
     // ── Vault (E2E DMs) ──────────────────────────────────────────────────────
 
     /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
@@ -514,6 +537,43 @@ impl Comrade {
         handles
             .send_dm_reply(&target, &content, reply_to.as_deref())
             .await
+    }
+
+    /// Retry every DM sitting in the sender outbox because no relay would take
+    /// it. Returns how many a relay accepted this pass.
+    ///
+    /// A background loop already flushes on a cadence (and once at launch);
+    /// call this when the platform reports connectivity came back, so a queued
+    /// message goes out immediately instead of on the next tick.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn flush_outbox(&self) -> Result<u64, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.flush_outbox().await.map(|n| n as u64)
+    }
+
+    /// How many DMs are waiting for a relay that will take them — for a
+    /// "queued" indicator in the chat list.
+    pub fn outbox_pending(&self) -> u64 {
+        self.inner.blocking_read().outbox_pending() as u64
+    }
+
+    /// **Panic wipe.** Destroy every locally stored value — identity keys, DM
+    /// history, journal, Tara thread, queued mail — then re-lock, leaving the
+    /// runtime as it was before its first unlock.
+    ///
+    /// Irreversible, and deliberately not a duress feature: it wipes rather
+    /// than hides, and it needs the app open and unlocked. After it returns,
+    /// send the user back to onboarding.
+    pub async fn panic_wipe(&self) -> Result<(), UiError> {
+        self.inner.write().await.panic_wipe().await
+    }
+
+    /// Device-local delivery counters — bare tallies with no identities, ids,
+    /// content, or timestamps, for a diagnostics screen. Nothing here is ever
+    /// uploaded; the panic wipe clears them.
+    pub fn metrics_snapshot(&self) -> Vec<MetricDto> {
+        self.inner.blocking_read().metrics_snapshot()
     }
 
     pub fn conversations(&self) -> Result<Vec<ConversationDto>, UiError> {
@@ -594,6 +654,39 @@ impl Comrade {
         let refresher = self.inner.read().await.profile_refresher()?;
         let changed = refresher.run().await?;
         Ok(changed as u64)
+    }
+
+    // ── Comrades (chosen-peer presence) ─────────────────────────────────────
+
+    /// Choose (or un-choose) a contact as a comrade — see
+    /// `comrade_ui::ComradeRuntime::set_comrade` for what that discloses.
+    ///
+    /// Async for the same reason as [`Comrade::accept_request`]: the beacon
+    /// telling that peer about the change is a background `tokio::spawn`,
+    /// which needs a live reactor.
+    pub async fn set_comrade(&self, npub: String, comrade: bool) -> Result<ContactDto, UiError> {
+        self.inner.read().await.set_comrade(&npub, comrade)
+    }
+
+    /// Every comrade with their live presence, online first.
+    pub fn comrades(&self) -> Result<Vec<ComradeDto>, UiError> {
+        self.inner.blocking_read().comrades()
+    }
+
+    /// One peer's live presence, or `None` if no beacon ever arrived from
+    /// them (they haven't chosen us back, or haven't been online since).
+    pub fn peer_presence(&self, npub: String) -> Result<Option<PresenceDto>, UiError> {
+        self.inner.blocking_read().peer_presence(&npub)
+    }
+
+    /// Announce this device's presence to every comrade, returning how many
+    /// beacons a relay accepted. Called by the Android shell on foreground /
+    /// background transitions; the native heartbeat covers the rest.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn announce_presence(&self, online: bool) -> u64 {
+        let handles = self.inner.read().await.handles();
+        handles.announce_presence(online).await
     }
 
     // ── Journal (strictly local) ─────────────────────────────────────────────
@@ -896,6 +989,24 @@ mod tests {
         let c = isolated();
         assert!(matches!(c.conversations(), Err(UiError::VaultLocked)));
         assert!(matches!(c.profile(), Err(UiError::NoIdentity)));
+        assert!(matches!(c.comrades(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            c.peer_presence("npub1x".to_string()),
+            Err(UiError::VaultLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn announcing_presence_before_unlock_is_a_quiet_zero_not_an_error() {
+        // Presence is a courtesy, never an error path — the Android shell
+        // calls this on every foreground transition, including ones that
+        // race the vault being open.
+        let c = Comrade::new();
+        assert_eq!(c.announce_presence(true).await, 0);
+        assert!(matches!(
+            c.set_comrade("npub1x".to_string(), true).await,
+            Err(UiError::VaultLocked)
+        ));
     }
 
     #[test]

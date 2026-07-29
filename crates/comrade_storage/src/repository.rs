@@ -31,14 +31,24 @@ use serde::{Deserialize, Serialize};
 use crate::{EncryptedStore, StorageError};
 
 /// Monotonic rank of a delivery status so receipts only ever move forward:
-/// sent (0) < delivered (1) < read (2). Unknown strings rank as sent.
+/// queued (0) < sent (1) < delivered (2) < read (3).
+///
+/// `queued` is the pre-relay state of a message sitting in the sender outbox,
+/// and `failed` is its terminal counterpart; both rank 0, and `failed` gets an
+/// explicit escape hatch in [`EncryptedStore::set_message_status`] because it
+/// must be able to replace `sent` (a flush that ran out of attempts) without
+/// ever overwriting a real delivered/read receipt. Unknown strings rank 0.
 fn status_rank(status: &str) -> u8 {
     match status {
-        "read" => 2,
-        "delivered" => 1,
+        "read" => 3,
+        "delivered" => 2,
+        "sent" => 1,
         _ => 0,
     }
 }
+
+/// Terminal local failure: the outbox gave up on this message.
+const STATUS_FAILED: &str = "failed";
 
 // ── Tree names ────────────────────────────────────────────────────────────────
 
@@ -54,6 +64,8 @@ const TARA_TREE: &str = "tara_companion";
 const CONVERSATIONS_TREE: &str = "conversation_meta";
 /// Voice/video call log, keyed by call id.
 const CALLS_TREE: &str = "call_log";
+/// Last known presence of a comrade, keyed by their npub.
+const PRESENCE_TREE: &str = "peer_presence";
 
 const IDENTITY_KEY: &str = "self";
 const LEDGER_SNAPSHOT_KEY: &str = "hisab_kitab";
@@ -95,6 +107,40 @@ pub struct Contact {
     pub petname: String,
     #[serde(default)]
     pub relays: Vec<String>,
+    /// Whether the user chose this contact as a **comrade**: someone they
+    /// announce their presence to, and want to be told about when that
+    /// person comes online. Defaulted so contacts saved before the feature
+    /// existed keep deserialising as "not a comrade" (opt-in, never
+    /// retroactive — presence is disclosure, so it may only ever be turned
+    /// on deliberately).
+    #[serde(default)]
+    pub comrade: bool,
+}
+
+/// What a comrade's last presence beacon said, and until when to believe it.
+///
+/// This is *soft* state: a device that dies sends no goodbye, so `online`
+/// alone is never enough — every read must also check `expires_at` against
+/// the current clock (`comrade_core::presence::is_online_at`). Stored per
+/// peer so a green dot survives an app restart only for as long as the peer's
+/// own claim does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerPresence {
+    pub peer_npub: String,
+    /// What the last beacon claimed. Combine with `expires_at`, never alone.
+    pub online: bool,
+    /// Send time (unix seconds) of the last beacon received from this peer —
+    /// the honest "last seen" for the UI.
+    pub last_seen_at: u64,
+    /// When the last `online` claim stops being believable (unix seconds).
+    pub expires_at: u64,
+    /// Whether this peer has marked *us* as their comrade. Receiving any
+    /// beacon proves it: beacons are only ever sent to comrades. Drives the
+    /// "they chose you — choose them back to see when they're online" hint,
+    /// which is the only way a mutual-by-construction model stays
+    /// discoverable.
+    #[serde(default)]
+    pub peer_marked_us: bool,
 }
 
 /// A single cached public Chitthi (Kind-1 note) for instant offline rendering
@@ -248,6 +294,50 @@ impl EncryptedStore {
         self.values(CONTACTS_TREE)
     }
 
+    /// Mark (or unmark) a contact as a comrade, creating the contact record if
+    /// this key isn't saved yet — marking someone you've only ever chatted
+    /// with must not require adding them by hand first. Every other field of
+    /// an existing contact is preserved. Returns the stored contact.
+    pub fn set_contact_comrade(&self, npub: &str, comrade: bool) -> Result<Contact, StorageError> {
+        let mut contact = self.get_contact(npub)?.unwrap_or_else(|| Contact {
+            npub: npub.to_string(),
+            petname: String::new(),
+            relays: Vec::new(),
+            comrade: false,
+        });
+        contact.comrade = comrade;
+        self.upsert_contact(&contact)?;
+        Ok(contact)
+    }
+
+    /// Every contact the user has marked as a comrade.
+    pub fn list_comrades(&self) -> Result<Vec<Contact>, StorageError> {
+        Ok(self
+            .list_contacts()?
+            .into_iter()
+            .filter(|c| c.comrade)
+            .collect())
+    }
+
+    // Comrade presence -----------------------------------------------------------
+
+    /// Record a peer's latest presence, keyed by npub (one row per peer).
+    pub fn set_peer_presence(&self, presence: &PeerPresence) -> Result<(), StorageError> {
+        self.put(PRESENCE_TREE, &presence.peer_npub, presence)
+    }
+
+    /// The last recorded presence for a peer, if any beacon ever arrived.
+    pub fn get_peer_presence(&self, peer_npub: &str) -> Result<Option<PeerPresence>, StorageError> {
+        self.get(PRESENCE_TREE, peer_npub)
+    }
+
+    /// Every recorded presence row, newest sighting first.
+    pub fn list_peer_presence(&self) -> Result<Vec<PeerPresence>, StorageError> {
+        let mut rows: Vec<PeerPresence> = self.values(PRESENCE_TREE)?;
+        rows.sort_by_key(|p| std::cmp::Reverse(p.last_seen_at));
+        Ok(rows)
+    }
+
     // Chitthi cache (public Sabha timeline) -----------------------------------
 
     /// Cache a public Chitthi, keyed by its event id. Idempotent on re-insert.
@@ -307,20 +397,39 @@ impl EncryptedStore {
         self.get(MESSAGES_TREE, id)
     }
 
-    /// Advance an outgoing message's delivery `status` (sent → delivered →
-    /// read) in response to a receipt. Never downgrades — a late "delivered"
-    /// receipt can't unset a "read" already recorded. Returns whether the row
-    /// existed and changed.
+    /// Advance an outgoing message's delivery `status` (queued → sent →
+    /// delivered → read) in response to a receipt. Never downgrades — a late
+    /// "delivered" receipt can't unset a "read" already recorded. Returns
+    /// whether the row existed and changed.
+    ///
+    /// `failed` is the one non-monotonic transition: the sender outbox reaching
+    /// its attempt cap must be able to mark a `queued` or `sent` message failed,
+    /// so the UI stops showing it as in-flight. It still cannot overwrite a
+    /// delivered/read receipt — the peer demonstrably has the message, whatever
+    /// the local queue thinks.
     pub fn set_message_status(&self, id: &str, status: &str) -> Result<bool, StorageError> {
         let Some(mut msg) = self.get_message(id)? else {
             return Ok(false);
         };
-        if status_rank(status) <= status_rank(msg.status.as_deref().unwrap_or("sent")) {
+        let current = msg.status.as_deref().unwrap_or("sent");
+        let allowed = if status == STATUS_FAILED {
+            current != STATUS_FAILED && status_rank(current) < status_rank("delivered")
+        } else {
+            status_rank(status) > status_rank(current)
+        };
+        if !allowed {
             return Ok(false);
         }
         msg.status = Some(status.to_string());
         self.save_message(&msg)?;
         Ok(true)
+    }
+
+    /// Delete a stored message. Used when a queued message is re-keyed to the
+    /// event id a relay finally assigned it, so the conversation does not end up
+    /// holding both rows. Returns whether a row existed.
+    pub fn remove_message(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete(MESSAGES_TREE, id)
     }
 
     // Conversation gate (message requests) ------------------------------------
@@ -482,11 +591,13 @@ mod tests {
             npub: "npub1alice".into(),
             petname: "Alice".into(),
             relays: vec!["wss://relay.one".into()],
+            comrade: false,
         };
         let bob = Contact {
             npub: "npub1bob".into(),
             petname: "Bob".into(),
             relays: vec![],
+            comrade: false,
         };
         s.upsert_contact(&alice).unwrap();
         s.upsert_contact(&bob).unwrap();
@@ -494,6 +605,80 @@ mod tests {
         assert_eq!(s.get_contact("npub1alice").unwrap(), Some(alice));
         assert!(s.remove_contact("npub1bob").unwrap());
         assert_eq!(s.list_contacts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn comrade_flag_is_opt_in_preserves_the_contact_and_survives_old_rows() {
+        let (_d, s) = store();
+        s.upsert_contact(&Contact {
+            npub: "npub1alice".into(),
+            petname: "Alice".into(),
+            relays: vec!["wss://relay.one".into()],
+            comrade: false,
+        })
+        .unwrap();
+        assert!(s.list_comrades().unwrap().is_empty(), "opt-in, not default");
+
+        // Marking preserves the alias/relays the contact already had.
+        let marked = s.set_contact_comrade("npub1alice", true).unwrap();
+        assert!(marked.comrade);
+        assert_eq!(marked.petname, "Alice");
+        assert_eq!(marked.relays, vec!["wss://relay.one".to_string()]);
+        assert_eq!(s.list_comrades().unwrap().len(), 1);
+
+        // Marking a key with no contact record yet creates one (you can make
+        // someone a comrade straight from a conversation).
+        s.set_contact_comrade("npub1bob", true).unwrap();
+        assert_eq!(s.list_comrades().unwrap().len(), 2);
+        assert_eq!(s.get_contact("npub1bob").unwrap().unwrap().petname, "");
+
+        // Unmarking leaves the contact in place — only presence stops.
+        s.set_contact_comrade("npub1alice", false).unwrap();
+        assert_eq!(s.list_comrades().unwrap().len(), 1);
+        assert!(s.get_contact("npub1alice").unwrap().is_some());
+
+        // A contact row written before the field existed reads as "not a
+        // comrade" rather than failing to deserialise.
+        let legacy: Contact =
+            serde_json::from_str(r#"{"npub":"npub1old","petname":"Old"}"#).unwrap();
+        assert!(!legacy.comrade);
+        assert!(legacy.relays.is_empty());
+    }
+
+    #[test]
+    fn peer_presence_crud_and_ordering() {
+        let (_d, s) = store();
+        assert!(s.get_peer_presence("npub1alice").unwrap().is_none());
+        for (npub, online, seen, expires) in [
+            ("npub1alice", true, 100u64, 580u64),
+            ("npub1bob", false, 300, 300),
+        ] {
+            s.set_peer_presence(&PeerPresence {
+                peer_npub: npub.into(),
+                online,
+                last_seen_at: seen,
+                expires_at: expires,
+                peer_marked_us: true,
+            })
+            .unwrap();
+        }
+        let rows = s.list_peer_presence().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].peer_npub, "npub1bob", "newest sighting first");
+
+        // Same key upserts in place rather than duplicating.
+        s.set_peer_presence(&PeerPresence {
+            peer_npub: "npub1alice".into(),
+            online: false,
+            last_seen_at: 900,
+            expires_at: 900,
+            peer_marked_us: true,
+        })
+        .unwrap();
+        assert_eq!(s.list_peer_presence().unwrap().len(), 2);
+        let alice = s.get_peer_presence("npub1alice").unwrap().unwrap();
+        assert!(!alice.online);
+        assert_eq!(alice.last_seen_at, 900);
     }
 
     #[test]
@@ -837,6 +1022,79 @@ mod tests {
         );
         // Unknown message id is a clean false, not an error.
         assert!(!s.set_message_status("nope", "read").unwrap());
+    }
+
+    #[test]
+    fn queued_messages_advance_and_can_fail_terminally() {
+        let (_d, s) = store();
+        let queued = StoredMessage {
+            id: "q1".into(),
+            peer_npub: "npub1x".into(),
+            content: "are you around?".into(),
+            created_at: 1,
+            outgoing: true,
+            status: Some("queued".into()),
+            reply_to: None,
+        };
+        s.save_message(&queued).unwrap();
+
+        // A queued message that reaches a relay advances to sent…
+        assert!(s.set_message_status("q1", "sent").unwrap());
+        // …and one the outbox gives up on is marked failed, so the UI stops
+        // showing it as in flight.
+        assert!(s.set_message_status("q1", "failed").unwrap());
+        assert_eq!(
+            s.get_message("q1").unwrap().unwrap().status.as_deref(),
+            Some("failed")
+        );
+        assert!(
+            !s.set_message_status("q1", "failed").unwrap(),
+            "marking failed twice is a no-op"
+        );
+        // A receipt still wins over a local failure verdict.
+        assert!(s.set_message_status("q1", "delivered").unwrap());
+    }
+
+    #[test]
+    fn failed_never_overwrites_a_delivery_receipt() {
+        let (_d, s) = store();
+        s.save_message(&StoredMessage {
+            id: "m1".into(),
+            peer_npub: "npub1x".into(),
+            content: "hi".into(),
+            created_at: 1,
+            outgoing: true,
+            status: Some("read".into()),
+            reply_to: None,
+        })
+        .unwrap();
+        assert!(
+            !s.set_message_status("m1", "failed").unwrap(),
+            "the peer demonstrably has it, whatever the local queue thinks"
+        );
+        assert_eq!(
+            s.get_message("m1").unwrap().unwrap().status.as_deref(),
+            Some("read")
+        );
+    }
+
+    #[test]
+    fn remove_message_drops_the_row() {
+        let (_d, s) = store();
+        s.save_message(&StoredMessage {
+            id: "queued:abc".into(),
+            peer_npub: "npub1x".into(),
+            content: "hi".into(),
+            created_at: 1,
+            outgoing: true,
+            status: Some("queued".into()),
+            reply_to: None,
+        })
+        .unwrap();
+        assert!(s.remove_message("queued:abc").unwrap());
+        assert!(s.get_message("queued:abc").unwrap().is_none());
+        assert!(!s.remove_message("queued:abc").unwrap());
+        assert!(s.messages_with("npub1x").unwrap().is_empty());
     }
 
     #[test]

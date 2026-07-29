@@ -7,11 +7,23 @@
  *   vault   — NIP-04 E2E DM engine + UPI /pay regex processor
  *   dm      — DM control envelopes (profile-share on accept, read/delivered receipts)
  *   call    — voice/video call signaling (WebRTC over the Vault DM channel)
+ *   presence— comrade presence beacons (online/offline, to chosen peers only)
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
  *   tara    — reflective-companion engine (deterministic, on-device, not therapy)
  *   relay   — NIP-65 relay-list metadata + outbox-model routing
  *   media   — NIP-94/96 encrypted media staging + pluggable uploaders
+ *
+ * Store-and-forward, privacy, and anonymity primitives adapted from
+ * permissionlesstech/bitchat (see `docs/BITCHAT_ADOPTION.md` for the full
+ * take/adapt/reject analysis):
+ *   dak     — sender outbox + courier envelopes ("the recipient is not here")
+ *   gcs     — Golomb-coded set filters for reconciling public history
+ *   anon    — unlinkable scoped + ephemeral identities for anonymous posting
+ *   geo     — geohash location channels and presence counting
+ *   pad     — bucket length padding, so ciphertext size leaks less
+ *   seen    — bounded dedup seen-set shared by every ingress path
+ *   metrics — privacy-safe, device-local delivery counters
  */
 
 // Gives this crate its own `UniFfiTag`, so the plain-data types the engines
@@ -21,15 +33,23 @@
 // (plus `comrade_ui`'s own namespace) into an actual cdylib.
 uniffi::setup_scaffolding!("comrade_core");
 
+pub mod anon;
 pub mod call;
 pub mod crypto;
+pub mod dak;
 pub mod dm;
 pub mod error;
+pub mod gcs;
+pub mod geo;
 pub mod media;
+pub mod metrics;
+pub mod pad;
+pub mod presence;
 pub mod relay;
 pub mod saathi;
 pub mod sabha;
 pub mod sakha;
+pub mod seen;
 pub mod tara;
 pub mod vault;
 

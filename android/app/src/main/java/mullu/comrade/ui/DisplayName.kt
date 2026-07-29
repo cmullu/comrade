@@ -81,3 +81,25 @@ fun dayLabel(
         )
     }
 }
+
+/**
+ * What to say under a comrade's name, in the order that answers the user's
+ * actual question ("can I reach them right now?"):
+ *  1. [Online] — the whole point,
+ *  2. [LastSeen] — how long ago we last saw them, if we ever did,
+ *  3. [AwaitingReciprocity] — the honest reason a chosen comrade may never
+ *     light up: presence is mutual by construction, so until they choose us
+ *     back their device tells us nothing, and no amount of waiting changes
+ *     that. Showing a bare grey dot here would read as "they're ignoring
+ *     you", which is a different (and wrong) thing.
+ *  4. [NeverSeen] — chosen, reciprocated, simply away.
+ */
+enum class PresenceLabel { Online, LastSeen, AwaitingReciprocity, NeverSeen }
+
+/** Which [PresenceLabel] a comrade row should carry. The caller resolves the string. */
+fun presenceLabelOf(online: Boolean, lastSeenAt: Long, peerMarkedUs: Boolean): PresenceLabel = when {
+    online -> PresenceLabel.Online
+    lastSeenAt > 0L -> PresenceLabel.LastSeen
+    !peerMarkedUs -> PresenceLabel.AwaitingReciprocity
+    else -> PresenceLabel.NeverSeen
+}

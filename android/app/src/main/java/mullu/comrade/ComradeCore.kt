@@ -250,7 +250,13 @@ object ComradeCore {
 
     data class FoundProfile(val npub: String, val name: String?, val about: String?)
 
-    data class ContactInfo(val npub: String, val alias: String, val name: String?)
+    data class ContactInfo(
+        val npub: String,
+        val alias: String,
+        val name: String?,
+        /** Whether the user chose this contact as a comrade (see [setComradeTyped]). */
+        val comrade: Boolean = false,
+    )
 
     data class ConversationInfo(
         val peer: String,
@@ -259,6 +265,34 @@ object ComradeCore {
         val lastMessage: String,
         val lastAt: Long,
         val lastOutgoing: Boolean,
+        /** Whether this peer is one of the user's comrades. */
+        val comrade: Boolean = false,
+        /** Whether that comrade is online right now (always false for anyone else). */
+        val online: Boolean = false,
+    )
+
+    /** A comrade — a chosen contact — plus what their last presence beacon said. */
+    data class ComradeInfo(
+        val npub: String,
+        val alias: String,
+        val name: String?,
+        val online: Boolean,
+        /** Send time of their last beacon, or 0 if none ever arrived. */
+        val lastSeenAt: Long,
+        /**
+         * Whether they chose *us* too. `false` means we will never see them
+         * online however long we wait — presence is mutual by construction —
+         * so the UI must say so rather than showing an unexplained grey dot.
+         */
+        val peerMarkedUs: Boolean,
+    )
+
+    /** One peer's live presence, for a chat header. */
+    data class PresenceInfo(
+        val peer: String,
+        val online: Boolean,
+        val lastSeenAt: Long,
+        val peerMarkedUs: Boolean,
     )
 
     data class MessageInfo(
@@ -302,6 +336,8 @@ object ComradeCore {
                 lastMessage = it.lastMessage,
                 lastAt = it.lastAt.toLong(),
                 lastOutgoing = it.lastOutgoing,
+                comrade = it.comrade,
+                online = it.online,
             )
         }
     }
@@ -347,7 +383,8 @@ object ComradeCore {
         }
     }
 
-    private fun uniffi.comrade_ui.ContactDto.toInfo() = ContactInfo(npub = npub, alias = alias, name = name)
+    private fun uniffi.comrade_ui.ContactDto.toInfo() =
+        ContactInfo(npub = npub, alias = alias, name = name, comrade = comrade)
 
     fun addContactTyped(npub: String, alias: String): ContactInfo =
         rethrowing("Add contact") { ffi.addContact(npub, alias).toInfo() }
@@ -362,6 +399,57 @@ object ComradeCore {
     }
 
     fun contacts(): List<ContactInfo> = rethrowing("Contacts") { ffi.listContacts().map { it.toInfo() } }
+
+    // ── Comrades (chosen-peer presence) ───────────────────────────────────────
+
+    /**
+     * Choose (or un-choose) a contact as a comrade.
+     *
+     * This is a disclosure, so say what it does: from now on this device
+     * tells that one peer — nobody else, and no relay — when it is online,
+     * and starts believing what they say about theirs. It does *not*
+     * subscribe us to their presence: they see us because we chose them, and
+     * we see them only once they choose us back
+     * ([ComradeInfo.peerMarkedUs]).
+     */
+    fun setComradeTyped(npub: String, comrade: Boolean): ContactInfo =
+        rethrowing("Comrade") { runBlocking { ffi.setComrade(npub, comrade) }.toInfo() }
+
+    /** Every chosen comrade with their live presence, online first. */
+    fun comrades(): List<ComradeInfo> = rethrowing("Comrades") {
+        ffi.comrades().map {
+            ComradeInfo(
+                npub = it.npub,
+                alias = it.alias,
+                name = it.name,
+                online = it.online,
+                lastSeenAt = it.lastSeenAt.toLong(),
+                peerMarkedUs = it.peerMarkedUs,
+            )
+        }
+    }
+
+    /** One peer's live presence, or `null` if no beacon ever arrived from them. */
+    fun peerPresenceTyped(npub: String): PresenceInfo? = rethrowing("Presence") {
+        ffi.peerPresence(npub)?.let {
+            PresenceInfo(
+                peer = it.peer,
+                online = it.online,
+                lastSeenAt = it.lastSeenAt.toLong(),
+                peerMarkedUs = it.peerMarkedUs,
+            )
+        }
+    }
+
+    /**
+     * Announce this device's presence to every comrade, returning how many
+     * beacons a relay accepted. The native side already announces on unlock
+     * and heartbeats every few minutes; the shell calls this when the app
+     * comes back to the foreground so a comrade's view of us is fresh the
+     * moment the user picks the phone up. Never throws — presence is a
+     * courtesy, not a call worth failing a screen over.
+     */
+    fun announcePresenceTyped(online: Boolean): Long = runBlocking { ffi.announcePresence(online) }.toLong()
 
     // ── Journal (strictly local) ──────────────────────────────────────────────
 
@@ -643,6 +731,10 @@ class EventBus internal constructor() {
         is BridgeEvent.LedgerUpdated -> Placement.Coalesced("ledger")
         is BridgeEvent.PeerProfileUpdated -> Placement.Coalesced("profile:${event.peer}")
         is BridgeEvent.MessageStatus -> Placement.Coalesced("receipt:${event.peer}")
+        // Presence per peer: only the newest matters, and coalescing is what
+        // makes an online-then-offline flap resolve to one correct dot (and
+        // no stale "they're online" notification) rather than two events.
+        is BridgeEvent.ComradePresence -> Placement.Coalesced("presence:${event.peer}")
         // DMs, media, message requests, call signals (offer/answer/ICE/hangup).
         else -> Placement.Critical
     }

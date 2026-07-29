@@ -275,3 +275,55 @@ val MicIcon: ImageVector = materialIcon(name = "Filled.Mic") {
         close()
     }
 }
+
+/**
+ * Material "star" (filled) — a chosen comrade (see [ComradesScreen]).
+ *
+ * Defined here rather than taken from `Icons.Filled`, like every other
+ * feature glyph in this file, so the app never depends on which subset of
+ * Material icons the core artifact happens to ship.
+ */
+val StarIcon: ImageVector = materialIcon(name = "Filled.Star") {
+    materialPath {
+        moveTo(12.0f, 17.27f)
+        lineTo(18.18f, 21.0f)
+        lineTo(16.54f, 13.97f)
+        lineTo(22.0f, 9.24f)
+        lineTo(14.81f, 8.63f)
+        lineTo(12.0f, 2.0f)
+        lineTo(9.19f, 8.63f)
+        lineTo(2.0f, 9.24f)
+        lineTo(7.46f, 13.97f)
+        lineTo(5.82f, 21.0f)
+        close()
+    }
+}
+
+/** Material "star_outline" — not (yet) a comrade; the off state of [StarIcon]. */
+val StarOutlineIcon: ImageVector = materialIcon(name = "Filled.StarOutline") {
+    materialPath {
+        moveTo(22.0f, 9.24f)
+        lineTo(14.81f, 8.62f)
+        lineTo(12.0f, 2.0f)
+        lineTo(9.19f, 8.63f)
+        lineTo(2.0f, 9.24f)
+        lineTo(7.46f, 13.97f)
+        lineTo(5.82f, 21.0f)
+        lineTo(12.0f, 17.27f)
+        lineTo(18.18f, 21.0f)
+        lineTo(16.55f, 13.97f)
+        close()
+        // The inner cut-out, wound the other way so it renders as a hole.
+        moveTo(12.0f, 15.4f)
+        lineTo(8.24f, 17.67f)
+        lineTo(9.24f, 13.39f)
+        lineTo(5.92f, 10.51f)
+        lineTo(10.3f, 10.13f)
+        lineTo(12.0f, 6.1f)
+        lineTo(13.71f, 10.14f)
+        lineTo(18.09f, 10.52f)
+        lineTo(14.77f, 13.4f)
+        lineTo(15.77f, 17.68f)
+        close()
+    }
+}
