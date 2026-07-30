@@ -25,6 +25,7 @@ import '../data/comrade_repository.dart';
 import '../data/models.dart';
 import '../state/providers.dart';
 import '../widgets/app_chrome.dart';
+import '../widgets/secure_screen.dart';
 
 class OnboardingScreen extends ConsumerStatefulWidget {
   const OnboardingScreen({required this.vaultExists, super.key});
@@ -141,119 +142,127 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             ? 'Private messaging without middlemen.'
             : 'Welcome back.';
 
+    // `SecureScreen` blocks screenshots while — and only while — the passphrase
+    // is revealed. It is the one place in the app where something genuinely
+    // secret is on screen; obscured, the field is dots, and there is nothing to
+    // capture. Wrapping the body rather than the Scaffold keeps the widget tree
+    // stable across a reveal toggle, so nothing typed is lost.
     return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 48),
-          child: ConstrainedBox(
-            // The desktop `.vault-card` is `min(380px, 90vw)`; on a phone the
-            // same constraint simply never binds.
-            constraints: const BoxConstraints(maxWidth: 380),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                Text(
-                  '⬢',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.displaySmall
-                      ?.copyWith(color: theme.colorScheme.primary),
-                ),
-                Text(
-                  'Comrade',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.headlineMedium
-                      ?.copyWith(fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  subtitle,
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.bodyMedium
-                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                ),
-                const SizedBox(height: 24),
-                if (_creating || _claimOnly) ...<Widget>[
-                  TextField(
-                    key: const Key('onboarding-username'),
-                    controller: _username,
-                    enabled: !_busy,
-                    decoration: const InputDecoration(
-                      labelText: 'Username',
-                      prefixText: '@',
-                    ),
-                  ),
-                  const SizedBox(height: 8),
+      body: SecureScreen(
+        secure: _reveal,
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 48),
+            child: ConstrainedBox(
+              // The desktop `.vault-card` is `min(380px, 90vw)`; on a phone the
+              // same constraint simply never binds.
+              constraints: const BoxConstraints(maxWidth: 380),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
                   Text(
-                    'Your public name, so people can find you. Your real '
-                    'identity is a cryptographic key created on this device — '
-                    'contacts are always pinned to the key, so a name-alike '
-                    'can never impersonate you.',
-                    style: theme.textTheme.bodySmall
+                    '⬢',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.displaySmall
+                        ?.copyWith(color: theme.colorScheme.primary),
+                  ),
+                  Text(
+                    'Comrade',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.headlineMedium
+                        ?.copyWith(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyMedium
                         ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                   ),
-                  const SizedBox(height: 12),
-                ],
-                if (!_claimOnly) ...<Widget>[
-                  TextField(
-                    key: const Key('onboarding-passcode'),
-                    controller: _passcode,
-                    enabled: !_busy,
-                    obscureText: !_reveal,
-                    onSubmitted: (_) => _submit(),
-                    decoration: InputDecoration(
-                      labelText: _creating ? 'Passcode' : 'Your passcode',
-                      suffixIcon: IconButton(
-                        onPressed: () => setState(() => _reveal = !_reveal),
-                        tooltip: 'Show or hide passphrase',
-                        icon: Icon(
-                          _reveal ? Icons.visibility_off : Icons.visibility,
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (_creating) ...<Widget>[
-                    const SizedBox(height: 12),
+                  const SizedBox(height: 24),
+                  if (_creating || _claimOnly) ...<Widget>[
                     TextField(
-                      key: const Key('onboarding-confirm'),
-                      controller: _confirm,
+                      key: const Key('onboarding-username'),
+                      controller: _username,
                       enabled: !_busy,
-                      obscureText: !_reveal,
-                      onSubmitted: (_) => _submit(),
-                      decoration:
-                          const InputDecoration(labelText: 'Confirm passcode'),
+                      decoration: const InputDecoration(
+                        labelText: 'Username',
+                        prefixText: '@',
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'The passcode encrypts everything stored on this device. '
-                      'It never leaves the device and cannot be recovered — '
-                      'pick something strong and memorable.',
+                      'Your public name, so people can find you. Your real '
+                      'identity is a cryptographic key created on this device — '
+                      'contacts are always pinned to the key, so a name-alike '
+                      'can never impersonate you.',
                       style: theme.textTheme.bodySmall
                           ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                     ),
+                    const SizedBox(height: 12),
                   ],
+                  if (!_claimOnly) ...<Widget>[
+                    TextField(
+                      key: const Key('onboarding-passcode'),
+                      controller: _passcode,
+                      enabled: !_busy,
+                      obscureText: !_reveal,
+                      onSubmitted: (_) => _submit(),
+                      decoration: InputDecoration(
+                        labelText: _creating ? 'Passcode' : 'Your passcode',
+                        suffixIcon: IconButton(
+                          onPressed: () => setState(() => _reveal = !_reveal),
+                          tooltip: 'Show or hide passphrase',
+                          icon: Icon(
+                            _reveal ? Icons.visibility_off : Icons.visibility,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (_creating) ...<Widget>[
+                      const SizedBox(height: 12),
+                      TextField(
+                        key: const Key('onboarding-confirm'),
+                        controller: _confirm,
+                        enabled: !_busy,
+                        obscureText: !_reveal,
+                        onSubmitted: (_) => _submit(),
+                        decoration: const InputDecoration(
+                            labelText: 'Confirm passcode'),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'The passcode encrypts everything stored on this device. '
+                        'It never leaves the device and cannot be recovered — '
+                        'pick something strong and memorable.',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ],
+                  if (_error != null)
+                    Padding(
+                      key: const Key('onboarding-error'),
+                      padding: const EdgeInsets.only(top: 8),
+                      child: ErrorText(_error),
+                    ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    height: 52,
+                    child: BusyButton(
+                      key: const Key('onboarding-submit'),
+                      busy: _busy,
+                      expand: true,
+                      onPressed: _submit,
+                      label: _claimOnly
+                          ? 'Claim username'
+                          : _creating
+                              ? 'Create my identity'
+                              : 'Unlock',
+                    ),
+                  ),
                 ],
-                if (_error != null)
-                  Padding(
-                    key: const Key('onboarding-error'),
-                    padding: const EdgeInsets.only(top: 8),
-                    child: ErrorText(_error),
-                  ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  height: 52,
-                  child: BusyButton(
-                    key: const Key('onboarding-submit'),
-                    busy: _busy,
-                    expand: true,
-                    onPressed: _submit,
-                    label: _claimOnly
-                        ? 'Claim username'
-                        : _creating
-                            ? 'Create my identity'
-                            : 'Unlock',
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         ),

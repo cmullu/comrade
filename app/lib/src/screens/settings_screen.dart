@@ -46,6 +46,7 @@ class SettingsScreen extends ConsumerWidget {
           const SizedBox(height: 12),
           const _BackgroundConnectivityCard(),
           const SizedBox(height: 12),
+          const _ScreenshotCard(),
           const _TurnRelayCard(),
           const SizedBox(height: 12),
           const _VaultLockCard(),
@@ -343,6 +344,80 @@ class _BackgroundConnectivityCard extends ConsumerWidget {
                 ref.read(backgroundConnectivityProvider.notifier).set(v),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Screenshots: allowed by default, blockable by the user.
+///
+/// The Compose app set `FLAG_SECURE` on its whole window and never cleared it,
+/// so nothing in the app could be screenshotted — chats, journal, feed, settings
+/// — to protect key material that is not on any of those screens (what is shown
+/// is an npub, which is public). That is now the user's decision instead of a
+/// blanket default, and the copy says plainly what it can and cannot do: it
+/// stops the OS screenshotting, it cannot stop a camera pointed at the screen.
+///
+/// The whole card is absent where the platform has no equivalent — the settings
+/// screen's own "no fake switches" rule.
+class _ScreenshotCard extends ConsumerWidget {
+  const _ScreenshotCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ScreenshotPolicy? policy = ref.watch(screenshotPolicyProvider).value;
+    if (policy == null || !policy.supported) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: SectionCard(
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(
+                    'Block screenshots',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Off by default: screenshots and screen recording work '
+                    'everywhere in Comrade. Turn this on and the system refuses '
+                    'both, and the app is hidden from the recents preview. It '
+                    'cannot stop a photo of your screen, and it applies to your '
+                    'device only — never to the person you are talking to.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
+                  const SizedBox(height: 4),
+                  // Said out loud because the card above it (Appearance) has to
+                  // admit the opposite: unlike every other client preference,
+                  // this one survives a restart. It has to — the window flag is
+                  // set before the first frame, long before there is a vault to
+                  // read a setting out of — so it lives on the platform side and
+                  // is shared with the Compose app.
+                  Text(
+                    'Remembered across restarts, and shared with the older '
+                    'Android app on the same device.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Switch(
+              key: const Key('settings-block-screenshots'),
+              value: policy.blocked,
+              onChanged: (bool v) =>
+                  ref.read(screenshotPolicyProvider.notifier).setBlocked(v),
+            ),
+          ],
+        ),
       ),
     );
   }

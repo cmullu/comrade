@@ -101,6 +101,10 @@
     <string name="settings_background_connectivity_title">Stay connected in the background</string>
     <string name="settings_background_connectivity_summary">Keep receiving messages and calls while Comrade is unlocked but not on screen. Shows a low-priority notification while active. With this off, messages and calls arrive only while Comrade is open — nothing is lost, but you won\'t be notified until you come back.</string>
 
+    <!-- Screenshots (FLAG_SECURE). Off by default: see ScreenSecurity.kt. -->
+    <string name="settings_block_screenshots_title">Block screenshots</string>
+    <string name="settings_block_screenshots_summary">Off by default: screenshots and screen recording work everywhere in Comrade. Turn this on and the system refuses both, and the app is hidden from the recents preview. It cannot stop a photo of your screen, and it applies to your device only — never to the person you are talking to.</string>
+
     <!-- Vault lock -->
     <string name="settings_lock_vault_title">Lock vault now</string>
     <string name="settings_lock_vault_summary">Drops the decrypted key from memory immediately. You’ll need your passphrase to unlock again.</string>

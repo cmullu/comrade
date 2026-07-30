@@ -34,6 +34,16 @@ internal object ChannelNames {
 
     const val RECORDER = "mullu.comrade/recorder"
 
+    /** Attachments: pick, capture, play in memory, hand to another app. */
+    const val MEDIA = "mullu.comrade/media"
+
+    /**
+     * `FLAG_SECURE` — a *window* concern like [PIP], not a media one. Screenshots
+     * are allowed by default; this carries the user's opt-in block and any
+     * screen-scoped hold. See `ScreenSecurityChannel`.
+     */
+    const val SCREEN = "mullu.comrade/screen"
+
     const val SYSTEM = "mullu.comrade/system"
 }
 

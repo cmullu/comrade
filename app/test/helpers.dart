@@ -21,18 +21,23 @@ Future<FakeComradeRepository> unlockedFake({bool seed = true}) async {
 List<Override> fakeOverrides(
   ComradeRepository repo, {
   Map<String, Object>? prefs,
+  List<Override> extra = const <Override>[],
 }) =>
     <Override>[
       comradeRepositoryProvider.overrideWithValue(repo),
       appPreferencesProvider.overrideWithValue(InMemoryPreferences(prefs)),
+      // Platform seams (pickers, capture, playback, window security) come last
+      // so a test can replace one the defaults above would otherwise pin.
+      ...extra,
     ];
 
 ProviderContainer testContainer(
   ComradeRepository repo, {
   Map<String, Object>? prefs,
+  List<Override> extra = const <Override>[],
 }) {
   final ProviderContainer container = ProviderContainer(
-    overrides: fakeOverrides(repo, prefs: prefs),
+    overrides: fakeOverrides(repo, prefs: prefs, extra: extra),
   );
   addTearDown(container.dispose);
   return container;
@@ -43,10 +48,11 @@ Widget harness(
   Widget child, {
   required ComradeRepository repo,
   Map<String, Object>? prefs,
+  List<Override> extra = const <Override>[],
   Brightness brightness = Brightness.dark,
 }) =>
     ProviderScope(
-      overrides: fakeOverrides(repo, prefs: prefs),
+      overrides: fakeOverrides(repo, prefs: prefs, extra: extra),
       child: MaterialApp(
         theme: brightness == Brightness.dark
             ? ComradeTheme.dark()

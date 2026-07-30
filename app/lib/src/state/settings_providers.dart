@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/app_preferences.dart';
 import '../data/models.dart';
+import '../platform/screen_channel.dart';
 import 'providers.dart';
 
 // ── Appearance (SCREEN_INVENTORY D26) ───────────────────────────────────────
@@ -122,6 +123,66 @@ final NotifierProvider<BackgroundConnectivityController, bool>
     backgroundConnectivityProvider =
     NotifierProvider<BackgroundConnectivityController, bool>(
         BackgroundConnectivityController.new);
+
+// ── Screenshots (FLAG_SECURE) ───────────────────────────────────────────────
+
+/// The native window-security channel. Overridden at the composition root so
+/// tests (and any platform without a native half) can substitute a fake.
+final Provider<ScreenSecurityChannel> screenSecurityProvider =
+    Provider<ScreenSecurityChannel>((Ref ref) => ScreenSecurityChannel());
+
+/// Screenshot policy: whether this platform can block them at all, and whether
+/// the user has asked it to.
+class ScreenshotPolicy {
+  const ScreenshotPolicy({required this.supported, required this.blocked});
+
+  /// False on a platform with no `FLAG_SECURE` equivalent — the Settings card
+  /// hides itself rather than showing a switch that does nothing.
+  final bool supported;
+
+  /// True when screenshots and screen recording are blocked app-wide.
+  final bool blocked;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ScreenshotPolicy &&
+      other.supported == supported &&
+      other.blocked == blocked;
+
+  @override
+  int get hashCode => Object.hash(supported, blocked);
+}
+
+/// **Screenshots are allowed by default**, which is a deliberate reversal of the
+/// Compose app's unconditional `FLAG_SECURE` (see `ScreenSecurityChannel.kt` for
+/// the reasoning: it blocked every screen in the app to protect key material no
+/// screen shows, and could never stop someone photographing the display).
+///
+/// Blocking them is now the user's call, stored natively — it has to be readable
+/// and applicable before the vault is unlocked, so it cannot live in the
+/// encrypted store.
+class ScreenshotPolicyController extends AsyncNotifier<ScreenshotPolicy> {
+  @override
+  Future<ScreenshotPolicy> build() async {
+    final ScreenSecurityChannel channel = ref.watch(screenSecurityProvider);
+    final bool blocked = await channel.isBlocked();
+    return ScreenshotPolicy(supported: channel.supported, blocked: blocked);
+  }
+
+  Future<void> setBlocked(bool blocked) async {
+    final ScreenSecurityChannel channel = ref.read(screenSecurityProvider);
+    // Report what the platform actually stored, never what was asked for.
+    final bool stored = await channel.setBlocked(blocked: blocked);
+    state = AsyncData<ScreenshotPolicy>(
+      ScreenshotPolicy(supported: channel.supported, blocked: stored),
+    );
+  }
+}
+
+final AsyncNotifierProvider<ScreenshotPolicyController, ScreenshotPolicy>
+    screenshotPolicyProvider =
+    AsyncNotifierProvider<ScreenshotPolicyController, ScreenshotPolicy>(
+        ScreenshotPolicyController.new);
 
 // ── Couple sandbox (Sakha / Sakhi) ──────────────────────────────────────────
 

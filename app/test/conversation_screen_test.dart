@@ -137,6 +137,11 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byKey(const Key('dm-input')), 'On my way');
+      // A frame between typing and tapping, because Send is disabled while
+      // there is nothing to send: the composer's action button follows the
+      // draft (`MessageComposer._actionButton`), so the state it is in is a
+      // rendered fact, not an assumption.
+      await tester.pump();
       await tester.tap(find.byKey(const Key('dm-send')));
       await tester.pumpAndSettle();
 

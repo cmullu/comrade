@@ -125,12 +125,12 @@ import uniffi.comrade_core.CallMediaKind
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Screens can display key material — block screenshots and screen
-        // recording for the whole activity (AUDIT S5 / M1-6).
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE,
-        )
+        // Screenshots and screen recording work unless the user turned them off
+        // in Settings. Applied before the first frame, because a window that
+        // starts unprotected has already been captured by the recents
+        // thumbnail. See [ScreenSecurity] for why the unconditional FLAG_SECURE
+        // this used to set is gone.
+        ScreenSecurity.applyPreference(this)
         // A tapped "model is ready" notification asks for a specific tab; park
         // the request so the shell honours it once it exists (the vault may
         // still need unlocking first).

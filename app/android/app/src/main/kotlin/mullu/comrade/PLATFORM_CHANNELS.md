@@ -115,10 +115,16 @@ outside those two files spells a channel name as a literal.
 | Relay connection (`RelayConnectionService`, `ChatEventRouter`, `MeshStatusMonitor`) | `mullu.comrade/relay` | `mullu.comrade/relay/state` | `RelayConnectionChannel` |
 | Model downloads (`ModelDownloadService`) | `mullu.comrade/models` | `mullu.comrade/models/state` | `ModelDownloadChannel` |
 | Voice notes (`VoiceRecorder`) | `mullu.comrade/recorder` | — | `VoiceRecorderChannel` |
+| Attachments (pick · capture · play · open out) | `mullu.comrade/media` | — | `MediaChannel` |
+| Window security (`FLAG_SECURE`) | `mullu.comrade/screen` | — | `ScreenSecurityChannel` |
 | Notifications + runtime permissions (`Notifier`) | `mullu.comrade/system` | — | `SystemChannel` |
 
-All seven are constructed by `ComradePlugin` (`FlutterPlugin`, `ActivityAware`) and
+All nine are constructed by `ComradePlugin` (`FlutterPlugin`, `ActivityAware`) and
 registered from `MainActivity.configureFlutterEngine`.
+
+Two **bridges** are shared rather than per-channel, because their request codes must not
+collide: `PermissionBridge` (runtime permissions) and `ActivityResultBridge`
+(`startActivityForResult`, used by the picker and the camera).
 
 ---
 
@@ -671,6 +677,66 @@ heap with no deletion discipline at all.
 
 `VoiceRecorder` is *not thread-safe* by design (one gesture drives it), so the handler
 holds a single instance and serialises every method onto the main thread.
+
+### `mullu.comrade/media`
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `capabilities` | — | `{pick, capturePhoto, captureVideo, recordVoice, playAudio, openExternally}` — all `bool` |
+| `pick` | — | `{name, mimeType, bytes}` or `null` (cancelled) |
+| `capturePhoto` | — | `{name, mimeType, bytes}` or `null` (backed out) |
+| `captureVideo` | — | `{name, mimeType, bytes}` or `null` |
+| `toggleAudio` | `{eventId, bytes}` | `bool` — playing *after* the call |
+| `stopAudio` | — | `null` |
+| `openExternally` | `{name, mimeType, bytes}` | `bool` — false when nothing can open it |
+| `purge` | — | `null` |
+
+**Bytes, not paths — the opposite of `recorder` above, for the same reason.** The recorder
+produces a plaintext *file* someone must delete; there is no file here. A picked document
+belongs to another app, and a *received* attachment is decrypted into
+`DecryptedMediaCache` in the Dart heap and served onward from memory:
+
+* audio plays through a `MediaDataSource` over the byte array — no temp file;
+* anything handed to another app goes through `media/InMemoryMediaProvider`, which serves a
+  **seekable** descriptor from memory via `StorageManager.openProxyFileDescriptor`
+  (API 26+, matching `minSdk`) rather than a pipe, because PDF readers and video players
+  seek;
+* `purge` drops the audio buffer and every staged blob, called with the Dart-side cache
+  clear when the app backgrounds or the vault locks.
+
+The Compose app could not do this: `MediaPlayer`/`VideoView`/`ACTION_VIEW` all needed a
+path, so it wrote decrypted media to `cacheDir/media` and paid for it with an explicit
+purge that a missed call site would have turned into plaintext left on disk (AUDIT S-4).
+
+The one unavoidable file is a **camera capture** — a camera app writes full-resolution
+output to `EXTRA_OUTPUT`, and the alternative (the thumbnail in the result extras) is a few
+hundred pixels wide. It is staged in `cacheDir/media`, read once, and deleted in a
+`finally`.
+
+`capabilities` is queried once at startup by the composition root, and the composer gates
+its controls on the answer: a device with no camera app never shows a camera button. The
+10 MB cap (`comrade_core::media::MAX_MEDIA_BYTES`) is enforced here as well as in Rust, so
+an oversized pick is refused with its real size before its bytes are copied anywhere.
+
+### `mullu.comrade/screen`
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `isBlocked` | — | `bool` — the user's stored preference |
+| `setBlocked` | `{blocked}` | `bool` — what was actually stored |
+| `setSecureWhileVisible` | `{secure}` | `bool` — whether the window is now secure |
+
+**Screenshots are allowed by default.** The Compose app set `FLAG_SECURE` on its whole
+Activity and never cleared it, so nothing in the app could be screenshotted or recorded, to
+protect key material no screen renders (what is shown is an npub, which is public). That is
+now a user setting — stored by `mullu.comrade.ScreenSecurity`, shared with the Compose
+frontend so both frontends read one key, and outside the encrypted store because the flag
+must be right for the first frame, before any unlock.
+
+`setSecureWhileVisible` is the screen-scoped alternative, reference counted natively and
+taken by Dart's `SecureScreen` while a surface showing something genuinely secret is
+mounted. Nothing ships one today; it exists so that adding one is a wrap rather than a
+reason to reach for the app-wide flag again.
 
 ### `mullu.comrade/system`
 

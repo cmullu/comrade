@@ -1,5 +1,8 @@
 gradle-wrapper.jar
 /.gradle
+# Kotlin build-session scratch (`.kotlin/sessions/*.salive`) — written by the
+# Kotlin Gradle plugin during a build, never source.
+/.kotlin/
 /captures/
 /gradlew
 /gradlew.bat

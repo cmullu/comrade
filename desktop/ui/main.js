@@ -207,6 +207,49 @@
     return new Blob([arr], { type: mime || "application/octet-stream" });
   }
 
+  // ── Decrypted-media object URLs, bounded and revocable ────────────────────
+  //
+  // An object URL pins its Blob — the *decrypted* attachment — in memory until
+  // it is revoked, and this UI never revoked one: every attachment viewed in a
+  // session stayed in the webview's heap for the life of the process, and
+  // re-unlocking as a different identity left the previous one's plaintext
+  // behind. Android bounded the same cache at 24 bitmaps and purged it on
+  // backgrounding; this is the desktop equivalent.
+  //
+  // The eviction policy lives in media_cache.mjs (with node tests) for the same
+  // reason the call decisions do: the rule is testable, the DOM glue is not.
+  // Loaded through the same cached dynamic import as call_decisions.mjs — see
+  // its note above for why this file cannot use a static `import`.
+  const MEDIA_URL_CAPACITY = 8;
+  const mediaCacheReady = import("./media_cache.mjs").then(
+    ({ createBlobUrlCache }) =>
+      createBlobUrlCache({
+        create: (blob) => URL.createObjectURL(blob),
+        revoke: (url) => URL.revokeObjectURL(url),
+        capacity: MEDIA_URL_CAPACITY,
+        // Forget the bubble's own reference, so a re-view re-fetches instead of
+        // rendering a dead `blob:` link.
+        onEvict: (eventId) => {
+          for (const msgs of state.dms.values()) {
+            for (const m of msgs) {
+              if (m.media && m.media.eventId === eventId) m.media.objectUrl = null;
+            }
+          }
+        },
+      }),
+  );
+
+  /** Mint (or reuse) the object URL for one attachment. */
+  async function mediaUrlFor(eventId, blob) {
+    return (await mediaCacheReady).get(eventId, blob);
+  }
+
+  /** Drop every decrypted attachment this window is holding — the deliberate
+   *  version of "the app should not be sitting on plaintext". */
+  async function revokeAllMediaUrls() {
+    (await mediaCacheReady).clear();
+  }
+
   function renderMediaEl(mime, url) {
     if (mime.startsWith("image/")) return el("img", { class: "media-img", src: url, alt: "media" });
     if (mime.startsWith("audio/")) return el("audio", { controls: "", src: url });
@@ -286,6 +329,9 @@
       state.identity = id;
       $("#identity-npub").textContent = shortNpub(id.npub);
       $("#passphrase").value = "";
+      // A fresh unlock may be a different identity in the same window: nothing
+      // decrypted for the previous one may still be renderable.
+      await revokeAllMediaUrls();
       showToast(`Vault unlocked · ${shortNpub(id.npub)}`, "success");
 
       const ws = await safeInvoke("current_workspace", undefined, {
@@ -1986,7 +2032,12 @@
           });
           const mime = out.mime_type || m.media.mime;
           if (!m.media.objectUrl) {
-            m.media.objectUrl = URL.createObjectURL(base64ToBlob(out.base64, mime));
+            // Through the bounded cache: an object URL pins the decrypted blob
+            // until it is revoked, so they cannot simply accumulate.
+            m.media.objectUrl = await mediaUrlFor(
+              m.media.eventId,
+              base64ToBlob(out.base64, mime),
+            );
           }
           // Re-render from state (not replaceChild on a possibly-detached node)
           // so the inline media lands in the live DOM for whichever screen shows it.
