@@ -177,7 +177,10 @@ Future<void> blockConversation({required String peer}) =>
     RustLib.instance.api.crateApiBlockConversation(peer: peer);
 
 /// Async for the same reason as [`accept_request`].
-Future<void> markConversationRead({required String peer}) =>
+///
+/// Returns the read position the thread had *before* this call (unix seconds,
+/// 0 = never opened), so the UI can open at the first unread message.
+Future<BigInt> markConversationRead({required String peer}) =>
     RustLib.instance.api.crateApiMarkConversationRead(peer: peer);
 
 Future<ProfileDto> profile() => RustLib.instance.api.crateApiProfile();

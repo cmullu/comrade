@@ -110,4 +110,93 @@ void main() {
       expect(clockTime(noon + 12 * 3600 + 1800, utc: true), '00:30');
     });
   });
+
+  // Mirrors the "Opening position" block in `ChatThreadTest.kt`.
+  group('opening position (Telegram first-unread rule)', () {
+    test('opens at the first message newer than the read position', () {
+      expect(
+        firstUnreadIndex(
+          createdAt: <int>[100, 200, 300, 400],
+          outgoing: <bool>[false, false, false, false],
+          lastReadAt: 200,
+        ),
+        2,
+      );
+    });
+
+    test('a first visit opens at the newest message', () {
+      // No stored position: there is no honest "where you left off", and the
+      // top of a long history is a worse guess than the bottom.
+      expect(
+        firstUnreadIndex(
+          createdAt: <int>[100, 200],
+          outgoing: <bool>[false, false],
+          lastReadAt: 0,
+        ),
+        isNull,
+      );
+    });
+
+    test('a fully read thread opens at the newest message', () {
+      expect(
+        firstUnreadIndex(
+          createdAt: <int>[100, 200],
+          outgoing: <bool>[false, false],
+          lastReadAt: 200,
+        ),
+        isNull,
+      );
+      // A watermark past everything (clock skew between two devices) is still
+      // "nothing unread", not a bogus index.
+      expect(
+        firstUnreadIndex(
+          createdAt: <int>[100, 200],
+          outgoing: <bool>[false, false],
+          lastReadAt: 9999,
+        ),
+        isNull,
+      );
+    });
+
+    test('your own messages are never unread', () {
+      // Sending from another device must not make the thread claim unread mail.
+      expect(
+        firstUnreadIndex(
+          createdAt: <int>[100, 200, 300],
+          outgoing: <bool>[false, true, true],
+          lastReadAt: 100,
+        ),
+        isNull,
+      );
+    });
+
+    test('the divider lands on the first incoming message past your own', () {
+      expect(
+        firstUnreadIndex(
+          createdAt: <int>[100, 200, 300, 400],
+          outgoing: <bool>[false, true, false, false],
+          lastReadAt: 100,
+        ),
+        2,
+      );
+    });
+
+    test('an empty thread has nothing to open at', () {
+      expect(
+        firstUnreadIndex(
+          createdAt: <int>[],
+          outgoing: <bool>[],
+          lastReadAt: 100,
+        ),
+        isNull,
+      );
+    });
+
+    test('the divider renders only at the boundary', () {
+      expect(startsUnread(2, 2), isTrue);
+      expect(startsUnread(1, 2), isFalse);
+      expect(startsUnread(3, 2), isFalse);
+      expect(startsUnread(0, null), isFalse);
+    });
+  });
 }

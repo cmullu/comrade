@@ -59,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -70,6 +71,7 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import mullu.comrade.R
 import mullu.comrade.ComradeCore
 import mullu.comrade.Notifier
 import mullu.comrade.PresenceMonitor
@@ -430,12 +432,27 @@ private fun statusGlyph(status: String?): String = when (status) {
 private sealed interface ChatItem {
     val createdAt: Long
 
+    /** Whether *this device* sent it — your own messages are never "unread". */
+    val outgoing: Boolean
+
+    /**
+     * Stable list key. Media ids are namespaced so a media event id can never
+     * collide with a message id. Also used to remember the unread boundary by
+     * identity rather than by index, so a backfill of older history inserted
+     * above it cannot slide the divider onto the wrong message.
+     */
+    val key: String
+
     data class TextItem(val msg: ComradeCore.MessageInfo) : ChatItem {
         override val createdAt get() = msg.createdAt
+        override val outgoing get() = msg.outgoing
+        override val key get() = msg.id
     }
 
     data class MediaItem(val info: ComradeCore.MediaMessageInfo) : ChatItem {
         override val createdAt get() = info.createdAt
+        override val outgoing get() = info.outgoing
+        override val key get() = "media:${info.eventId}"
     }
 }
 
@@ -459,6 +476,12 @@ fun ConversationScreen(
     // Keyed on `peer` so switching conversations resets the scroll bookkeeping.
     var loadedOnce by remember(peer) { mutableStateOf(false) }
     var newMessagesBelow by remember(peer) { mutableStateOf(false) }
+    // The unread boundary for this visit, held by item key rather than index so
+    // a backfill of older history above it can't slide the divider onto the
+    // wrong message. Captured once on open and deliberately *not* recomputed as
+    // the watermark advances — Telegram leaves the line where you found it for
+    // the rest of the visit, which is what makes it useful to read down to.
+    var unreadBoundaryKey by remember(peer) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val context = LocalContext.current
@@ -498,33 +521,49 @@ fun ConversationScreen(
         )
         messages = msgs
         mediaItems = media
-        val last = msgs.size + media.size - 1
+        // The merged list this effect is about to scroll — recomputed here
+        // rather than read from `chatItems`, which is derived from the state
+        // set two lines up and so still holds the previous composition's value.
+        val merged = (msgs.map(ChatItem::TextItem) + media.map(ChatItem::MediaItem))
+            .sortedBy { it.createdAt }
+        val last = merged.size - 1
         when {
             last < 0 -> {}
             !loadedOnce -> {
-                listState.scrollToItem(last)
+                // One call both records that the thread is now read and reports
+                // where the reader had got to, so there is no window where the
+                // answer has already been overwritten.
+                val previous = withContext(Dispatchers.IO) {
+                    runCatching { ComradeCore.markConversationReadTyped(peer) }.getOrDefault(0L)
+                }
+                val firstUnread = firstUnreadIndex(
+                    createdAt = merged.map { it.createdAt },
+                    outgoing = merged.map { it.outgoing },
+                    lastReadAt = previous,
+                )
+                unreadBoundaryKey = firstUnread?.let { merged[it].key }
+                // Open where they left off, not at the newest message.
+                listState.scrollToItem(firstUnread ?: last)
                 loadedOnce = true
             }
-            grew && wasNearBottom -> listState.scrollToItem(last)
-            grew -> newMessagesBelow = true
-        }
-        if (grew) {
-            // Receipts for messages that arrive while the thread is on
-            // screen — the mark-read on open below only covers backlog.
-            withContext(Dispatchers.IO) {
-                runCatching { ComradeCore.markConversationReadTyped(peer) }
+            grew && wasNearBottom -> {
+                listState.scrollToItem(last)
+                // They can see these, so they are read — receipt and watermark.
+                withContext(Dispatchers.IO) {
+                    runCatching { ComradeCore.markConversationReadTyped(peer) }
+                }
             }
+            // Scrolled up in history: deliberately *not* marked read. They have
+            // not seen these, so neither the peer's receipt nor the watermark
+            // should claim otherwise — the jump-to-latest button is the signal,
+            // and marking read here would cost them the divider next visit.
+            grew -> newMessagesBelow = true
         }
     }
 
-    // Opening the thread marks it read (sends a read receipt) and clears any
-    // pending notification for this peer.
-    LaunchedEffect(peer) {
-        Notifier.clearForPeer(context, peer)
-        withContext(Dispatchers.IO) {
-            runCatching { ComradeCore.markConversationReadTyped(peer) }
-        }
-    }
+    // Clear any pending notification for this peer. The read receipt itself
+    // rides along with the load effect above, which needs its return value.
+    LaunchedEffect(peer) { Notifier.clearForPeer(context, peer) }
 
     fun send() {
         val text = draft.trim()
@@ -623,6 +662,15 @@ fun ConversationScreen(
         }
     }
     LaunchedEffect(atBottom) { if (atBottom) newMessagesBelow = false }
+    // Reaching the bottom is the moment anything left unread has actually been
+    // seen — the load effect deliberately doesn't claim that while scrolled up.
+    LaunchedEffect(atBottom, chatItems.size) {
+        if (loadedOnce && atBottom && chatItems.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                runCatching { ComradeCore.markConversationReadTyped(peer) }
+            }
+        }
+    }
     // Day headers compare against "now" once per data change; good enough —
     // a stale "Today" flips on the next message either way.
     val nowSecs = remember(chatItems) { System.currentTimeMillis() / 1000 }
@@ -652,20 +700,18 @@ fun ConversationScreen(
                 }
                 itemsIndexed(
                     chatItems,
-                    key = { _, item ->
-                        when (item) {
-                            is ChatItem.TextItem -> item.msg.id
-                            is ChatItem.MediaItem -> "media:${item.info.eventId}"
-                        }
-                    },
+                    key = { _, item -> item.key },
                 ) { index, item ->
-                    // The separator lives inside the message item (not as its own
-                    // list item), so item indices keep matching `chatItems` and the
-                    // scroll-to-latest arithmetic above stays honest.
+                    // The separators live inside the message item (not as their
+                    // own list items), so item indices keep matching `chatItems`
+                    // and the scroll arithmetic above stays honest.
                     val prevAt = chatItems.getOrNull(index - 1)?.createdAt
                     Column(Modifier.fillMaxWidth()) {
                         if (startsNewDay(prevAt, item.createdAt)) {
                             DaySeparator(dayLabel(item.createdAt, nowSecs))
+                        }
+                        if (item.key == unreadBoundaryKey) {
+                            UnreadSeparator(stringResource(R.string.unread_messages))
                         }
                         when (item) {
                             is ChatItem.MediaItem -> Row(
@@ -977,6 +1023,38 @@ private fun DaySeparator(label: String) {
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
             )
         }
+    }
+}
+
+/**
+ * "Unread messages" line marking where the reader left off.
+ *
+ * A full-width rule rather than a day-style pill: it is a boundary through the
+ * thread, not a label on one message, and it has to be findable at a glance
+ * after scrolling away from it.
+ */
+@Composable
+private fun UnreadSeparator(label: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+        )
     }
 }
 

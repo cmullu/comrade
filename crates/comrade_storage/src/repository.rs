@@ -220,6 +220,17 @@ pub struct ConversationMeta {
     /// implicitly when we started the conversation).
     #[serde(default)]
     pub profile_shared: bool,
+    /// `created_at` (unix seconds) of the newest message the user has actually
+    /// seen in this thread; 0 when they have never opened it.
+    ///
+    /// Lives here rather than in a device preference because it is a property
+    /// of the conversation, not of the device: it belongs beside the gate state
+    /// in the encrypted store so every frontend — Android, desktop — opens the
+    /// thread in the same place. `#[serde(default)]` so vaults written before
+    /// this field existed still deserialize (as "never read", which is the
+    /// honest answer for them).
+    #[serde(default)]
+    pub last_read_at: u64,
     pub updated_at: u64,
 }
 
@@ -455,6 +466,60 @@ impl EncryptedStore {
     /// Remove a peer's conversation gate. Returns `true` if one existed.
     pub fn remove_conversation_meta(&self, peer_npub: &str) -> Result<bool, StorageError> {
         self.delete(CONVERSATIONS_TREE, peer_npub)
+    }
+
+    /// Record that the user has read this thread up to `seen_at`, and report
+    /// where they had got to *before* this call.
+    ///
+    /// Read-and-advance in one step so a caller can position the thread at the
+    /// first unread message without a read-then-write window in which the
+    /// answer it is about to rely on has already been overwritten.
+    ///
+    /// The advance is monotonic: a thread opened while scrolled up, or an
+    /// out-of-order delivery, must never drag the watermark backwards and
+    /// resurrect messages the user has already seen.
+    ///
+    /// A peer with no gate record yet (an ordinary conversation, never routed
+    /// through message requests) needs one created to hold the position;
+    /// `state_if_new` is the gate state to stamp on it. It is a parameter
+    /// rather than a literal here because the gate vocabulary belongs to the
+    /// caller — this crate owns the record's shape, not its state machine.
+    pub fn advance_read_position(
+        &self,
+        peer_npub: &str,
+        seen_at: u64,
+        now: u64,
+        state_if_new: &str,
+    ) -> Result<u64, StorageError> {
+        let existing = self.get_conversation_meta(peer_npub)?;
+        let previous = existing.as_ref().map(|m| m.last_read_at).unwrap_or(0);
+        if seen_at <= previous {
+            return Ok(previous);
+        }
+        let meta = match existing {
+            Some(m) => ConversationMeta {
+                last_read_at: seen_at,
+                updated_at: now,
+                ..m
+            },
+            None => ConversationMeta {
+                peer_npub: peer_npub.to_string(),
+                state: state_if_new.to_string(),
+                profile_shared: false,
+                last_read_at: seen_at,
+                updated_at: now,
+            },
+        };
+        self.set_conversation_meta(&meta)?;
+        Ok(previous)
+    }
+
+    /// A peer's read position without changing it (0 when never read).
+    pub fn read_position(&self, peer_npub: &str) -> Result<u64, StorageError> {
+        Ok(self
+            .get_conversation_meta(peer_npub)?
+            .map(|m| m.last_read_at)
+            .unwrap_or(0))
     }
 
     // Call log ----------------------------------------------------------------
@@ -1105,6 +1170,7 @@ mod tests {
             peer_npub: "npub1x".into(),
             state: "pending".into(),
             profile_shared: false,
+            last_read_at: 0,
             updated_at: 5,
         };
         s.set_conversation_meta(&meta).unwrap();
@@ -1114,6 +1180,7 @@ mod tests {
             peer_npub: "npub1x".into(),
             state: "accepted".into(),
             profile_shared: true,
+            last_read_at: 0,
             updated_at: 6,
         })
         .unwrap();
@@ -1123,6 +1190,98 @@ mod tests {
         assert_eq!(s.list_conversation_meta().unwrap().len(), 1);
         assert!(s.remove_conversation_meta("npub1x").unwrap());
         assert!(!s.remove_conversation_meta("npub1x").unwrap());
+    }
+
+    #[test]
+    fn read_position_starts_at_zero_and_reports_the_previous_value() {
+        let (_d, s) = store();
+        // Never opened.
+        assert_eq!(s.read_position("npub1x").unwrap(), 0);
+        // First open: nothing was read before, so the caller gets 0 and the
+        // UI knows not to draw a divider.
+        assert_eq!(
+            s.advance_read_position("npub1x", 100, 1, "accepted")
+                .unwrap(),
+            0
+        );
+        assert_eq!(s.read_position("npub1x").unwrap(), 100);
+        // Second open, later messages: the caller learns where they had been.
+        assert_eq!(
+            s.advance_read_position("npub1x", 300, 2, "accepted")
+                .unwrap(),
+            100
+        );
+        assert_eq!(s.read_position("npub1x").unwrap(), 300);
+    }
+
+    #[test]
+    fn read_position_never_moves_backwards() {
+        let (_d, s) = store();
+        s.advance_read_position("npub1x", 300, 1, "accepted")
+            .unwrap();
+        // An out-of-order delivery, or a thread re-opened while scrolled up,
+        // must not resurrect messages the user has already seen.
+        assert_eq!(
+            s.advance_read_position("npub1x", 100, 2, "accepted")
+                .unwrap(),
+            300
+        );
+        assert_eq!(s.read_position("npub1x").unwrap(), 300);
+        // Re-reading the same watermark is a no-op that still reports it.
+        assert_eq!(
+            s.advance_read_position("npub1x", 300, 3, "accepted")
+                .unwrap(),
+            300
+        );
+    }
+
+    #[test]
+    fn advancing_a_read_position_preserves_the_gate_state() {
+        let (_d, s) = store();
+        s.set_conversation_meta(&ConversationMeta {
+            peer_npub: "npub1x".into(),
+            state: "accepted".into(),
+            profile_shared: true,
+            last_read_at: 0,
+            updated_at: 1,
+        })
+        .unwrap();
+        s.advance_read_position("npub1x", 100, 2, "pending")
+            .unwrap();
+        let got = s.get_conversation_meta("npub1x").unwrap().unwrap();
+        // `state_if_new` must not touch an existing record — a peer whose
+        // handle we already shared must not be re-shared, and an accepted
+        // conversation must not slide back to pending.
+        assert_eq!(got.state, "accepted");
+        assert!(got.profile_shared);
+        assert_eq!(got.last_read_at, 100);
+        assert_eq!(got.updated_at, 2);
+    }
+
+    #[test]
+    fn advancing_a_read_position_creates_a_record_when_there_is_none() {
+        let (_d, s) = store();
+        s.advance_read_position("npub1new", 50, 9, "accepted")
+            .unwrap();
+        let got = s.get_conversation_meta("npub1new").unwrap().unwrap();
+        assert_eq!(got.state, "accepted");
+        assert!(!got.profile_shared);
+        assert_eq!(got.last_read_at, 50);
+    }
+
+    #[test]
+    fn a_meta_record_written_before_read_positions_existed_still_loads() {
+        let (_d, s) = store();
+        // Exactly the JSON an older build wrote: no `last_read_at` key at all.
+        // `#[serde(default)]` has to carry it, or every existing vault fails to
+        // open its chat list on upgrade.
+        let legacy =
+            br#"{"peer_npub":"npub1old","state":"accepted","profile_shared":true,"updated_at":7}"#;
+        s.put_bytes(CONVERSATIONS_TREE, "npub1old", legacy).unwrap();
+        let got = s.get_conversation_meta("npub1old").unwrap().unwrap();
+        assert_eq!(got.state, "accepted");
+        assert!(got.profile_shared);
+        assert_eq!(got.last_read_at, 0, "absent means never read");
     }
 
     #[test]

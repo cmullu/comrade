@@ -648,7 +648,10 @@ pub fn block_conversation(peer: String) -> Result<(), UiError> {
 }
 
 /// Async for the same reason as [`accept_request`].
-pub async fn mark_conversation_read(peer: String) -> Result<(), UiError> {
+///
+/// Returns the read position the thread had *before* this call (unix seconds,
+/// 0 = never opened), so the UI can open at the first unread message.
+pub async fn mark_conversation_read(peer: String) -> Result<u64, UiError> {
     runtime().read().await.mark_conversation_read(&peer)
 }
 

@@ -129,8 +129,15 @@ abstract interface class ComradeRepository {
     String? replyTo,
   });
 
-  /// Mark the thread read (sends read receipts).
-  Future<void> markConversationRead(String peer);
+  /// Mark the thread read (sends read receipts) and record how far the user has
+  /// now read, returning the position they had reached *before* this call —
+  /// `createdAt` of the newest message they had already seen, or 0 if this is
+  /// the first visit.
+  ///
+  /// One call rather than a getter plus a setter so there is no window in which
+  /// this very call has already overwritten the answer the caller is about to
+  /// position the thread on. See `firstUnreadIndex`.
+  Future<int> markConversationRead(String peer);
 
   Future<List<MessageRequestInfo>> messageRequests();
 
