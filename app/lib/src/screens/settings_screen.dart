@@ -392,6 +392,20 @@ class _ScreenshotCard extends ConsumerWidget {
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                   ),
+                  const SizedBox(height: 4),
+                  // Said out loud because the card above it (Appearance) has to
+                  // admit the opposite: unlike every other client preference,
+                  // this one survives a restart. It has to — the window flag is
+                  // set before the first frame, long before there is a vault to
+                  // read a setting out of — so it lives on the platform side and
+                  // is shared with the Compose app.
+                  Text(
+                    'Remembered across restarts, and shared with the older '
+                    'Android app on the same device.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                  ),
                 ],
               ),
             ),

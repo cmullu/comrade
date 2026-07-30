@@ -206,8 +206,12 @@ map 1:1 onto `ComradeCore.kt`'s methods and `commands.rs`'s commands.
 
 - **Cards**: profile (avatar · @handle · full key · Copy key · the
   "names repeat, keys don't" paragraph) → appearance (System · Light · Dark) →
-  background connectivity switch → TURN relay → lock vault → "In the lab" +
-  `core vX`.
+  background connectivity switch → block-screenshots switch → TURN relay → lock
+  vault → "In the lab" + `core vX`.
+- **The screenshots card is absent where the platform cannot honour it**, and it
+  is the one preference here that *does* survive a restart — it is stored
+  natively, because `FLAG_SECURE` has to be right before the first frame, long
+  before there is a vault to read a setting out of. See §5.8.
 - **Backend**: `setUsername`, `turnServerStatus`, `setTurnServer`,
   `testTurnConnectivity`, `lockVault`, `version`.
 - **Load-bearing detail — the TURN card is write-only** (AUDIT COMMS-02). The
