@@ -3622,6 +3622,12 @@ fn presence_display_name(
         .flatten()
         .and_then(|c| user_alias(&c.petname, peer_npub))
         .or_else(|| cached_peer_name(store, peer_npub))
+        // A peer's published handle is *their* string: a whitespace-only one
+        // would otherwise reach a frontend as "a name", and a notification
+        // titled " is online" helps nobody. `None` lets every frontend fall
+        // back to the key, which is always meaningful.
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// Apply one incoming [`PresenceBeacon`] from an accepted conversation:
@@ -5742,6 +5748,39 @@ mod tests {
             Err(UiError::Engine(_))
         ));
         assert!(matches!(rt.peer_presence("junk"), Err(UiError::Engine(_))));
+    }
+
+    #[tokio::test]
+    async fn a_presence_event_carries_a_usable_name_or_none_at_all() {
+        // The name rides the event so a frontend can title a notification
+        // without a store round-trip — which makes a blank one worse than
+        // useless ("  is online"). Alias wins, a published handle is next,
+        // and anything whitespace-only is no name at all.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        let store = rt.ui.store_arc().unwrap();
+
+        assert_eq!(presence_display_name(&store, &peer), None, "no contact yet");
+
+        rt.set_comrade(&peer, true).unwrap();
+        assert_eq!(
+            presence_display_name(&store, &peer),
+            None,
+            "choosing someone doesn't invent a name for them"
+        );
+
+        store.set_contact_comrade(&peer, true).unwrap();
+        rt.set_contact_alias(&peer, "   ").unwrap();
+        assert_eq!(
+            presence_display_name(&store, &peer),
+            None,
+            "a whitespace alias is not a name"
+        );
+
+        rt.set_contact_alias(&peer, "  Ana  ").unwrap();
+        assert_eq!(presence_display_name(&store, &peer).as_deref(), Some("Ana"));
     }
 
     #[tokio::test]

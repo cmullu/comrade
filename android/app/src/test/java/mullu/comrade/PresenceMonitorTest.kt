@@ -42,16 +42,43 @@ class PresenceMonitorTest {
     fun `update tracks the dot and reports the arrival exactly once`() {
         assertFalse(PresenceMonitor.isOnline("npub1ana"))
 
-        assertTrue("first beacon is an arrival", PresenceMonitor.update("npub1ana", online = true))
+        assertTrue("first beacon is an arrival", PresenceMonitor.update("npub1ana", online = true, at = 100L))
         assertTrue(PresenceMonitor.isOnline("npub1ana"))
-        assertEquals(true, PresenceMonitor.online.value["npub1ana"])
+        assertEquals(true, PresenceMonitor.presence.value["npub1ana"]?.online)
 
-        assertFalse("a heartbeat is not a second arrival", PresenceMonitor.update("npub1ana", online = true))
+        assertFalse(
+            "a heartbeat is not a second arrival",
+            PresenceMonitor.update("npub1ana", online = true, at = 200L),
+        )
 
-        assertFalse("leaving is silent", PresenceMonitor.update("npub1ana", online = false))
+        assertFalse("leaving is silent", PresenceMonitor.update("npub1ana", online = false, at = 300L))
         assertFalse(PresenceMonitor.isOnline("npub1ana"))
 
-        assertTrue("coming back is an arrival again", PresenceMonitor.update("npub1ana", online = true))
+        assertTrue(
+            "coming back is an arrival again",
+            PresenceMonitor.update("npub1ana", online = true, at = 400L),
+        )
+    }
+
+    @Test
+    fun `last seen advances on sightings and never on an expiry`() {
+        PresenceMonitor.update("npub1ana", online = true, at = 1_000L)
+        assertEquals(1_000L, PresenceMonitor.presenceOf("npub1ana")?.lastSeenAt)
+
+        // A later sighting moves it forward…
+        PresenceMonitor.update("npub1ana", online = true, at = 2_000L)
+        assertEquals(2_000L, PresenceMonitor.presenceOf("npub1ana")?.lastSeenAt)
+
+        // …an out-of-order one never moves it back…
+        PresenceMonitor.update("npub1ana", online = true, at = 1_500L)
+        assertEquals(2_000L, PresenceMonitor.presenceOf("npub1ana")?.lastSeenAt)
+
+        // …and an offline edge leaves it alone: its timestamp is the moment a
+        // claim lapsed, which is later than the peer was actually seen, and
+        // overstating "last seen" is the one direction that would lie.
+        PresenceMonitor.update("npub1ana", online = false, at = 9_000L)
+        assertEquals(2_000L, PresenceMonitor.presenceOf("npub1ana")?.lastSeenAt)
+        assertFalse(PresenceMonitor.isOnline("npub1ana"))
     }
 
     @Test
@@ -84,10 +111,18 @@ class PresenceMonitorTest {
     }
 
     @Test
+    fun `seeding carries the store's last-seen and reciprocity through`() {
+        PresenceMonitor.seed(listOf(comrade("npub1ana", online = false)))
+        val ana = PresenceMonitor.presenceOf("npub1ana")
+        assertEquals(0L, ana?.lastSeenAt)
+        assertEquals(true, ana?.peerMarkedUs)
+    }
+
+    @Test
     fun `clearing drops every dot so none outlives a vault lock`() {
         PresenceMonitor.update("npub1ana", online = true)
         PresenceMonitor.clear()
-        assertTrue(PresenceMonitor.online.value.isEmpty())
+        assertTrue(PresenceMonitor.presence.value.isEmpty())
         assertFalse(PresenceMonitor.isOnline("npub1ana"))
         // After a re-unlock the first beacon is an arrival again, so the user
         // is told their comrade is around rather than silently missing it.

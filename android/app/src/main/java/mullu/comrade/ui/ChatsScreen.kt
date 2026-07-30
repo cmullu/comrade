@@ -152,7 +152,7 @@ fun ChatsScreen(
 ) {
     var conversations by remember { mutableStateOf<List<ComradeCore.ConversationInfo>?>(null) }
     var requestCount by remember { mutableStateOf(0) }
-    val onlineNow by PresenceMonitor.online.collectAsState()
+    val presenceNow by PresenceMonitor.presence.collectAsState()
 
     LaunchedEffect(chatTick) {
         conversations = withContext(Dispatchers.IO) {
@@ -182,7 +182,7 @@ fun ChatsScreen(
                 val title = peerTitle(convo.peer, convo.alias, convo.peerName)
                 // A comrade's dot follows the live flow, so a beacon arriving
                 // while the list is on screen moves it without a reload.
-                val online = convo.comrade && (onlineNow[convo.peer] ?: convo.online)
+                val online = convo.comrade && (presenceNow[convo.peer]?.online ?: convo.online)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

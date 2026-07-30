@@ -86,13 +86,16 @@ fun dayLabel(
  * What to say under a comrade's name, in the order that answers the user's
  * actual question ("can I reach them right now?"):
  *  1. [Online] — the whole point,
- *  2. [LastSeen] — how long ago we last saw them, if we ever did,
+ *  2. [LastSeen] — when we last saw them, if we ever did (rendered
+ *     Telegram-style, see [lastSeenOf]),
  *  3. [AwaitingReciprocity] — the honest reason a chosen comrade may never
  *     light up: presence is mutual by construction, so until they choose us
  *     back their device tells us nothing, and no amount of waiting changes
  *     that. Showing a bare grey dot here would read as "they're ignoring
  *     you", which is a different (and wrong) thing.
- *  4. [NeverSeen] — chosen, reciprocated, simply away.
+ *  4. [NeverSeen] — chosen, reciprocated, simply never caught online. Reads
+ *     as Telegram's deliberately vague "last seen recently", because that is
+ *     the truth: we have a beacon-shaped hole, not a timestamp.
  */
 enum class PresenceLabel { Online, LastSeen, AwaitingReciprocity, NeverSeen }
 
@@ -102,4 +105,87 @@ fun presenceLabelOf(online: Boolean, lastSeenAt: Long, peerMarkedUs: Boolean): P
     lastSeenAt > 0L -> PresenceLabel.LastSeen
     !peerMarkedUs -> PresenceLabel.AwaitingReciprocity
     else -> PresenceLabel.NeverSeen
+}
+
+/**
+ * How a "last seen" moment reads, in the vocabulary people already know from
+ * Telegram: a fresh sighting is relative ("just now", "5 minutes ago"), an
+ * older one is a wall clock you can act on ("at 5:30 PM", "yesterday at
+ * 5:30 PM"), and a distant one is a date.
+ *
+ * A sealed model rather than a formatted string so the *rule* is pure and
+ * unit-testable while the wording stays in `strings.xml` — the pattern
+ * [PresenceLabel] already follows. The time/date fragments are pre-formatted
+ * here (they need the zone and the device's clock preference, not a
+ * translation).
+ */
+sealed interface LastSeen {
+    /** Within the last minute. */
+    data object JustNow : LastSeen
+
+    /** Within the hour. */
+    data class MinutesAgo(val minutes: Int) : LastSeen
+
+    /** Earlier today, e.g. `5:30 PM`. */
+    data class TodayAt(val time: String) : LastSeen
+
+    /** Yesterday, e.g. `5:30 PM`. */
+    data class YesterdayAt(val time: String) : LastSeen
+
+    /** Earlier this week, e.g. `Monday` + `5:30 PM`. */
+    data class WeekdayAt(val weekday: String, val time: String) : LastSeen
+
+    /** Longer ago, e.g. `12 Jul` (this year) or `12 Jul 2025`. */
+    data class OnDate(val date: String) : LastSeen
+}
+
+/** Cutoffs for [lastSeenOf], named so the rule reads as prose. */
+private const val A_MINUTE = 60L
+private const val AN_HOUR = 3600L
+
+/**
+ * Classify [lastSeenAt] (unix seconds) relative to [nowEpochSecs].
+ *
+ * [use24Hour] comes from the device's own clock setting
+ * (`DateFormat.is24HourFormat`), so a user who reads 17:30 never gets
+ * 5:30 PM; both [zone] and [locale] are injectable for the same reason
+ * [dayLabel] takes a zone — the rules are then testable without a device.
+ *
+ * A timestamp in the future (clock skew between two phones is ordinary)
+ * reads as "just now" rather than a negative age.
+ */
+fun lastSeenOf(
+    lastSeenAt: Long,
+    nowEpochSecs: Long,
+    use24Hour: Boolean = false,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): LastSeen {
+    val age = nowEpochSecs - lastSeenAt
+    if (age < A_MINUTE) return LastSeen.JustNow
+    if (age < AN_HOUR) return LastSeen.MinutesAgo((age / A_MINUTE).toInt())
+
+    val seen = java.time.Instant.ofEpochSecond(lastSeenAt).atZone(zone)
+    val now = java.time.Instant.ofEpochSecond(nowEpochSecs).atZone(zone)
+    val time = seen.toLocalTime().format(
+        java.time.format.DateTimeFormatter.ofPattern(if (use24Hour) "HH:mm" else "h:mm a", locale),
+    )
+    val day = seen.toLocalDate()
+    val today = now.toLocalDate()
+    return when {
+        day == today -> LastSeen.TodayAt(time)
+        day == today.minusDays(1) -> LastSeen.YesterdayAt(time)
+        // Within the last week the weekday is the most useful handle; beyond
+        // that it stops being unambiguous ("Monday" — which Monday?).
+        day.isAfter(today.minusDays(7)) -> LastSeen.WeekdayAt(
+            seen.format(java.time.format.DateTimeFormatter.ofPattern("EEEE", locale)),
+            time,
+        )
+        day.year == today.year -> LastSeen.OnDate(
+            seen.format(java.time.format.DateTimeFormatter.ofPattern("d MMM", locale)),
+        )
+        else -> LastSeen.OnDate(
+            seen.format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", locale)),
+        )
+    }
 }

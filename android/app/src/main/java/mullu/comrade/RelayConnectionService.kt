@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallUiState
+import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.shortNpub
 import uniffi.comrade_ui.BridgeEvent
 
@@ -297,6 +298,26 @@ object ChatEventRouter {
         }
     }
 
+    /**
+     * How a peer should be titled in a notification: the alias the user gave
+     * them, else the @handle they published, else the shortened key — the
+     * same precedence [mullu.comrade.ui.peerTitle] applies on every screen,
+     * so the shade and the app never disagree about who someone is.
+     *
+     * Contacts first because that read is a small tree; the conversation list
+     * is only consulted for a peer who was accepted but never saved (an
+     * accepted message request), and both fall back to the key on any
+     * failure — a notification must never be lost to a naming lookup.
+     */
+    fun peerLabel(peer: String): String {
+        val contact = runCatching { ComradeCore.contacts() }.getOrDefault(emptyList())
+            .find { it.npub == peer }
+        if (contact != null) return peerTitle(peer, contact.alias, contact.name)
+        val convo = runCatching { ComradeCore.conversations() }.getOrDefault(emptyList())
+            .find { it.peer == peer }
+        return peerTitle(peer, convo?.alias, convo?.peerName)
+    }
+
     private fun uniffi.comrade_ui.ChitthiDto.toInfo() = ComradeCore.ChitthiInfo(
         id = id,
         author = author,
@@ -316,7 +337,7 @@ object ChatEventRouter {
                     Notifier.notifyMessage(
                         context,
                         peer,
-                        shortNpub(peer),
+                        peerLabel(peer),
                         event.v1.content.ifBlank { "New message" },
                     )
                 }
@@ -332,7 +353,7 @@ object ChatEventRouter {
                     Notifier.notifyMessage(
                         context,
                         peer,
-                        shortNpub(peer),
+                        peerLabel(peer),
                         "📎 " + event.v1.caption.ifBlank { "Attachment" },
                     )
                 }
@@ -346,18 +367,27 @@ object ChatEventRouter {
                 maybeRefreshNames()
             }
             is BridgeEvent.ComradePresence -> {
-                val becameOnline = PresenceMonitor.update(event.peer, event.online)
+                val becameOnline = PresenceMonitor.update(
+                    peer = event.peer,
+                    online = event.online,
+                    at = event.at.toLong(),
+                )
                 // The chat list carries the dot too, so it has to re-read.
                 _chatTick.update { it + 1 }
-                // Don't tell someone their comrade is around while they are
-                // literally looking at that conversation — same rule the DM
-                // notification follows.
-                if (becameOnline && event.peer != _openConversationPeer.value) {
-                    Notifier.notifyComradeOnline(
-                        context,
-                        event.peer,
-                        event.name ?: shortNpub(event.peer),
-                    )
+                if (!event.online) {
+                    // They left before the user got to the notice — a shade
+                    // still saying "Ana is online" would invite a call to
+                    // someone who isn't there.
+                    Notifier.clearComradeOnline(context, event.peer)
+                } else if (becameOnline && event.peer != _openConversationPeer.value) {
+                    // Don't tell someone their comrade is around while they
+                    // are literally looking at that conversation — same rule
+                    // the DM notification follows. The event's own name is
+                    // the core's view at send time; fall back to a fresh
+                    // store lookup so the title is a name whenever one
+                    // exists at all.
+                    val title = event.name?.takeIf { it.isNotBlank() } ?: peerLabel(event.peer)
+                    Notifier.notifyComradeOnline(context, event.peer, title)
                 }
             }
             is BridgeEvent.MeshStatusChanged -> MeshStatusMonitor.update(

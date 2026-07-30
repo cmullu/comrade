@@ -76,7 +76,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -100,6 +103,7 @@ import mullu.comrade.ui.NewChatScreen
 import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
+import mullu.comrade.ui.presenceHeaderText
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
@@ -512,8 +516,9 @@ private fun MainShell(
             runCatching { ComradeCore.comrades().any { it.npub == peer } }.getOrDefault(false)
         }
     }
-    val onlineNow by PresenceMonitor.online.collectAsState()
-    val comradeOnline = openChat?.peer?.let { onlineNow[it] == true } == true
+    val presenceNow by PresenceMonitor.presence.collectAsState()
+    val peerPresence = openChat?.peer?.let { presenceNow[it] }
+    val comradeOnline = peerPresence?.online == true
     // Back priority, innermost first: an open drawer closes, then a pushed
     // Settings screen closes, then a Chats sub-screen returns to the list.
     BackHandler(
@@ -585,17 +590,32 @@ private fun MainShell(
                                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             // The npub tail always stays visible (handles are
                                             // claims, keys are identity); presence, when we have
-                                            // it, rides alongside rather than replacing it.
+                                            // it, rides alongside rather than replacing it —
+                                            // "online" while they are, a Telegram-style
+                                            // "last seen …" once they aren't.
+                                            val presenceLine = if (isComrade) {
+                                                presenceHeaderText(
+                                                    online = comradeOnline,
+                                                    lastSeenAt = peerPresence?.lastSeenAt ?: 0L,
+                                                    peerMarkedUs = peerPresence?.peerMarkedUs ?: false,
+                                                )
+                                            } else {
+                                                null
+                                            }
+                                            // Prose in the UI font, the key in
+                                            // monospace — one line, two jobs.
+                                            val subtitle = buildAnnotatedString {
+                                                presenceLine?.let { append("$it · ") }
+                                                withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) {
+                                                    append(shortNpub(openChat.peer))
+                                                }
+                                            }
                                             Text(
-                                                if (isComrade && comradeOnline) {
-                                                    stringResource(R.string.comrade_online) +
-                                                        " · " + shortNpub(openChat.peer)
-                                                } else {
-                                                    shortNpub(openChat.peer)
-                                                },
+                                                subtitle,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = if (isComrade && comradeOnline) {
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = if (comradeOnline) {
                                                     MaterialTheme.colorScheme.primary
                                                 } else {
                                                     MaterialTheme.colorScheme.onSurfaceVariant
