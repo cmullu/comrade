@@ -117,9 +117,10 @@ outside those two files spells a channel name as a literal.
 | Voice notes (`VoiceRecorder`) | `mullu.comrade/recorder` | — | `VoiceRecorderChannel` |
 | Attachments (pick · capture · play · open out) | `mullu.comrade/media` | — | `MediaChannel` |
 | Window security (`FLAG_SECURE`) | `mullu.comrade/screen` | — | `ScreenSecurityChannel` |
-| Notifications + runtime permissions (`Notifier`) | `mullu.comrade/system` | — | `SystemChannel` |
+| Notifications + runtime permissions + mute (`Notifier`, `MutedChats`) | `mullu.comrade/system` | — | `SystemChannel` |
+| App updates (`UpdateChecker`) | `mullu.comrade/updates` | `mullu.comrade/updates/state` | `UpdateChannel` |
 
-All nine are constructed by `ComradePlugin` (`FlutterPlugin`, `ActivityAware`) and
+All ten are constructed by `ComradePlugin` (`FlutterPlugin`, `ActivityAware`) and
 registered from `MainActivity.configureFlutterEngine`.
 
 Two **bridges** are shared rather than per-channel, because their request codes must not
@@ -748,10 +749,27 @@ reason to reach for the app-wide flag again.
 | `clearForPeer` | `{peer}` | `null` |
 | `clearCall` | `{peer}` | `null` |
 | `consumePendingTab` | — | `String?` |
+| `consumePendingPeer` | — | `String?` |
+| `areNotificationsEnabled` | — | `bool` |
+| `openNotificationSettings` | — | `null` |
+| `mutedPeers` | — | `List<String>` |
+| `isMuted` | `{peer}` | `bool` |
+| `setMuted` | `{peer, muted}` | `null` |
+| `unmuteAll` | — | `null` |
 
-Plus one **outbound** call, Kotlin → Dart: `openTab` with `{tab: String}`, fired when the
-Activity is (re)started from a notification carrying `AppNavigation.EXTRA_OPEN_TAB`. If the
-engine is not attached it is stashed and `consumePendingTab` returns it on the next start.
+Plus two **outbound** calls, Kotlin → Dart: `openTab` with `{tab: String}` and
+`openConversation` with `{peer: String}`, fired when the Activity is (re)started from a
+notification carrying `AppNavigation.EXTRA_OPEN_TAB` / `EXTRA_OPEN_PEER`. If the engine is
+not attached they are stashed and `consumePendingTab`/`consumePendingPeer` return them on
+the next start. Both are read on every entry point, because a message notification carries a
+peer while a model-ready or update notice carries a destination.
+
+**Mute is native state, and that is the point.** `MutedChats` is a plain SharedPreferences
+set outside the vault, consulted by `ChatEventRouter` on the notification path — which runs
+with no engine attached, and before any unlock. A Dart-held mute set would be a second answer
+that the code actually deciding never reads. It is device-local (Comrade has no server to
+sync a preference through) and the settings card says so. Mute never silences a ringing call:
+see `NotificationPolicy`, which has no rule for calls at all.
 
 **Notification channel ids are frozen.** `comrade_calls_v2` in particular: the `_v2` suffix
 exists because channel settings are sticky once created, so silencing the original id would
@@ -762,7 +780,40 @@ untouched by this phase and Dart has no way to create a channel.
 
 ---
 
-## 10. Status of this code
+## 10. `mullu.comrade/updates` — the in-app update check
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `settings` | — | `{currentVersion, autoCheck, lastCheckedAt, skippedVersion}` |
+| `check` | `{force}` | `null` (the answer arrives on the state channel) |
+| `setAutoCheck` | `{enabled}` | `null` |
+| `skip` | `{version}` | `null` |
+| `unskip` | — | `null` |
+| `openRelease` | — | `null` |
+
+`mullu.comrade/updates/state` carries `{status}` plus the fields that status has:
+`unknown` / `checking` / `upToDate {checkedAt}` / `failed {message, checkedAt}` /
+`available {version, tag, notes, pageUrl, apkBytes, checkedAt}`. Snapshot-based like every
+other state channel (the source is `UpdateChecker.status`, a `StateFlow`), so a UI attaching
+after a check still sees the finding.
+
+**Nothing here takes a URL.** `check` hits the endpoint compiled into
+`UpdateCheck.LATEST_RELEASE_URL`, and `openRelease` opens the page that endpoint itself
+reported — never one named by the caller. An update path is code execution; a settable source
+would be a way to point someone's upgrade at another APK.
+
+**Nothing here downloads or installs.** `openRelease` hands the release page to a browser,
+which is the install source these users have already granted (`RELEASING.md` §4). One-tap
+in-app installation would mean holding `REQUEST_INSTALL_PACKAGES` — the permission that lets
+an app install other apps — which is an owner decision, not a side effect of adding a check.
+
+The rule (what counts as newer, when to look again, when a finding is worth a notification)
+is `mullu.comrade.update.UpdateCheck` in the preserved tree, shared verbatim with the Compose
+app and unit-tested on the host JVM by `UpdateCheckTest`.
+
+---
+
+## 11. Status of this code
 
 ### What was actually run
 
@@ -825,7 +876,7 @@ Every "preserved invariant" claim in this document remains a claim about *unchan
 code plus a channel that cannot reach it* — checkable by reading, and read. It is not a
 claim that anything ran.
 
-## 11. Standing tension worth recording
+## 12. Standing tension worth recording
 
 `docs/FRONTEND_STRATEGY.md` (2026-07-29, `AUDIT.md` line 31) recommends **against** this
 migration and names D3 — this document's §6 — as the defect the plan does not survive.

@@ -30,7 +30,7 @@ import org.webrtc.VideoFrame
  * internally. [reportEvents] therefore fires on that decode thread, so
  * [CallVideoChannel] hops to main before touching an `EventSink`.
  *
- * **Uncompiled.** See `../PLATFORM_CHANNELS.md` §10. The members used here
+ * **Uncompiled.** See `../PLATFORM_CHANNELS.md` §11. The members used here
  * (`init(EglBase.Context, int[], RendererCommon.GlDrawer)`,
  * `createEglSurface(SurfaceTexture)`, `release()`, `setMirror`, `onFrame`) are
  * stable public API of the libwebrtc Android SDK, and this project already

@@ -51,7 +51,8 @@ import mullu.comrade.media.InMemoryMediaProvider
  * is never written out to be played. Anything handed to *another* app goes
  * through [InMemoryMediaProvider], which serves a seekable descriptor straight
  * from memory. Between them, the unified app has no disk plaintext path at all —
- * see `PLATFORM_CHANNELS.md` §11.
+ * see `PLATFORM_CHANNELS.md` §9, this channel's own section (it said §11, which
+ * was the standing-tension note even before the update channel renumbered it).
  */
 internal class MediaChannel(
     messenger: BinaryMessenger,

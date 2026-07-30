@@ -60,8 +60,33 @@ a partial set fails fast). It produces:
 | Channel | Install friction | What it takes |
 |---|---|---|
 | **Google Play** | None — no unknown-sources toggle, no Play Protect warning | One-time $25 developer account; upload the `.aab`; complete the **Data safety** form (easy case for Comrade: no data collected, no data shared — everything is on-device or E2E); host a **privacy policy URL** (required); pass review. Play App Signing re-signs with a Google-held key; our keystore becomes the upload key. |
-| **GitHub Releases / Obtainium** | Medium — user enables "install unknown apps" for their browser once; Play Protect may show "unknown app" scan prompts | Nothing beyond step 1–2. Obtainium gives users auto-updates from GitHub Releases. |
+| **GitHub Releases / Obtainium** | Medium — user enables "install unknown apps" for their browser once; Play Protect may show "unknown app" scan prompts | Nothing beyond step 1–2. Obtainium gives users auto-updates from GitHub Releases; for everyone else the app's own update check (below) is what surfaces a new release. |
 | **F-Droid** | Medium-low — F-Droid users expect sideloading; reproducible builds earn trust | Submit metadata to fdroiddata; F-Droid builds from source. A good ideological fit for a privacy-first app; slower release cadence. |
+
+### The app tells users about a release now
+
+Since 2026-07-30 the app checks `releases/latest` once a day and raises a
+low-priority notification when a newer version exists (Settings → **App
+updates** shows the same thing, with the release notes, a manual **Check now**,
+and a **Skip this version**). Two properties matter for release management:
+
+- **It reads the tag, so the tag has to be a version.** `UpdateCheck.parseVersion`
+  accepts `v1.2.3` / `1.2.3` / `1.2` / `1.2.3-rc1`; a tag it cannot parse means
+  the release is never offered, and a tag marked *pre-release* or *draft* is
+  skipped by design. `auto-release.yml`'s `vX.Y.Z` tags are exactly the shape it
+  expects.
+- **It links, it does not install.** "Get the update" opens the release page in
+  the user's browser. The app deliberately does **not** hold
+  `REQUEST_INSTALL_PACKAGES`, so a one-tap in-app upgrade would be a new
+  permission and a product decision; today the browser is the installer, which
+  is the same flow §4 below describes. Android's refusal to install an update
+  signed with a different key is what protects the upgrade path, and that
+  guarantee is the platform's — which is another reason step 1's keystore is
+  forever.
+
+If a release ever ships **several** APK assets (per-ABI splits, say), the check
+stops offering a direct download and offers the release page instead rather than
+guessing which one a device wants.
 
 ## 4. What Play Protect will and won't do
 
