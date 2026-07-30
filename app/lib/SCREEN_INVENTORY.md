@@ -16,9 +16,11 @@ first. §3 is the divergence ledger; it is the part worth arguing with.
 > **Status.** `flutter analyze --fatal-infos` is clean and `flutter test` is
 > green (169 tests, 4 skipped) against the in-memory fake. The media seams now
 > have a real Android implementation behind them (picker, camera, in-memory
-> playback, `FLAG_SECURE`) — but *none of that native half has been run*: no
-> device, no emulator, and no Android SDK in the environment it was written in.
-> Read §5 before believing anything is finished.
+> playback, `FLAG_SECURE`), and `flutter build apk --debug` **completes** —
+> so that Kotlin is compiled and packaged, with both ABI slices of the Rust core
+> in the APK. What none of it has done is *run*: no device, no emulator, so not
+> one of those paths has been exercised. Read §5 before believing anything is
+> finished.
 
 ---
 
@@ -367,7 +369,9 @@ kind of wrong.
    Blocking is now a Settings switch (off by default, shared with the Compose
    frontend through `ScreenSecurity`), plus a screen-scoped `SecureScreen` hold —
    used in one place, the passphrase field while it is revealed.
-9. **Never run.** `flutter analyze --fatal-infos` is clean and 169 tests pass
-   (4 skipped) in the Flutter test harness. No device, no desktop window, no
-   golden tests, no real relay — and the Kotlin written for the media and
-   screen-security channels has never been compiled, let alone exercised.
+9. **Never run.** `flutter analyze --fatal-infos` is clean, 169 tests pass
+   (4 skipped) in the Flutter test harness, and a debug APK builds with the
+   media and screen-security Kotlin compiled into it. No device, no emulator, no
+   desktop window, no golden tests, no real relay — so "it builds" is the whole
+   of the claim: not one attachment has been picked, played, or opened out, and
+   `FLAG_SECURE` has never been applied to a real window.
