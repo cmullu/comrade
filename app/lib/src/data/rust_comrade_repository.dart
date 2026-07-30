@@ -244,8 +244,8 @@ class RustComradeRepository implements ComradeRepository {
       ));
 
   @override
-  Future<void> markConversationRead(String peer) =>
-      _guard(() => rust.markConversationRead(peer: peer));
+  Future<int> markConversationRead(String peer) async =>
+      (await _guard(() => rust.markConversationRead(peer: peer))).toInt();
 
   @override
   Future<List<MessageRequestInfo>> messageRequests() async =>

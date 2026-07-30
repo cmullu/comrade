@@ -1603,10 +1603,15 @@ impl ComradeRuntime {
             .to_bech32()
             .map_err(|e| UiError::Engine(e.to_string()))?;
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        // Carry the read position across the block. Nothing reads it while the
+        // thread is hidden, but throwing it away would silently restart the
+        // history of a peer who is later talked to again.
+        let last_read_at = store.read_position(&peer_npub).unwrap_or(0);
         let meta = comrade_storage::ConversationMeta {
             peer_npub,
             state: STATE_BLOCKED.to_string(),
             profile_shared: false,
+            last_read_at,
             updated_at: now_secs(),
         };
         store
@@ -1616,9 +1621,24 @@ impl ComradeRuntime {
     }
 
     /// Mark a conversation read: send a read receipt covering the peer's
-    /// incoming messages. The frontend calls this when the thread is opened
-    /// (accepted conversations only — we never ack a pending request).
-    pub fn mark_conversation_read(&self, peer: &str) -> Result<(), UiError> {
+    /// incoming messages, record how far the user has now read, and return the
+    /// position they had reached *before* this call.
+    ///
+    /// The frontend uses that previous position to open the thread at the first
+    /// unread message rather than at the newest one (Telegram's behaviour), and
+    /// to draw the "unread messages" divider. It is returned from this call
+    /// rather than exposed as a separate getter so there is no window in which
+    /// the caller's own mark-read has already overwritten the answer it is
+    /// about to position on.
+    ///
+    /// Returns 0 when the thread has never been opened, which the UI reads as
+    /// "no divider, open at the newest message" — for a first visit there is no
+    /// meaningful "where I left off".
+    ///
+    /// Accepted conversations only: we never ack a pending request. A pending
+    /// thread also keeps its read position untouched, because acking or
+    /// recording it would leak that we read it before deciding to accept.
+    pub fn mark_conversation_read(&self, peer: &str) -> Result<u64, UiError> {
         let peer_pk = parse_pubkey(peer)?;
         let peer_npub = peer_pk
             .to_bech32()
@@ -1632,11 +1652,22 @@ impl ComradeRuntime {
             .map(|m| m.state == STATE_ACCEPTED)
             .unwrap_or(true); // no gate record ⇒ ordinary conversation
         if !accepted {
-            return Ok(());
+            return Ok(0);
         }
+        // Everything currently in the thread is what the reader is being shown,
+        // so the newest stored message is the new watermark. Taken from the
+        // store rather than the clock: a message that arrives one second after
+        // this call must stay unread, and a clock-based mark would swallow it.
+        let newest = store
+            .messages_with(&peer_npub)
+            .map(|msgs| msgs.iter().map(|m| m.created_at).max().unwrap_or(0))
+            .unwrap_or(0);
+        let previous = store
+            .advance_read_position(&peer_npub, newest, now_secs(), STATE_ACCEPTED)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
         let ids = self.incoming_ids(&peer_npub);
         self.spawn_receipt(&peer_pk, ReceiptKind::Read, ids);
-        Ok(())
+        Ok(previous)
     }
 
     /// Event ids of the peer's incoming (received) messages in this thread.
@@ -3641,6 +3672,8 @@ fn ensure_pending(store: Option<&Arc<comrade_storage::EncryptedStore>>, peer_npu
             peer_npub: peer_npub.to_string(),
             state: STATE_PENDING.to_string(),
             profile_shared: false,
+            // Only reached when no record exists, so there is nothing read yet.
+            last_read_at: 0,
             updated_at: now_secs(),
         };
         if let Err(e) = store
@@ -3682,16 +3715,15 @@ fn share_profile_on_accept(
     let Some(store) = store else {
         return;
     };
-    let already_shared = store
-        .get_conversation_meta(peer_npub)
-        .ok()
-        .flatten()
-        .map(|m| m.profile_shared)
-        .unwrap_or(false);
+    let existing = store.get_conversation_meta(peer_npub).ok().flatten();
+    let already_shared = existing.as_ref().map(|m| m.profile_shared).unwrap_or(false);
     let meta = comrade_storage::ConversationMeta {
         peer_npub: peer_npub.to_string(),
         state: STATE_ACCEPTED.to_string(),
         profile_shared: already_shared,
+        // Accepting rewrites the record, so the position has to be carried or
+        // the freshly accepted thread would forget what had been read.
+        last_read_at: existing.as_ref().map(|m| m.last_read_at).unwrap_or(0),
         updated_at: now_secs(),
     };
     if let Err(e) = store
@@ -3713,10 +3745,15 @@ fn share_profile_on_accept(
             return;
         };
         if vault.send_dm(&peer, &json).await.is_ok() {
+            // Re-read rather than reuse the value from before the await: the
+            // send is a relay round-trip, and the thread may well have been
+            // opened and read in the meantime.
+            let last_read_at = store.read_position(&peer_npub).unwrap_or(0);
             let meta = comrade_storage::ConversationMeta {
                 peer_npub,
                 state: STATE_ACCEPTED.to_string(),
                 profile_shared: true,
+                last_read_at,
                 updated_at: now_secs(),
             };
             let _ = store
@@ -5535,6 +5572,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "pending".into(),
                 profile_shared: false,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -5563,6 +5601,83 @@ mod tests {
         let convos = rt.conversations().unwrap();
         assert_eq!(convos.len(), 1);
         assert_eq!(convos[0].peer, peer);
+    }
+
+    #[tokio::test]
+    async fn marking_read_reports_the_previous_position_and_watermarks_the_newest() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        let store = rt.ui.store_ref().unwrap();
+        let save = |id: &str, at: u64| {
+            store
+                .save_message(&comrade_storage::StoredMessage {
+                    id: id.into(),
+                    peer_npub: peer.clone(),
+                    content: "hi".into(),
+                    created_at: at,
+                    outgoing: false,
+                    status: None,
+                    reply_to: None,
+                })
+                .unwrap();
+        };
+        save("in1", 100);
+        save("in2", 200);
+
+        // First visit: nothing had been read, so the UI gets 0 and opens at the
+        // newest message with no divider.
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 0);
+        assert_eq!(store.read_position(&peer).unwrap(), 200);
+
+        // Two more arrive while away; re-opening reports where they had been,
+        // which is what the divider is drawn from.
+        save("in3", 300);
+        save("in4", 400);
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 200);
+        assert_eq!(store.read_position(&peer).unwrap(), 400);
+
+        // Re-opening with nothing new still reports the position, so a thread
+        // with no unread messages simply opens at the bottom.
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 400);
+    }
+
+    #[tokio::test]
+    async fn marking_a_pending_request_read_records_nothing() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        let store = rt.ui.store_ref().unwrap();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "pending".into(),
+                profile_shared: false,
+                last_read_at: 0,
+                updated_at: 1,
+            })
+            .unwrap();
+        store
+            .save_message(&comrade_storage::StoredMessage {
+                id: "in1".into(),
+                peer_npub: peer.clone(),
+                content: "hi, can we talk?".into(),
+                created_at: 5,
+                outgoing: false,
+                status: None,
+                reply_to: None,
+            })
+            .unwrap();
+
+        // Not just "no receipt": no *stored* position either. Recording one
+        // would be a local trace that we read a request before deciding on it,
+        // and it would survive into the accepted thread.
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 0);
+        assert_eq!(store.read_position(&peer).unwrap(), 0);
+        let meta = store.get_conversation_meta(&peer).unwrap().unwrap();
+        assert_eq!(meta.state, "pending");
     }
 
     #[tokio::test]
@@ -5684,6 +5799,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: STATE_PENDING.into(),
                 profile_shared: false,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6038,6 +6154,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6115,6 +6232,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "blocked".into(),
                 profile_shared: false,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6174,6 +6292,7 @@ mod tests {
                 peer_npub: peer.to_string(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6543,6 +6662,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6599,6 +6719,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6635,6 +6756,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6835,6 +6957,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();

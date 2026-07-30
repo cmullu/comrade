@@ -611,7 +611,11 @@ impl Comrade {
 
     /// Async for the same reason as [`Comrade::accept_request`] — the
     /// read-receipt send is a background `tokio::spawn`.
-    pub async fn mark_conversation_read(&self, peer: String) -> Result<(), UiError> {
+    ///
+    /// Returns the read position the thread had *before* this call (unix
+    /// seconds, 0 = never opened), which is what lets the UI open at the first
+    /// unread message instead of the newest one.
+    pub async fn mark_conversation_read(&self, peer: String) -> Result<u64, UiError> {
         self.inner.read().await.mark_conversation_read(&peer)
     }
 

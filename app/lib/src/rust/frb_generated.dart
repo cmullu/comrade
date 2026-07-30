@@ -173,7 +173,7 @@ abstract class RustLibApi extends BaseApi {
       required BigInt startedAt,
       required BigInt durationSecs});
 
-  Future<void> crateApiMarkConversationRead({required String peer});
+  Future<BigInt> crateApiMarkConversationRead({required String peer});
 
   Future<List<MediaMessageDto>> crateApiMediaWith({required String peer});
 
@@ -1164,7 +1164,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiMarkConversationRead({required String peer}) {
+  Future<BigInt> crateApiMarkConversationRead({required String peer}) {
     return handler.executeNormal(NormalTask(
       callFfi: (port_) {
         final serializer = SseSerializer(generalizedFrbRustBinding);
@@ -1173,7 +1173,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             funcId: 37, port: port_);
       },
       codec: SseCodec(
-        decodeSuccessData: sse_decode_unit,
+        decodeSuccessData: sse_decode_u_64,
         decodeErrorData: sse_decode_ui_error,
       ),
       constMeta: kCrateApiMarkConversationReadConstMeta,

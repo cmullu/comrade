@@ -494,8 +494,26 @@ class FakeComradeRepository implements ComradeRepository {
         return msg;
       });
 
+  /// Per-peer read position, mirroring `ConversationMeta.last_read_at` in the
+  /// real encrypted store. Absent means never opened.
+  final Map<String, int> _readPositions = <String, int>{};
+
+  /// Pretend the thread was last read up to [seenAt], so a test can set up
+  /// "opened yesterday, three messages since" without driving the clock.
+  void seedReadPosition(String peer, int seenAt) {
+    _readPositions[peer] = seenAt;
+  }
+
   @override
-  Future<void> markConversationRead(String peer) => _io(() {});
+  Future<int> markConversationRead(String peer) => _io(() {
+        final int previous = _readPositions[peer] ?? 0;
+        final int newest = (_messages[peer] ?? const <MessageInfo>[]).fold<int>(
+            0, (int a, MessageInfo m) => m.createdAt > a ? m.createdAt : a);
+        // Monotonic, like the store: re-opening a thread scrolled up must not
+        // drag the watermark backwards.
+        if (newest > previous) _readPositions[peer] = newest;
+        return previous;
+      });
 
   @override
   Future<List<MessageRequestInfo>> messageRequests() => _io(() {
