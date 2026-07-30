@@ -20,7 +20,7 @@ Future<FakeComradeRepository> unlockedFake({bool seed = true}) async {
 
 List<Override> fakeOverrides(
   ComradeRepository repo, {
-  Map<String, bool>? prefs,
+  Map<String, Object>? prefs,
 }) =>
     <Override>[
       comradeRepositoryProvider.overrideWithValue(repo),
@@ -29,7 +29,7 @@ List<Override> fakeOverrides(
 
 ProviderContainer testContainer(
   ComradeRepository repo, {
-  Map<String, bool>? prefs,
+  Map<String, Object>? prefs,
 }) {
   final ProviderContainer container = ProviderContainer(
     overrides: fakeOverrides(repo, prefs: prefs),
@@ -42,7 +42,7 @@ ProviderContainer testContainer(
 Widget harness(
   Widget child, {
   required ComradeRepository repo,
-  Map<String, bool>? prefs,
+  Map<String, Object>? prefs,
   Brightness brightness = Brightness.dark,
 }) =>
     ProviderScope(
