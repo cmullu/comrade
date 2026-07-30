@@ -26,6 +26,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Screen sharing during a call (CallManager.startScreenShare). The
+         projection itself is granted per-share by the system's own consent
+         dialog; from Android 14 it may only *begin* while a foreground service
+         declaring the mediaProjection type is already running, which is why
+         CallService re-announces itself before capture starts. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!-- CallService: keeps an in-progress call's process alive while the app
          is backgrounded. Required alongside the matching foregroundServiceType
          on Android 14+ (see CallService/the <service> entry below); video
@@ -147,7 +153,7 @@
         <service
             android:name=".call.CallService"
             android:exported="false"
-            android:foregroundServiceType="camera|microphone" />
+            android:foregroundServiceType="camera|microphone|mediaProjection" />
 
         <!-- Always-listening "Hey Comrade" wake-word foreground service -->
         <service

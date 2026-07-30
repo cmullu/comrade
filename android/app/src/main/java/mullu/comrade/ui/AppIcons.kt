@@ -359,3 +359,41 @@ val CopyIcon: ImageVector = materialIcon(name = "Filled.ContentCopy") {
         close()
     }
 }
+
+/**
+ * Material "screen_share" (filled) — share your screen during a call.
+ *
+ * A monitor with an upward arrow: the same glyph Telegram/Meet use, so the
+ * control reads without a label. Inlined here for the same reason as every
+ * other icon in this file — the app never depends on which subset of Material
+ * icons the core artifact happens to ship.
+ */
+val ScreenShareIcon: ImageVector = materialIcon(name = "Filled.ScreenShare") {
+    materialPath {
+        // The monitor body.
+        moveTo(20.0f, 18.0f)
+        curveToRelative(1.1f, 0.0f, 2.0f, -0.9f, 2.0f, -2.0f)
+        verticalLineTo(6.0f)
+        curveToRelative(0.0f, -1.1f, -0.9f, -2.0f, -2.0f, -2.0f)
+        horizontalLineTo(4.0f)
+        curveToRelative(-1.1f, 0.0f, -2.0f, 0.9f, -2.0f, 2.0f)
+        verticalLineToRelative(10.0f)
+        curveToRelative(0.0f, 1.1f, 0.9f, 2.0f, 2.0f, 2.0f)
+        horizontalLineTo(0.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineToRelative(24.0f)
+        verticalLineToRelative(-2.0f)
+        horizontalLineToRelative(-4.0f)
+        close()
+        // The arrow rising out of it.
+        moveTo(13.0f, 12.4f)
+        verticalLineToRelative(2.6f)
+        horizontalLineToRelative(-2.0f)
+        verticalLineToRelative(-2.6f)
+        horizontalLineTo(8.0f)
+        lineToRelative(4.0f, -4.0f)
+        lineToRelative(4.0f, 4.0f)
+        horizontalLineToRelative(-3.0f)
+        close()
+    }
+}

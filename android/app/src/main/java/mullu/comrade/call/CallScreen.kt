@@ -1,6 +1,8 @@
 package mullu.comrade.call
 
 import android.Manifest
+import android.app.Activity
+import android.media.projection.MediaProjectionManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -11,11 +13,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -35,6 +43,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -44,11 +53,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -56,6 +68,7 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import mullu.comrade.R
 import mullu.comrade.ui.CallEndIcon
+import mullu.comrade.ui.ScreenShareIcon
 import mullu.comrade.ui.CallIcon
 import mullu.comrade.ui.ChatBubbleIcon
 import mullu.comrade.ui.FlipCameraIcon
@@ -65,6 +78,7 @@ import mullu.comrade.ui.SpeakerIcon
 import mullu.comrade.ui.VideocamIcon
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
+import kotlin.math.roundToInt
 import org.webrtc.VideoTrack
 
 /*
@@ -249,6 +263,48 @@ private fun CallVideoSurface(
 }
 
 /**
+ * Start or stop sharing the screen.
+ *
+ * Starting needs the system's own capture-consent dialog, which only an
+ * Activity result can deliver — hence the launcher rather than a direct
+ * `CallManager` call. Dismissing that dialog returns `RESULT_CANCELED` and
+ * nothing happens, which is why the button's lit state follows
+ * [CallManager.screenSharing] and never the tap.
+ */
+@Composable
+private fun ScreenShareButton(sharing: Boolean) {
+    val context = LocalContext.current
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            CallManager.startScreenShare(context, data)
+        }
+    }
+    CallActionButton(
+        icon = ScreenShareIcon,
+        desc = stringOf(
+            if (sharing) R.string.call_screen_share_stop else R.string.call_screen_share,
+        ),
+        bg = if (sharing) ControlActive else ControlIdle,
+        tint = if (sharing) CallBackground else Color.White,
+        size = 60.dp,
+        label = stringOf(
+            if (sharing) R.string.call_screen_share_stop else R.string.call_screen_share,
+        ),
+        slashed = sharing,
+    ) {
+        if (sharing) {
+            CallManager.stopScreenShare()
+        } else {
+            val manager = context.getSystemService(MediaProjectionManager::class.java)
+            if (manager != null) launcher.launch(manager.createScreenCaptureIntent())
+        }
+    }
+}
+
+/**
  * The call shrunk into a corner of our own window — what the chat button
  * produces. Tap to restore.
  *
@@ -269,14 +325,63 @@ private fun MinimizedCallTile(
     val remotePaused by CallManager.remoteVideoPaused.collectAsState()
     val muted by CallManager.muted.collectAsState()
     val quality by CallManager.connectionQuality.collectAsState()
-    Box(modifier.fillMaxSize()) {
+
+    val density = LocalDensity.current
+    val tileWidth = 132.dp
+    val tileHeight = 186.dp
+    val margin = 12.dp
+
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        // Telegram's rules, in pixels because that is what `offset` speaks:
+        // the tile goes wherever it is dragged, never leaves the screen, and
+        // on release flies to whichever side edge its centre is nearer.
+        val maxX = with(density) { (maxWidth - tileWidth - margin).toPx() }
+        val maxY = with(density) { (maxHeight - tileHeight - margin).toPx() }
+        val minPx = with(density) { margin.toPx() }
+        val halfTile = with(density) { (tileWidth / 2).toPx() }
+        val centreOfScreen = with(density) { (maxWidth / 2).toPx() }
+
+        // Starts top-right: the bottom right of a conversation is the send
+        // button, and a tile parked there defeats the mode's whole purpose.
+        var offsetX by remember(maxX) { mutableFloatStateOf(maxX.coerceAtLeast(minPx)) }
+        var offsetY by remember { mutableFloatStateOf(minPx) }
+        var dragging by remember { mutableStateOf(false) }
+        // Instant while the finger is down, a short glide when it lets go.
+        val animatedX by animateFloatAsState(
+            targetValue = offsetX,
+            animationSpec = if (dragging) snap() else tween(180),
+            label = "tile-x",
+        )
+        val animatedY by animateFloatAsState(
+            targetValue = offsetY,
+            animationSpec = if (dragging) snap() else tween(180),
+            label = "tile-y",
+        )
+
         Box(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(12.dp)
-                .size(width = 132.dp, height = 186.dp)
+                .offset { IntOffset(animatedX.roundToInt(), animatedY.roundToInt()) }
+                .size(width = tileWidth, height = tileHeight)
                 .clip(RoundedCornerShape(14.dp))
                 .background(Color(0xFF17212B))
+                .pointerInput(maxX, maxY) {
+                    detectDragGestures(
+                        onDragStart = { dragging = true },
+                        onDragEnd = {
+                            dragging = false
+                            offsetX = if (offsetX + halfTile < centreOfScreen) {
+                                minPx
+                            } else {
+                                maxX.coerceAtLeast(minPx)
+                            }
+                        },
+                        onDragCancel = { dragging = false },
+                    ) { change, drag ->
+                        change.consume()
+                        offsetX = (offsetX + drag.x).coerceIn(minPx, maxX.coerceAtLeast(minPx))
+                        offsetY = (offsetY + drag.y).coerceIn(minPx, maxY.coerceAtLeast(minPx))
+                    }
+                }
                 .clickable(onClickLabel = stringOf(R.string.call_restore)) {
                     PipController.restoreFromMinimized()
                 },
@@ -400,6 +505,7 @@ private fun InCallContent(
     val remoteVideo by CallManager.remoteVideo.collectAsState()
     val localVideo by CallManager.localVideo.collectAsState()
     val connectionQuality by CallManager.connectionQuality.collectAsState()
+    val screenSharing by CallManager.screenSharing.collectAsState()
     val videoSuspended by CallManager.videoSuspended.collectAsState()
     val remoteVideoPaused by CallManager.remoteVideoPaused.collectAsState()
 
@@ -617,6 +723,10 @@ private fun InCallContent(
                             slashed = !cameraOn,
                         ) { CallManager.toggleCamera() }
                     }
+                    // Screen share — on voice calls as well as video ones,
+                    // which is the point of it: a voice call that starts
+                    // sharing grows a picture it did not have.
+                    ScreenShareButton(sharing = screenSharing)
                     // Chat: open the conversation and shrink the call into
                     // picture-in-picture — the call keeps running, it only
                     // changes where it is drawn.

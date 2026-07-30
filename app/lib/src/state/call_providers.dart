@@ -205,6 +205,7 @@ class CallSession {
     this.pip = CallPipMode.none,
     this.videoSuspended = false,
     this.remoteVideoPaused = false,
+    this.screenSharing = false,
   });
 
   final CallUiState state;
@@ -237,9 +238,25 @@ class CallSession {
   /// paused", never as a frozen frame.
   final bool remoteVideoPaused;
 
+  /// We are sending our screen instead of (or as well as) a camera.
+  ///
+  /// Available on **voice calls too**, which is the point of the feature: a
+  /// voice call that starts sharing a screen grows a video stage it did not
+  /// have. See [showsVideoStage].
+  final bool screenSharing;
+
+  /// Whether the UI should draw the video stage at all.
+  ///
+  /// Not simply `state.video`: a voice call sharing a screen has a picture to
+  /// show, and a video call keeps its stage even when both cameras are off.
+  bool get showsVideoStage => state.video || screenSharing;
+
   /// True while our own camera is not being sent, for whichever of the two
   /// reasons. The self-view shows "Video paused" for both, because from the
   /// peer's side they are the same thing.
+  ///
+  /// Screen sharing is not "paused": there is a picture, it just isn't a
+  /// camera. That is why this deliberately does not consult [screenSharing].
   bool get localVideoPaused => !cameraOn || videoSuspended;
 
   CallSession copyWith({
@@ -254,6 +271,7 @@ class CallSession {
     CallPipMode? pip,
     bool? videoSuspended,
     bool? remoteVideoPaused,
+    bool? screenSharing,
   }) =>
       CallSession(
         state: state ?? this.state,
@@ -267,6 +285,7 @@ class CallSession {
         pip: pip ?? this.pip,
         videoSuspended: videoSuspended ?? this.videoSuspended,
         remoteVideoPaused: remoteVideoPaused ?? this.remoteVideoPaused,
+        screenSharing: screenSharing ?? this.screenSharing,
       );
 }
 
@@ -296,6 +315,15 @@ abstract interface class CallEngine {
   /// runs only while the camera is on **and** this is false. See
   /// `CallChannel.setVideoCaptureSuspended`.
   Future<void> setVideoCaptureSuspended(bool suspended);
+
+  /// Start or stop sending the screen, returning whether we are sharing when
+  /// it settles.
+  ///
+  /// Returning a value rather than `void` is load-bearing: starting a share
+  /// needs the user's consent through a system dialog they can dismiss, so
+  /// "asked to share" and "is sharing" are different facts and the UI must
+  /// follow the second one. An engine that cannot share answers `false`.
+  Future<bool> setScreenSharing(bool sharing);
 
   /// A widget rendering the named track, or `null` when the engine has no
   /// frames for it yet. `local` mirrors (it is the front-camera preview);
@@ -339,6 +367,11 @@ class NullCallEngine implements CallEngine {
 
   @override
   Future<void> setVideoCaptureSuspended(bool suspended) async {}
+
+  /// No media, so nothing to share — and it says so rather than letting the UI
+  /// light up a button that does nothing.
+  @override
+  Future<bool> setScreenSharing(bool sharing) async => false;
 
   @override
   Widget? videoView({required bool local, required bool mirror}) => null;
@@ -502,6 +535,7 @@ class CallController extends Notifier<CallSession> {
       pip: CallPipMode.none,
       videoSuspended: false,
       remoteVideoPaused: false,
+      screenSharing: false,
     );
   }
 
@@ -523,6 +557,27 @@ class CallController extends Notifier<CallSession> {
   }
 
   Future<void> switchCamera() => _engine.switchCamera();
+
+  /// Start or stop sharing the screen. Available on voice calls as well as
+  /// video ones — a voice call that starts sharing grows a video stage.
+  ///
+  /// The UI follows the engine's answer, not the request: the platform asks
+  /// the user for consent through a system dialog, and dismissing that dialog
+  /// must leave the button off rather than showing a share that isn't
+  /// happening.
+  Future<void> toggleScreenShare() async {
+    final CallUiState s = state.state;
+    if (s is! CallActive && s is! CallConnecting) return;
+    final bool wanted = !state.screenSharing;
+    final bool actual = await _engine.setScreenSharing(wanted);
+    state = state.copyWith(screenSharing: actual);
+  }
+
+  /// The platform stopped the share without us asking — the user hit the
+  /// system's own "Stop sharing", or the capture died.
+  void onScreenShareStopped() {
+    if (state.screenSharing) state = state.copyWith(screenSharing: false);
+  }
 
   Future<void> setAudioRoute(AudioRoute route) async {
     state = state.copyWith(audioRoute: route);

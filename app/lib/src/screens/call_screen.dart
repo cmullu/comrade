@@ -294,7 +294,9 @@ class _InCallContentState extends ConsumerState<_InCallContent>
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
-        if (state.video)
+        // A voice call that starts sharing a screen grows a video stage it did
+        // not have — which is why this asks the session, not the call kind.
+        if (session.showsVideoStage)
           _videoStage(context, session, engine, connecting, quality)
         else
           Center(
@@ -314,7 +316,7 @@ class _InCallContentState extends ConsumerState<_InCallContent>
           child: Align(
             alignment: Alignment.bottomCenter,
             child: DecoratedBox(
-              decoration: state.video
+              decoration: session.showsVideoStage
                   ? const BoxDecoration(
                       gradient: LinearGradient(
                         begin: Alignment.topCenter,
@@ -374,6 +376,23 @@ class _InCallContentState extends ConsumerState<_InCallContent>
               unawaited(controller.toggleCamera());
             },
           ),
+        // Screen share sits on **voice calls too** — that is the whole point of
+        // it, and it is why the stage below can appear on a call that started
+        // without video.
+        CallActionButton(
+          key: const Key('call-screen-share'),
+          icon: Icons.screen_share_outlined,
+          slashed: session.screenSharing,
+          label: session.screenSharing ? 'Stop sharing' : 'Share screen',
+          background: session.screenSharing
+              ? CallPalette.controlActive
+              : CallPalette.controlIdle,
+          tint: session.screenSharing ? CallPalette.background : Colors.white,
+          onPressed: () {
+            _keepChromeUp();
+            unawaited(controller.toggleScreenShare());
+          },
+        ),
         CallActionButton(
           key: const Key('call-chat'),
           icon: Icons.chat_bubble_outline,
@@ -645,14 +664,47 @@ class FloatingCallTile extends ConsumerStatefulWidget {
 }
 
 class _FloatingCallTileState extends ConsumerState<FloatingCallTile> {
-  /// **Top**-right by default, and that corner is a deliberate choice: the
+  /// The tile's top-left in logical pixels, or null until the first layout
+  /// places it at its default corner.
+  ///
+  /// **Top**-right is that default, and the corner is a deliberate choice: the
   /// bottom right of a conversation is the send button, and a call tile parked
-  /// on top of it would defeat the one thing this mode exists for. Dragged
-  /// position is kept as an offset from that corner.
-  Offset _drag = Offset.zero;
+  /// on top of it would defeat the one thing this mode exists for. From there
+  /// it goes wherever it is dragged.
+  Offset? _position;
+
+  /// True while a finger is down, so the snap animation doesn't fight the drag.
+  bool _dragging = false;
 
   static const double _width = 132;
   static const double _height = 186;
+  static const double _margin = 12;
+
+  /// Where the tile sits before anyone moves it.
+  Offset _defaultPosition(Size screen) =>
+      Offset(screen.width - _width - _margin, _margin);
+
+  /// Keep the whole tile on screen, whatever the drag or a rotation did. Also
+  /// what stops a tile dragged to the edge of a phone from becoming
+  /// unreachable when the window resizes (or a PiP window restores).
+  Offset _clamp(Offset p, Size screen) => Offset(
+        p.dx.clamp(_margin,
+            (screen.width - _width - _margin).clamp(_margin, double.infinity)),
+        p.dy.clamp(
+            _margin,
+            (screen.height - _height - _margin)
+                .clamp(_margin, double.infinity)),
+      );
+
+  /// Telegram's release behaviour: the tile flies to whichever side edge it is
+  /// nearer, keeping its height. Left free-floating it would sit over the
+  /// middle of the thread, which is the one place it must not be.
+  Offset _snapToEdge(Offset p, Size screen) {
+    final double centre = p.dx + _width / 2;
+    final double right =
+        (screen.width - _width - _margin).clamp(_margin, double.infinity);
+    return Offset(centre < screen.width / 2 ? _margin : right, p.dy);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -662,14 +714,30 @@ class _FloatingCallTileState extends ConsumerState<FloatingCallTile> {
     final CallController controller = ref.read(callProvider.notifier);
     final Widget? remote =
         state.video ? engine.videoView(local: false, mirror: false) : null;
+    final Size screen = MediaQuery.sizeOf(context);
+    final Offset position =
+        _clamp(_position ?? _defaultPosition(screen), screen);
 
-    return Positioned(
-      right: 12 - _drag.dx,
-      top: 12 + _drag.dy,
+    return AnimatedPositioned(
+      // Instant while the finger is down; a short glide when it lets go.
+      duration: _dragging ? Duration.zero : const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+      left: position.dx,
+      top: position.dy,
       child: GestureDetector(
         key: const Key('call-floating-tile'),
         onTap: controller.restoreFromPip,
-        onPanUpdate: (DragUpdateDetails d) => setState(() => _drag += d.delta),
+        onPanStart: (_) => setState(() {
+          _dragging = true;
+          _position = position;
+        }),
+        onPanUpdate: (DragUpdateDetails d) => setState(
+          () => _position = _clamp((_position ?? position) + d.delta, screen),
+        ),
+        onPanEnd: (_) => setState(() {
+          _dragging = false;
+          _position = _snapToEdge(_position ?? position, screen);
+        }),
         child: Material(
           elevation: 8,
           color: CallPalette.pipBackground,

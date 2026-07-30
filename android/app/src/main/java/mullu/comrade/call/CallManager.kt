@@ -2,12 +2,14 @@ package mullu.comrade.call
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.projection.MediaProjection
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -40,6 +42,7 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.RTCStatsReport
 import org.webrtc.RtpReceiver
 import org.webrtc.SdpObserver
@@ -99,6 +102,16 @@ object CallManager {
     private const val CAMERA_WIDTH = 1280
     private const val CAMERA_HEIGHT = 720
     private const val CAMERA_FPS = 30
+
+    /**
+     * Screen capture geometry. The real display metrics are used when they can
+     * be read; these are the fallback for the case they cannot, and 15 fps
+     * because a shared screen is mostly static text — spending a video call's
+     * bitrate on 30 fps of an unchanging document helps nobody.
+     */
+    private const val SCREEN_FALLBACK_WIDTH = 1280
+    private const val SCREEN_FALLBACK_HEIGHT = 720
+    private const val SCREEN_FPS = 15
 
     /** How long the [CallUiState.Ended] card lingers before returning to [CallUiState.Idle]. */
     private const val ENDED_LINGER_MS = 1_600L
@@ -253,6 +266,17 @@ object CallManager {
      */
     val videoSuspended: StateFlow<Boolean> = _videoSuspended.asStateFlow()
 
+    private val _screenSharing = MutableStateFlow(false)
+
+    /**
+     * Whether we are sending the screen instead of (or, on a voice call,
+     * without) a camera.
+     *
+     * Works on **voice calls too**, which is the point of the feature and also
+     * the source of its only real complexity — see [startScreenShare].
+     */
+    val screenSharing: StateFlow<Boolean> = _screenSharing.asStateFlow()
+
     private val _remoteVideoPaused = MutableStateFlow(false)
 
     /**
@@ -334,6 +358,14 @@ object CallManager {
         var videoTrack: VideoTrack? = null
         var capturer: VideoCapturer? = null
         var surfaceHelper: SurfaceTextureHelper? = null
+
+        /**
+         * The camera capturer parked while a screen share has the video track,
+         * so stopping the share can put it straight back. Null whenever the
+         * screen is not being shared, and on a voice call (there is no camera
+         * to park).
+         */
+        var cameraCapturer: VideoCapturer? = null
 
         /** Remote description applied — gates ICE (WebRTC rejects early candidates). */
         var remoteSet = false
@@ -714,6 +746,190 @@ object CallManager {
             runCatching { s.capturer?.stopCapture() }.onFailure { Log.w(TAG, "stopCapture failed", it) }
         }
         s.capturing = wanted
+    }
+
+    // ── Screen sharing ───────────────────────────────────────────────────────
+
+    /**
+     * Start sending the screen, using the consent [data] the system's capture
+     * dialog returned (`MediaProjectionManager.createScreenCaptureIntent`).
+     *
+     * The two call kinds take genuinely different paths, and that difference is
+     * the whole complexity here:
+     *
+     *  * **A video call already has a video sender.** So the camera capturer is
+     *    stopped and a [ScreenCapturerAndroid] is pointed at the *same*
+     *    [VideoSource]. The track and the sender never change, so the peer
+     *    simply starts seeing a different picture — **no renegotiation**.
+     *  * **A voice call has no video at all.** The source, track and sender have
+     *    to be created and added, which changes the media shape and therefore
+     *    needs a fresh offer. That reuses the same same-`call_id` re-offer the
+     *    STUN→TURN fallback already relies on ([tryTurnFallbackOrFail]), so the
+     *    peer handles it with a path that is already exercised.
+     *
+     * The foreground service is re-announced with
+     * `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION` **before** capture starts,
+     * because from Android 14 a projection may only begin while such a service
+     * is already running — getting that order wrong throws at `startCapture`.
+     *
+     * Safe to call twice: an already-running share is left alone.
+     */
+    fun startScreenShare(context: Context, data: Intent) {
+        io.launch {
+            val appCtx = context.applicationContext
+            // Announce the projection service type first — see above.
+            val session = synchronized(this@CallManager) { session }
+            if (session == null || session.ended || _screenSharing.value) return@launch
+            if (!disableCallServiceForTest) {
+                runCatching {
+                    CallService.start(appCtx, session.peer, session.peerLabel, session.isVideo, screenShare = true)
+                }.onFailure { Log.w(TAG, "could not re-announce CallService for screen capture", it) }
+            }
+            synchronized(this@CallManager) {
+                val s = this@CallManager.session ?: return@launch
+                if (s !== session || s.ended || _screenSharing.value) return@launch
+                val fac = factory ?: return@launch
+                val egl = eglBase ?: return@launch
+
+                val capturer = ScreenCapturerAndroid(
+                    data,
+                    object : MediaProjection.Callback() {
+                        // The user can revoke a projection from the system UI at
+                        // any time; the UI must not keep claiming to share.
+                        override fun onStop() {
+                            io.launch { stopScreenShare() }
+                        }
+                    },
+                )
+
+                val existingSource = s.videoSource
+                if (existingSource != null) {
+                    // Video call: swap capturers behind the existing track.
+                    runCatching { s.capturer?.stopCapture() }
+                        .onFailure { Log.w(TAG, "stopping the camera for screen share failed", it) }
+                    val helper = s.surfaceHelper ?: SurfaceTextureHelper.create("ScreenCapture", egl.eglBaseContext)
+                    s.surfaceHelper = helper
+                    capturer.initialize(helper, appCtx, existingSource.capturerObserver)
+                    if (!startCapturing(capturer)) return@launch
+                    s.cameraCapturer = s.capturer
+                    s.capturer = capturer
+                    s.videoTrack?.setEnabled(true)
+                    s.capturing = true
+                    _screenSharing.value = true
+                    return@launch
+                }
+
+                // Voice call: build the whole video path, then renegotiate.
+                val helper = SurfaceTextureHelper.create("ScreenCapture", egl.eglBaseContext)
+                val source = fac.createVideoSource(true) // isScreencast
+                capturer.initialize(helper, appCtx, source.capturerObserver)
+                if (!startCapturing(capturer)) {
+                    runCatching { helper.dispose() }
+                    runCatching { source.dispose() }
+                    return@launch
+                }
+                val track = fac.createVideoTrack(LOCAL_VIDEO_ID, source).apply { setEnabled(true) }
+                s.surfaceHelper = helper
+                s.videoSource = source
+                s.videoTrack = track
+                s.capturer = capturer
+                s.capturing = true
+                s.pc?.addTrack(track, listOf(STREAM_ID))
+                _localVideo.value = track
+                _screenSharing.value = true
+                renegotiate(s)
+            }
+        }
+    }
+
+    /**
+     * Stop sending the screen: back to the camera on a video call, back to
+     * audio-only (with a renegotiation) on a voice call.
+     *
+     * Idempotent, and safe from the [MediaProjection.Callback] — the user
+     * revoking the projection from the system UI lands here too.
+     */
+    fun stopScreenShare() {
+        io.launch {
+            synchronized(this@CallManager) {
+                if (!_screenSharing.value) return@launch
+                val s = session
+                _screenSharing.value = false
+                if (s == null || s.ended) return@launch
+
+                val screenCapturer = s.capturer
+                runCatching { screenCapturer?.stopCapture() }
+                    .onFailure { Log.w(TAG, "stopCapture (screen) failed", it) }
+                runCatching { screenCapturer?.dispose() }
+
+                val camera = s.cameraCapturer
+                if (camera != null) {
+                    // Video call: put the camera back behind the same track.
+                    s.cameraCapturer = null
+                    s.capturer = camera
+                    s.capturing = false
+                    applyCaptureState(s) // honours cameraOn / videoSuspended
+                    return@launch
+                }
+
+                // Voice call: drop the video path entirely so the peer's stage
+                // goes away instead of freezing on the last frame shared.
+                val track = s.videoTrack
+                val source = s.videoSource
+                val helper = s.surfaceHelper
+                s.capturer = null
+                s.videoTrack = null
+                s.videoSource = null
+                s.surfaceHelper = null
+                s.capturing = false
+                _localVideo.value = null
+                val sender = s.pc?.senders?.firstOrNull { it.track()?.kind() == "video" }
+                if (sender != null) runCatching { s.pc?.removeTrack(sender) }
+                io.launch {
+                    runCatching { track?.dispose() }
+                    runCatching { source?.dispose() }
+                    runCatching { helper?.dispose() }
+                }
+                renegotiate(s)
+                // Back to a service that no longer claims a projection.
+                if (!disableCallServiceForTest) {
+                    appContext?.let { ctx ->
+                        runCatching { CallService.start(ctx, s.peer, s.peerLabel, s.isVideo, screenShare = false) }
+                    }
+                }
+            }
+        }
+    }
+
+    /** `startCapture` at screen dimensions, reporting whether it took. */
+    private fun startCapturing(capturer: VideoCapturer): Boolean {
+        val metrics = appContext?.resources?.displayMetrics
+        val width = metrics?.widthPixels ?: SCREEN_FALLBACK_WIDTH
+        val height = metrics?.heightPixels ?: SCREEN_FALLBACK_HEIGHT
+        return runCatching { capturer.startCapture(width, height, SCREEN_FPS) }
+            .onFailure { Log.e(TAG, "screen capture failed to start", it) }
+            .isSuccess
+    }
+
+    /**
+     * Offer again on the same call id because the *media shape* changed —
+     * adding or removing the screen track on a voice call.
+     *
+     * Same machinery as the ICE-restart re-offer in [tryTurnFallbackOrFail],
+     * minus the `IceRestart` constraint: the transport is fine, only the tracks
+     * moved. Must be called under this object's monitor.
+     */
+    private fun renegotiate(s: Session) {
+        val pc = s.pc ?: return
+        s.remoteSet = false
+        pc.createOffer(
+            createSdpObserver(s) { offer ->
+                setLocalThen(s, offer) { sendSignal(s, CallSignal.Offer(offer.description)) }
+            },
+            // `true`: whatever the call started as, it has video now (or had it
+            // and is giving it up), so the offer must describe a video m-line.
+            mediaConstraints(true),
+        )
     }
 
     /** Cycle to the next available [AudioRoute] (earpiece → speaker → Bluetooth/wired → …). */
@@ -1554,6 +1770,9 @@ object CallManager {
         _remoteVideo.value = null
 
         val capturerToDispose = s.capturer
+        // The camera parked behind a live screen share still owns the physical
+        // camera; leaking it here would keep the lens busy after the call.
+        val parkedCameraToDispose = s.cameraCapturer
         val videoTrackToDispose = s.videoTrack
         val videoSourceToDispose = s.videoSource
         val surfaceHelperToDispose = s.surfaceHelper
@@ -1563,6 +1782,7 @@ object CallManager {
 
         s.pc = null
         s.capturer = null
+        s.cameraCapturer = null
         s.videoTrack = null
         s.videoSource = null
         s.surfaceHelper = null
@@ -1578,10 +1798,13 @@ object CallManager {
         _availableRoutes.value = listOf(AudioRoute.EARPIECE, AudioRoute.SPEAKER)
         _videoSuspended.value = false
         _remoteVideoPaused.value = false
+        _screenSharing.value = false
 
         io.launch {
             runCatching { capturerToDispose?.stopCapture() }.onFailure { Log.w(TAG, "stopCapture failed", it) }
             runCatching { capturerToDispose?.dispose() }
+            runCatching { parkedCameraToDispose?.stopCapture() }
+            runCatching { parkedCameraToDispose?.dispose() }
             runCatching { videoTrackToDispose?.dispose() }
             runCatching { videoSourceToDispose?.dispose() }
             runCatching { surfaceHelperToDispose?.dispose() }

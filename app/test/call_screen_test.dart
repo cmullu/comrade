@@ -63,6 +63,17 @@ class RecordingEngine implements CallEngine {
   Future<void> setVideoCaptureSuspended(bool suspended) async =>
       captureSuspensions.add(suspended);
 
+  /// Whether the platform's consent dialog is granted in this test. `false`
+  /// stands in for the user dismissing it.
+  bool screenShareAllowed = true;
+  final List<bool> screenShareRequests = <bool>[];
+
+  @override
+  Future<bool> setScreenSharing(bool sharing) async {
+    screenShareRequests.add(sharing);
+    return sharing && screenShareAllowed;
+  }
+
   @override
   Widget? videoView({required bool local, required bool mirror}) {
     if (local && !hasLocal) return null;
@@ -478,6 +489,135 @@ void main() {
 
       expect(t.pip.closeCalls, 1);
       expect(t.container.read(callProvider).pip, CallPipMode.none);
+    });
+  });
+
+  group('screen sharing', () {
+    testWidgets('is offered on a voice call, and grows a video stage',
+        (WidgetTester tester) async {
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: false);
+
+      // The button is there on a call that started without any video at all.
+      expect(find.byKey(const Key('call-screen-share')), findsOneWidget);
+      expect(t.container.read(callProvider).showsVideoStage, isFalse);
+
+      await tester.tap(find.byKey(const Key('call-screen-share')));
+      await tester.pumpAndSettle();
+
+      expect(t.engine.screenShareRequests, <bool>[true]);
+      expect(t.container.read(callProvider).screenSharing, isTrue);
+      expect(t.container.read(callProvider).showsVideoStage, isTrue,
+          reason: 'a shared screen is a picture, so the stage appears');
+      expect(find.text('Stop sharing'), findsOneWidget);
+    });
+
+    testWidgets('follows the platform, not the tap, when consent is refused',
+        (WidgetTester tester) async {
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: true);
+      // The user dismisses the system dialog.
+      t.engine.screenShareAllowed = false;
+
+      await tester.tap(find.byKey(const Key('call-screen-share')));
+      await tester.pumpAndSettle();
+
+      expect(t.engine.screenShareRequests, <bool>[true]);
+      expect(t.container.read(callProvider).screenSharing, isFalse,
+          reason: 'a dismissed dialog must not leave the button lit');
+      expect(find.text('Share screen'), findsOneWidget);
+    });
+
+    testWidgets('the platform can stop it without being asked',
+        (WidgetTester tester) async {
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: true);
+      final CallController controller = t.container.read(callProvider.notifier);
+
+      await controller.toggleScreenShare();
+      expect(t.container.read(callProvider).screenSharing, isTrue);
+
+      // The system's own "Stop sharing", or the capture dying.
+      controller.onScreenShareStopped();
+      await tester.pump();
+      expect(t.container.read(callProvider).screenSharing, isFalse);
+    });
+
+    testWidgets('ending the call clears it', (WidgetTester tester) async {
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: true);
+      final CallController controller = t.container.read(callProvider.notifier);
+
+      await controller.toggleScreenShare();
+      await controller.hangup();
+      await tester.pumpAndSettle();
+
+      expect(t.container.read(callProvider).screenSharing, isFalse);
+    });
+  });
+
+  group('the floating tile', () {
+    testWidgets('can be dragged anywhere and snaps to the nearer edge',
+        (WidgetTester tester) async {
+      await pumpConnectedCall(tester, video: true);
+      await tester.tap(find.byKey(const Key('call-chat')));
+      await tester.pumpAndSettle();
+
+      Offset tile() =>
+          tester.getTopLeft(find.byKey(const Key('call-floating-tile')));
+      final double screenWidth =
+          tester.view.physicalSize.width / tester.view.devicePixelRatio;
+
+      final Offset start = tile();
+      expect(start.dx, greaterThan(screenWidth / 2),
+          reason: 'defaults to the top right, clear of the send button');
+
+      // Drag it left past the midpoint and down — it follows the finger, and
+      // the snap then goes to whichever edge its *centre* ended up nearer.
+      await tester.drag(
+        find.byKey(const Key('call-floating-tile')),
+        const Offset(-420, 220),
+      );
+      await tester.pumpAndSettle();
+
+      final Offset moved = tile();
+      expect(moved.dy, greaterThan(start.dy), reason: 'it moved down');
+      expect(moved.dx, lessThan(screenWidth / 2),
+          reason: 'and snapped to the left edge it was dragged towards');
+    });
+
+    testWidgets('never leaves the screen, however hard it is thrown',
+        (WidgetTester tester) async {
+      await pumpConnectedCall(tester, video: true);
+      await tester.tap(find.byKey(const Key('call-chat')));
+      await tester.pumpAndSettle();
+
+      await tester.drag(
+        find.byKey(const Key('call-floating-tile')),
+        const Offset(-4000, 4000),
+      );
+      await tester.pumpAndSettle();
+
+      final Rect tile =
+          tester.getRect(find.byKey(const Key('call-floating-tile')));
+      final Size screen =
+          tester.view.physicalSize / tester.view.devicePixelRatio;
+      expect(tile.left, greaterThanOrEqualTo(0));
+      expect(tile.top, greaterThanOrEqualTo(0));
+      expect(tile.right, lessThanOrEqualTo(screen.width));
+      expect(tile.bottom, lessThanOrEqualTo(screen.height));
     });
   });
 
