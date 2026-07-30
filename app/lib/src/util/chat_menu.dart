@@ -21,6 +21,12 @@ enum ChatMenuAction {
   /// Stop being comrades; their presence goes dark again.
   removeComrade,
 
+  /// Stop notifying about this conversation (calls still ring).
+  mute,
+
+  /// Start notifying about it again.
+  unmute,
+
   /// Copy the peer's `npub` to the clipboard.
   copyKey,
 
@@ -35,24 +41,36 @@ enum ChatMenuAction {
   /// Blocking is the only entry that silently changes what reaches the user, so
   /// it is the only one that earns the error colour — spending that emphasis
   /// elsewhere would teach people to ignore it.
+  ///
+  /// Mute deliberately does not qualify: it is reversible from the same menu,
+  /// it is announced in Settings, and it never silences a call.
   bool get destructive => this == ChatMenuAction.block;
 }
 
 /// The menu for an open conversation, top to bottom.
 ///
-/// Exactly one of [ChatMenuAction.addComrade]/[ChatMenuAction.removeComrade]
-/// appears, chosen by [isComrade], so the row always names what tapping it will
-/// *do* rather than describing the current state.
+/// Exactly one of each either/or pair appears —
+/// [ChatMenuAction.addComrade]/[ChatMenuAction.removeComrade] chosen by
+/// [isComrade], [ChatMenuAction.mute]/[ChatMenuAction.unmute] by [isMuted] — so
+/// a row always names what tapping it will *do* rather than describing the
+/// current state.
+///
+/// Mute sits next to the comrade toggle because both answer "how much do I want
+/// to hear from this person": the two settings people reach for together.
 ///
 /// Destructive entries sort last: a menu that opens under the thumb should not
 /// put "Block" where "Set alias" was a moment ago.
-List<ChatMenuAction> conversationMenu({required bool isComrade}) =>
+List<ChatMenuAction> conversationMenu({
+  required bool isComrade,
+  bool isMuted = false,
+}) =>
     <ChatMenuAction>[
       ChatMenuAction.setAlias,
       if (isComrade)
         ChatMenuAction.removeComrade
       else
         ChatMenuAction.addComrade,
+      if (isMuted) ChatMenuAction.unmute else ChatMenuAction.mute,
       ChatMenuAction.copyKey,
       ChatMenuAction.encryptionInfo,
       ChatMenuAction.block,

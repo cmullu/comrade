@@ -306,6 +306,18 @@ object ChatEventRouter {
         return peerTitle(peer, convo?.alias, convo?.peerName)
     }
 
+    /**
+     * Whether a message from [peer] may raise a notification — the thread on
+     * screen and the per-conversation mute, in one place so DMs and attachments
+     * cannot drift apart. The rule itself is [NotificationPolicy.shouldNotifyMessage].
+     */
+    private fun mayNotify(context: Context, peer: String): Boolean =
+        NotificationPolicy.shouldNotifyMessage(
+            peer = peer,
+            openConversationPeer = _openConversationPeer.value,
+            muted = MutedChats.isMuted(context, peer),
+        )
+
     private fun uniffi.comrade_ui.ChitthiDto.toInfo() = ComradeCore.ChitthiInfo(
         id = id,
         author = author,
@@ -321,7 +333,7 @@ object ChatEventRouter {
             is BridgeEvent.IncomingDirectMessage -> {
                 _chatTick.update { it + 1 }
                 val peer = event.v1.sender
-                if (peer != _openConversationPeer.value) {
+                if (mayNotify(context, peer)) {
                     Notifier.notifyMessage(
                         context,
                         peer,
@@ -337,7 +349,7 @@ object ChatEventRouter {
             is BridgeEvent.IncomingMedia -> {
                 _chatTick.update { it + 1 }
                 val peer = event.v1.sender
-                if (peer != _openConversationPeer.value) {
+                if (mayNotify(context, peer)) {
                     Notifier.notifyMessage(
                         context,
                         peer,
@@ -367,7 +379,14 @@ object ChatEventRouter {
                     // still saying "Ana is online" would invite a call to
                     // someone who isn't there.
                     Notifier.clearComradeOnline(context, event.peer)
-                } else if (becameOnline && event.peer != _openConversationPeer.value) {
+                } else if (
+                    NotificationPolicy.shouldNotifyPresence(
+                        peer = event.peer,
+                        openConversationPeer = _openConversationPeer.value,
+                        muted = MutedChats.isMuted(context, event.peer),
+                        becameOnline = becameOnline,
+                    )
+                ) {
                     // Don't tell someone their comrade is around while they
                     // are literally looking at that conversation — same rule
                     // the DM notification follows. The event's own name is

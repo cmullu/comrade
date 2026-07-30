@@ -14,6 +14,7 @@ import mullu.comrade.channel.PipChannel
 import mullu.comrade.channel.RelayConnectionChannel
 import mullu.comrade.channel.ScreenSecurityChannel
 import mullu.comrade.channel.SystemChannel
+import mullu.comrade.channel.UpdateChannel
 import mullu.comrade.channel.VoiceRecorderChannel
 import mullu.comrade.channel.WakeWordChannel
 
@@ -63,6 +64,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
     private var media: MediaChannel? = null
     private var screen: ScreenSecurityChannel? = null
     private var system: SystemChannel? = null
+    private var updates: UpdateChannel? = null
 
     /**
      * Exposed so `MainActivity` can hand a notification's
@@ -85,6 +87,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
         media = MediaChannel(messenger, context, activityResults)
         screen = ScreenSecurityChannel(messenger, context)
         system = SystemChannel(messenger, context, permissions)
+        updates = UpdateChannel(messenger, context)
 
         // The SurfaceViewRenderer fallback for call video. Registered so it is
         // available, not used by the default widget — see CallVideoPlatformView.
@@ -109,6 +112,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
         media?.dispose()
         screen?.dispose()
         system?.dispose()
+        updates?.dispose()
 
         callVideo = null
         call = null
@@ -120,6 +124,7 @@ class ComradePlugin : FlutterPlugin, ActivityAware {
         media = null
         screen = null
         system = null
+        updates = null
     }
 
     // ── ActivityAware: runtime permissions need a real Activity ──────────────

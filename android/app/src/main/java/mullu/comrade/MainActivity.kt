@@ -100,6 +100,8 @@ import mullu.comrade.ui.FeedScreen
 import mullu.comrade.ui.HeartIcon
 import mullu.comrade.ui.JournalScreen
 import mullu.comrade.ui.NewChatScreen
+import mullu.comrade.ui.NotificationsIcon
+import mullu.comrade.ui.NotificationsOffIcon
 import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
@@ -115,6 +117,7 @@ import mullu.comrade.ui.shortNpub
 import mullu.comrade.ui.CallIcon
 import mullu.comrade.ui.VideocamIcon
 import mullu.comrade.ui.theme.ComradeTheme
+import mullu.comrade.update.UpdateChecker
 import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallScreen
 import mullu.comrade.call.CallUiState
@@ -131,10 +134,12 @@ class MainActivity : ComponentActivity() {
         // thumbnail. See [ScreenSecurity] for why the unconditional FLAG_SECURE
         // this used to set is gone.
         ScreenSecurity.applyPreference(this)
-        // A tapped "model is ready" notification asks for a specific tab; park
-        // the request so the shell honours it once it exists (the vault may
-        // still need unlocking first).
+        // A tapped notification asks for a specific tab (or Settings), and a
+        // tapped message notification asks for a conversation; park both so the
+        // shell honours them once it exists (the vault may still need unlocking
+        // first).
         AppNavigation.request(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
+        AppNavigation.requestPeer(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
         // Picture-in-picture for a live video call — see [PipController]. The
         // Activity is the only thing that receives the PiP lifecycle callbacks.
         PipController.attachActivity(this)
@@ -182,6 +187,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         AppNavigation.request(intent.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
+        AppNavigation.requestPeer(intent.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
     }
 
     /**
@@ -215,6 +221,10 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         EventPump.acquire(this, PumpHolder.FOREGROUND)
+        // At most one request a day, and none at all with the preference off
+        // (see UpdateChecker) — a sideloaded app otherwise has no way to tell
+        // anyone that a fix shipped.
+        UpdateChecker.maybeCheck(this)
         // The video surface is back: resume capture if a video call had it
         // suspended (a no-op otherwise, and idempotent — see PipController).
         PipController.onWindowVisibilityChanged(visible = true)
@@ -425,12 +435,39 @@ private fun MainShell(
     val requestedTab by AppNavigation.requestedTab.collectAsState()
     LaunchedEffect(requestedTab) {
         val key = requestedTab ?: return@LaunchedEffect
-        MainTab.entries.firstOrNull { it.name.equals(key, ignoreCase = true) }?.let {
-            tab = it
-            if (it == MainTab.Chats) chatNav = ChatNav.List
-            settingsOpen = false
+        when {
+            // Settings is a pushed screen, not a tab — an update notice lands
+            // on the card that offers the update.
+            key.equals(AppNavigation.SCREEN_SETTINGS, ignoreCase = true) -> settingsOpen = true
+            key.equals(AppNavigation.SCREEN_REQUESTS, ignoreCase = true) -> {
+                tab = MainTab.Chats
+                chatNav = ChatNav.Requests
+                settingsOpen = false
+            }
+            else -> MainTab.entries.firstOrNull { it.name.equals(key, ignoreCase = true) }?.let {
+                tab = it
+                if (it == MainTab.Chats) chatNav = ChatNav.List
+                settingsOpen = false
+            }
         }
         AppNavigation.consume()
+    }
+
+    // A tapped message notification names a conversation: open it (WP11).
+    // The peer key is all the intent carries, so the title is resolved the same
+    // way the shade resolved it — off the main thread, because it reads the
+    // contact/conversation trees — and the notification for that thread is
+    // cleared, exactly as opening the chat from the list does.
+    val requestedPeer by AppNavigation.requestedPeer.collectAsState()
+    LaunchedEffect(requestedPeer) {
+        val peer = requestedPeer ?: return@LaunchedEffect
+        val label = withContext(Dispatchers.IO) {
+            runCatching { ChatEventRouter.peerLabel(peer) }.getOrDefault("")
+        }
+        tab = MainTab.Chats
+        chatNav = ChatNav.Open(peer = peer, alias = label.ifBlank { null }, username = null)
+        settingsOpen = false
+        AppNavigation.consumePeer()
     }
 
     // Notification channels + runtime permission (Android 13+). Notifications
@@ -536,6 +573,12 @@ private fun MainShell(
         isComrade = peer != null && withContext(Dispatchers.IO) {
             runCatching { ComradeCore.comrades().any { it.npub == peer } }.getOrDefault(false)
         }
+    }
+    // Whether this conversation is muted. A plain preference read rather than a
+    // flow: it only ever changes from the menu below, and the tick re-reads it.
+    var muteToggleTick by remember { mutableStateOf(0) }
+    val isMuted = remember(openChat?.peer, muteToggleTick) {
+        openChat?.peer?.let { MutedChats.isMuted(context, it) } ?: false
     }
     val presenceNow by PresenceMonitor.presence.collectAsState()
     val peerPresence = openChat?.peer?.let { presenceNow[it] }
@@ -682,7 +725,7 @@ private fun MainShell(
                                             expanded = chatMenuOpen,
                                             onDismissRequest = { chatMenuOpen = false },
                                         ) {
-                                            conversationMenu(isComrade).forEach { action ->
+                                            conversationMenu(isComrade, isMuted).forEach { action ->
                                                 ChatMenuRow(
                                                     action = action,
                                                     onClick = {
@@ -690,6 +733,26 @@ private fun MainShell(
                                                         when (action) {
                                                             ChatMenuAction.SetAlias ->
                                                                 editingAlias = true
+                                                            ChatMenuAction.Mute,
+                                                            ChatMenuAction.Unmute,
+                                                            -> {
+                                                                MutedChats.setMuted(
+                                                                    context,
+                                                                    openChat.peer,
+                                                                    !isMuted,
+                                                                )
+                                                                muteToggleTick++
+                                                                if (!isMuted) {
+                                                                    // Muting with a notice already
+                                                                    // in the shade would otherwise
+                                                                    // leave the buzz it was meant
+                                                                    // to stop sitting there.
+                                                                    Notifier.clearForPeer(
+                                                                        context,
+                                                                        openChat.peer,
+                                                                    )
+                                                                }
+                                                            }
                                                             ChatMenuAction.AddComrade,
                                                             ChatMenuAction.RemoveComrade,
                                                             -> scope.launch {
@@ -963,6 +1026,8 @@ private fun ChatMenuRow(action: ChatMenuAction, onClick: () -> Unit) {
             ChatMenuAction.SetAlias -> R.string.chat_menu_set_alias
             ChatMenuAction.AddComrade -> R.string.comrade_add
             ChatMenuAction.RemoveComrade -> R.string.comrade_remove
+            ChatMenuAction.Mute -> R.string.chat_menu_mute
+            ChatMenuAction.Unmute -> R.string.chat_menu_unmute
             ChatMenuAction.CopyKey -> R.string.chat_menu_copy_key
             ChatMenuAction.EncryptionInfo -> R.string.chat_menu_encryption
             ChatMenuAction.Block -> R.string.chat_menu_block
@@ -974,6 +1039,10 @@ private fun ChatMenuRow(action: ChatMenuAction, onClick: () -> Unit) {
         // star toggle in the bar used to give at a glance.
         ChatMenuAction.AddComrade -> StarOutlineIcon
         ChatMenuAction.RemoveComrade -> StarIcon
+        // The glyph shows what tapping *does*, matching the label: a struck-out
+        // bell on the row that turns notifications back on would read backwards.
+        ChatMenuAction.Mute -> NotificationsOffIcon
+        ChatMenuAction.Unmute -> NotificationsIcon
         ChatMenuAction.CopyKey -> CopyIcon
         ChatMenuAction.EncryptionInfo -> Icons.Filled.Lock
         ChatMenuAction.Block -> Icons.Filled.Warning

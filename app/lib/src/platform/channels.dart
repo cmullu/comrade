@@ -51,6 +51,12 @@ abstract final class Channels {
   static const screen = 'mullu.comrade/screen';
 
   static const system = 'mullu.comrade/system';
+
+  /// The in-app update check. Control + a state stream, like the model
+  /// downloads: the answer can arrive long after the request, and it must
+  /// survive an engine detach in between.
+  static const updates = 'mullu.comrade/updates';
+  static const updatesState = 'mullu.comrade/updates/state';
 }
 
 /// Stable `PlatformException.code` values. The `message` is for humans and may

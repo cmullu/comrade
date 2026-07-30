@@ -1,13 +1,20 @@
 /// Settings state: appearance, the TURN relay card, background connectivity,
-/// and the couple-sandbox pairing the desktop shell owned.
+/// notifications (per-conversation mute), app updates, and the couple-sandbox
+/// pairing the desktop shell owned.
 library;
 
 import 'package:flutter/material.dart' show ThemeMode;
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/app_preferences.dart';
 import '../data/models.dart';
 import '../platform/screen_channel.dart';
+// `show`-listed rather than a bare facade import: `platform.dart` re-exports
+// `call_channel.dart`, whose `TurnServerStatus`/`TurnDiagnostic` names collide
+// with `models.dart`'s (the Rust-served versions this file actually uses).
+import '../platform/platform.dart'
+    show SystemChannel, UpdateChannel, UpdateSettings, UpdateStatus;
 import 'providers.dart';
 
 // ── Appearance (SCREEN_INVENTORY D26) ───────────────────────────────────────
@@ -241,3 +248,151 @@ class LedgerController extends AsyncNotifier<String> {
 
 final AsyncNotifierProvider<LedgerController, String> ledgerProvider =
     AsyncNotifierProvider<LedgerController, String>(LedgerController.new);
+
+// ── Notifications: per-conversation mute, and whether any get through ────────
+
+/// The system-notification surface. Overridden in tests, and in every widget
+/// test that renders Settings — a real [SystemChannel] needs an engine.
+final Provider<SystemChannel> systemChannelProvider =
+    Provider<SystemChannel>((Ref ref) => SystemChannel());
+
+/// Run a platform call that only exists on Android, answering [fallback] where
+/// there is no handler.
+///
+/// The same Flutter app builds for Linux desktop, where `mullu.comrade/*` has
+/// nothing behind it — and a widget test has no engine at all. A
+/// [MissingPluginException] there is the platform saying "not me", not a
+/// failure worth surfacing: mute and the update check are Android features, and
+/// a settings card must render on every platform regardless.
+Future<T> _ifSupported<T>(Future<T> Function() call, T fallback) async {
+  try {
+    return await call();
+  } on MissingPluginException {
+    return fallback;
+  }
+}
+
+/// Which conversations are muted, as the native side sees it.
+///
+/// Native is the source of truth on purpose: the notification path that consults
+/// mute runs with no Flutter engine attached, so a Dart-held set would be a
+/// second answer that the thing actually deciding never reads. Device-local —
+/// Comrade has no server to sync a preference through.
+class NotificationSettingsController extends AsyncNotifier<Set<String>> {
+  @override
+  Future<Set<String>> build() => _ifSupported<Set<String>>(
+        ref.watch(systemChannelProvider).mutedPeers,
+        const <String>{},
+      );
+
+  Future<void> setMuted(String peer, {required bool muted}) async {
+    await _ifSupported<void>(
+      () => ref.read(systemChannelProvider).setMuted(peer, muted: muted),
+      null,
+    );
+    // Re-read rather than patching the local set: the native store is the
+    // authority, and it also clears the shade as a side effect.
+    ref.invalidateSelf();
+    await future;
+  }
+
+  Future<void> unmuteAll() async {
+    await _ifSupported<void>(ref.read(systemChannelProvider).unmuteAll, null);
+    ref.invalidateSelf();
+    await future;
+  }
+
+  /// The OS's own per-app notification screen, where the channels live.
+  Future<void> openSystemSettings() => _ifSupported<void>(
+        ref.read(systemChannelProvider).openNotificationSettings,
+        null,
+      );
+}
+
+final AsyncNotifierProvider<NotificationSettingsController, Set<String>>
+    mutedChatsProvider =
+    AsyncNotifierProvider<NotificationSettingsController, Set<String>>(
+        NotificationSettingsController.new);
+
+/// Whether the OS delivers any notification from Comrade at all. False means
+/// nothing arrives in the background — including calls — so the card says so
+/// rather than leaving the user to wonder.
+final FutureProvider<bool> notificationsEnabledProvider =
+    FutureProvider<bool>((Ref ref) => _ifSupported<bool>(
+          ref.watch(systemChannelProvider).areNotificationsEnabled,
+          // No handler (desktop, tests): report "enabled" rather than claiming a
+          // problem we cannot see.
+          true,
+        ));
+
+// ── App updates ─────────────────────────────────────────────────────────────
+
+/// The update-check surface. Overridden in tests.
+final Provider<UpdateChannel> updateChannelProvider =
+    Provider<UpdateChannel>((Ref ref) => UpdateChannel());
+
+/// Live check status. The native stream's first event is the current answer, so
+/// a card built after a check still shows the finding.
+///
+/// A platform with no handler yields nothing at all rather than an error: the
+/// card then renders its "not checked yet" state, which is the truth there.
+final StreamProvider<UpdateStatus> updateStatusProvider =
+    StreamProvider<UpdateStatus>((Ref ref) => ref
+        .watch(updateChannelProvider)
+        .status
+        .handleError((Object _) {},
+            test: (dynamic e) => e is MissingPluginException));
+
+/// Version, cadence preference and skip watermark — everything the card renders
+/// around [updateStatusProvider].
+class UpdateSettingsController extends AsyncNotifier<UpdateSettings> {
+  @override
+  Future<UpdateSettings> build() => _ifSupported<UpdateSettings>(
+        ref.watch(updateChannelProvider).settings,
+        const UpdateSettings.unknown(),
+      );
+
+  Future<void> setAutoCheck(bool enabled) async {
+    await _ifSupported<void>(
+      () => ref.read(updateChannelProvider).setAutoCheck(enabled),
+      null,
+    );
+    ref.invalidateSelf();
+    await future;
+  }
+
+  /// Stop mentioning [version]; anything newer is still announced.
+  Future<void> skip(String version) async {
+    await _ifSupported<void>(
+      () => ref.read(updateChannelProvider).skip(version),
+      null,
+    );
+    ref.invalidateSelf();
+    await future;
+  }
+
+  Future<void> unskip() async {
+    await _ifSupported<void>(ref.read(updateChannelProvider).unskip, null);
+    ref.invalidateSelf();
+    await future;
+  }
+
+  /// A user-initiated check. Bypasses the daily cadence but not the native
+  /// single-flight guard, and deliberately raises no notification — the answer
+  /// is on screen.
+  Future<void> checkNow() => _ifSupported<void>(
+        () => ref.read(updateChannelProvider).check(force: true),
+        null,
+      );
+
+  /// Open the release page in a browser. Comrade never installs an APK itself.
+  Future<void> openRelease() => _ifSupported<void>(
+        ref.read(updateChannelProvider).openRelease,
+        null,
+      );
+}
+
+final AsyncNotifierProvider<UpdateSettingsController, UpdateSettings>
+    updateSettingsProvider =
+    AsyncNotifierProvider<UpdateSettingsController, UpdateSettings>(
+        UpdateSettingsController.new);
