@@ -72,12 +72,18 @@ internal class MediaChannel(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    /** The one live audio player, and the attachment it is playing. */
+    /**
+     * The one live audio player, and the attachment it is playing.
+     *
+     * `@Volatile` because `prepare()` runs on IO (it parses the container and
+     * would block the platform thread) while every read of these happens on the
+     * platform thread — the next tap must see the player the last one made.
+     */
+    @Volatile
     private var player: MediaPlayer? = null
-    private var playingToken: String? = null
 
-    /** URIs currently staged for an external viewer, so they can be released. */
-    private val stagedUris = mutableListOf<Uri>()
+    @Volatile
+    private var playingToken: String? = null
 
     private val methods = MethodChannel(messenger, ChannelNames.MEDIA)
         .also { it.setMethodCallHandler(this) }
@@ -244,8 +250,8 @@ internal class MediaChannel(
                             // A human name, not the staging file's UUID: this
                             // becomes the attachment's caption, which the
                             // recipient sees.
-                            "name" to if (photo) "photo.jpg" else "video.mp4",
-                            "mimeType" to if (photo) "image/jpeg" else "video/mp4",
+                            "name" to (if (photo) "photo.jpg" else "video.mp4"),
+                            "mimeType" to (if (photo) "image/jpeg" else "video/mp4"),
                             "bytes" to target.readBytes(),
                         )
                     } else if (fromResult != null) {
@@ -333,7 +339,6 @@ internal class MediaChannel(
             return
         }
         val uri = InMemoryMediaProvider.stage(appContext, name, mime, bytes)
-        stagedUris += uri
         val view = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, mime)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -344,8 +349,9 @@ internal class MediaChannel(
             activity.startActivity(Intent.createChooser(view, name))
             result.postSuccess(true)
         } catch (_: android.content.ActivityNotFoundException) {
+            // Nothing can open it: unstage immediately rather than leaving a
+            // decrypted blob readable until the next purge.
             InMemoryMediaProvider.release(uri)
-            stagedUris.remove(uri)
             result.postSuccess(false)
         }
     }
@@ -359,7 +365,6 @@ internal class MediaChannel(
      */
     fun purge() {
         stopAudio()
-        stagedUris.clear()
         InMemoryMediaProvider.clear()
     }
 

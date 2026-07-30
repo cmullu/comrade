@@ -148,6 +148,7 @@ class InMemoryMediaProvider : ContentProvider() {
             throw java.io.FileNotFoundException("comrade media is read-only")
         }
         val token = uri.lastPathSegment
+            ?: throw java.io.FileNotFoundException("no attachment token in $uri")
         val blob = blob(token) ?: throw java.io.FileNotFoundException("no such attachment")
         val context = context ?: throw java.io.FileNotFoundException("provider has no context")
         val storage = context.getSystemService(StorageManager::class.java)
@@ -156,7 +157,7 @@ class InMemoryMediaProvider : ContentProvider() {
         // One handler thread per open blob: the callbacks below are invoked on
         // it, and must not run on the main thread.
         val thread = HandlerThread("comrade-media-$token").also { it.start() }
-        servers.put(token!!, thread)?.quitSafely()
+        servers.put(token, thread)?.quitSafely()
 
         return storage.openProxyFileDescriptor(
             ParcelFileDescriptor.MODE_READ_ONLY,
