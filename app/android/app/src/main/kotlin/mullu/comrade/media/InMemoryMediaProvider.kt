@@ -129,15 +129,19 @@ class InMemoryMediaProvider : ContentProvider() {
         }?.toTypedArray()
             ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
         val cursor = MatrixCursor(columns, 1)
-        cursor.addRow(
-            columns.map {
-                when (it) {
-                    OpenableColumns.DISPLAY_NAME -> blob.name
-                    OpenableColumns.SIZE -> blob.bytes.size.toLong()
-                    else -> null
-                }
-            }.toTypedArray(),
-        )
+        // `List<Any?>` spelled out, not inferred: the branches below are a String
+        // and a Long, whose common supertype is an intersection
+        // (`Comparable<*> & Serializable`), and reifying that for
+        // `toTypedArray()` is an error in Kotlin 2.x — rightly, since the array's
+        // element type would be a type nobody wrote.
+        val row: List<Any?> = columns.map { column ->
+            when (column) {
+                OpenableColumns.DISPLAY_NAME -> blob.name
+                OpenableColumns.SIZE -> blob.bytes.size.toLong()
+                else -> null
+            }
+        }
+        cursor.addRow(row.toTypedArray())
         return cursor
     }
 
