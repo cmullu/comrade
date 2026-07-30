@@ -13,6 +13,8 @@
 /// between them live.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -21,6 +23,8 @@ import '../data/models.dart';
 import '../state/call_providers.dart';
 import '../state/chat_providers.dart';
 import '../state/providers.dart';
+import '../state/settings_providers.dart';
+import '../platform/platform.dart' show SystemChannel;
 import '../theme/breakpoints.dart';
 import '../theme/comrade_theme.dart';
 import '../util/chat_menu.dart';
@@ -86,6 +90,88 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   ChatNav _chatNav = ChatNav.list;
   SecondaryDestination? _secondary;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final List<StreamSubscription<String>> _navRequests =
+      <StreamSubscription<String>>[];
+
+  /// Notification taps land here (WP11 in `docs/COMMS_ARCHITECTURE.md`).
+  ///
+  /// Two directions, because a notification names either a destination (an
+  /// update notice → Settings, a model-ready notice → Tara) or a conversation (a
+  /// message). A tap that arrived before this shell existed — a cold start from
+  /// a notification is exactly that — was stashed natively, so the pending pair
+  /// is collected once here as well as streamed.
+  @override
+  void initState() {
+    super.initState();
+    final SystemChannel system = ref.read(systemChannelProvider);
+    _navRequests
+      ..add(system.openTabRequests.listen(_openRequestedDestination))
+      ..add(system.openConversationRequests.listen(_openRequestedConversation));
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _collectPending(system));
+  }
+
+  Future<void> _collectPending(SystemChannel system) async {
+    try {
+      final String? tab = await system.consumePendingTab();
+      if (tab != null) _openRequestedDestination(tab);
+      final String? peer = await system.consumePendingPeer();
+      if (peer != null) _openRequestedConversation(peer);
+    } on MissingPluginException {
+      // No native handler (desktop, tests). Nothing to collect, and a missing
+      // deep link must never stop the shell from rendering.
+    }
+  }
+
+  /// A tab or non-tab destination named by a notification. Unknown keys are
+  /// ignored rather than guessed at.
+  void _openRequestedDestination(String key) {
+    final String wanted = key.toLowerCase();
+    final MainTab? tab = MainTab.values
+        .where((MainTab t) => t.name.toLowerCase() == wanted)
+        .firstOrNull;
+    final SecondaryDestination? secondary = SecondaryDestination.values
+        .where((SecondaryDestination d) => d.name.toLowerCase() == wanted)
+        .firstOrNull;
+    if (tab == null && secondary == null && wanted != 'requests') return;
+    if (!mounted) return;
+    setState(() {
+      if (wanted == 'requests') {
+        _tab = MainTab.chats;
+        _chatNav = ChatNav.requests;
+        _secondary = null;
+      } else if (secondary != null) {
+        _secondary = secondary;
+      } else {
+        _tab = tab!;
+        _chatNav = ChatNav.list;
+        _secondary = null;
+      }
+    });
+  }
+
+  /// A conversation named by a tapped message notification. The intent carries
+  /// only the key, so the title is filled in from whatever the chat list
+  /// already knows — the same lookup the in-call chat button uses.
+  void _openRequestedConversation(String peer) {
+    if (!mounted) return;
+    final ConversationInfo? known = ref
+        .read(conversationsProvider)
+        .value
+        ?.where((ConversationInfo c) => c.peer == peer)
+        .firstOrNull;
+    _openConversation(
+      ChatTarget(peer: peer, alias: known?.alias, username: known?.peerName),
+    );
+  }
+
+  @override
+  void dispose() {
+    for (final StreamSubscription<String> sub in _navRequests) {
+      sub.cancel();
+    }
+    super.dispose();
+  }
 
   ChatTarget? get _openChat => ref.read(openConversationProvider);
 
@@ -184,6 +270,14 @@ class _HomeShellState extends ConsumerState<HomeShell> {
         await ref.read(comradesProvider.notifier).setComrade(
               chat.peer,
               comrade: action == ChatMenuAction.addComrade,
+            );
+      case ChatMenuAction.mute:
+      case ChatMenuAction.unmute:
+        // Native owns the mute set (the notification path reads it with no
+        // engine attached) and clears the shade for a freshly-muted peer.
+        await ref.read(mutedChatsProvider.notifier).setMuted(
+              chat.peer,
+              muted: action == ChatMenuAction.mute,
             );
       case ChatMenuAction.copyKey:
         await Clipboard.setData(ClipboardData(text: chat.peer));
@@ -432,6 +526,11 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     if (_secondary != null || _tab != MainTab.chats) return const <Widget>[];
     if (openChat != null) {
       final bool isComrade = ref.watch(isComradeProvider(openChat.peer));
+      // Watched for the same reason as isComrade: the mute set loads on first
+      // subscribe, so a lazy read would build the first menu from an empty one.
+      final bool isMuted =
+          (ref.watch(mutedChatsProvider).value ?? const <String>{})
+              .contains(openChat.peer);
       return <Widget>[
         IconButton(
           tooltip: 'Voice call',
@@ -458,7 +557,9 @@ class _HomeShellState extends ConsumerState<HomeShell> {
           // reading it lazily inside itemBuilder would render the first menu
           // from a not-yet-loaded (false) answer.
           itemBuilder: (BuildContext context) =>
-              conversationMenu(isComrade: isComrade).map(_menuEntry).toList(),
+              conversationMenu(isComrade: isComrade, isMuted: isMuted)
+                  .map(_menuEntry)
+                  .toList(),
         ),
       ];
     }
@@ -482,6 +583,10 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       // Outline for "not yet", filled for "currently".
       ChatMenuAction.addComrade => ('Make a comrade', Icons.star_border),
       ChatMenuAction.removeComrade => ('Remove as comrade', Icons.star),
+      // The glyph shows what tapping *does*, matching the label: a struck-out
+      // bell on the row that turns notifications back on would read backwards.
+      ChatMenuAction.mute => ('Mute notifications', Icons.notifications_off),
+      ChatMenuAction.unmute => ('Unmute notifications', Icons.notifications),
       ChatMenuAction.copyKey => ('Copy public key', Icons.content_copy),
       ChatMenuAction.encryptionInfo => ('Encryption details', Icons.lock),
       ChatMenuAction.block => ('Block this person', Icons.warning),

@@ -1,5 +1,5 @@
-/// Settings: profile/@handle, background connectivity, the TURN relay card,
-/// vault lock, and an honest "in the lab" note.
+/// Settings: profile/@handle, background connectivity, notifications, app
+/// updates, the TURN relay card, vault lock, and an honest "in the lab" note.
 ///
 /// Port of `ui/SettingsScreen.kt`, merged with desktop's TURN modal.
 ///
@@ -23,6 +23,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/comrade_repository.dart';
 import '../data/models.dart';
+// `show`-listed: `platform.dart` also re-exports the call channel's own
+// `TurnServerStatus`/`TurnDiagnostic`, which would collide with `models.dart`.
+import '../platform/platform.dart'
+    show
+        UpdateAvailable,
+        UpdateChecking,
+        UpdateFailed,
+        UpdateSettings,
+        UpdateStatus,
+        UpdateUnknown,
+        UpdateUpToDate;
 import '../state/providers.dart';
 import '../state/settings_providers.dart';
 import '../widgets/app_chrome.dart';
@@ -47,6 +58,11 @@ class SettingsScreen extends ConsumerWidget {
           const _BackgroundConnectivityCard(),
           const SizedBox(height: 12),
           const _ScreenshotCard(),
+          const SizedBox(height: 12),
+          const _NotificationsCard(),
+          const SizedBox(height: 12),
+          const _UpdatesCard(),
+          const SizedBox(height: 12),
           const _TurnRelayCard(),
           const SizedBox(height: 12),
           const _VaultLockCard(),
@@ -420,6 +436,252 @@ class _ScreenshotCard extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+/// What Comrade may notify about, and what it has been told to stay quiet about.
+///
+/// The per-channel detail lives in the OS's own screen (Android owns that UI and
+/// duplicating it would drift), so this card's job is the three things that
+/// screen cannot say: that notifications are off entirely, how many
+/// conversations *this app* is muting, and that muting is device-local.
+class _NotificationsCard extends ConsumerWidget {
+  const _NotificationsCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ThemeData theme = Theme.of(context);
+    final bool enabled = ref.watch(notificationsEnabledProvider).value ?? true;
+    final Set<String> muted =
+        ref.watch(mutedChatsProvider).value ?? const <String>{};
+    return SectionCard(
+      title: 'Notifications',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            'Messages, message requests, calls, comrades coming online and app '
+            'updates each have their own channel, so you can silence one '
+            'without silencing the rest.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          if (!enabled) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              'Notifications are turned off for Comrade — nothing will reach '
+              'you while the app is in the background, including calls.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.error),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Text(
+            muted.isEmpty
+                ? 'No conversations are muted.'
+                : '${muted.length} '
+                    '${muted.length == 1 ? "conversation is" : "conversations are"} '
+                    'muted (on this device).',
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Muting is stored on this device only — Comrade has no server to '
+            'sync it through — and a muted chat still shows its unread count '
+            'and still rings for calls.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          if (muted.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            OutlinedButton(
+              onPressed: () =>
+                  ref.read(mutedChatsProvider.notifier).unmuteAll(),
+              child: const Text('Unmute all'),
+            ),
+          ],
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: () =>
+                ref.read(mutedChatsProvider.notifier).openSystemSettings(),
+            child: const Text('Notification settings'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Whether a newer Comrade exists, and how to get it.
+///
+/// Comrade is installed by sideload, so nothing otherwise tells anyone that a
+/// release — including a security fix — has shipped. "Get the update" opens the
+/// release page in a browser: the app never downloads or installs an APK
+/// itself, which would mean holding the permission that lets an app install
+/// other apps.
+class _UpdatesCard extends ConsumerWidget {
+  const _UpdatesCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ThemeData theme = Theme.of(context);
+    final UpdateSettings settings = ref.watch(updateSettingsProvider).value ??
+        const UpdateSettings.unknown();
+    final UpdateStatus status =
+        ref.watch(updateStatusProvider).value ?? const UpdateUnknown();
+
+    return SectionCard(
+      title: 'App updates',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            "You're running ${settings.currentVersion}",
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 8),
+          ..._statusRows(context, ref, status, settings),
+          if (settings.skippedVersion != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              "Skipped ${settings.skippedVersion} — you'll be told about "
+              'anything newer.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            TextButton(
+              onPressed: () =>
+                  ref.read(updateSettingsProvider.notifier).unskip(),
+              child: const Text('Stop skipping'),
+            ),
+          ],
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: status is UpdateChecking
+                ? null
+                : () => ref.read(updateSettingsProvider.notifier).checkNow(),
+            child: const Text('Check now'),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(
+                      'Check for updates automatically',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Asks github.com once a day whether a newer Comrade has '
+                      'been published. That tells GitHub your IP address and '
+                      'nothing else — no account, no identifier, no message '
+                      'data. With this off, nothing is checked until you tap '
+                      '“Check now”.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Switch(
+                value: settings.autoCheck,
+                onChanged: (bool v) =>
+                    ref.read(updateSettingsProvider.notifier).setAutoCheck(v),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The status half of the card: one of checking / available / up to date /
+  /// failed / never looked.
+  List<Widget> _statusRows(
+    BuildContext context,
+    WidgetRef ref,
+    UpdateStatus status,
+    UpdateSettings settings,
+  ) {
+    final ThemeData theme = Theme.of(context);
+    switch (status) {
+      case UpdateChecking():
+        return <Widget>[
+          Text(
+            'Checking…',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ];
+      case UpdateAvailable(:final String version, :final String notes):
+        return <Widget>[
+          Text(
+            'Comrade $version is available',
+            style: theme.textTheme.titleSmall
+                ?.copyWith(color: theme.colorScheme.primary),
+          ),
+          if (notes.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              // Bounded: release notes in this repo run long, and a settings
+              // card is not a changelog viewer — the full text is one tap away.
+              notes.split('\n').take(12).join('\n'),
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ],
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: () =>
+                ref.read(updateSettingsProvider.notifier).openRelease(),
+            child: const Text('Get the update'),
+          ),
+          const SizedBox(height: 4),
+          OutlinedButton(
+            onPressed: () =>
+                ref.read(updateSettingsProvider.notifier).skip(version),
+            child: const Text('Skip this version'),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Comrade is installed by sideload, so the download opens in your '
+            'browser. Android only installs it if it is signed with the same '
+            'key as the copy you already have.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.outline),
+          ),
+        ];
+      case UpdateFailed(:final String message):
+        return <Widget>[
+          Text(
+            "Couldn't check: $message",
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.error),
+          ),
+        ];
+      case UpdateUpToDate():
+        return <Widget>[
+          Text(
+            'Up to date',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ];
+      case UpdateUnknown():
+        return <Widget>[
+          Text(
+            settings.lastCheckedAt > 0 ? 'Up to date' : 'Not checked yet',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ];
+    }
   }
 }
 

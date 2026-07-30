@@ -45,6 +45,9 @@ internal object ChannelNames {
     const val SCREEN = "mullu.comrade/screen"
 
     const val SYSTEM = "mullu.comrade/system"
+
+    const val UPDATES = "mullu.comrade/updates"
+    const val UPDATES_STATE = "mullu.comrade/updates/state"
 }
 
 /**

@@ -270,6 +270,13 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
+    // The real org.json, for host JVM unit tests only. `org.json` ships inside
+    // android.jar, but the mockable android.jar the unit-test classpath gets has
+    // every method stubbed to throw — so a parser that uses JSONObject (here:
+    // update/UpdateCheck.kt, matching what the voice recogniser already does in
+    // main) is untestable off-device without the genuine article shadowing the
+    // stub. Test-only: the app itself still uses the platform's copy.
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(composeBom)
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")

@@ -24,6 +24,12 @@ enum class ChatMenuAction {
     /** Stop being comrades; their presence goes dark again. */
     RemoveComrade,
 
+    /** Stop notifying about this conversation (calls still ring). */
+    Mute,
+
+    /** Start notifying about it again. */
+    Unmute,
+
     /** Copy the peer's `npub` to the clipboard. */
     CopyKey,
 
@@ -39,22 +45,30 @@ enum class ChatMenuAction {
      * entry that silently changes what reaches the user, so it is the only
      * one that earns the error colour — spending that emphasis elsewhere
      * would teach people to ignore it.
+     *
+     * Mute deliberately does not qualify: it is reversible from the same menu,
+     * it is announced in Settings, and it never silences a call.
      */
     val destructive: Boolean get() = this == Block
 }
 
 /**
- * The menu for an open conversation, top to bottom. Exactly one of
- * [ChatMenuAction.AddComrade]/[ChatMenuAction.RemoveComrade] appears, chosen
- * by [isComrade], so the row always names what tapping it will *do* rather
- * than describing the current state.
+ * The menu for an open conversation, top to bottom. Exactly one of each
+ * either/or pair appears — [ChatMenuAction.AddComrade]/[ChatMenuAction.RemoveComrade]
+ * chosen by [isComrade], [ChatMenuAction.Mute]/[ChatMenuAction.Unmute] by
+ * [isMuted] — so a row always names what tapping it will *do* rather than
+ * describing the current state.
+ *
+ * Mute sits next to the comrade toggle because both are "how much do I want to
+ * hear from this person": the two settings people reach for together.
  *
  * Destructive entries sort last: a menu that opens under the thumb should not
  * put "Block" where "Set alias" was a moment ago.
  */
-fun conversationMenu(isComrade: Boolean): List<ChatMenuAction> = listOf(
+fun conversationMenu(isComrade: Boolean, isMuted: Boolean = false): List<ChatMenuAction> = listOf(
     ChatMenuAction.SetAlias,
     if (isComrade) ChatMenuAction.RemoveComrade else ChatMenuAction.AddComrade,
+    if (isMuted) ChatMenuAction.Unmute else ChatMenuAction.Mute,
     ChatMenuAction.CopyKey,
     ChatMenuAction.EncryptionInfo,
     ChatMenuAction.Block,

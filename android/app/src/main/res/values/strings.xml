@@ -162,6 +162,8 @@
     <string name="chat_menu_copied">Public key copied</string>
     <string name="chat_menu_encryption">Encryption details</string>
     <string name="chat_menu_block">Block this person</string>
+    <string name="chat_menu_mute">Mute notifications</string>
+    <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->
     <string name="encryption_title">Encryption details</string>
     <string name="encryption_body">Messages in this chat are sealed with your key and theirs (NIP-44) and gift-wrapped, so relays carry neither the text nor who is talking to whom. Nobody without one of the two private keys can read it — not a relay, not us.</string>
@@ -173,4 +175,38 @@
     <string name="block_confirm">Block</string>
     <string name="cancel">Cancel</string>
     <string name="close">Close</string>
+
+    <!-- Notifications (settings card + grouping) -->
+    <string name="notification_messages_summary">New messages</string>
+    <string name="settings_notifications_title">Notifications</string>
+    <string name="settings_notifications_summary">Messages, message requests, calls, comrades coming online and app updates each have their own channel, so you can silence one without silencing the rest.</string>
+    <string name="settings_notifications_blocked">Notifications are turned off for Comrade — nothing will reach you while the app is in the background, including calls.</string>
+    <string name="settings_notifications_open_system">Notification settings</string>
+    <string name="settings_notifications_grant">Allow notifications</string>
+    <string name="settings_notifications_muted_none">No conversations are muted.</string>
+    <plurals name="settings_notifications_muted_count">
+        <item quantity="one">%1$d conversation is muted (on this device).</item>
+        <item quantity="other">%1$d conversations are muted (on this device).</item>
+    </plurals>
+    <string name="settings_notifications_unmute_all">Unmute all</string>
+    <string name="settings_notifications_mute_scope">Muting is stored on this device only — Comrade has no server to sync it through, and a muted chat still shows its unread count and still rings for calls.</string>
+
+    <!-- App updates -->
+    <string name="update_available_title">Comrade %1$s is available</string>
+    <string name="update_available_text">Tap to see what changed</string>
+    <string name="settings_updates_title">App updates</string>
+    <string name="settings_updates_current">You\'re running %1$s</string>
+    <string name="settings_updates_auto_title">Check for updates automatically</string>
+    <string name="settings_updates_auto_summary">Asks github.com once a day whether a newer Comrade has been published. That tells GitHub your IP address and nothing else — no account, no identifier, no message data. With this off, nothing is checked until you tap “Check now”.</string>
+    <string name="settings_updates_check_now">Check now</string>
+    <string name="settings_updates_checking">Checking…</string>
+    <string name="settings_updates_up_to_date">Up to date, as of %1$s</string>
+    <string name="settings_updates_failed">Couldn\'t check: %1$s</string>
+    <string name="settings_updates_available">Comrade %1$s is available</string>
+    <string name="settings_updates_get">Get the update</string>
+    <string name="settings_updates_skip">Skip this version</string>
+    <string name="settings_updates_skipped">Skipped %1$s — you\'ll be told about anything newer.</string>
+    <string name="settings_updates_unskip">Stop skipping</string>
+    <string name="settings_updates_never_checked">Not checked yet</string>
+    <string name="settings_updates_sideload_note">Comrade is installed by sideload, so updates arrive from the release page: the download opens in your browser, and Android only installs it if it is signed with the same key as the copy you already have.</string>
 </resources>

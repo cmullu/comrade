@@ -7,8 +7,10 @@ library;
 
 import 'package:comrade/src/data/fake_comrade_repository.dart';
 import 'package:comrade/src/data/models.dart';
+import 'package:comrade/src/platform/platform.dart' show SystemChannel;
 import 'package:comrade/src/screens/home_shell.dart';
 import 'package:comrade/src/state/chat_providers.dart';
+import 'package:comrade/src/state/settings_providers.dart';
 import 'package:comrade/src/theme/breakpoints.dart';
 import 'package:comrade/src/theme/comrade_theme.dart';
 import 'package:comrade/src/util/display_name.dart';
@@ -18,11 +20,49 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers.dart';
 
-Widget _shell(FakeComradeRepository repo, {ChatTarget? open}) => ProviderScope(
+/// Records mute calls and answers from an in-memory set — the native store
+/// stands in for itself, because the real one is an Android SharedPreferences
+/// read behind a channel with no handler in a widget test.
+class _FakeSystemChannel extends SystemChannel {
+  _FakeSystemChannel({Set<String>? muted}) : muted = muted ?? <String>{};
+
+  final Set<String> muted;
+  final List<String> calls = <String>[];
+
+  @override
+  Future<Set<String>> mutedPeers() async => muted;
+
+  @override
+  Future<bool> isMuted(String peer) async => muted.contains(peer);
+
+  @override
+  Future<void> setMuted(String peer, {required bool muted}) async {
+    calls.add('setMuted:$peer:$muted');
+    if (muted) {
+      this.muted.add(peer);
+    } else {
+      this.muted.remove(peer);
+    }
+  }
+
+  @override
+  Future<void> unmuteAll() async => muted.clear();
+
+  @override
+  Future<bool> areNotificationsEnabled() async => true;
+}
+
+Widget _shell(
+  FakeComradeRepository repo, {
+  ChatTarget? open,
+  SystemChannel? system,
+}) =>
+    ProviderScope(
       overrides: <Override>[
         ...fakeOverrides(repo),
         if (open != null)
           openConversationProvider.overrideWith((Ref ref) => open),
+        if (system != null) systemChannelProvider.overrideWithValue(system),
       ],
       child: MaterialApp(
         theme: ComradeTheme.dark(),
@@ -226,13 +266,52 @@ void main() {
 
   group('conversation ⋮ menu', () {
     Future<void> openMenu(
-        WidgetTester tester, FakeComradeRepository repo, String peer) async {
+      WidgetTester tester,
+      FakeComradeRepository repo,
+      String peer, {
+      SystemChannel? system,
+    }) async {
       setWindowSize(tester, const Size(400, 900));
-      await tester.pumpWidget(_shell(repo, open: ChatTarget(peer: peer)));
+      await tester.pumpWidget(
+        _shell(repo, open: ChatTarget(peer: peer), system: system),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('chat-menu')));
       await tester.pumpAndSettle();
     }
+
+    testWidgets('offers to mute an unmuted conversation, and then to unmute it',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      final _FakeSystemChannel system = _FakeSystemChannel();
+      await openMenu(tester, repo, FakePeers.bhaskar, system: system);
+
+      expect(find.text('Mute notifications'), findsOneWidget);
+      expect(find.text('Unmute notifications'), findsNothing);
+
+      await tester.tap(find.text('Mute notifications'));
+      await tester.pumpAndSettle();
+      // Native owns the mute set: it is what the notification path reads, with
+      // no engine attached.
+      expect(system.calls, <String>['setMuted:${FakePeers.bhaskar}:true']);
+
+      await tester.tap(find.byKey(const Key('chat-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('Unmute notifications'), findsOneWidget);
+      expect(find.text('Mute notifications'), findsNothing);
+    });
+
+    testWidgets('an already-muted conversation is offered the unmute',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await openMenu(
+        tester,
+        repo,
+        FakePeers.bhaskar,
+        system: _FakeSystemChannel(muted: <String>{FakePeers.bhaskar}),
+      );
+      expect(find.text('Unmute notifications'), findsOneWidget);
+    });
 
     testWidgets('replaces the alias pencil — calls stay, the rest move in',
         (WidgetTester tester) async {

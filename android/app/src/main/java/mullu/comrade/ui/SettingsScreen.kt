@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
+import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,20 +42,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.BackgroundConnectivityPreference
 import mullu.comrade.ComradeCore
+import mullu.comrade.MutedChats
 import mullu.comrade.R
 import mullu.comrade.RelayConnectionService
 import mullu.comrade.ScreenSecurity
+import mullu.comrade.update.UpdateChecker
+import mullu.comrade.update.UpdateStatus
 import mullu.comrade.call.CallManager
 import mullu.comrade.voice.CommandDispatcher
 import mullu.comrade.voice.ComradeCoreBackend
@@ -134,6 +144,8 @@ fun SettingsScreen(
 
         BackgroundConnectivitySection()
         ScreenshotSection()
+        NotificationsSection()
+        UpdatesSection()
         TurnRelaySection()
         VaultLockSection(onLock = onLock)
 
@@ -339,6 +351,254 @@ private fun ScreenshotSection() {
         }
     }
 }
+
+// ── Notifications ────────────────────────────────────────────────────────────
+
+/**
+ * What Comrade may notify about, and what it has been told to stay quiet about.
+ *
+ * The per-channel detail lives in system settings (Android owns that UI and
+ * duplicating it would drift), so this card's job is the three things the OS
+ * screen cannot tell the user: that notifications are switched off entirely,
+ * how many conversations *this app* is muting, and that muting is device-local.
+ */
+@Composable
+private fun NotificationsSection() {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled()) }
+    var mutedCount by remember { mutableStateOf(MutedChats.muted(context).size) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        enabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Coming back from the system screen (or from a chat that was just muted)
+    // must not leave a stale answer on this card.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                enabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                mutedCount = MutedChats.muted(context).size
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                stringResource(R.string.settings_notifications_title),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                stringResource(R.string.settings_notifications_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!enabled) {
+                Text(
+                    stringResource(R.string.settings_notifications_blocked),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    // A revoked permission can be re-requested; a channel the
+                    // user switched off in system settings cannot, which is why
+                    // the button below exists as well.
+                    OutlinedButton(
+                        onClick = { permission.launch(Manifest.permission.POST_NOTIFICATIONS) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.settings_notifications_grant)) }
+                }
+            }
+            Text(
+                if (mutedCount == 0) {
+                    stringResource(R.string.settings_notifications_muted_none)
+                } else {
+                    pluralStringResource(R.plurals.settings_notifications_muted_count, mutedCount, mutedCount)
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                stringResource(R.string.settings_notifications_mute_scope),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (mutedCount > 0) {
+                OutlinedButton(
+                    onClick = {
+                        MutedChats.unmuteAll(context)
+                        mutedCount = 0
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(stringResource(R.string.settings_notifications_unmute_all)) }
+            }
+            OutlinedButton(
+                onClick = { context.startActivity(notificationSettingsIntent(context)) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.settings_notifications_open_system)) }
+        }
+    }
+}
+
+/** The system's own per-app notification screen — where the channels live. */
+private fun notificationSettingsIntent(context: Context): Intent =
+    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+// ── App updates ──────────────────────────────────────────────────────────────
+
+/**
+ * Whether a newer Comrade exists, and how to get it.
+ *
+ * The card is the whole update UI: the notification only exists to bring
+ * someone here. "Get the update" opens the release page in a browser rather
+ * than downloading an APK in-app — see [UpdateChecker] for why that line is
+ * drawn there.
+ */
+@Composable
+private fun UpdatesSection() {
+    val context = LocalContext.current
+    val status by UpdateChecker.status.collectAsState()
+    var autoCheck by remember { mutableStateOf(UpdateChecker.isAutoCheckEnabled(context)) }
+    var skipped by remember { mutableStateOf(UpdateChecker.skippedVersion(context)) }
+    val lastChecked = remember(status) { UpdateChecker.lastCheckedAt(context) }
+
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(R.string.settings_updates_title), style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.settings_updates_current, UpdateChecker.currentVersion),
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            when (val current = status) {
+                is UpdateStatus.Checking -> Text(
+                    stringResource(R.string.settings_updates_checking),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                is UpdateStatus.Available -> {
+                    Text(
+                        stringResource(R.string.settings_updates_available, current.release.versionName),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    if (current.release.notes.isNotBlank()) {
+                        Text(
+                            // Bounded: release notes in this repo run long, and
+                            // a settings card is not a changelog viewer — the
+                            // full text is one tap away on the release page.
+                            current.release.notes.lineSequence().take(12).joinToString("\n"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Button(
+                        onClick = { UpdateChecker.openRelease(context, current.release) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.settings_updates_get)) }
+                    OutlinedButton(
+                        onClick = {
+                            UpdateChecker.skip(context, current.release.versionName)
+                            skipped = current.release.versionName
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.settings_updates_skip)) }
+                }
+
+                is UpdateStatus.UpToDate -> Text(
+                    stringResource(R.string.settings_updates_up_to_date, formatCheckedAt(context, current.checkedAt)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                is UpdateStatus.Failed -> Text(
+                    stringResource(R.string.settings_updates_failed, current.message),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+
+                UpdateStatus.Unknown -> Text(
+                    if (lastChecked > 0L) {
+                        stringResource(R.string.settings_updates_up_to_date, formatCheckedAt(context, lastChecked))
+                    } else {
+                        stringResource(R.string.settings_updates_never_checked)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            skipped?.let { version ->
+                Text(
+                    stringResource(R.string.settings_updates_skipped, version),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = {
+                        UpdateChecker.unskip(context)
+                        skipped = null
+                    },
+                ) { Text(stringResource(R.string.settings_updates_unskip)) }
+            }
+
+            OutlinedButton(
+                onClick = { UpdateChecker.maybeCheck(context, force = true) },
+                enabled = status !is UpdateStatus.Checking,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.settings_updates_check_now)) }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.settings_updates_auto_title),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        stringResource(R.string.settings_updates_auto_summary),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = autoCheck,
+                    onCheckedChange = {
+                        autoCheck = it
+                        UpdateChecker.setAutoCheckEnabled(context, it)
+                    },
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
+
+            Text(
+                stringResource(R.string.settings_updates_sideload_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
+}
+
+/** "as of" wording for a check timestamp, in the device's own date/time format. */
+private fun formatCheckedAt(context: Context, at: Long): String =
+    if (at <= 0L) {
+        context.getString(R.string.settings_updates_never_checked)
+    } else {
+        DateUtils.getRelativeTimeSpanString(
+            at,
+            System.currentTimeMillis(),
+            DateUtils.MINUTE_IN_MILLIS,
+        ).toString()
+    }
 
 // ── Vault lock (AUDIT.md COMMS-01) ───────────────────────────────────────────
 

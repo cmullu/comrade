@@ -240,7 +240,7 @@ class CallVideoView extends StatelessWidget {
 /// raster penalty, transforms and z-order that work like any other widget, and
 /// no `SurfaceView`-versus-Flutter-surface conflict. Kept so a bad device is a
 /// one-line switch rather than a feature gap. Neither path has been run on
-/// hardware (§10).
+/// hardware (§11).
 class CallVideoSurfaceView extends StatelessWidget {
   const CallVideoSurfaceView({
     super.key,
