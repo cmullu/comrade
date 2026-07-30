@@ -125,7 +125,45 @@ Backgrounding deliberately does **not** announce offline: the connection
 service keeps delivering while the app is backgrounded, so the user really is
 still reachable. Claiming otherwise would be the dishonest direction.
 
-## 5. Where the code lives
+## 5. How it reads on screen
+
+Presence is only useful if the words are ones people already know, so the
+vocabulary is Telegram's — relative while a sighting is fresh, a wall clock
+once it isn't, a date beyond that:
+
+| State | What the UI says |
+|---|---|
+| Online right now | `online` |
+| Seen < 1 min ago | `last seen just now` |
+| Seen < 1 hour ago | `last seen 5 minutes ago` |
+| Seen earlier today | `last seen at 5:30 PM` (`17:30` if the device is on a 24-hour clock) |
+| Seen yesterday | `last seen yesterday at 5:30 PM` |
+| Seen earlier this week | `last seen Monday at 5:30 PM` |
+| Seen longer ago | `last seen 12 Jul` — with the year once it isn't this one |
+| Chosen, reciprocated, never yet caught online | `last seen recently` |
+| Chosen, **not** reciprocated | `waiting for them to choose you back` |
+
+Two rules keep this honest. The last row is the one a status UI usually gets
+wrong: a grey dot with no explanation reads as "they are ignoring me", when
+the truth is that their device has never told us anything and will not until
+they choose us back. And the *timestamp* is only ever advanced by a sighting —
+never by a claim lapsing, which happens up to a TTL after the peer was
+actually there — so "last seen" never overstates.
+
+The rules live in `lastSeenOf`/`presenceLabelOf`
+(`android/.../ui/DisplayName.kt`, pure and unit-tested); the wording lives in
+`strings.xml` (with a plural for the minutes case), and the clock follows the
+device's own 12/24-hour setting. The desktop SPA mirrors the same ladder in
+`presenceLabel()`.
+
+A comrade coming online also raises a notification — **"Ana is online" / "Your
+comrade is around"** — on its own channel, so it can be silenced without
+touching messages or calls. It is dropped when they go offline again, when
+their chat is opened, and on its own after the presence TTL, so the shade can
+never keep claiming someone is around after everything else in the app has
+stopped believing it.
+
+## 6. Where the code lives
 
 | Layer | What it owns |
 |---|---|
@@ -133,7 +171,7 @@ still reachable. Claiming otherwise would be the dishonest direction.
 | `comrade_storage` | Opt-in `Contact.comrade` flag (defaulted for rows written before the feature; preserved across alias edits) and a `peer_presence` tree per peer. |
 | `comrade_ui::runtime` | `set_comrade` / `comrades` / `peer_presence` / `announce_presence`, the heartbeat + expiry loop, the farewell beacon on lock, the receive path in `dispatch_incoming_dm`, and the `ComradePresence` bridge event. |
 | `comrade_jni`, `desktop/src-tauri` | The same four calls over uniffi / Tauri commands. |
-| Android | `PresenceMonitor` (live dots), `ComradesScreen` (choose + see), a dot on chat-list rows and the conversation header's ★ toggle, and a `comrade_presence` notification channel. |
+| Android | `PresenceMonitor` (live dots + last-seen), `ComradesScreen` (choose + see), dots on chat-list rows, a presence line in the conversation header, the ⋮-menu toggle, and a `comrade_presence` notification channel. |
 | Desktop SPA | ★ toggle + presence line in the conversation header, dots in the conversation list, a toast on the online edge. |
 
 Tests worth knowing about: `crates/comrade_ui/tests/two_peer_integration.rs`
@@ -142,7 +180,7 @@ the claim — comrades seeing each other come and go (including the
 answer-on-the-spot path), and a beacon reaching *only* the chosen peer while
 another accepted contact learns nothing.
 
-## 6. Deliberately out of scope
+## 7. Deliberately out of scope
 
 - **Typing indicators and "last active" timelines.** Same channel would work;
   both leak considerably more about a person's day than "around / not

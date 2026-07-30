@@ -76,7 +76,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -100,6 +103,7 @@ import mullu.comrade.ui.NewChatScreen
 import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
+import mullu.comrade.ui.presenceHeaderText
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
@@ -181,7 +185,20 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Coming back to the foreground re-announces our presence to the comrades.
+     * Becoming visible does two things.
+     *
+     * **It drains the native event queue.** While an Activity is on screen
+     * this process needs [EventPump] running — that is what makes a message,
+     * a call or a comrade coming online show up *now*. Deliberately not tied
+     * to [RelayConnectionService]: that service is gated on the user's "stay
+     * connected in the background" preference, and while it also owned the
+     * drain loop, turning the preference off silently stopped delivery even
+     * with the app open. The pump refcounts its holders, so exactly one loop
+     * runs whether it is this Activity, the service, or both. Acquiring here
+     * rather than after unlock is safe: with a locked vault nothing produces
+     * events, so the loop is an idle tick.
+     *
+     * **It re-announces our presence to the comrades.**
      *
      * The native side already beacons on unlock and heartbeats every few
      * minutes, so this is a freshness nicety rather than the mechanism: it
@@ -197,6 +214,7 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStart() {
         super.onStart()
+        EventPump.acquire(this, PumpHolder.FOREGROUND)
         // The video surface is back: resume capture if a video call had it
         // suspended (a no-op otherwise, and idempotent — see PipController).
         PipController.onWindowVisibilityChanged(visible = true)
@@ -219,6 +237,9 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStop() {
         super.onStop()
+        // Nothing visible any more: the service keeps the drain loop alive if
+        // the user wants background delivery, and the pump stops it if not.
+        EventPump.release(PumpHolder.FOREGROUND)
         // Nothing is displaying the local video any more — stop capturing it
         // (unless a PiP window is showing the call). See PipController.
         PipController.onWindowVisibilityChanged(visible = false)
@@ -299,6 +320,10 @@ fun ComradeApp() {
                 runCatching { RelayConnectionService.start(context) }
                     .onFailure { Log.w("ComradeApp", "Failed to start RelayConnectionService", it) }
             }
+            // The store is readable now, so fill the feed/mesh/presence state
+            // the screens observe. Independent of the service: with background
+            // connectivity turned off there is no service to do it.
+            ChatEventRouter.seedFromStore()
         }
     }
 
@@ -512,8 +537,9 @@ private fun MainShell(
             runCatching { ComradeCore.comrades().any { it.npub == peer } }.getOrDefault(false)
         }
     }
-    val onlineNow by PresenceMonitor.online.collectAsState()
-    val comradeOnline = openChat?.peer?.let { onlineNow[it] == true } == true
+    val presenceNow by PresenceMonitor.presence.collectAsState()
+    val peerPresence = openChat?.peer?.let { presenceNow[it] }
+    val comradeOnline = peerPresence?.online == true
     // Back priority, innermost first: an open drawer closes, then a pushed
     // Settings screen closes, then a Chats sub-screen returns to the list.
     BackHandler(
@@ -585,17 +611,32 @@ private fun MainShell(
                                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             // The npub tail always stays visible (handles are
                                             // claims, keys are identity); presence, when we have
-                                            // it, rides alongside rather than replacing it.
+                                            // it, rides alongside rather than replacing it —
+                                            // "online" while they are, a Telegram-style
+                                            // "last seen …" once they aren't.
+                                            val presenceLine = if (isComrade) {
+                                                presenceHeaderText(
+                                                    online = comradeOnline,
+                                                    lastSeenAt = peerPresence?.lastSeenAt ?: 0L,
+                                                    peerMarkedUs = peerPresence?.peerMarkedUs ?: false,
+                                                )
+                                            } else {
+                                                null
+                                            }
+                                            // Prose in the UI font, the key in
+                                            // monospace — one line, two jobs.
+                                            val subtitle = buildAnnotatedString {
+                                                presenceLine?.let { append("$it · ") }
+                                                withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) {
+                                                    append(shortNpub(openChat.peer))
+                                                }
+                                            }
                                             Text(
-                                                if (isComrade && comradeOnline) {
-                                                    stringResource(R.string.comrade_online) +
-                                                        " · " + shortNpub(openChat.peer)
-                                                } else {
-                                                    shortNpub(openChat.peer)
-                                                },
+                                                subtitle,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = if (isComrade && comradeOnline) {
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = if (comradeOnline) {
                                                     MaterialTheme.colorScheme.primary
                                                 } else {
                                                     MaterialTheme.colorScheme.onSurfaceVariant

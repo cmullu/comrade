@@ -57,6 +57,16 @@ object Notifier {
     const val CHANNEL_COMRADES = "comrade_presence"
 
     private const val GROUP_MESSAGES = "comrade_messages_group"
+    private const val GROUP_COMRADES = "comrade_presence_group"
+
+    /**
+     * How long an "is online" notice may sit in the shade unattended.
+     * Matches `comrade_core::presence::PRESENCE_TTL_SECS` — the point past
+     * which the claim it was raised from is no longer believed anywhere else
+     * either, so leaving it up would be the notification shade disagreeing
+     * with every dot in the app.
+     */
+    private const val ONLINE_TIMEOUT_MS = 480_000L
 
     /** Register notification channels once (no-op on < O). */
     fun ensureChannels(context: Context) {
@@ -225,24 +235,41 @@ object Notifier {
 
     /**
      * A comrade — someone the user deliberately chose — just came online.
+     * The title is their name ("Ana is online"), resolved by the caller with
+     * the same alias → published-handle → key precedence the chat list uses.
      *
      * Content-light like the rest: a name and the fact itself, nothing about
      * what they are doing (the beacon doesn't carry it, and the notification
      * store is not the place for it either). Tapping opens the app;
-     * [clearForPeer] drops it when their chat is opened.
+     * [clearForPeer] drops it when their chat is opened, [clearComradeOnline]
+     * when they go offline again — and [ONLINE_TIMEOUT_MS] drops it on its own
+     * if neither happens, so the shade can never keep claiming someone is
+     * around long after their presence claim has lapsed.
      */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
     fun notifyComradeOnline(context: Context, peer: String, title: String) {
         if (!canPost(context)) return
         val n = NotificationCompat.Builder(context, CHANNEL_COMRADES)
-            .setSmallIcon(android.R.drawable.presence_online)
+            .setSmallIcon(R.drawable.ic_notification_comrade)
             .setContentTitle(context.getString(R.string.comrade_online_title, title.ifBlank { shortNpub(peer) }))
             .setContentText(context.getString(R.string.comrade_online_text))
             .setAutoCancel(true)
+            .setGroup(GROUP_COMRADES)
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setTimeoutAfter(ONLINE_TIMEOUT_MS)
             .setContentIntent(openAppIntent(context))
             .build()
         NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+    }
+
+    /**
+     * Drop the "is online" notice for `peer` — they went offline (or their
+     * claim aged out) before the user got to it. A stale "Ana is online" is
+     * worse than no notification: it invites a call to someone who isn't
+     * there any more.
+     */
+    fun clearComradeOnline(context: Context, peer: String) {
+        NotificationManagerCompat.from(context).cancel("online:$peer".hashCode())
     }
 
     /** Clear any notification we posted for `peer` (e.g. on opening the chat). */

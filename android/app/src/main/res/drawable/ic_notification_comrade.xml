@@ -1,0 +1,19 @@
+<!--
+  Notification small icon for "a comrade is online" — the same ★ the
+  conversation menu and the comrades screen use, so the shade and the app
+  agree on what the feature looks like.
+
+  A flat white silhouette on transparent, per the platform rule for small
+  icons since API 21: anything else (notably the legacy colour drawables in
+  `android.R.drawable`) is reduced to an unrecognisable blob by the system's
+  tinting.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,17.27L18.18,21l-1.64,-7.03L22,9.24l-7.19,-0.61L12,2 9.19,8.63 2,9.24l5.46,4.73L5.82,21z" />
+</vector>
