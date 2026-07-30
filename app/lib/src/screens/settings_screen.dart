@@ -42,6 +42,8 @@ class SettingsScreen extends ConsumerWidget {
         children: <Widget>[
           _ProfileCard(profile: profile),
           const SizedBox(height: 12),
+          const _AppearanceCard(),
+          const SizedBox(height: 12),
           const _BackgroundConnectivityCard(),
           const SizedBox(height: 12),
           const _TurnRelayCard(),
@@ -228,6 +230,79 @@ class _EditUsernameDialogState extends ConsumerState<_EditUsernameDialog> {
           ),
         ],
       );
+}
+
+/// Dark / light / follow-the-OS.
+///
+/// A segmented control rather than a single "Dark mode" switch, because a
+/// switch cannot express *three* states and the third one — "whatever the OS
+/// says" — is the default. See `settings_providers.dart`'s
+/// [ThemeModeController] for why the override has to exist at all.
+class _AppearanceCard extends ConsumerWidget {
+  const _AppearanceCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ThemeMode mode = ref.watch(themeModeProvider);
+    return SectionCard(
+      title: 'Appearance',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          // Icons omitted on purpose: three icon+label segments overflow the
+          // card on a 360 dp phone, and the labels are already unambiguous.
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<ThemeMode>(
+              key: const Key('theme-mode'),
+              showSelectedIcon: false,
+              segments: const <ButtonSegment<ThemeMode>>[
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.system,
+                  label: Text('System'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.light,
+                  label: Text('Light'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.dark,
+                  label: Text('Dark'),
+                ),
+              ],
+              selected: <ThemeMode>{mode},
+              onSelectionChanged: (Set<ThemeMode> selection) =>
+                  ref.read(themeModeProvider.notifier).set(selection.first),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            switch (mode) {
+              ThemeMode.system =>
+                'Following your system setting. Desktop sessions that report no '
+                    'preference land on light — pick Dark here to override that.',
+              ThemeMode.light => 'Light everywhere, whatever the system says.',
+              ThemeMode.dark => 'Dark everywhere, whatever the system says.',
+            },
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'A call is always dark, in every mode — a bright screen held to '
+            'your face at 3am is a bug, not a preference. This choice is not '
+            'remembered across restarts yet: like every client preference it '
+            'lives in memory until the app gets a persisted store.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _BackgroundConnectivityCard extends ConsumerWidget {

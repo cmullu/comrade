@@ -1,12 +1,62 @@
-/// Settings state: the TURN relay card, background connectivity, and the
-/// couple-sandbox pairing the desktop shell owned.
+/// Settings state: appearance, the TURN relay card, background connectivity,
+/// and the couple-sandbox pairing the desktop shell owned.
 library;
 
+import 'package:flutter/material.dart' show ThemeMode;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/app_preferences.dart';
 import '../data/models.dart';
 import 'providers.dart';
+
+// ── Appearance (SCREEN_INVENTORY D26) ───────────────────────────────────────
+
+/// The stored spelling of a [ThemeMode]. Only these three strings are ever
+/// written; anything else in the store is treated as "never chosen".
+String themeModeKey(ThemeMode mode) => switch (mode) {
+      ThemeMode.system => 'system',
+      ThemeMode.light => 'light',
+      ThemeMode.dark => 'dark',
+    };
+
+/// Decode of [themeModeKey]. Unknown and absent both mean [ThemeMode.system]:
+/// a value this build doesn't recognise (an older/newer spelling, a corrupted
+/// store) must not leave the app themeless, and "follow the OS" is the only
+/// answer that is right on every platform.
+ThemeMode themeModeFromKey(String? key) => switch (key) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      _ => ThemeMode.system,
+    };
+
+/// Dark, light, or whatever the OS says.
+///
+/// Default **system**, per SCREEN_INVENTORY D26 — a phone in daylight is a
+/// real use case and so is a phone at 3am. But following the OS cannot be the
+/// *only* option: the desktop shell this replaces was dark-only by design, and
+/// a Linux/Windows session that reports no preference resolves to light, which
+/// is how a dark-first product ends up bright with no way back. So the choice
+/// is explicit and overridable, and the override — not the OS — wins once set.
+///
+/// The call overlay is exempt in either direction: it is full-bleed dark
+/// always (`CallPalette`), because a bright call screen held to a face is a
+/// bug, not a theme.
+class ThemeModeController extends Notifier<ThemeMode> {
+  @override
+  ThemeMode build() => themeModeFromKey(
+        ref.watch(appPreferencesProvider).getString(PrefKeys.themeMode),
+      );
+
+  Future<void> set(ThemeMode mode) async {
+    await ref
+        .read(appPreferencesProvider)
+        .setString(PrefKeys.themeMode, themeModeKey(mode));
+    state = mode;
+  }
+}
+
+final NotifierProvider<ThemeModeController, ThemeMode> themeModeProvider =
+    NotifierProvider<ThemeModeController, ThemeMode>(ThemeModeController.new);
 
 // ── TURN relay (AUDIT COMMS-02) ─────────────────────────────────────────────
 

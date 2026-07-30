@@ -34,22 +34,38 @@ const List<Color> kAvatarPalette = <Color>[
 ];
 
 /// The workspace skins `styles.css` swaps CSS variables for.
+///
+/// The dark accents are `--accent-2` verbatim. The light ones are **not**
+/// `--accent`, which is what the first port of this file used: `styles.css`
+/// has no `prefers-color-scheme` block at all, so every value in it was tuned
+/// against a near-black background, and there `--accent` is a *fill* carrying
+/// dark `--accent-contrast` text — never text itself. Reused as a light-mode
+/// `primary` it becomes small text on white, and `SectionCard` titles in the
+/// Travel workspace measured 2.1:1 against the surface (WCAG AA wants 4.5:1
+/// for body text). A `FilledButton` was worse still: white on `#f59e0b` is
+/// 2.15:1. Each light accent is therefore the same hue taken several steps
+/// darker, chosen so the colour clears 4.5:1 both as text on every surface in
+/// the ramp *and* under white — `theme_test.dart` asserts exactly that, for
+/// every skin, so a future palette edit cannot quietly reintroduce it.
 enum WorkspaceSkin {
   /// `:root` — indigo.
-  base(Color(0xFF818CF8), Color(0xFF6366F1)),
+  base(Color(0xFF818CF8), Color(0xFF4F46E5)),
 
   /// `body.theme-travel` — warm amber, "off the grid".
-  travel(Color(0xFFFBBF24), Color(0xFFF59E0B)),
+  travel(Color(0xFFFBBF24), Color(0xFF92400E)),
 
   /// `body.theme-couple-sakha` — cool cyan.
-  coupleSakha(Color(0xFF7DD3FC), Color(0xFF38BDF8)),
+  coupleSakha(Color(0xFF7DD3FC), Color(0xFF0369A1)),
 
   /// `body.theme-couple-sakhi` — warm rose.
-  coupleSakhi(Color(0xFFFDA4AF), Color(0xFFFB7185));
+  coupleSakhi(Color(0xFFFDA4AF), Color(0xFFBE123C));
 
   const WorkspaceSkin(this.darkAccent, this.lightAccent);
 
+  /// Used on a dark background: `--accent-2`, bright.
   final Color darkAccent;
+
+  /// Used on a light background: the same hue, dark enough to read as text.
   final Color lightAccent;
 
   static WorkspaceSkin fromWorkspaceKey(String key) => switch (key) {
@@ -118,15 +134,23 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
     bad: Color(0xFFF87171),
   );
 
+  /// Same note as [WorkspaceSkin]'s light accents: `good`/`warn`/`bad` are
+  /// rendered as *text* (the sidebar status pills in `home_shell.dart` colour
+  /// their label with them, over an 18%-alpha wash of the same colour), so the
+  /// dark ramp's `--good`/`--warn`/`--bad` are too light to reuse here. These
+  /// are the 700/800 steps of the same hues.
   static const ComradeSurfaces light = ComradeSurfaces(
     panel: Color(0xFFF4F6FB),
     panelAlt: Color(0xFFE8ECF6),
     border: Color(0xFFD5DBE8),
     borderStrong: Color(0xFFB6BFD2),
-    good: Color(0xFF059669),
-    warn: Color(0xFFB45309),
-    bad: Color(0xFFDC2626),
+    good: Color(0xFF065F46),
+    warn: Color(0xFF92400E),
+    bad: Color(0xFFB91C1C),
   );
+
+  static ComradeSurfaces forBrightness(Brightness brightness) =>
+      brightness == Brightness.dark ? dark : light;
 
   @override
   ComradeSurfaces copyWith({
@@ -165,8 +189,15 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
 
 /// Convenience accessor: `context.surfaces.border`.
 extension ComradeThemeX on BuildContext {
+  /// The fallback follows the ambient [Brightness] rather than always being
+  /// the dark ramp. A widget built under a theme that never registered the
+  /// extension — a stock `ThemeData`, a local `Theme` override, a dialog
+  /// someone re-themes — would otherwise paint dark panels and dark borders
+  /// onto a light scaffold, which is the exact failure this ramp exists to
+  /// avoid. It should never happen; when it does it stays legible.
   ComradeSurfaces get surfaces =>
-      Theme.of(this).extension<ComradeSurfaces>() ?? ComradeSurfaces.dark;
+      Theme.of(this).extension<ComradeSurfaces>() ??
+      ComradeSurfaces.forBrightness(Theme.of(this).brightness);
   ColorScheme get colors => Theme.of(this).colorScheme;
   TextTheme get texts => Theme.of(this).textTheme;
 }
@@ -231,11 +262,13 @@ abstract final class ComradeTheme {
             onPrimary: Colors.white,
             primaryContainer: const Color(0xFFE0E7FF),
             onPrimaryContainer: const Color(0xFF1E1B4B),
-            secondary: const Color(0xFF059669),
+            // Kept in step with `ComradeSurfaces.light`'s good/warn, for the
+            // same reason: both roles can end up as text on a light surface.
+            secondary: const Color(0xFF065F46),
             onSecondary: Colors.white,
             secondaryContainer: const Color(0xFFE8ECF6),
             onSecondaryContainer: const Color(0xFF1E1B4B),
-            tertiary: const Color(0xFFB45309),
+            tertiary: const Color(0xFF92400E),
             onTertiary: Colors.white,
             surface: const Color(0xFFFBFCFF),
             onSurface: const Color(0xFF141A28),
@@ -247,15 +280,31 @@ abstract final class ComradeTheme {
             onSurfaceVariant: const Color(0xFF4A5468),
             outline: const Color(0xFF6B7894),
             outlineVariant: const Color(0xFFD5DBE8),
+            // Stated rather than inherited. `ColorScheme.light`'s default error
+            // is Material's own `#b00020`, which left the light theme's error
+            // colour unrelated to `ComradeSurfaces.light.bad` even though
+            // `ErrorText` reads the first and the status pills read the second.
+            // The dark scheme already matched its ramp; now both do.
+            error: const Color(0xFFB91C1C),
+            onError: Colors.white,
+            errorContainer: const Color(0xFFFEE2E2),
+            onErrorContainer: const Color(0xFF7F1D1D),
           );
 
-    final TextTheme text = _typography(Typography.material2021(
+    // `.white` for dark, `.black` for light — then recoloured to `onSurface`
+    // anyway. The `.apply` below already covers all fifteen styles, so the
+    // choice is invisible today; it is made correctly so that removing the
+    // recolour later cannot silently produce black text on a dark surface.
+    final Typography typography = Typography.material2021(
       platform: TargetPlatform.android,
       colorScheme: scheme,
-    ).black.apply(
-          bodyColor: scheme.onSurface,
-          displayColor: scheme.onSurface,
-        ));
+    );
+    final TextTheme text = _typography(
+      (isDark ? typography.white : typography.black).apply(
+        bodyColor: scheme.onSurface,
+        displayColor: scheme.onSurface,
+      ),
+    );
 
     return ThemeData(
       useMaterial3: true,

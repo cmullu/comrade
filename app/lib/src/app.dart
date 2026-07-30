@@ -8,6 +8,7 @@ import 'data/models.dart';
 import 'screens/home_shell.dart';
 import 'screens/onboarding_screen.dart';
 import 'state/providers.dart';
+import 'state/settings_providers.dart';
 import 'theme/comrade_theme.dart';
 
 class ComradeApp extends ConsumerWidget {
@@ -26,9 +27,10 @@ class ComradeApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: ComradeTheme.light(skin: skin),
       darkTheme: ComradeTheme.dark(skin: skin),
-      // Dark-mode-first, like the desktop shell — but the system preference
-      // wins where the platform has one.
-      themeMode: ThemeMode.system,
+      // Follows the OS until Settings → Appearance says otherwise; both skins
+      // exist for every workspace accent, so the override is a real choice on
+      // every platform rather than a mobile-only affordance.
+      themeMode: ref.watch(themeModeProvider),
       home: const _PhaseGate(),
     );
   }
