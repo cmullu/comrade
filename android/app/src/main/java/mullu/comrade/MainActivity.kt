@@ -185,7 +185,20 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Coming back to the foreground re-announces our presence to the comrades.
+     * Becoming visible does two things.
+     *
+     * **It drains the native event queue.** While an Activity is on screen
+     * this process needs [EventPump] running — that is what makes a message,
+     * a call or a comrade coming online show up *now*. Deliberately not tied
+     * to [RelayConnectionService]: that service is gated on the user's "stay
+     * connected in the background" preference, and while it also owned the
+     * drain loop, turning the preference off silently stopped delivery even
+     * with the app open. The pump refcounts its holders, so exactly one loop
+     * runs whether it is this Activity, the service, or both. Acquiring here
+     * rather than after unlock is safe: with a locked vault nothing produces
+     * events, so the loop is an idle tick.
+     *
+     * **It re-announces our presence to the comrades.**
      *
      * The native side already beacons on unlock and heartbeats every few
      * minutes, so this is a freshness nicety rather than the mechanism: it
@@ -201,6 +214,7 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStart() {
         super.onStart()
+        EventPump.acquire(this, PumpHolder.FOREGROUND)
         // The video surface is back: resume capture if a video call had it
         // suspended (a no-op otherwise, and idempotent — see PipController).
         PipController.onWindowVisibilityChanged(visible = true)
@@ -223,6 +237,9 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStop() {
         super.onStop()
+        // Nothing visible any more: the service keeps the drain loop alive if
+        // the user wants background delivery, and the pump stops it if not.
+        EventPump.release(PumpHolder.FOREGROUND)
         // Nothing is displaying the local video any more — stop capturing it
         // (unless a PiP window is showing the call). See PipController.
         PipController.onWindowVisibilityChanged(visible = false)
@@ -303,6 +320,10 @@ fun ComradeApp() {
                 runCatching { RelayConnectionService.start(context) }
                     .onFailure { Log.w("ComradeApp", "Failed to start RelayConnectionService", it) }
             }
+            // The store is readable now, so fill the feed/mesh/presence state
+            // the screens observe. Independent of the service: with background
+            // connectivity turned off there is no service to do it.
+            ChatEventRouter.seedFromStore()
         }
     }
 

@@ -99,7 +99,7 @@
     <string name="relay_connection_notification_title">Comrade</string>
     <string name="relay_connection_notification_text">Staying connected in the background</string>
     <string name="settings_background_connectivity_title">Stay connected in the background</string>
-    <string name="settings_background_connectivity_summary">Keep receiving messages and calls while the app is unlocked but not on screen. Shows a low-priority notification while active; turning this off means messages and calls only arrive while Comrade is open.</string>
+    <string name="settings_background_connectivity_summary">Keep receiving messages and calls while Comrade is unlocked but not on screen. Shows a low-priority notification while active. With this off, messages and calls arrive only while Comrade is open — nothing is lost, but you won\'t be notified until you come back.</string>
 
     <!-- Vault lock -->
     <string name="settings_lock_vault_title">Lock vault now</string>
