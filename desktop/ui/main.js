@@ -2227,7 +2227,33 @@
       rv.srcObject = c.remoteStream;
       rv.play().catch(() => {}); // best-effort; user gesture (the call) already occurred
     }
-    $("#call-avatar").hidden = c.media === "video";
+    // A voice call that the peer is sharing a screen on does have a picture,
+    // so the avatar must get out of its way.
+    $("#call-avatar").hidden = c.media === "video" || !!c.screenSharing;
+    applyRemoteFit();
+  }
+
+  /**
+   * Fill the stage with the remote frame — unless filling would throw most of
+   * the picture away, which is what a shared 16:9 screen on a narrow window
+   * does. Then letterbox instead.
+   *
+   * Driven by geometry rather than by "is the peer sharing a screen", which
+   * would need a wire-format field the protocol does not have. See
+   * `shouldLetterbox` for why a third is the threshold.
+   */
+  function applyRemoteFit() {
+    const rv = $("#call-remote-video");
+    if (!rv || !callDecisions) return;
+    rv.classList.toggle(
+      "is-letterboxed",
+      callDecisions.shouldLetterbox({
+        frameWidth: rv.videoWidth,
+        frameHeight: rv.videoHeight,
+        boxWidth: rv.clientWidth,
+        boxHeight: rv.clientHeight,
+      }),
+    );
   }
 
   function setCallStatusText(text) {
@@ -2783,6 +2809,12 @@
     installTileDragging();
     // Nothing displaying the call means nothing should be captured for it.
     document.addEventListener("visibilitychange", applyVideoVisibility);
+    // The frame's own dimensions only exist once metadata has loaded, and they
+    // change when the peer rotates or starts sharing a screen; the box changes
+    // when the window does or the tile is minimised.
+    $("#call-remote-video").addEventListener("loadedmetadata", applyRemoteFit);
+    $("#call-remote-video").addEventListener("resize", applyRemoteFit);
+    window.addEventListener("resize", applyRemoteFit);
     $("#call-remote-video").addEventListener("leavepictureinpicture", applyVideoVisibility);
     $("#call-remote-video").addEventListener("enterpictureinpicture", applyVideoVisibility);
 

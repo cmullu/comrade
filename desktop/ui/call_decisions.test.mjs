@@ -28,6 +28,7 @@ import {
   shouldSendLocalVideo,
   clampTilePosition,
   snapTileToEdge,
+  shouldLetterbox,
 } from "./call_decisions.mjs";
 
 // ── decideOfferDisposition ───────────────────────────────────────────────────
@@ -658,4 +659,61 @@ test("snapTileToEdge decides by centre, not by left edge", () => {
   // thrown rather than springing back.
   assert.equal(snapTileToEdge({ x: 427, y: 0, ...box }).x, 1000 - 148 - 12);
   assert.equal(snapTileToEdge({ x: 425, y: 0, ...box }).x, 12);
+});
+
+// ── How a remote frame should fill its box ───────────────────────────────────
+
+test("shouldLetterbox fills for camera-shaped video", () => {
+  // Portrait phone camera in a portrait box — no mismatch at all.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 720, frameHeight: 1280, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+  // 4:3 camera on a tall phone loses 25% — still fills, as every call app does.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 960, frameHeight: 1280, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+  // A 16:9 screen in a 16:9 window: nothing to crop.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1920, frameHeight: 1080, boxWidth: 1280, boxHeight: 720 }),
+    false,
+  );
+});
+
+test("shouldLetterbox letterboxes a shared screen on a phone", () => {
+  // 16:9 desktop screen in a portrait phone box loses ~68% to the crop.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1920, frameHeight: 1080, boxWidth: 720, boxHeight: 1280 }),
+    true,
+  );
+  // An ultrawide monitor is worse still.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 3440, frameHeight: 1440, boxWidth: 720, boxHeight: 1280 }),
+    true,
+  );
+});
+
+test("shouldLetterbox fills rather than guessing when it has nothing to go on", () => {
+  // No frame yet, and a zero-height box mid-layout.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 0, frameHeight: 0, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1920, frameHeight: 1080, boxWidth: 720, boxHeight: 0 }),
+    false,
+  );
+  assert.equal(
+    shouldLetterbox({ frameWidth: NaN, frameHeight: 1080, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+});
+
+test("shouldLetterbox is symmetric — a tall frame in a wide box crops too", () => {
+  // A portrait phone screen shared onto a wide desktop window.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1080, frameHeight: 1920, boxWidth: 1600, boxHeight: 900 }),
+    true,
+  );
 });

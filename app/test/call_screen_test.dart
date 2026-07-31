@@ -9,6 +9,7 @@ library;
 
 import 'package:comrade/src/data/comrade_repository.dart';
 import 'package:comrade/src/data/models.dart';
+import 'package:comrade/src/platform/call_video.dart' show shouldLetterbox;
 import 'package:comrade/src/platform/pip_channel.dart';
 import 'package:comrade/src/screens/call_screen.dart';
 import 'package:comrade/src/state/call_providers.dart';
@@ -167,6 +168,8 @@ Future<
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  _fitRuleTests();
 
   group('signal strength', () {
     test('bars fill by quality, and nothing is invented for unknown', () {
@@ -646,6 +649,62 @@ void main() {
       expect(icon().icon, Icons.mic,
           reason: 'the glyph does not swap — a slash is drawn over it');
       expect(find.text('Unmute'), findsOneWidget);
+    });
+  });
+}
+
+/// The fill-vs-letterbox rule behind a shared screen looking right on a phone.
+///
+/// Pure geometry, so it is tested as arithmetic rather than through a widget:
+/// the same numbers are implemented in Compose (`shouldLetterbox` in
+/// `CallWidgets.kt`) and on the desktop (`call_decisions.mjs`), and all three
+/// must agree.
+void _fitRuleTests() {
+  group('fill vs letterbox', () {
+    test('camera-shaped video fills, whatever the box', () {
+      // Portrait camera in a portrait box — nothing to crop.
+      expect(
+        shouldLetterbox(frameAspect: 720 / 1280, boxAspect: 720 / 1280),
+        isFalse,
+      );
+      // 4:3 camera on a tall phone loses 25%, and every call app fills there:
+      // black bars around a face read as broken.
+      expect(
+        shouldLetterbox(frameAspect: 960 / 1280, boxAspect: 720 / 1280),
+        isFalse,
+      );
+      // A 16:9 screen in a 16:9 window is not a mismatch at all.
+      expect(
+        shouldLetterbox(frameAspect: 16 / 9, boxAspect: 16 / 9),
+        isFalse,
+      );
+    });
+
+    test('a shared screen on a phone letterboxes', () {
+      // 16:9 desktop screen in a portrait phone box: ~68% would be cropped.
+      expect(
+        shouldLetterbox(frameAspect: 16 / 9, boxAspect: 720 / 1280),
+        isTrue,
+      );
+      // And a portrait phone screen shared onto a wide window, symmetrically.
+      expect(
+        shouldLetterbox(frameAspect: 1080 / 1920, boxAspect: 16 / 9),
+        isTrue,
+      );
+    });
+
+    test('fills rather than guessing when there is nothing to judge', () {
+      // No frame yet, a box mid-layout, or a division that went wrong.
+      expect(shouldLetterbox(frameAspect: 0, boxAspect: 0.5625), isFalse);
+      expect(shouldLetterbox(frameAspect: 1.78, boxAspect: 0), isFalse);
+      expect(
+        shouldLetterbox(frameAspect: double.nan, boxAspect: 0.5625),
+        isFalse,
+      );
+      expect(
+        shouldLetterbox(frameAspect: double.infinity, boxAspect: 0.5625),
+        isFalse,
+      );
     });
   });
 }

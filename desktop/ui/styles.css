@@ -1253,6 +1253,12 @@ code {
   background: #05070f;
 }
 
+/* Filling would crop most of the picture away — a shared 16:9 screen in a
+   narrow window — so fit it inside instead. Toggled by applyRemoteFit(). */
+.call-remote.is-letterboxed {
+  object-fit: contain;
+}
+
 .call-avatar {
   position: absolute;
   inset: 0;

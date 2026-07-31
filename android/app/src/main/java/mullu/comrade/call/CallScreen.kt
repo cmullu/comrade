@@ -44,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -938,9 +939,32 @@ private fun VideoRenderer(
         return
     }
     val context = LocalContext.current
+    // The frame's own dimensions, reported by WebRTC as they change (the peer
+    // rotating, or starting a screen share). Drives the fill-vs-letterbox
+    // decision below; 0×0 until the first frame, which reads as "fill".
+    var frameWidth by remember { mutableIntStateOf(0) }
+    var frameHeight by remember { mutableIntStateOf(0) }
     val renderer = remember {
         SurfaceViewRenderer(context).apply {
-            init(egl, null)
+            init(
+                egl,
+                object : RendererCommon.RendererEvents {
+                    override fun onFirstFrameRendered() = Unit
+
+                    // Fired on a WebRTC thread; Compose state writes are safe
+                    // from any thread, and the recomposition it schedules lands
+                    // on the main one.
+                    override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) {
+                        // Report the frame the way it will be *drawn*: at 90°
+                        // or 270° the sides swap, and comparing an un-rotated
+                        // frame against the box would letterbox exactly the
+                        // portrait video that should fill.
+                        val rotated = rotation == 90 || rotation == 270
+                        frameWidth = if (rotated) height else width
+                        frameHeight = if (rotated) width else height
+                    }
+                },
+            )
             setEnableHardwareScaler(true)
             setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
             // Must be set before the view attaches: the picture-in-picture
@@ -956,9 +980,30 @@ private fun VideoRenderer(
         track?.addSink(renderer)
         onDispose { track?.removeSink(renderer) }
     }
-    // Mirror is applied in update (not just at creation): it flips whenever the
-    // user swaps which tile shows the front-camera preview.
-    AndroidView(factory = { renderer }, update = { it.setMirror(mirror) }, modifier = modifier)
+    // Mirror and scaling are applied in update (not just at creation): mirror
+    // flips whenever the user swaps which tile shows the front camera, and the
+    // scaling type changes the moment a peer starts sharing a 16:9 screen onto
+    // this portrait surface.
+    AndroidView(
+        factory = { renderer },
+        update = { view ->
+            view.setMirror(mirror)
+            val letterbox = shouldLetterbox(
+                frameWidth = frameWidth,
+                frameHeight = frameHeight,
+                boxWidth = view.width,
+                boxHeight = view.height,
+            )
+            view.setScalingType(
+                if (letterbox) {
+                    RendererCommon.ScalingType.SCALE_ASPECT_FIT
+                } else {
+                    RendererCommon.ScalingType.SCALE_ASPECT_FILL
+                },
+            )
+        },
+        modifier = modifier,
+    )
 }
 
 /**

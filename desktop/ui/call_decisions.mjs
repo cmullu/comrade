@@ -554,3 +554,53 @@ export function snapTileToEdge({
     margin,
   });
 }
+
+// ── How a remote frame should fill its box ───────────────────────────────────
+
+/**
+ * Above this much of the picture lost to cropping, fill gives way to letterbox.
+ *
+ * A third is the useful line, and the cases either side of it are why: a 4:3
+ * camera frame on a tall phone loses 25% to the crop and every call app fills
+ * there (bars around a face look broken), while a 16:9 *screen* on a portrait
+ * phone loses 68%, which is not a crop so much as a different picture.
+ */
+export const MAX_CROPPED_FRACTION = 1 / 3;
+
+/**
+ * Whether a frame should be letterboxed (`object-fit: contain`) rather than
+ * cropped to fill (`cover`).
+ *
+ * Deliberately a question about geometry, not about what the far end is doing.
+ * "Is the peer sharing a screen" would need a wire-format field, and guessing
+ * it from orientation gets a landscape tablet wrong; "would filling this box
+ * destroy the picture" is answerable from the frame that already arrived.
+ *
+ * Nonsense input (a frame that has not arrived, a zero-height box) answers
+ * false: filling is the safe default and matches every other surface here.
+ *
+ * @param {object} input
+ * @param {number} input.frameWidth
+ * @param {number} input.frameHeight
+ * @param {number} input.boxWidth
+ * @param {number} input.boxHeight
+ * @param {number} [input.maxCropped]
+ * @returns {boolean}
+ */
+export function shouldLetterbox({
+  frameWidth,
+  frameHeight,
+  boxWidth,
+  boxHeight,
+  maxCropped = MAX_CROPPED_FRACTION,
+}) {
+  if (![frameWidth, frameHeight, boxWidth, boxHeight].every(isFiniteNumber)) return false;
+  if (frameWidth <= 0 || frameHeight <= 0 || boxWidth <= 0 || boxHeight <= 0) return false;
+  const frameAspect = frameWidth / frameHeight;
+  const boxAspect = boxWidth / boxHeight;
+  // Cover scales until the box is covered, so the fraction of the source still
+  // visible is the ratio of the smaller aspect to the larger.
+  const visible =
+    frameAspect < boxAspect ? frameAspect / boxAspect : boxAspect / frameAspect;
+  return 1 - visible > maxCropped;
+}
