@@ -5,8 +5,10 @@ import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import mullu.comrade.update.UpdateChecker
+import mullu.comrade.update.UpdateDownloadState
+import mullu.comrade.update.UpdateDownloads
 import mullu.comrade.update.UpdateStatus
 
 /**
@@ -19,9 +21,15 @@ import mullu.comrade.update.UpdateStatus
  * cannot disagree about what counts as an upgrade.
  *
  * Nothing here takes a URL. `check` hits the one endpoint compiled into
- * `UpdateCheck.LATEST_RELEASE_URL`, and `openRelease` opens the page that
- * endpoint reported — an update path is code execution, so a settable source
- * would be a way to point someone's upgrade at another APK.
+ * `UpdateCheck.LATEST_RELEASE_URL`, `download` fetches the APK asset that
+ * endpoint reported, and `openRelease` opens that release's page — an update
+ * path is code execution, so a settable source would be a way to point
+ * someone's upgrade at another APK.
+ *
+ * `download` returns as soon as the foreground service has been started: the
+ * transfer outlives the engine, shows progress in the notification shade, and
+ * reports through the state channel. `install` hands the verified APK to the
+ * system installer, which always shows its own confirmation.
  */
 internal class UpdateChannel(
     messenger: BinaryMessenger,
@@ -38,7 +46,12 @@ internal class UpdateChannel(
      * current answer as its first event — including one found while the engine
      * was detached.
      */
-    private fun stateFlow(): Flow<Any?> = UpdateChecker.status.map { it.toMap() }
+    private fun stateFlow(): Flow<Any?> = combine(
+        UpdateChecker.status,
+        UpdateDownloads.state,
+    ) { check, download ->
+        mapOf("check" to check.toMap(), "download" to download.toMap())
+    }
 
     private fun UpdateStatus.toMap(): Map<String, Any?> = when (this) {
         UpdateStatus.Unknown -> mapOf("status" to "unknown")
@@ -56,6 +69,19 @@ internal class UpdateChannel(
         )
     }
 
+    private fun UpdateDownloadState.toMap(): Map<String, Any?> = when (this) {
+        UpdateDownloadState.Idle -> mapOf("state" to "idle")
+        is UpdateDownloadState.Downloading -> mapOf(
+            "state" to "downloading",
+            "bytesRead" to bytesRead,
+            "totalBytes" to totalBytes,
+        )
+        UpdateDownloadState.Verifying -> mapOf("state" to "verifying")
+        is UpdateDownloadState.Ready -> mapOf("state" to "ready", "version" to version)
+        is UpdateDownloadState.Installing -> mapOf("state" to "installing", "version" to version)
+        is UpdateDownloadState.Failed -> mapOf("state" to "failed", "message" to message)
+    }
+
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         try {
             when (call.method) {
@@ -65,6 +91,9 @@ internal class UpdateChannel(
                         "autoCheck" to UpdateChecker.isAutoCheckEnabled(appContext),
                         "lastCheckedAt" to UpdateChecker.lastCheckedAt(appContext),
                         "skippedVersion" to UpdateChecker.skippedVersion(appContext),
+                        // Granted outside this app and revocable at any time, so
+                        // it is read here rather than cached anywhere in Dart.
+                        "canInstall" to UpdateChecker.canInstall(appContext),
                     ),
                 )
                 // Fire-and-forget: the answer arrives on the state channel, so a
@@ -83,6 +112,28 @@ internal class UpdateChannel(
                 }
                 "unskip" -> {
                     UpdateChecker.unskip(appContext)
+                    result.postSuccess()
+                }
+                // Fire-and-forget: the service owns the transfer from here, and
+                // its progress arrives on the state channel.
+                "download" -> {
+                    UpdateChecker.download(appContext)
+                    result.postSuccess()
+                }
+                "cancelDownload" -> {
+                    UpdateChecker.cancelDownload()
+                    result.postSuccess()
+                }
+                "install" -> {
+                    UpdateChecker.install(appContext)
+                    result.postSuccess()
+                }
+                "refreshDownloadState" -> {
+                    UpdateChecker.refreshDownloadState()
+                    result.postSuccess()
+                }
+                "openInstallPermissionSettings" -> {
+                    UpdateChecker.openInstallPermissionSettings(appContext)
                     result.postSuccess()
                 }
                 "openRelease" -> {

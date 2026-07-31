@@ -32,6 +32,14 @@
          declaring the mediaProjection type is already running, which is why
          CallService re-announces itself before capture starts. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Installs an update the app downloaded itself (UpdateDownloadService →
+         UpdateInstaller, both in the preserved native tree). From Android 8 the
+         user grants "install unknown apps" to this app once; the OS still shows
+         its own confirmation for every install and still refuses an APK signed
+         with a different key than the installed copy. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- CallService: keeps an in-progress call's process alive while the app
          is backgrounded. Required alongside the matching foregroundServiceType
          on Android 14+ (see CallService/the <service> entry below); video
@@ -177,6 +185,20 @@
             android:name=".model.ModelDownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Downloads the update APK in the background with progress in the
+             notification bar, then offers to install it. Reads the release from
+             UpdateChecker's own state, never from an intent extra. -->
+        <service
+            android:name=".update.UpdateDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- The "ready to install" tap and the PackageInstaller session's status
+             callbacks. Not exported. -->
+        <receiver
+            android:name=".update.UpdateInstallReceiver"
+            android:exported="false" />
 
         <!-- Assist app: the assist gesture (long-press power) opens Comrade -->
         <service

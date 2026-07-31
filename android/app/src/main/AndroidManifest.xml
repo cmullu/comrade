@@ -19,6 +19,16 @@
          declaring the mediaProjection type is already running, which is why
          CallService re-announces itself before capture starts. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Installs an update the app downloaded itself (UpdateDownloadService →
+         UpdateInstaller). Declaring it is not enough: from Android 8 the user
+         grants "install unknown apps" to this app once, which is the same
+         consent a browser needs to install a sideloaded APK — moved to the app
+         that actually knows what the file is. The OS still shows its own
+         confirmation dialog for every install, and still refuses an APK signed
+         with a different key than the copy already installed. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- CallService: keeps an in-progress call's process alive while the app
          is backgrounded. Required alongside the matching foregroundServiceType
          on Android 14+ (see CallService/the <service> entry below); video
@@ -137,6 +147,24 @@
             android:name=".model.ModelDownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Downloads the update APK in the background with progress in the
+             notification bar, then offers to install it — see
+             UpdateDownloadService. Reads the release from UpdateChecker's own
+             state rather than from an intent extra, so no caller can name a URL
+             for it to fetch. -->
+        <service
+            android:name=".update.UpdateDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Two halves of the install: the "ready to install" notification tap,
+             and the PackageInstaller session's status callbacks. Not exported:
+             only this app's own PendingIntents and the platform's session
+             callback ever reach it. -->
+        <receiver
+            android:name=".update.UpdateInstallReceiver"
+            android:exported="false" />
 
         <!-- Assist app: the assist gesture (long-press power) opens Comrade -->
         <service

@@ -14,7 +14,13 @@ import '../platform/screen_channel.dart';
 // `call_channel.dart`, whose `TurnServerStatus`/`TurnDiagnostic` names collide
 // with `models.dart`'s (the Rust-served versions this file actually uses).
 import '../platform/platform.dart'
-    show SystemChannel, UpdateChannel, UpdateSettings, UpdateStatus;
+    show
+        SystemChannel,
+        UpdateChannel,
+        UpdateSettings,
+        UpdateState,
+        UpdateStatus,
+        UpdateUnknown;
 import 'providers.dart';
 
 // ── Appearance (SCREEN_INVENTORY D26) ───────────────────────────────────────
@@ -331,17 +337,23 @@ final FutureProvider<bool> notificationsEnabledProvider =
 final Provider<UpdateChannel> updateChannelProvider =
     Provider<UpdateChannel>((Ref ref) => UpdateChannel());
 
-/// Live check status. The native stream's first event is the current answer, so
-/// a card built after a check still shows the finding.
+/// Live check + download state. The native stream's first event is the current
+/// answer, so a card built after a check — or after a download finished while
+/// the app was closed — still shows it.
 ///
 /// A platform with no handler yields nothing at all rather than an error: the
 /// card then renders its "not checked yet" state, which is the truth there.
-final StreamProvider<UpdateStatus> updateStatusProvider =
-    StreamProvider<UpdateStatus>((Ref ref) => ref
+final StreamProvider<UpdateState> updateStateProvider =
+    StreamProvider<UpdateState>((Ref ref) => ref
         .watch(updateChannelProvider)
-        .status
+        .updates
         .handleError((Object _) {},
             test: (dynamic e) => e is MissingPluginException));
+
+/// Just the check half, for callers that do not care about the download.
+final Provider<UpdateStatus> updateStatusProvider = Provider<UpdateStatus>(
+    (Ref ref) =>
+        ref.watch(updateStateProvider).value?.check ?? const UpdateUnknown());
 
 /// Version, cadence preference and skip watermark — everything the card renders
 /// around [updateStatusProvider].
@@ -385,7 +397,46 @@ class UpdateSettingsController extends AsyncNotifier<UpdateSettings> {
         null,
       );
 
-  /// Open the release page in a browser. Comrade never installs an APK itself.
+  /// Start fetching the APK. The foreground service owns it from there, so this
+  /// returns immediately and progress arrives on [updateStateProvider].
+  Future<void> download() => _ifSupported<void>(
+        ref.read(updateChannelProvider).download,
+        null,
+      );
+
+  Future<void> cancelDownload() => _ifSupported<void>(
+        ref.read(updateChannelProvider).cancelDownload,
+        null,
+      );
+
+  /// Hand the downloaded APK to the system installer (which re-verifies it and
+  /// asks the user to confirm).
+  Future<void> install() => _ifSupported<void>(
+        ref.read(updateChannelProvider).install,
+        null,
+      );
+
+  /// The system screen that lets Comrade install apps, followed by a re-read:
+  /// the grant happens outside this app, so the card has to ask again on return.
+  Future<void> openInstallPermissionSettings() async {
+    await _ifSupported<void>(
+      ref.read(updateChannelProvider).openInstallPermissionSettings,
+      null,
+    );
+  }
+
+  /// Re-read the permission, and drop a "ready to install" whose file has gone.
+  /// Cheap enough to call on every resume.
+  Future<void> refresh() async {
+    await _ifSupported<void>(
+      ref.read(updateChannelProvider).refreshDownloadState,
+      null,
+    );
+    ref.invalidateSelf();
+    await future;
+  }
+
+  /// Open the release page in a browser — the fallback path.
   Future<void> openRelease() => _ifSupported<void>(
         ref.read(updateChannelProvider).openRelease,
         null,
