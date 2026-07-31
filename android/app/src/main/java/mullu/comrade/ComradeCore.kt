@@ -113,8 +113,37 @@ object ComradeCore {
         try {
             block()
         } catch (e: UiException) {
-            throw IllegalStateException("$what failed: ${e.message}", e)
+            throw IllegalStateException("$what failed: ${e.humanMessage()}", e)
         }
+
+    /**
+     * The sentence to show a person, rather than uniffi's rendering of the
+     * error's *fields*.
+     *
+     * `UiException`'s generated `message` is built from the variant's field
+     * names, so a failed attachment reached the chat screen reading
+     * `Send media failed: v1=http error: error sending request for url (…)`.
+     * The `v1=` is the name of a tuple field in Rust; it means nothing to
+     * anyone, and it made a legible error (a media host was unreachable) look
+     * like a crash. Every error the app shows goes through here.
+     *
+     * Mirrors `describeUiError` in the Flutter app's
+     * `rust_comrade_repository.dart`, so the two frontends word the same
+     * failure the same way.
+     */
+    fun UiException.humanMessage(): String = when (this) {
+        is UiException.UnknownWorkspace -> "Unknown workspace: $v1"
+        is UiException.Transition -> v1
+        is UiException.NoIdentity -> "No identity yet — unlock the vault to create one."
+        is UiException.StoreLocked, is UiException.VaultLocked -> "The vault is locked."
+        is UiException.Crypto -> v1
+        is UiException.Storage -> v1
+        is UiException.Engine -> v1
+        // No `else` on purpose. `UiException` is a sealed hierarchy generated
+        // from `UiError`, so adding a variant in Rust should break *this*
+        // compile and make someone word the new failure — the alternative is a
+        // fallback branch that silently starts printing `v1=` again.
+    }
 
     // ── Library / crypto helpers (no store required) ─────────────────────────
 

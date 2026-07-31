@@ -2615,7 +2615,11 @@
         case "send_media_bytes":
           return {
             event_id: "mockmedia_" + Date.now(),
-            url: "https://cdn.hackers.town/mock",
+            // `example.invalid` on purpose: this is the dev mock, so the URL is
+            // never fetched, and naming a *real* host here is how a dead one
+            // ends up looking load-bearing. (It did: the previous value was the
+            // media host that broke every attachment.)
+            url: "https://blob.example.invalid/mock",
             mime_type: args.mimeType,
             caption: args.caption || "",
             sender: "npub1mockdev0identity00000000000000000000000000000000",

@@ -88,6 +88,15 @@ const FEED_BOOTSTRAP_LIMIT: usize = 200;
 
 /// HKDF label binding the ECDH shared secret to media encryption.
 const MEDIA_LABEL: &str = "comrade-media-v1";
+
+/// What an encrypted attachment is declared as when it is uploaded.
+///
+/// Deliberately not the file's real type: the body is AES-GCM ciphertext, and
+/// naming it `image/jpeg` would both misdescribe it and hand the media host the
+/// one piece of metadata the encryption was meant to withhold — what *kind* of
+/// thing was just sent. The recipient learns the true type from the encrypted
+/// envelope, never from the host.
+const OPAQUE_UPLOAD_MIME: &str = "application/octet-stream";
 /// Encrypted-store tree mapping a NIP-94 event id → local [`MediaRef`].
 const MEDIA_REFS_TREE: &str = "comrade_media_refs";
 /// Encrypted-store tree caching peers' published Kind-0 profiles
@@ -3249,8 +3258,14 @@ impl RuntimeHandles {
         let size = media.size as u64;
         let sha256_hex = media.sha256_hex.clone();
 
-        // Upload ciphertext only — the host sees opaque bytes.
-        let url = upload_blob(media.ciphertext, mime_type).await?;
+        // Upload ciphertext only — the host sees opaque bytes, and is *told*
+        // opaque bytes. This used to send the plaintext's own MIME type as the
+        // upload's `Content-Type`, which contradicted the sentence above: it
+        // told the media host whether the user had just sent a photo, a voice
+        // note or a PDF, when the body it was describing is AES-GCM ciphertext
+        // and could not be any of them. The real type travels inside the
+        // encrypted DM envelope, which is where the recipient reads it.
+        let url = upload_blob(media.ciphertext, OPAQUE_UPLOAD_MIME).await?;
 
         // Zero-knowledge NIP-94 event: URL + ciphertext hash, no key, no `ox`.
         let meta = FileMetadata {
@@ -3450,8 +3465,14 @@ impl RuntimeHandles {
 /// no engine/store state at all.
 #[cfg(feature = "media-http")]
 async fn upload_blob(blob: Vec<u8>, mime: &str) -> Result<String, UiError> {
-    use comrade_core::media::{BlossomUploader, MediaUploader, DEFAULT_BLOSSOM_SERVER};
-    let uploader = BlossomUploader::new(DEFAULT_BLOSSOM_SERVER, nostr_sdk::Keys::generate());
+    use comrade_core::media::{BlossomUploader, MediaUploader, DEFAULT_BLOSSOM_SERVERS};
+    // Every default host, in order, not one: media sharing was broken outright
+    // for as long as the single hard-coded host was refusing connections, and
+    // no frontend could route around it.
+    let uploader = BlossomUploader::with_servers(
+        DEFAULT_BLOSSOM_SERVERS.iter().copied(),
+        nostr_sdk::Keys::generate(),
+    );
     let receipt = uploader
         .upload(&blob, mime)
         .await
