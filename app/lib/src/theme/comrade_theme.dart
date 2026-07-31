@@ -250,7 +250,14 @@ abstract final class ComradeTheme {
             surfaceContainerHigh: const Color(0xFF1A2438),
             surfaceContainerHighest: const Color(0xFF1A2438),
             onSurfaceVariant: const Color(0xFF9AA7C2),
-            outline: const Color(0xFF6B7894),
+            // Was `#6B7894` in both schemes, which is the one thing a shared
+            // value cannot be: legible on a near-black surface *and* on a white
+            // one. It reached 3.5:1 over `panelAlt` — under AA even for large
+            // text — while carrying real information in small type (a message's
+            // clock time, delivery ticks, the "mDNS off" pill). Each scheme now
+            // gets its own step, still quieter than `onSurfaceVariant` so the
+            // hierarchy holds, but no longer quiet to the point of unreadable.
+            outline: const Color(0xFF8794B0),
             outlineVariant: const Color(0xFF34425F),
             error: const Color(0xFFF87171),
             onError: const Color(0xFF3B0A0A),
@@ -278,7 +285,9 @@ abstract final class ComradeTheme {
             surfaceContainerHigh: const Color(0xFFE8ECF6),
             surfaceContainerHighest: const Color(0xFFE8ECF6),
             onSurfaceVariant: const Color(0xFF4A5468),
-            outline: const Color(0xFF6B7894),
+            // The light counterpart of the dark scheme's `outline` note: darker
+            // rather than lighter, same reason, same 4.5:1 bar.
+            outline: const Color(0xFF566072),
             outlineVariant: const Color(0xFFD5DBE8),
             // Stated rather than inherited. `ColorScheme.light`'s default error
             // is Material's own `#b00020`, which left the light theme's error

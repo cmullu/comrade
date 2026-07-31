@@ -5,13 +5,24 @@
 /// re-asked every launch. The unified app needs one seam so screens don't care
 /// which platform they're on.
 ///
-/// The default implementation is in-memory: nothing here is secret, but
-/// nothing here is persisted yet either, and pretending otherwise would be a
-/// lie the first relaunch exposes. Swap in a `shared_preferences`-backed
-/// implementation (or, better, the encrypted store) at the composition root.
-/// Every setting that reads through this seam — Tara's opt-in, background
-/// connectivity, the theme choice — shares that one gap, and no screen claims
-/// otherwise in its copy.
+/// Two implementations. [InMemoryPreferences] is the default and what every
+/// test injects; [PersistentPreferences] in `persistent_preferences.dart` is
+/// what the shipping app installs at the composition root, and it is the one
+/// that makes these settings survive a relaunch.
+///
+/// **Not the encrypted store**, which this file used to point at as the better
+/// home. Every setting here has to be readable *before* the vault is unlocked —
+/// the theme has to be right for the first frame of the onboarding screen, and
+/// background connectivity decides whether to connect at all — so a store that
+/// needs a passphrase cannot serve them. That is a reason, not a compromise:
+/// nothing here is secret. The one client setting that is deliberately *not*
+/// here is the screenshot policy, which lives on the platform side because
+/// `FLAG_SECURE` has to be applied earlier still and is shared with the Compose
+/// app.
+///
+/// The getters are synchronous by design, so a `build()` can read one without
+/// becoming a `FutureProvider`. That is what forces the async work — opening the
+/// store and warming its cache — into the composition root.
 library;
 
 abstract interface class AppPreferences {
@@ -64,4 +75,15 @@ abstract final class PrefKeys {
 
   /// `system` (default) | `light` | `dark` — see `themeModeFromKey`.
   static const String themeMode = 'appearance.themeMode';
+
+  /// Every key the app stores, and the allowlist the persisted store is opened
+  /// with. A key that is not declared here throws at the call site instead of
+  /// quietly writing an entry nothing will ever read back — which is the whole
+  /// reason `shared_preferences` recommends an allowlist, and the reason this
+  /// set is not merely documentation.
+  static const Set<String> all = <String>{
+    taraAccepted,
+    backgroundConnectivity,
+    themeMode,
+  };
 }
