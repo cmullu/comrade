@@ -227,23 +227,6 @@ fun presenceText(online: Boolean, lastSeenAt: Long, peerMarkedUs: Boolean): Stri
         PresenceLabel.NeverSeen -> stringResource(R.string.comrade_never_seen)
     }
 
-/**
- * The presence line for a conversation header, or `null` when there is
- * nothing short enough to say.
- *
- * The header shares one cramped line with the npub tail, which always stays
- * visible (handles are claims, keys are identity). "Waiting for them to
- * choose you back" is the one label that would push the key off the end, and
- * it is also the one the comrades screen already explains at length — so the
- * header shows the grey dot alone and lets that screen do the explaining.
- */
-@Composable
-fun presenceHeaderText(online: Boolean, lastSeenAt: Long, peerMarkedUs: Boolean): String? =
-    when (presenceLabelOf(online, lastSeenAt, peerMarkedUs)) {
-        PresenceLabel.AwaitingReciprocity -> null
-        else -> presenceText(online, lastSeenAt, peerMarkedUs)
-    }
-
 /** Renders one [LastSeen] case; the device's own 12/24-hour setting decides the clock. */
 @Composable
 private fun lastSeenText(lastSeenAt: Long): String {

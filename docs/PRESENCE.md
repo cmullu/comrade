@@ -150,6 +150,10 @@ they choose us back. And the *timestamp* is only ever advanced by a sighting —
 never by a claim lapsing, which happens up to a TTL after the peer was
 actually there — so "last seen" never overstates.
 
+In the conversation header that line sits directly under the name, with
+nothing else on it: the peer's key moved to the ⋮ menu (*Copy key*,
+*Encryption info*), so presence never has to compete with it for room.
+
 The rules live in `lastSeenOf`/`presenceLabelOf`
 (`android/.../ui/DisplayName.kt`, pure and unit-tested); the wording lives in
 `strings.xml` (with a plural for the minutes case), and the clock follows the

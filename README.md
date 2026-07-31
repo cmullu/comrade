@@ -87,9 +87,11 @@ unreliable. The model instead:
 - **Chats are titled by name, in trust order.** A conversation shows (1) the
   alias *you* set for that contact, else (2) the `@handle` *they* published
   (fetched and cached locally, refreshed in the background), else (3) the
-  shortened key. The open-conversation header always shows the npub tail —
-  handles are claims, keys are identity. Aliases are edited from the pencil
-  icon in the conversation header; an empty alias falls back to the handle.
+  shortened key. Handles are claims and keys are identity, so the key is
+  always one tap away in the conversation's ⋮ menu — *Copy key*, and
+  *Encryption info* shows it in full — rather than crowding the header, which
+  carries the name and (for a comrade) their presence. Aliases are set from
+  the same ⋮ menu; an empty alias falls back to the handle.
 - The opt-in path to *verified* unique names (NIP-05 DNS mapping) is future
   work.
 
