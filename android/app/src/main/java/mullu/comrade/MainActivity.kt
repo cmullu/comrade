@@ -76,10 +76,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -105,7 +102,7 @@ import mullu.comrade.ui.NotificationsOffIcon
 import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
-import mullu.comrade.ui.presenceHeaderText
+import mullu.comrade.ui.presenceText
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
@@ -652,39 +649,36 @@ private fun MainShell(
                                         }
                                         Column {
                                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            // The npub tail always stays visible (handles are
-                                            // claims, keys are identity); presence, when we have
-                                            // it, rides alongside rather than replacing it —
+                                            // Presence is the only thing under the name —
                                             // "online" while they are, a Telegram-style
-                                            // "last seen …" once they aren't.
-                                            val presenceLine = if (isComrade) {
-                                                presenceHeaderText(
-                                                    online = comradeOnline,
-                                                    lastSeenAt = peerPresence?.lastSeenAt ?: 0L,
-                                                    peerMarkedUs = peerPresence?.peerMarkedUs ?: false,
+                                            // "last seen …" once they aren't, and nothing
+                                            // at all for someone who isn't a comrade.
+                                            //
+                                            // The key used to live here too, on the grounds
+                                            // that handles are claims and keys are identity.
+                                            // It now lives one tap away in the ⋮ menu (Copy
+                                            // key, and Encryption info shows it in full),
+                                            // which is a better home for it: the header
+                                            // reads like a conversation instead of a key
+                                            // dump, and the line no longer has to choose
+                                            // between the key and what presence has to say.
+                                            if (isComrade) {
+                                                Text(
+                                                    presenceText(
+                                                        online = comradeOnline,
+                                                        lastSeenAt = peerPresence?.lastSeenAt ?: 0L,
+                                                        peerMarkedUs = peerPresence?.peerMarkedUs ?: false,
+                                                    ),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    color = if (comradeOnline) {
+                                                        MaterialTheme.colorScheme.primary
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                                    },
                                                 )
-                                            } else {
-                                                null
                                             }
-                                            // Prose in the UI font, the key in
-                                            // monospace — one line, two jobs.
-                                            val subtitle = buildAnnotatedString {
-                                                presenceLine?.let { append("$it · ") }
-                                                withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) {
-                                                    append(shortNpub(openChat.peer))
-                                                }
-                                            }
-                                            Text(
-                                                subtitle,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                color = if (comradeOnline) {
-                                                    MaterialTheme.colorScheme.primary
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                                },
-                                            )
                                         }
                                     }
                                 },
