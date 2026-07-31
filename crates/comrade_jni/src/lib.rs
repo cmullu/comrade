@@ -693,6 +693,41 @@ impl Comrade {
         handles.announce_presence(online).await
     }
 
+    // ── The nudge (abandoned drafts) ─────────────────────────────────────────
+
+    /// There is unsent text in `peer`'s composer, as of now — see
+    /// `comrade_ui::ComradeRuntime::note_draft`.
+    ///
+    /// Synchronous, unlike its presence neighbours, precisely because a
+    /// frontend calls it on a keystroke: it takes the runtime lock for a
+    /// hash-map insert and touches no store, no relay and no reactor, so a
+    /// suspend function (and the `runBlocking` every caller would wrap it in)
+    /// would cost more than the work.
+    ///
+    /// `try_read`, not `blocking_read`: this runs on the UI thread, and a
+    /// courtesy signal must never make a text field wait behind a slow
+    /// `lock_vault`/`unlock_vault` (both of which hold the write lock across
+    /// awaits). A skipped report costs at most one nudge, and the next
+    /// keystroke reports again.
+    pub fn note_draft(&self, peer: String) {
+        if let Ok(rt) = self.inner.try_read() {
+            rt.note_draft(&peer);
+        }
+    }
+
+    /// That draft is gone — cleared, or left behind when the thread closed.
+    /// Call it whenever a conversation closes; an empty composer does nothing.
+    ///
+    /// Skipped under contention like [`Comrade::note_draft`], which fails in
+    /// the harmless direction: the only thing holding the write lock long
+    /// enough to matter is a vault lock or unlock, and locking clears the
+    /// watch anyway.
+    pub fn abandon_draft(&self, peer: String) {
+        if let Ok(rt) = self.inner.try_read() {
+            rt.abandon_draft(&peer);
+        }
+    }
+
     // ── Journal (strictly local) ─────────────────────────────────────────────
 
     pub fn add_journal_entry(

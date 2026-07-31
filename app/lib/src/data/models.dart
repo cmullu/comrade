@@ -542,6 +542,23 @@ class ComradePresenceChanged extends BridgeEvent {
   final int at;
 }
 
+/// A comrade wrote something for us and never sent it — see
+/// `comrade_core::nudge`.
+///
+/// One event per hesitation, only for a peer the user marked as a comrade, and
+/// only while it is still fresh. It carries a name for the notification and
+/// nothing else: not the draft, not its length, not whether they cleared it or
+/// walked away. It is also not presence — it moves no dot and advances no "last
+/// seen", both of which belong to beacons alone.
+class IncomingComradeNudge extends BridgeEvent {
+  const IncomingComradeNudge({required this.peer, this.name});
+  final String peer;
+
+  /// Display name at the time of the event (alias → published handle), so a
+  /// notification can be raised without a store round-trip.
+  final String? name;
+}
+
 class MeshStatusChanged extends BridgeEvent {
   const MeshStatusChanged(this.status);
   final MeshStatus status;

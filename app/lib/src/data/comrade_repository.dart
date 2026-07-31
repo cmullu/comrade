@@ -115,6 +115,19 @@ abstract interface class ComradeRepository {
   /// courtesy, so a locked vault is a quiet `0`.
   Future<int> announcePresence(bool online);
 
+  /// There is unsent text in [npub]'s composer, as of now.
+  ///
+  /// Called as the user types, so it must stay cheap — the core takes a lock
+  /// for one map insert and returns. It discloses nothing by itself: only if
+  /// that draft is later abandoned *and* [npub] is a comrade does their device
+  /// learn that it happened, and never what was written (`comrade_core::nudge`).
+  Future<void> noteDraft(String npub);
+
+  /// That draft is gone — the box was emptied, or the conversation closed with
+  /// it still unsent. Safe to call whenever a thread closes; a composer that
+  /// never held text does nothing.
+  Future<void> abandonDraft(String npub);
+
   // ── Conversations ────────────────────────────────────────────────────────
 
   Future<List<ConversationInfo>> conversations();

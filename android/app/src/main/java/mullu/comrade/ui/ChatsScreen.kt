@@ -471,6 +471,19 @@ fun ConversationScreen(
     // A TextFieldValue rather than a String: the emoji picker inserts at the
     // caret, which needs the selection.
     var draft by remember { mutableStateOf(TextFieldValue()) }
+
+    /**
+     * The one place the draft changes by hand, so typing and an emoji
+     * insertion tell the core the same thing. It needs to know a composer
+     * holds unsent text before it can ever tell a comrade one was given up on
+     * (`comrade_core::nudge`) — and nothing about the text itself goes with it.
+     *
+     * Whitespace-only counts as empty, because [send] would not send it either.
+     */
+    fun editDraft(next: TextFieldValue) {
+        draft = next
+        if (next.text.isBlank()) ComradeCore.abandonDraft(peer) else ComradeCore.noteDraft(peer)
+    }
     var emojiOpen by remember { mutableStateOf(false) }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -581,6 +594,12 @@ fun ConversationScreen(
     // Clear any pending notification for this peer. The read receipt itself
     // rides along with the load effect above, which needs its return value.
     LaunchedEffect(peer) { Notifier.clearForPeer(context, peer) }
+
+    // Walking away from a half-written message is the other way to abandon it,
+    // and the one the person is least likely to come back from. Keyed on `peer`
+    // so switching conversations reports the thread being left, not the one
+    // arriving; an empty composer makes this a no-op.
+    DisposableEffect(peer) { onDispose { ComradeCore.abandonDraft(peer) } }
 
     fun send() {
         val text = draft.text.trim()
@@ -1019,7 +1038,7 @@ fun ConversationScreen(
         ) {
             OutlinedTextField(
                 value = draft,
-                onValueChange = { draft = it },
+                onValueChange = { editDraft(it) },
                 placeholder = { Text("Message") },
                 shape = RoundedCornerShape(26.dp),
                 modifier = Modifier
@@ -1147,7 +1166,7 @@ fun ConversationScreen(
 
     if (emojiOpen) {
         EmojiPickerSheet(
-            onPick = { draft = insertEmoji(draft, it) },
+            onPick = { editDraft(insertEmoji(draft, it)) },
             onDismiss = { emojiOpen = false },
         )
     }

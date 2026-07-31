@@ -383,6 +383,10 @@ pub enum _BridgeEvent {
         online: bool,
         at: u64,
     },
+    ComradeNudge {
+        peer: String,
+        name: Option<String>,
+    },
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
         ledger: String,
@@ -732,6 +736,42 @@ pub fn peer_presence(npub: String) -> Result<Option<PresenceDto>, UiError> {
 pub async fn announce_presence(online: bool) -> u64 {
     let handles = runtime().read().await.handles();
     handles.announce_presence(online).await
+}
+
+// ── The nudge (abandoned drafts — see `comrade_core::nudge`) ─────────────────
+
+/// There is unsent text in `peer`'s composer, as of now.
+///
+/// What this discloses, stated plainly: nothing, yet. It starts a local clock.
+/// If the draft is later abandoned — cleared, or left behind when the thread
+/// closes — and `peer` is a comrade, their device is told *that it happened*
+/// and nothing else: never the text, its length, or how the writing ended.
+/// See `comrade_core::nudge` for every rule that has to agree first.
+///
+/// Cheap enough to call on a keystroke, and infallible: a courtesy signal has
+/// no business raising an error into a text field. Synchronous for the same
+/// reason — the work is a hash-map insert, so an async hop would cost more than
+/// the thing it was scheduling.
+///
+/// `try_read` rather than a blocking acquire: nothing about watching a composer
+/// is worth waiting behind a slow `lock_vault`/`unlock_vault` for, and a skipped
+/// report costs at most one nudge (the next keystroke reports again).
+pub fn note_draft(peer: String) {
+    if let Ok(rt) = runtime().try_read() {
+        rt.note_draft(&peer);
+    }
+}
+
+/// That draft is gone — cleared, or left behind when the thread closed. Call it
+/// whenever a conversation closes; a composer that never held text does
+/// nothing.
+///
+/// Skipped under contention like [`note_draft`], which fails in the harmless
+/// direction: locking the vault clears the watch regardless.
+pub fn abandon_draft(peer: String) {
+    if let Ok(rt) = runtime().try_read() {
+        rt.abandon_draft(&peer);
+    }
 }
 
 // ── Journal (strictly local) ─────────────────────────────────────────────────

@@ -133,6 +133,13 @@
     <string name="comrades_title">Comrades</string>
     <string name="comrade_online_title">%1$s is online</string>
     <string name="comrade_online_text">Your comrade is around</string>
+    <!--
+      Same title as the online notice, deliberately: it replaces that line in
+      the shade rather than stacking a second one about the same person. The
+      body is a nudge, not a report — it never says what they wrote, how much,
+      or whether they cleared it, because none of that is sent.
+    -->
+    <string name="comrade_nudge_text">Your comrade might need you</string>
     <string name="comrades_explainer">Choose the people whose company you want to know about. Your comrades — and nobody else, not even a relay — are told when you\'re online. You see them the same way: once they\'ve chosen you back.</string>
     <string name="comrades_empty">No comrades yet. Pick a contact below, or open any conversation\'s ⋮ menu and choose “Make a comrade”.</string>
     <string name="comrades_no_contacts">Save a contact first — start a chat, and they\'ll show up here.</string>

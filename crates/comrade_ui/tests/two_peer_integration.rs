@@ -22,9 +22,18 @@ mod support;
 use std::time::Duration;
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason};
+use comrade_core::nudge::NUDGE_SETTLE_SECS;
 use comrade_ui::{BridgeEvent, ComradeRuntime};
 use support::TestRelay;
 use tempfile::TempDir;
+
+/// Unix seconds — the clock the nudge sweep is asked to stand at.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Generous for an in-process relay with zero real network latency, but long
 /// enough to absorb CI scheduling jitter without being a slow-test problem.
@@ -744,6 +753,141 @@ async fn comrades_see_each_other_come_online_and_go_offline() {
         .await,
         "alice must answer bob's arrival with a beacon of her own"
     );
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn a_message_bob_wrote_and_never_sent_still_reaches_alice_as_a_nudge() {
+    // The whole feature, end to end over a real relay: Bob opens Alice's chat,
+    // types, gives up — and Alice is told that her comrade might need her,
+    // without a word of what he wrote ever leaving his device.
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut alice_events = alice.subscribe_events();
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+    // Both directions of consent: his marking her is what lets him disclose,
+    // hers is what makes it something she asked to hear.
+    bob.set_comrade(&alice_npub, true).unwrap();
+    alice.set_comrade(&bob_npub, true).unwrap();
+
+    // He starts writing, and stops. The dwell is a real-clock rule, so this
+    // waits it out rather than pretending — it is the difference between a
+    // hesitation and a mistyped key, and it is the only part of the feature
+    // that cannot be hurried.
+    bob.note_draft(&alice_npub);
+    tokio::time::sleep(Duration::from_millis(3_100)).await;
+    bob.abandon_draft(&alice_npub);
+
+    // Nothing goes out while the draft could still come back.
+    assert_eq!(
+        bob.handles().nudge_abandoned_drafts(now_secs()).await,
+        0,
+        "a draft abandoned a moment ago may yet be rewritten"
+    );
+    assert!(wait_for(&mut alice_events, ABSENCE_TIMEOUT, |e| matches!(
+        e,
+        BridgeEvent::ComradeNudge { .. }
+    ))
+    .await
+    .is_none());
+
+    // A sweep on the far side of the settle window sends it.
+    assert_eq!(
+        bob.handles()
+            .nudge_abandoned_drafts(now_secs() + NUDGE_SETTLE_SECS)
+            .await,
+        1,
+        "one comrade he gave up on, one nudge"
+    );
+    let event = wait_for(&mut alice_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::ComradeNudge { .. })
+    })
+    .await
+    .expect("alice must be told her comrade nearly wrote to her");
+    let BridgeEvent::ComradeNudge { peer, .. } = event else {
+        unreachable!()
+    };
+    assert_eq!(peer, bob_npub);
+
+    // What she must *not* have: the draft, or anything that looks like one.
+    // The envelope never leaves as chat text, so her thread with him is still
+    // empty of it.
+    assert!(alice
+        .messages_with(&bob_npub)
+        .unwrap()
+        .iter()
+        .all(|m| !m.content.contains("comrade_nudge")));
+
+    // And the hesitation is spent: the next sweep has nothing to say, however
+    // many times it runs.
+    assert_eq!(
+        bob.handles()
+            .nudge_abandoned_drafts(now_secs() + NUDGE_SETTLE_SECS + 1)
+            .await,
+        0
+    );
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn a_message_bob_actually_sends_is_never_also_a_nudge() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut alice_events = alice.subscribe_events();
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+    bob.set_comrade(&alice_npub, true).unwrap();
+    alice.set_comrade(&bob_npub, true).unwrap();
+
+    // He types for long enough to clear the dwell rule, then actually sends —
+    // which no frontend has to report, because sending is what settles it.
+    bob.note_draft(&alice_npub);
+    tokio::time::sleep(Duration::from_millis(3_100)).await;
+    bob.send_dm(&alice_npub, "made it out after all")
+        .await
+        .unwrap();
+    bob.abandon_draft(&alice_npub);
+
+    assert_eq!(
+        bob.handles()
+            .nudge_abandoned_drafts(now_secs() + NUDGE_SETTLE_SECS)
+            .await,
+        0,
+        "the message said it; a nudge afterwards would be noise"
+    );
+    // She gets the message, and only the message.
+    assert!(
+        wait_for(&mut alice_events, RECV_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::IncomingDirectMessage(_)
+        ))
+        .await
+        .is_some(),
+        "the sent message must still arrive"
+    );
+    assert!(wait_for(&mut alice_events, ABSENCE_TIMEOUT, |e| matches!(
+        e,
+        BridgeEvent::ComradeNudge { .. }
+    ))
+    .await
+    .is_none());
 
     relay.stop().await;
 }
