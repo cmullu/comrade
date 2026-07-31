@@ -605,7 +605,9 @@ pub async fn tara_send(
     state: tauri::State<'_, Runtime>,
     text: String,
 ) -> Result<TaraMessageDto, String> {
-    state.read().await.tara_send(&text).map_err(|e| e.to_string())
+    // Write lock: tara_send allocates ids from the current thread length, so
+    // concurrent sends under the read lock would collide (see comrade_jni).
+    state.write().await.tara_send(&text).map_err(|e| e.to_string())
 }
 
 /// The whole Tara thread, oldest-first (chat order).

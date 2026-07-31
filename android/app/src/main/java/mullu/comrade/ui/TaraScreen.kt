@@ -135,17 +135,23 @@ private fun TaraThread(modifier: Modifier = Modifier) {
     val busy = thinking || streaming != null
 
     suspend fun reload() {
-        val (thread, hello) = withContext(Dispatchers.IO) {
-            val t = runCatching { ComradeCore.taraThread() }.getOrDefault(emptyList())
-            val h = if (t.isEmpty()) {
-                runCatching { ComradeCore.taraOpener() }.getOrNull()
-            } else {
-                null
+        val result = withContext(Dispatchers.IO) { runCatching { ComradeCore.taraThread() } }
+        result.onSuccess { thread ->
+            messages = thread
+            // The opener is a session greeting: fetched once, when the thread
+            // starts empty — and then it STAYS in the transcript. Clearing it
+            // on the first send would delete the sentence the user is
+            // replying to mid-conversation.
+            if (thread.isEmpty() && opener == null) {
+                opener = withContext(Dispatchers.IO) {
+                    runCatching { ComradeCore.taraOpener() }.getOrNull()
+                }
             }
-            t to h
+        }.onFailure {
+            // A locked vault or storage failure must not masquerade as an
+            // empty conversation — keep the loading state and say what broke.
+            error = it.message ?: "Couldn't open the conversation."
         }
-        messages = thread
-        opener = hello
     }
     LaunchedEffect(Unit) {
         crisisResources = withContext(Dispatchers.IO) {
@@ -183,6 +189,15 @@ private fun TaraThread(modifier: Modifier = Modifier) {
             thinking = false
             reply.onSuccess { message ->
                 if (message.crisis) {
+                    // A crisis bubble must never render beside an empty
+                    // helpline card — if the startup fetch failed, retry now
+                    // (the list is a static, infallible constant in Rust).
+                    if (crisisResources.isEmpty()) {
+                        crisisResources = withContext(Dispatchers.IO) {
+                            runCatching { ComradeCore.taraCrisisResources() }
+                                .getOrDefault(emptyList())
+                        }
+                    }
                     // Never drip-feed a crisis hand-off: helpline numbers
                     // appear complete, at once, the moment they are known.
                     streaming = StreamingReply(message.text, crisis = true)
@@ -198,6 +213,9 @@ private fun TaraThread(modifier: Modifier = Modifier) {
                 pendingUser = null
                 streaming = null
             }.onFailure {
+                // Give the words back: a failed send must not eat a message
+                // the user may have spent real effort writing.
+                if (draft.isBlank()) draft = text
                 pendingUser = null
                 streaming = null
                 error = it.message ?: "Could not send."
@@ -225,13 +243,18 @@ private fun TaraThread(modifier: Modifier = Modifier) {
                         CircularProgressIndicator(Modifier.align(Alignment.Center))
                     }
                 }
-                list.isEmpty() && pendingUser == null -> item(key = "opener") {
-                    opener?.let { TaraBubble(text = it, fromTara = true) }
-                }
-                else -> items(list, key = { it.id }) { msg ->
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TaraBubble(text = msg.text, fromTara = msg.fromTara)
-                        if (msg.crisis && msg.fromTara) CrisisCard(crisisResources)
+                else -> {
+                    // The opener stays at the top of the transcript for the
+                    // whole session — it is the message the user replied to,
+                    // and deleting it on the first send would rewrite history.
+                    opener?.let { hello ->
+                        item(key = "opener") { TaraBubble(text = hello, fromTara = true) }
+                    }
+                    items(list, key = { it.id }) { msg ->
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TaraBubble(text = msg.text, fromTara = msg.fromTara)
+                            if (msg.crisis && msg.fromTara) CrisisCard(crisisResources)
+                        }
                     }
                 }
             }

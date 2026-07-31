@@ -5477,7 +5477,16 @@ mod tests {
         let reply = rt.tara_send("  I've been anxious all week  ").unwrap();
         assert!(reply.from_tara);
         assert!(!reply.crisis);
-        assert!(reply.text.contains("anxious"));
+        // The runtime must hand the trimmed message and a zero turn count to
+        // the engine — pin equality with the engine's own answer rather than
+        // a copy substring, so reply-copy rewrites don't break the plumbing test.
+        let expected = {
+            use comrade_core::tara::{CompanionEngine, ReflectiveCompanion};
+            ReflectiveCompanion
+                .reply("I've been anxious all week", 0)
+                .text
+        };
+        assert_eq!(reply.text, expected);
 
         // Thread is chat-ordered: trimmed user turn first, reply after it.
         let thread = rt.tara_thread().unwrap();
@@ -5507,14 +5516,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tara_opener_reflects_recent_low_journal_moods() {
+    async fn tara_opener_never_overclaims_one_rough_day() {
+        // Both entries land with now_secs(), i.e. the SAME day. The low-mood
+        // nudge counts distinct low DAYS, so one rough day with two entries
+        // must read as journaling activity — not "2 of your days felt low".
+        // (The multi-day path is pinned at the engine level, where
+        // JournalSignal ages can be constructed directly.)
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
 
-        rt.add_journal_entry("rough monday", Some("😞")).unwrap();
-        rt.add_journal_entry("rough tuesday", Some("😕")).unwrap();
-        assert!(rt.tara_opener().unwrap().contains("felt low"));
+        rt.add_journal_entry("rough monday morning", Some("😞"))
+            .unwrap();
+        rt.add_journal_entry("rough monday evening", Some("😕"))
+            .unwrap();
+        let opener = rt.tara_opener().unwrap();
+        assert!(
+            !opener.contains("felt low"),
+            "overclaimed low days: {opener}"
+        );
+        // …but the mood markers still shape the opener via the journal branch.
+        assert!(
+            opener.contains("journal") || opener.contains("writing"),
+            "journal activity not reflected: {opener}"
+        );
     }
 
     #[test]

@@ -719,7 +719,12 @@ impl Comrade {
     /// return it. `crisis == true` on the reply means the UI must surface
     /// [`Comrade::tara_crisis_resources`] with it.
     pub fn tara_send(&self, text: String) -> Result<TaraMessageDto, UiError> {
-        self.inner.blocking_read().tara_send(&text)
+        // The WRITE lock, deliberately: tara_send allocates sequence-numbered
+        // ids from the current thread length, so two concurrent sends under
+        // the read lock (e.g. the Tara tab and the voice assistant at once)
+        // would mint colliding ids and silently overwrite each other's turns.
+        // The section is lock-only, no network, so serialising it is cheap.
+        self.inner.blocking_write().tara_send(&text)
     }
 
     /// The whole Tara thread, oldest-first (chat order).

@@ -97,6 +97,49 @@ pairs interleave.
   the companion doesn't need your words to invite you to reflect.
 - "Clear conversation" deletes every turn; there is no other copy to forget.
 
+## The v1.1 engine: why it doesn't read as a form letter
+
+The first template engine was minimal by design and it showed: one
+fill-in-the-label sentence per feeling, every reply ending in a question,
+pools small enough to repeat within five turns, and "thank you" answered with
+"Say more — what happened just before?". The v1.1 rewrite keeps the engine
+fully deterministic and on-device but changes what it does with that budget:
+
+* **Intent routing before templates.** Thanks, goodbyes, greetings, bare
+  "yes"/"idk" replies, "are you an AI / a therapist?" meta questions, decision
+  questions, generic questions and long vents each route to their own pool.
+  The meta pools are honesty gate 1 in miniature: asked directly, Tara says
+  no, she is not a therapist and not a person — every line, unhedged.
+* **Whole sentences per feeling.** Eight complete lines per family, mixed
+  shapes — some validate without asking anything, some end with an open
+  question, some just invite. No more "That sounds worn out, and it makes
+  sense you'd feel that way."
+* **Seeded variety.** Line choice is `(fnv1a(message) + turn) % pool_len`:
+  same (message, turn) is stable for tests; consecutive turns never repeat;
+  different messages start at different offsets.
+* **Negation awareness.** "I'm not happy" reads as low, never celebrated;
+  "I don't feel lonely" isn't mirrored; "not anxious anymore" is left in the
+  past. Ambiguous bare cues ("the wifi has been down") no longer count as
+  feelings — only "feel"-anchored phrasings do.
+* **Both feelings named.** "Exhausted and scared" is acknowledged as both, in
+  the user's own order, instead of whichever the cue table lists first.
+* **Safe topic echo.** "…about the review tomorrow" can come back as "It
+  makes sense that the review tomorrow is weighing on you" — but only when
+  the fragment is short, names something concrete, and contains no
+  first-person tokens (no ELIZA person-flips) and no distress content.
+* **Long vents are validated, not interrogated.** Sixty-plus words of
+  outpouring gets acknowledgement first; at most one gentle question.
+* **A rhythm that breathes.** Streaming pauses longer at sentence ends and
+  leans at commas (`TaraStream.delayAfter`), instead of metronome chunks.
+
+What deliberately did NOT change: `detect_distress` still runs before all
+routing, the crisis reply is still a single fixed vetted string (never
+rotated, never echoed, never streamed), and the first-contact greeting still
+introduces Tara with the privacy promise — exactly once.
+
+To *read* the current feel rather than imagine it:
+`cargo run -p comrade_core --example tara_demo`.
+
 ## Crisis hand-off behaviour
 
 `detect_distress` is a normalising, whole-phrase cue matcher, deliberately
