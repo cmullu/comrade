@@ -382,9 +382,39 @@ pub use nip96::Nip96Uploader;
 
 // ── Blossom upload + fetch-and-decrypt (feature-gated) ───────────────────────────
 
-/// Default Blossom server used by [`upload_encrypted_blob`]. Blossom servers are
+/// Blossom hosts tried in order, first success wins. Blossom servers are
 /// content-addressed (blob URL = `<server>/<sha256>`) and accept raw `PUT`s.
-pub const DEFAULT_BLOSSOM_SERVER: &str = "https://cdn.hackers.town";
+///
+/// **A list, because a single default is a single point of failure — and it
+/// failed.** This was one hard-coded host, `cdn.hackers.town`, which stopped
+/// completing TCP connections; every attachment on every platform then died
+/// with `error sending request for url (https://cdn.hackers.town/upload)` and
+/// no way for a user to route around it. Nothing about that host was special,
+/// which is the point: any of these can go the same way, so the uploader tries
+/// the next one instead of reporting failure after one.
+///
+/// Ordering is measured, not guessed. `examples/blossom_probe.rs` uploads a
+/// signed blob to each and fetches it back; on the day this list was written it
+/// reported:
+///
+/// | host | result |
+/// |---|---|
+/// | `nostr.download` | **accepts** anonymous BUD-01 uploads, round trip verified |
+/// | `blossom.band` | reachable, rejects us (415 opaque / 400 typed) |
+/// | `cdn.satellite.earth` | reachable, 401 — wants an account |
+///
+/// The two that reject us stay as fallbacks anyway: they cost nothing while the
+/// first host works, and being down to one host is the exact condition that
+/// produced this outage. Re-run the probe before trusting the order.
+pub const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
+    "https://nostr.download",
+    "https://blossom.band",
+    "https://cdn.satellite.earth",
+];
+
+/// The first of [`DEFAULT_BLOSSOM_SERVERS`], for callers that want exactly one.
+/// Prefer the list: a single host is how this broke.
+pub const DEFAULT_BLOSSOM_SERVER: &str = DEFAULT_BLOSSOM_SERVERS[0];
 
 /// Hard cap on a decrypted media payload (10 MB). Mirrors the frontend limit;
 /// enforced in the core so *every* caller (desktop, JNI/Android) is protected,
@@ -399,7 +429,7 @@ pub const MAX_ENCRYPTED_MEDIA_BYTES: usize = MAX_MEDIA_BYTES + 64;
 mod http {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     /// Blossom authorization event kind (BUD-01).
     const BLOSSOM_AUTH_KIND: u16 = 24242;
@@ -442,6 +472,11 @@ mod http {
         }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Same reasoning as the upload side: a host that accepts the
+            // connection and then stops sending would otherwise leave a bubble
+            // spinning forever with no error to act on.
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(TRANSFER_TIMEOUT)
             .build()
             .map_err(|e| MediaError::Http(e.to_string()))?;
         let mut resp = client
@@ -488,6 +523,36 @@ mod http {
         aes256gcm_open(key, &bytes).map_err(|e| MediaError::Crypto(e.to_string()))
     }
 
+    /// How long to wait for a host to *answer at all*.
+    ///
+    /// Short on purpose, and separate from [`TRANSFER_TIMEOUT`]: a host that has
+    /// stopped completing connections (which is exactly how the old default
+    /// died) must cost seconds before the next one is tried, not minutes. A slow
+    /// but live host is a different case and gets the full transfer budget.
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Whole-request budget. Generous because the payload can be 10 MB over a
+    /// phone's uplink — but finite, because `reqwest`'s default is *no timeout*,
+    /// and a black-holed connection would otherwise hang a send forever with a
+    /// spinner and no error.
+    const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
+
+    fn http_client() -> Result<reqwest::Client, MediaError> {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(TRANSFER_TIMEOUT)
+            .build()
+            .map_err(|e| MediaError::Http(e.to_string()))
+    }
+
+    /// Render one host's failure for a combined error message. The host is named
+    /// because "upload failed" without it sends the reader to the wrong layer —
+    /// the relay, the network, their own file — when the answer is "that media
+    /// host is down".
+    fn attempt_error(server: &str, error: &MediaError) -> String {
+        format!("{}: {error}", server.trim_end_matches('/'))
+    }
+
     /// Anonymous Blossom upload: `PUT <server>/upload` with the raw blob body.
     /// Returns the download URL. Servers that mandate auth will reject this;
     /// use [`BlossomUploader`] (signed) for those.
@@ -497,7 +562,7 @@ mod http {
         mime_type: &str,
     ) -> Result<String, MediaError> {
         let endpoint = format!("{}/upload", server.trim_end_matches('/'));
-        let resp = reqwest::Client::new()
+        let resp = http_client()?
             .put(&endpoint)
             .header(reqwest::header::CONTENT_TYPE, mime_type)
             .body(blob)
@@ -507,12 +572,23 @@ mod http {
         parse_blob_url(resp).await
     }
 
-    /// Upload an encrypted blob to [`DEFAULT_BLOSSOM_SERVER`] (anonymous).
+    /// Upload an encrypted blob anonymously, trying each of
+    /// [`DEFAULT_BLOSSOM_SERVERS`] until one accepts it.
     pub async fn upload_encrypted_blob(
         blob: Vec<u8>,
         mime_type: &str,
     ) -> Result<String, MediaError> {
-        upload_encrypted_blob_to(DEFAULT_BLOSSOM_SERVER, blob, mime_type).await
+        let mut failures: Vec<String> = Vec::new();
+        for server in DEFAULT_BLOSSOM_SERVERS {
+            match upload_encrypted_blob_to(server, blob.clone(), mime_type).await {
+                Ok(url) => return Ok(url),
+                Err(e) => failures.push(attempt_error(server, &e)),
+            }
+        }
+        Err(MediaError::UploadFailed(format!(
+            "no media host accepted the upload — {}",
+            failures.join("; ")
+        )))
     }
 
     /// Extract the download URL from a Blossom blob-descriptor JSON response.
@@ -535,19 +611,58 @@ mod http {
 
     /// A Blossom uploader that signs each request with a BUD-01 `kind:24242`
     /// authorization event, so it works against servers that require auth.
+    ///
+    /// Holds a *list* of hosts and tries them in order — see
+    /// [`DEFAULT_BLOSSOM_SERVERS`] for why one is not enough.
     pub struct BlossomUploader {
         client: reqwest::Client,
-        server: String,
+        servers: Vec<String>,
         keys: Keys,
     }
 
     impl BlossomUploader {
+        /// One host. Kept for callers that mean exactly one (a test server, a
+        /// user-chosen host); [`Self::with_servers`] is the failover form.
         pub fn new(server: impl Into<String>, keys: Keys) -> Self {
+            Self::with_servers([server.into()], keys)
+        }
+
+        /// Try each host in order until one accepts the blob.
+        ///
+        /// Falls back to [`DEFAULT_BLOSSOM_SERVERS`] if handed an empty list, so
+        /// a misconfigured caller degrades to "the defaults" rather than to
+        /// "media is silently impossible".
+        pub fn with_servers(
+            servers: impl IntoIterator<Item = impl Into<String>>,
+            keys: Keys,
+        ) -> Self {
+            let mut servers: Vec<String> = servers
+                .into_iter()
+                .map(Into::into)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if servers.is_empty() {
+                servers = DEFAULT_BLOSSOM_SERVERS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            }
             Self {
-                client: reqwest::Client::new(),
-                server: server.into(),
+                // `unwrap_or_default` rather than `?`: a client that cannot be
+                // built is a programming error in the builder arguments, and
+                // failing here would make the constructor fallible for every
+                // caller to no benefit. The default client still works; it just
+                // has no timeouts, which the per-request budget below covers.
+                client: http_client().unwrap_or_default(),
+                servers,
                 keys,
             }
+        }
+
+        /// The hosts this uploader will try, in order.
+        pub fn servers(&self) -> &[String] {
+            &self.servers
         }
 
         fn auth_header(&self, blob_sha256: &str) -> Result<String, MediaError> {
@@ -568,21 +683,49 @@ mod http {
         }
     }
 
-    impl MediaUploader for BlossomUploader {
-        async fn upload(&self, blob: &[u8], mime_type: &str) -> Result<UploadReceipt, MediaError> {
-            let sha = sha256_hex(blob);
-            let endpoint = format!("{}/upload", self.server.trim_end_matches('/'));
+    impl BlossomUploader {
+        /// One host, one attempt.
+        async fn upload_to(
+            &self,
+            server: &str,
+            blob: &[u8],
+            sha: &str,
+            mime_type: &str,
+        ) -> Result<String, MediaError> {
+            let endpoint = format!("{}/upload", server.trim_end_matches('/'));
             let resp = self
                 .client
                 .put(&endpoint)
-                .header(reqwest::header::AUTHORIZATION, self.auth_header(&sha)?)
+                .header(reqwest::header::AUTHORIZATION, self.auth_header(sha)?)
                 .header(reqwest::header::CONTENT_TYPE, mime_type)
+                // BUD-02: servers match this against the `x` tag in the auth
+                // event, and some reject an upload that omits it.
+                .header("X-SHA-256", sha)
+                .header(reqwest::header::CONTENT_LENGTH, blob.len())
                 .body(blob.to_vec())
                 .send()
                 .await
                 .map_err(|e| MediaError::Http(e.to_string()))?;
-            let url = parse_blob_url(resp).await?;
-            Ok(UploadReceipt { url })
+            parse_blob_url(resp).await
+        }
+    }
+
+    impl MediaUploader for BlossomUploader {
+        async fn upload(&self, blob: &[u8], mime_type: &str) -> Result<UploadReceipt, MediaError> {
+            let sha = sha256_hex(blob);
+            let mut failures: Vec<String> = Vec::new();
+            for server in &self.servers {
+                match self.upload_to(server, blob, &sha, mime_type).await {
+                    Ok(url) => return Ok(UploadReceipt { url }),
+                    Err(e) => failures.push(attempt_error(server, &e)),
+                }
+            }
+            // Every host named, with its own reason. One line the user can act
+            // on — or paste into a bug report that is actually diagnosable.
+            Err(MediaError::UploadFailed(format!(
+                "no media host accepted the upload — {}",
+                failures.join("; ")
+            )))
         }
     }
 }
@@ -721,6 +864,68 @@ mod tests {
             let err = fetch_and_decrypt_media(url, &[0u8; 32], None).await;
             assert!(matches!(err, Err(MediaError::Http(_))), "must reject {url}");
         }
+    }
+
+    #[test]
+    fn the_single_default_host_is_the_first_of_the_list() {
+        // The scalar is kept for callers that want one host, but it must never
+        // drift away from the list the uploader actually tries.
+        assert_eq!(DEFAULT_BLOSSOM_SERVER, DEFAULT_BLOSSOM_SERVERS[0]);
+        assert!(
+            DEFAULT_BLOSSOM_SERVERS.len() > 1,
+            "one media host is a single point of failure — that is what broke"
+        );
+        for server in DEFAULT_BLOSSOM_SERVERS {
+            assert!(
+                server.starts_with("https://"),
+                "{server} must be HTTPS: the blob is opaque, but the request is not"
+            );
+            assert!(
+                !server.ends_with('/'),
+                "{server} must not carry a trailing /"
+            );
+        }
+    }
+
+    #[cfg(feature = "media-http")]
+    #[test]
+    fn an_uploader_given_no_usable_host_falls_back_to_the_defaults() {
+        let keys = Keys::generate();
+        // Blank/whitespace entries are dropped rather than turned into
+        // `https:///upload`, and an empty result degrades to the defaults —
+        // "media is impossible" must not be reachable by misconfiguration.
+        let uploader = BlossomUploader::with_servers(["", "   "], keys.clone());
+        assert_eq!(uploader.servers(), DEFAULT_BLOSSOM_SERVERS);
+
+        let trimmed = BlossomUploader::with_servers(["  https://one.example  "], keys);
+        assert_eq!(trimmed.servers(), &["https://one.example".to_string()]);
+    }
+
+    #[cfg(feature = "media-http")]
+    #[tokio::test]
+    async fn every_host_is_tried_and_every_failure_is_named() {
+        // Closed ports on loopback: refused immediately, so this stays hermetic
+        // and fast (no DNS, no external network, no timeout wait).
+        let uploader = BlossomUploader::with_servers(
+            ["https://127.0.0.1:1", "https://127.0.0.1:2"],
+            Keys::generate(),
+        );
+        let err = uploader
+            .upload(b"ciphertext", "application/octet-stream")
+            .await
+            .expect_err("no host can accept this");
+        let message = err.to_string();
+
+        // Both hosts attempted — a failover that stops at the first failure is
+        // the bug this replaced.
+        assert!(message.contains("127.0.0.1:1"), "{message}");
+        assert!(message.contains("127.0.0.1:2"), "{message}");
+        // And it says which layer failed. "upload failed" alone sends the
+        // reader to their relay, their network, or their own file.
+        assert!(
+            message.contains("no media host accepted the upload"),
+            "{message}"
+        );
     }
 
     #[test]
