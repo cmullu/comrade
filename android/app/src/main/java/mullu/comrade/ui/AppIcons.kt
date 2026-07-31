@@ -466,3 +466,104 @@ val ScreenShareIcon: ImageVector = materialIcon(name = "Filled.ScreenShare") {
         close()
     }
 }
+
+/** Material "insert emoticon" (outlined-ish) — the composer's emoji button. */
+val EmojiIcon: ImageVector = materialIcon(name = "Filled.InsertEmoticon") {
+    materialPath {
+        // Face outline as a ring, wound so the inside stays hollow.
+        moveTo(12.0f, 2.0f)
+        curveToRelative(-5.52f, 0.0f, -10.0f, 4.48f, -10.0f, 10.0f)
+        reflectiveCurveToRelative(4.48f, 10.0f, 10.0f, 10.0f)
+        reflectiveCurveToRelative(10.0f, -4.48f, 10.0f, -10.0f)
+        reflectiveCurveTo(17.52f, 2.0f, 12.0f, 2.0f)
+        close()
+        moveTo(12.0f, 20.0f)
+        curveToRelative(-4.42f, 0.0f, -8.0f, -3.58f, -8.0f, -8.0f)
+        reflectiveCurveToRelative(3.58f, -8.0f, 8.0f, -8.0f)
+        reflectiveCurveToRelative(8.0f, 3.58f, 8.0f, 8.0f)
+        reflectiveCurveToRelative(-3.58f, 8.0f, -8.0f, 8.0f)
+        close()
+        // Eyes.
+        moveTo(15.5f, 11.0f)
+        curveToRelative(0.83f, 0.0f, 1.5f, -0.67f, 1.5f, -1.5f)
+        reflectiveCurveTo(16.33f, 8.0f, 15.5f, 8.0f)
+        reflectiveCurveTo(14.0f, 8.67f, 14.0f, 9.5f)
+        reflectiveCurveToRelative(0.67f, 1.5f, 1.5f, 1.5f)
+        close()
+        moveTo(8.5f, 11.0f)
+        curveToRelative(0.83f, 0.0f, 1.5f, -0.67f, 1.5f, -1.5f)
+        reflectiveCurveTo(9.33f, 8.0f, 8.5f, 8.0f)
+        reflectiveCurveTo(7.0f, 8.67f, 7.0f, 9.5f)
+        reflectiveCurveToRelative(0.67f, 1.5f, 1.5f, 1.5f)
+        close()
+        // Smile.
+        moveTo(12.0f, 17.5f)
+        curveToRelative(2.33f, 0.0f, 4.31f, -1.46f, 5.11f, -3.5f)
+        horizontalLineTo(6.89f)
+        curveToRelative(0.8f, 2.04f, 2.78f, 3.5f, 5.11f, 3.5f)
+        close()
+    }
+}
+
+/** Material "attach file" (filled) — the composer's paper clip. */
+val AttachFileIcon: ImageVector = materialIcon(name = "Filled.AttachFile") {
+    materialPath {
+        moveTo(16.5f, 6.0f)
+        verticalLineToRelative(11.5f)
+        curveToRelative(0.0f, 2.21f, -1.79f, 4.0f, -4.0f, 4.0f)
+        reflectiveCurveToRelative(-4.0f, -1.79f, -4.0f, -4.0f)
+        verticalLineTo(5.0f)
+        curveToRelative(0.0f, -1.38f, 1.12f, -2.5f, 2.5f, -2.5f)
+        reflectiveCurveToRelative(2.5f, 1.12f, 2.5f, 2.5f)
+        verticalLineToRelative(10.5f)
+        curveToRelative(0.0f, 0.55f, -0.45f, 1.0f, -1.0f, 1.0f)
+        reflectiveCurveToRelative(-1.0f, -0.45f, -1.0f, -1.0f)
+        verticalLineTo(6.0f)
+        horizontalLineTo(10.0f)
+        verticalLineToRelative(9.5f)
+        curveToRelative(0.0f, 1.38f, 1.12f, 2.5f, 2.5f, 2.5f)
+        reflectiveCurveToRelative(2.5f, -1.12f, 2.5f, -2.5f)
+        verticalLineTo(5.0f)
+        curveToRelative(0.0f, -2.21f, -1.79f, -4.0f, -4.0f, -4.0f)
+        reflectiveCurveTo(7.0f, 2.79f, 7.0f, 5.0f)
+        verticalLineToRelative(12.5f)
+        curveToRelative(0.0f, 3.04f, 2.46f, 5.5f, 5.5f, 5.5f)
+        reflectiveCurveToRelative(5.5f, -2.46f, 5.5f, -5.5f)
+        verticalLineTo(6.0f)
+        horizontalLineToRelative(-1.5f)
+        close()
+    }
+}
+
+/** Material "photo camera" (filled) — the composer's photo capture mode. */
+val PhotoCameraIcon: ImageVector = materialIcon(name = "Filled.PhotoCamera") {
+    materialPath {
+        moveTo(9.0f, 2.0f)
+        lineTo(7.17f, 4.0f)
+        horizontalLineTo(4.0f)
+        curveToRelative(-1.1f, 0.0f, -2.0f, 0.9f, -2.0f, 2.0f)
+        verticalLineToRelative(12.0f)
+        curveToRelative(0.0f, 1.1f, 0.9f, 2.0f, 2.0f, 2.0f)
+        horizontalLineToRelative(16.0f)
+        curveToRelative(1.1f, 0.0f, 2.0f, -0.9f, 2.0f, -2.0f)
+        verticalLineTo(6.0f)
+        curveToRelative(0.0f, -1.1f, -0.9f, -2.0f, -2.0f, -2.0f)
+        horizontalLineToRelative(-3.17f)
+        lineTo(15.0f, 2.0f)
+        horizontalLineTo(9.0f)
+        close()
+        // Lens, wound the other way so it reads as a ring.
+        moveTo(12.0f, 17.0f)
+        curveToRelative(-2.76f, 0.0f, -5.0f, -2.24f, -5.0f, -5.0f)
+        reflectiveCurveToRelative(2.24f, -5.0f, 5.0f, -5.0f)
+        reflectiveCurveToRelative(5.0f, 2.24f, 5.0f, 5.0f)
+        reflectiveCurveToRelative(-2.24f, 5.0f, -5.0f, 5.0f)
+        close()
+        moveTo(12.0f, 15.0f)
+        curveToRelative(1.66f, 0.0f, 3.0f, -1.34f, 3.0f, -3.0f)
+        reflectiveCurveToRelative(-1.34f, -3.0f, -3.0f, -3.0f)
+        reflectiveCurveToRelative(-3.0f, 1.34f, -3.0f, 3.0f)
+        reflectiveCurveToRelative(1.34f, 3.0f, 3.0f, 3.0f)
+        close()
+    }
+}

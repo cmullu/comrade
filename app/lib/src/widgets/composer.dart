@@ -32,14 +32,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../util/composer_mode.dart';
 import 'emoji_picker.dart';
 import 'media_attachment.dart';
 
-/// What the round button does when there is no text to send.
-///
-/// Three, not two, because a device that can take a photo can usually also
-/// record video, and a two-way mic/camera toggle leaves video unreachable.
-enum ComposerCaptureMode { voice, photo, video }
+export '../util/composer_mode.dart' show ComposerCaptureMode;
 
 class MessageComposer extends ConsumerStatefulWidget {
   const MessageComposer({
@@ -213,21 +210,18 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   /// app runs — it comes from one probe at startup.
   List<ComposerCaptureMode> _availableModes() {
     final MediaCaptureDelegate capture = ref.read(mediaCaptureProvider);
-    return <ComposerCaptureMode>[
-      if (ref.read(voiceNoteRecorderProvider).available)
-        ComposerCaptureMode.voice,
-      if (capture.canCapturePhoto) ComposerCaptureMode.photo,
-      if (capture.canCaptureVideo) ComposerCaptureMode.video,
-    ];
+    return availableCaptureModes(
+      canRecordAudio: ref.read(voiceNoteRecorderProvider).available,
+      canTakePhoto: capture.canCapturePhoto,
+      canRecordVideo: capture.canCaptureVideo,
+    );
   }
 
   /// The current mode, corrected to something this device has. A stale `_mode`
   /// (a camera that vanished, or a default that never applied) must never leave
   /// the button doing nothing.
-  ComposerCaptureMode? _effectiveMode(List<ComposerCaptureMode> available) {
-    if (available.isEmpty) return null;
-    return available.contains(_mode) ? _mode : available.first;
-  }
+  ComposerCaptureMode? _effectiveMode(List<ComposerCaptureMode> available) =>
+      effectiveCaptureMode(_mode, available);
 
   /// Move to the next available mode.
   ///
@@ -235,12 +229,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   /// a mouse *and* with a finger, and the one thing worse than a hidden gesture
   /// is a hidden gesture that shares a target with a tap that records.
   void _cycleMode() {
-    final List<ComposerCaptureMode> available = _availableModes();
-    if (available.length < 2) return;
-    final ComposerCaptureMode current =
-        _effectiveMode(available) ?? available.first;
-    final int next = (available.indexOf(current) + 1) % available.length;
-    setState(() => _mode = available[next]);
+    final ComposerCaptureMode? next = nextCaptureMode(_mode, _availableModes());
+    if (next == null) return;
+    setState(() => _mode = next);
   }
 
   static IconData _iconFor(ComposerCaptureMode mode) => switch (mode) {
