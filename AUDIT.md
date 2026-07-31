@@ -438,6 +438,15 @@ user has)? Owner call required before any companion code.
 > url+sha256 switches the whole flow on. **OQ9 remains open** — the inference
 > backend is the one piece still missing.
 
+> **Proposal (2026-07-31, attention restoration).** A fifth pillar is
+> proposed — helping users rebuild attention eroded by doomscrolling and
+> short-video overuse: a tested "calm feed" contract + gentle session stop,
+> an opt-in on-device usage mirror, focus sessions + long-form reading
+> practice, and E2E-shared accountability with a loved one (presence-style
+> semantics). Design doc + phased plan with honesty gates and open
+> questions OQ11–OQ14: [`docs/ATTENTION.md`](docs/ATTENTION.md). Nothing
+> is wired yet.
+
 ### 8.1 Calls — voice & video (owner request, 2026-07-12)
 
 > **Status (landed).** The **signaling layer is built and tested**: a
