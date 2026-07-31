@@ -71,7 +71,12 @@ class CallService : Service() {
         // (ForegroundServiceDidNotStartInTimeException). Go foreground with
         // a generic placeholder here; onStartCommand replaces it in place
         // (same NOTIFICATION_ID) with the real peer-labeled notification.
-        startForegroundNotified(peer = "", peerLabel = getString(mullu.comrade.R.string.call_voice), video = false)
+        startForegroundNotified(
+            peer = "",
+            peerLabel = getString(mullu.comrade.R.string.call_voice),
+            video = false,
+            screenShare = false,
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -87,9 +92,10 @@ class CallService : Service() {
         }
         val peerLabel = intent.getStringExtra(EXTRA_PEER_LABEL)?.ifBlank { null } ?: peer
         val video = intent.getBooleanExtra(EXTRA_VIDEO, false)
+        val screenShare = intent.getBooleanExtra(EXTRA_SCREEN_SHARE, false)
         this.peer = peer
         this.peerLabel = peerLabel
-        startForegroundNotified(peer, peerLabel, video)
+        startForegroundNotified(peer, peerLabel, video, screenShare)
         observeCallControls()
         return START_NOT_STICKY
     }
@@ -129,7 +135,21 @@ class CallService : Service() {
         }
     }
 
-    private fun startForegroundNotified(peer: String, peerLabel: String, video: Boolean) {
+    /**
+     * Go foreground with exactly the types this call is currently using.
+     *
+     * [screenShare] is not cosmetic: from Android 14 a `MediaProjection` may
+     * only start while a foreground service already declaring `mediaProjection`
+     * is running, so `CallManager.startScreenShare` re-announces the service
+     * through here *before* it starts capturing. Get that order wrong and
+     * `startCapture` throws.
+     */
+    private fun startForegroundNotified(
+        peer: String,
+        peerLabel: String,
+        video: Boolean,
+        screenShare: Boolean,
+    ) {
         Notifier.ensureChannels(this)
         val notification = buildNotification(
             peer,
@@ -139,11 +159,9 @@ class CallService : Service() {
             route = CallManager.audioRoute.value,
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val type = if (video) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-            } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            }
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            if (video) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            if (screenShare) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             startForeground(NOTIFICATION_ID, notification, type)
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -238,12 +256,28 @@ class CallService : Service() {
         private const val EXTRA_PEER = "peer"
         private const val EXTRA_PEER_LABEL = "peerLabel"
         private const val EXTRA_VIDEO = "video"
+        private const val EXTRA_SCREEN_SHARE = "screenShare"
 
-        fun start(context: Context, peer: String, peerLabel: String, video: Boolean) {
+        /**
+         * Start — or re-announce — the ongoing-call service.
+         *
+         * Called again mid-call when [screenShare] changes, because the
+         * foreground-service *type* must match what the call is actually doing
+         * (see [startForegroundNotified]). Re-announcing reuses the same
+         * NOTIFICATION_ID, so it updates the row rather than adding one.
+         */
+        fun start(
+            context: Context,
+            peer: String,
+            peerLabel: String,
+            video: Boolean,
+            screenShare: Boolean = false,
+        ) {
             val intent = Intent(context, CallService::class.java)
                 .putExtra(EXTRA_PEER, peer)
                 .putExtra(EXTRA_PEER_LABEL, peerLabel)
                 .putExtra(EXTRA_VIDEO, video)
+                .putExtra(EXTRA_SCREEN_SHARE, screenShare)
             context.startForegroundService(intent)
         }
 

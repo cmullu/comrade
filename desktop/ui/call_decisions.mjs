@@ -482,3 +482,75 @@ function isFiniteNumber(value) {
 function isIterable(value) {
   return !!value && typeof value[Symbol.iterator] === "function";
 }
+
+// ── The minimised call tile's geometry ───────────────────────────────────────
+//
+// Pure so the awkward parts — never leaving the window, and picking which edge
+// to fly to — are testable without a DOM. Mirrors the Dart
+// `_FloatingCallTileState` helpers and the Compose `MinimizedCallTile`, which
+// use the same two rules.
+
+/**
+ * Keep the whole tile inside the window.
+ *
+ * Clamped on both axes, and the maximum is floored at the margin so a window
+ * narrower than the tile still yields a position on screen rather than a
+ * negative one.
+ *
+ * @param {object} input
+ * @param {number} input.x Desired left, in px.
+ * @param {number} input.y Desired top, in px.
+ * @param {number} input.tileWidth
+ * @param {number} input.tileHeight
+ * @param {number} input.windowWidth
+ * @param {number} input.windowHeight
+ * @param {number} [input.margin]
+ * @returns {{x: number, y: number}}
+ */
+export function clampTilePosition({
+  x,
+  y,
+  tileWidth,
+  tileHeight,
+  windowWidth,
+  windowHeight,
+  margin = 12,
+}) {
+  const maxX = Math.max(margin, windowWidth - tileWidth - margin);
+  const maxY = Math.max(margin, windowHeight - tileHeight - margin);
+  return {
+    x: Math.min(Math.max(x, margin), maxX),
+    y: Math.min(Math.max(y, margin), maxY),
+  };
+}
+
+/**
+ * Where the tile lands when the drag ends: the side edge its *centre* is
+ * nearer, at the same height.
+ *
+ * Snapping by centre rather than by left edge is what makes a tile dragged just
+ * past the midpoint go the way it was thrown instead of springing back.
+ *
+ * @returns {{x: number, y: number}}
+ */
+export function snapTileToEdge({
+  x,
+  y,
+  tileWidth,
+  tileHeight,
+  windowWidth,
+  windowHeight,
+  margin = 12,
+}) {
+  const centre = x + tileWidth / 2;
+  const right = Math.max(margin, windowWidth - tileWidth - margin);
+  return clampTilePosition({
+    x: centre < windowWidth / 2 ? margin : right,
+    y,
+    tileWidth,
+    tileHeight,
+    windowWidth,
+    windowHeight,
+    margin,
+  });
+}

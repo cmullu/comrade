@@ -26,6 +26,8 @@ import {
   decideRemoteVideoPaused,
   REMOTE_VIDEO_STALL_POLLS,
   shouldSendLocalVideo,
+  clampTilePosition,
+  snapTileToEdge,
 } from "./call_decisions.mjs";
 
 // ── decideOfferDisposition ───────────────────────────────────────────────────
@@ -606,4 +608,54 @@ test("shouldSendLocalVideo never overrides the user's camera choice", () => {
     shouldSendLocalVideo({ documentHidden: true, inPictureInPicture: true, cameraOn: false }),
     false,
   );
+});
+
+// ── The minimised call tile's geometry ───────────────────────────────────────
+
+test("clampTilePosition keeps the whole tile on screen", () => {
+  const box = { tileWidth: 148, tileHeight: 208, windowWidth: 1000, windowHeight: 700 };
+
+  // Thrown far past both edges — comes back to the margins.
+  assert.deepEqual(clampTilePosition({ x: -9999, y: -9999, ...box }), { x: 12, y: 12 });
+  assert.deepEqual(clampTilePosition({ x: 9999, y: 9999, ...box }), {
+    x: 1000 - 148 - 12,
+    y: 700 - 208 - 12,
+  });
+
+  // A position already inside is left alone.
+  assert.deepEqual(clampTilePosition({ x: 300, y: 200, ...box }), { x: 300, y: 200 });
+});
+
+test("clampTilePosition survives a window smaller than the tile", () => {
+  // Regression guard: a naive max() here goes negative and parks the tile off
+  // screen, where it can never be dragged back.
+  const pos = clampTilePosition({
+    x: 50,
+    y: 50,
+    tileWidth: 148,
+    tileHeight: 208,
+    windowWidth: 100,
+    windowHeight: 100,
+  });
+  assert.deepEqual(pos, { x: 12, y: 12 });
+});
+
+test("snapTileToEdge flies to the side the tile's centre is nearer", () => {
+  const box = { tileWidth: 148, tileHeight: 208, windowWidth: 1000, windowHeight: 700 };
+
+  // Centre at 174 — left half.
+  assert.deepEqual(snapTileToEdge({ x: 100, y: 300, ...box }), { x: 12, y: 300 });
+  // Centre at 674 — right half.
+  assert.deepEqual(snapTileToEdge({ x: 600, y: 300, ...box }), { x: 1000 - 148 - 12, y: 300 });
+  // Height is preserved by the snap; only x moves.
+  assert.equal(snapTileToEdge({ x: 600, y: 42, ...box }).y, 42);
+});
+
+test("snapTileToEdge decides by centre, not by left edge", () => {
+  const box = { tileWidth: 148, tileHeight: 208, windowWidth: 1000, windowHeight: 700 };
+  // Left edge (of 426) is in the left half, but the centre (500... just over)
+  // is not: dragging a tile just past the midpoint must go the way it was
+  // thrown rather than springing back.
+  assert.equal(snapTileToEdge({ x: 427, y: 0, ...box }).x, 1000 - 148 - 12);
+  assert.equal(snapTileToEdge({ x: 425, y: 0, ...box }).x, 12);
 });

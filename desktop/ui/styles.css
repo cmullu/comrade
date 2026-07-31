@@ -1191,9 +1191,10 @@ code {
    Top-right, not bottom-right: the bottom right of a conversation is the send
    button, and a call tile parked on it would defeat the point of the mode. */
 .call-active.is-minimized {
+  /* `left`/`top` are set inline by placeTile — the tile goes wherever it is
+     dragged (Telegram-style), clamped to the window, snapping to the nearer
+     side edge on release. */
   inset: auto;
-  top: 12px;
-  right: 12px;
   width: 148px;
   height: 208px;
   border-radius: 14px;
@@ -1201,8 +1202,16 @@ code {
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow);
   backdrop-filter: none;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none; /* the pointer drag owns the gesture, not the scroller */
+  transition: left 0.18s ease, top 0.18s ease;
   z-index: 320;
+}
+
+/* Mid-drag the tile must track the finger exactly, with no easing lag. */
+.call-active.is-minimized.is-dragging {
+  transition: none;
+  cursor: grabbing;
 }
 
 /* At that size only the picture and two controls fit. */
@@ -1267,6 +1276,20 @@ code {
   object-fit: cover;
   box-shadow: var(--shadow);
   transform: scaleX(-1); /* mirror the self-view, like every other call app */
+}
+
+/* ...except when it is a shared screen. Mirrored text is unreadable, and it
+   isn't what the peer is seeing. */
+.call-local.is-screen {
+  transform: none;
+  object-fit: contain;
+  background: #000;
+}
+
+/* The screen-share button while sharing: lit, like the muted mic. */
+.call-btn.is-on {
+  background: var(--accent, #4c8dff);
+  color: #05070f;
 }
 
 .call-info {

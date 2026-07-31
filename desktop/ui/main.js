@@ -43,6 +43,17 @@
   // needs to reuse a couple of pure functions from another file.
   const callDecisionsReady = import("./call_decisions.mjs");
 
+  /**
+   * The same module, cached for the handful of call sites that cannot await —
+   * a `pointermove` handler dragging the call tile has to answer within the
+   * frame. Null only in the milliseconds before the import resolves, long
+   * before any call exists to minimise.
+   */
+  let callDecisions = null;
+  callDecisionsReady.then((m) => {
+    callDecisions = m;
+  }).catch(() => {});
+
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
 
@@ -1085,6 +1096,11 @@
         // Shrunk into the corner tile by the chat button (see minimizeCall).
         // Every call starts full screen.
         minimized: false,
+        // Screen sharing, and the display stream behind it. Kept apart from
+        // localStream on purpose: the visibility rule that stops the camera
+        // when nothing is displaying it must never touch the screen track.
+        screenSharing: false,
+        screenStream: null,
         ended: false,
       },
       base,
@@ -1748,6 +1764,11 @@
     }
     try {
       if (c.localStream) c.localStream.getTracks().forEach((t) => t.stop());
+      // A screen capture that outlived its call would keep the OS's "sharing
+      // your screen" indicator up with nothing on the other end.
+      if (c.screenStream) c.screenStream.getTracks().forEach((t) => t.stop());
+      c.screenStream = null;
+      c.screenSharing = false;
     } catch {
       /* ignore */
     }
@@ -1825,14 +1846,269 @@
     const c = state.call;
     if (!c) return;
     c.minimized = true;
-    $("#call-active").classList.add("is-minimized");
+    const el = $("#call-active");
+    el.classList.add("is-minimized");
+    placeTile(tilePosition());
   }
 
   /** Back to the full-screen call — the tile was clicked, or the call ended. */
   function restoreCall() {
     const c = state.call;
     if (c) c.minimized = false;
-    $("#call-active").classList.remove("is-minimized");
+    const el = $("#call-active");
+    el.classList.remove("is-minimized");
+    // Drop the inline position so the overlay goes back to filling the window.
+    el.style.left = "";
+    el.style.top = "";
+  }
+
+  // ── Dragging the minimised tile ────────────────────────────────────────────
+  //
+  // Telegram's behaviour: the tile goes wherever you put it, never off screen,
+  // and lets go by flying to the nearer side edge. Kept in `state.tile` (not on
+  // the call) so a second call reuses where you last parked it.
+
+  const TILE_MARGIN = 12;
+
+  function tileSize() {
+    const el = $("#call-active");
+    return { w: el.offsetWidth || 148, h: el.offsetHeight || 208 };
+  }
+
+  /** The stored position, defaulting to the top-right corner. */
+  function tilePosition() {
+    const { w } = tileSize();
+    if (!state.tile) state.tile = { x: window.innerWidth - w - TILE_MARGIN, y: TILE_MARGIN };
+    return state.tile;
+  }
+
+  /** Geometry shared with the tested pure module — never duplicated here. */
+  function tileBox() {
+    const { w, h } = tileSize();
+    return {
+      tileWidth: w,
+      tileHeight: h,
+      windowWidth: window.innerWidth,
+      windowHeight: window.innerHeight,
+      margin: TILE_MARGIN,
+    };
+  }
+
+  function clampTile(x, y) {
+    if (!callDecisions) return { x, y };
+    return callDecisions.clampTilePosition({ x, y, ...tileBox() });
+  }
+
+  function placeTile(pos) {
+    const clamped = clampTile(pos.x, pos.y);
+    state.tile = clamped;
+    const el = $("#call-active");
+    el.style.left = `${clamped.x}px`;
+    el.style.top = `${clamped.y}px`;
+  }
+
+  /** Fly to whichever side edge the tile's centre ended up nearer. */
+  function snapTile() {
+    if (!callDecisions) return;
+    const pos = tilePosition();
+    placeTile(callDecisions.snapTileToEdge({ x: pos.x, y: pos.y, ...tileBox() }));
+  }
+
+  /**
+   * Pointer-drag the tile. Uses pointer capture so a fast drag that outruns the
+   * cursor doesn't drop the gesture, and only counts as a drag past a small
+   * threshold — otherwise every click-to-restore would be a one-pixel move.
+   */
+  function installTileDragging() {
+    const el = $("#call-active");
+    let origin = null;
+
+    el.addEventListener("pointerdown", (e) => {
+      const c = state.call;
+      if (!c || !c.minimized) return;
+      if (e.target.closest(".call-btn")) return; // the two controls keep their clicks
+      const pos = tilePosition();
+      origin = { px: e.clientX, py: e.clientY, x: pos.x, y: pos.y, moved: false };
+      el.setPointerCapture(e.pointerId);
+    });
+
+    el.addEventListener("pointermove", (e) => {
+      if (!origin) return;
+      const dx = e.clientX - origin.px;
+      const dy = e.clientY - origin.py;
+      if (!origin.moved && Math.hypot(dx, dy) < 4) return;
+      origin.moved = true;
+      el.classList.add("is-dragging"); // suppress the snap transition mid-drag
+      placeTile({ x: origin.x + dx, y: origin.y + dy });
+    });
+
+    const end = (e) => {
+      if (!origin) return;
+      const moved = origin.moved;
+      origin = null;
+      el.classList.remove("is-dragging");
+      if (e.pointerId != null && el.hasPointerCapture(e.pointerId)) {
+        el.releasePointerCapture(e.pointerId);
+      }
+      // A drag still ends with a `click`, and that click must not be read as
+      // "restore the call" — parking the tile somewhere would always reopen it.
+      state.tileDragged = moved;
+      if (moved) snapTile();
+    };
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+
+    // A resized window must not strand the tile off screen.
+    window.addEventListener("resize", () => {
+      const c = state.call;
+      if (c && c.minimized) placeTile(tilePosition());
+    });
+  }
+
+  // ── Screen sharing ─────────────────────────────────────────────────────────
+  //
+  // Available on **voice calls as well as video ones**, which is what makes it
+  // worth having: a voice call that starts sharing grows a picture it did not
+  // have. The two cases take different paths through WebRTC, and the difference
+  // is the whole complexity of this section:
+  //
+  //   * A **video call** already has a video sender, so swapping the camera
+  //     track for the screen track with `replaceTrack` needs no renegotiation
+  //     at all — the peer just starts seeing a different picture.
+  //   * A **voice call** has no video sender, so the track has to be added and
+  //     the call renegotiated with a fresh offer. That path reuses the same
+  //     same-call_id re-offer the STUN→TURN fallback already relies on
+  //     (`decideOfferDisposition` → RENEGOTIATE), so the peer handles it with
+  //     code that is already exercised.
+  //
+  // Note what deliberately does *not* apply here: `applyVideoVisibility`'s
+  // "stop sending video nobody is displaying" rule. It only ever touches
+  // `c.localStream`'s camera tracks, never the screen track — sharing your
+  // screen and then switching to the window you are sharing is the normal way
+  // to use this, and suspending capture then would defeat it entirely.
+
+  async function toggleScreenShare() {
+    const c = state.call;
+    if (!c || !c.pc || c.ended) return;
+    if (c.screenSharing) await stopScreenShare();
+    else await startScreenShare();
+  }
+
+  async function startScreenShare() {
+    const c = state.call;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      showToast("This build can't capture the screen", "warn");
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    } catch {
+      // Dismissing the picker is a decision, not a failure — say nothing.
+      return;
+    }
+    // Re-check liveness after the await: the call may have ended while the
+    // picker was open.
+    if (!c || c.ended || state.call !== c || !c.pc) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const track = stream.getVideoTracks()[0];
+    if (!track) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    c.screenStream = stream;
+    c.screenSharing = true;
+    // The browser draws its own "Stop sharing" control, which ends the track
+    // behind our back. Without this the UI would keep claiming to share.
+    track.addEventListener("ended", () => {
+      stopScreenShare().catch(() => {});
+    });
+
+    const sender = videoSender(c);
+    try {
+      if (sender) {
+        await sender.replaceTrack(track);
+      } else {
+        c.pc.addTrack(track, stream);
+        await renegotiate(c);
+      }
+    } catch (e) {
+      showToast(`Couldn't share the screen — ${errText(e)}`, "error");
+      await stopScreenShare();
+      return;
+    }
+    renderScreenShare();
+    attachLocalMedia();
+  }
+
+  async function stopScreenShare() {
+    const c = state.call;
+    if (!c || !c.screenSharing) return;
+    c.screenSharing = false;
+    const stream = c.screenStream;
+    c.screenStream = null;
+
+    if (c.pc && !c.ended) {
+      const sender = videoSender(c);
+      try {
+        if (c.media === "video") {
+          // Put the camera back where the screen was — same sender, so again
+          // no renegotiation.
+          const camera = c.localStream ? c.localStream.getVideoTracks()[0] : null;
+          if (sender) await sender.replaceTrack(camera || null);
+        } else if (sender) {
+          // A voice call has no camera to go back to: drop the video entirely
+          // and renegotiate, so the peer's stage goes away rather than freezing
+          // on the last frame of a screen that is no longer shared.
+          c.pc.removeTrack(sender);
+          await renegotiate(c);
+        }
+      } catch {
+        /* the call is ending, or already gone — nothing useful to do */
+      }
+    }
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    renderScreenShare();
+    attachLocalMedia();
+  }
+
+  /** The peer connection's video sender, if it has one. */
+  function videoSender(c) {
+    if (!c.pc) return null;
+    return c.pc.getSenders().find((s) => s.track && s.track.kind === "video") || null;
+  }
+
+  /**
+   * Offer again on the existing call id, for a change that alters the media
+   * shape (adding or removing the screen track on a voice call).
+   *
+   * Same shape as the ICE-restart re-offer above, minus `iceRestart` — the
+   * transport is fine, only the tracks changed.
+   */
+  async function renegotiate(c) {
+    if (!c.pc || c.ended || state.call !== c) return;
+    const offer = await c.pc.createOffer();
+    await c.pc.setLocalDescription(offer);
+    if (c.ended || state.call !== c) return;
+    await sendSignal({ kind: "offer", sdp: offer.sdp });
+  }
+
+  /** Paint the screen-share button and the stage's "you are sharing" state. */
+  function renderScreenShare() {
+    const c = state.call;
+    const sharing = !!(c && c.screenSharing);
+    const btn = $("#call-screen-share");
+    if (btn) {
+      btn.classList.toggle("is-on", sharing);
+      btn.title = sharing ? "Stop sharing your screen" : "Share your screen";
+      btn.setAttribute("aria-label", btn.title);
+    }
+    // A voice call that is sharing has a picture to show, so the stage stops
+    // being just an avatar.
+    const avatar = $("#call-avatar");
+    if (avatar && c) avatar.hidden = c.media === "video" || sharing;
   }
 
   // No `enterPictureInPicture` here on purpose. The webview can PiP the remote
@@ -1879,8 +2155,10 @@
     $("#call-media-label").textContent = c.media === "video" ? "Video call" : "Voice call";
     $("#call-timer").hidden = true;
     resetCallQuality(); // no reading yet — four empty bars, no caption
-    // The camera button only exists on a video call.
+    // The camera button only exists on a video call; screen share exists on
+    // both, which is the point of it.
     $("#call-camera").hidden = c.media !== "video";
+    renderScreenShare();
     attachLocalMedia();
     attachRemoteMedia();
     $("#call-active").hidden = false;
@@ -1897,6 +2175,8 @@
     const cb = $("#call-camera");
     cb.classList.remove("is-off");
     cb.hidden = true;
+    const sb = $("#call-screen-share");
+    if (sb) sb.classList.remove("is-on");
   }
 
   function showRingingOverlay() {
@@ -1916,12 +2196,23 @@
     const c = state.call;
     if (!c) return;
     const lv = $("#call-local-video");
-    if (c.media === "video" && c.localStream) {
-      lv.srcObject = c.localStream;
+    // While sharing, the self-view shows what the peer is actually receiving —
+    // the screen, not the camera — so you can see what you are giving away.
+    const source = c.screenSharing && c.screenStream
+      ? c.screenStream
+      : c.media === "video"
+        ? c.localStream
+        : null;
+    if (source) {
+      lv.srcObject = source;
+      // A mirrored self-view is right for a camera and wrong for a screen:
+      // mirrored text is unreadable, and it is not what the peer sees.
+      lv.classList.toggle("is-screen", !!c.screenSharing);
       lv.hidden = false;
       lv.play().catch(() => {}); // autoplay attr isn't always honored in a webview
     } else {
       lv.srcObject = null;
+      lv.classList.remove("is-screen");
       lv.hidden = true;
     }
   }
@@ -2471,6 +2762,9 @@
     $("#ring-decline").addEventListener("click", declineIncoming);
     $("#call-mute").addEventListener("click", toggleMute);
     $("#call-camera").addEventListener("click", toggleCamera);
+    $("#call-screen-share").addEventListener("click", () => {
+      toggleScreenShare().catch(() => {});
+    });
     $("#call-chat").addEventListener("click", openChatDuringCall);
     $("#call-hangup").addEventListener("click", hangupByUser);
     // Clicking the minimised tile restores the call — but not when the click
@@ -2479,8 +2773,14 @@
       const c = state.call;
       if (!c || !c.minimized) return;
       if (e.target.closest(".call-btn")) return;
+      // The click that ends a drag is not a request to restore.
+      if (state.tileDragged) {
+        state.tileDragged = false;
+        return;
+      }
       restoreCall();
     });
+    installTileDragging();
     // Nothing displaying the call means nothing should be captured for it.
     document.addEventListener("visibilitychange", applyVideoVisibility);
     $("#call-remote-video").addEventListener("leavepictureinpicture", applyVideoVisibility);
