@@ -14,6 +14,7 @@
  * | | what it solves | bitchat source |
  * |---|---|---|
  * | [`outbox`] | our send failed — retry it later, or fail visibly | §6.1 sender outbox |
+ * | [`mesh`] | there is no internet, but the recipient is on this WiFi | §4 BLE mesh, on a different radio |
  * | [`courier`] | nobody can reach the recipient — hand sealed mail to someone who might | §6.2 couriers |
  * | [`crate::gcs`] | we were away and missed public history | §6.3 gossip sync |
  *
@@ -27,10 +28,12 @@
  */
 
 pub mod courier;
+pub mod mesh;
 pub mod outbox;
 
 pub use courier::{
     candidate_tags, epoch_day, open, recipient_tag, seal, seal_envelope, CarriedEnvelope,
     CourierSnapshot, CourierStore, DepositTier, Envelope, Opened,
 };
+pub use mesh::{open_dm, seal_dm, MeshDm, OpenedDm};
 pub use outbox::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};

@@ -29,11 +29,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, info, warn};
 
-use crate::error::SaathiError;
+use crate::{dak::Envelope, error::SaathiError};
 
 // ── Gossipsub topic ──────────────────────────────────────────────────────────
 
 const TOPIC_NAME: &str = "comrade/saathi/v1";
+/// Second topic, carrying **sealed** mail: a [`crate::dak::Envelope`] whose
+/// only routing datum is a day-rotating recipient tag. Every peer on the
+/// network receives every frame and only the addressee can open one, which is
+/// how a shared WiFi becomes a delivery path without trusting anyone on it.
+/// Separate from [`TOPIC_NAME`] so a peer that only wants public mesh chatter
+/// is not obliged to relay private mail, and so the two never mix on decode.
+const DAK_TOPIC_NAME: &str = "comrade/saathi/dak/v1";
 const MAX_CACHE: usize = 256;
 
 // ── Wire message format ──────────────────────────────────────────────────────
@@ -86,6 +93,8 @@ pub struct SaathiEngine {
     cmd_tx: mpsc::Sender<SaathiCmd>,
     /// Received messages stream.
     msg_rx: Arc<Mutex<mpsc::Receiver<MeshMessage>>>,
+    /// Received sealed-envelope stream (see [`DAK_TOPIC_NAME`]).
+    sealed_rx: Arc<Mutex<mpsc::Receiver<Envelope>>>,
     shared: Arc<Mutex<SaathiShared>>,
     local_id: String,
     local_peer_id: PeerId,
@@ -96,6 +105,15 @@ pub struct SaathiEngine {
 
 enum SaathiCmd {
     Broadcast(MeshMessage),
+    /// Publish a sealed envelope onto [`DAK_TOPIC_NAME`]. The result channel
+    /// reports whether gossipsub accepted it, because — unlike a public
+    /// broadcast, which the engine caches — sealed mail is already retained by
+    /// the caller's [`crate::dak::Outbox`]. Caching it here as well would give
+    /// one message two independent retry loops.
+    PublishSealed {
+        bytes: Vec<u8>,
+        ack: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -147,13 +165,14 @@ impl SaathiEngine {
         let local_peer_id = *swarm.local_peer_id();
         info!(peer_id = %local_peer_id, "Saathi swarm identity");
 
-        // Subscribe to the shared mesh topic
-        let topic = IdentTopic::new(TOPIC_NAME);
-        swarm
-            .behaviour_mut()
-            .gossipsub
-            .subscribe(&topic)
-            .map_err(|e| SaathiError::SwarmInit(e.to_string()))?;
+        // Subscribe to both mesh topics: public chatter and sealed mail.
+        for name in [TOPIC_NAME, DAK_TOPIC_NAME] {
+            swarm
+                .behaviour_mut()
+                .gossipsub
+                .subscribe(&IdentTopic::new(name))
+                .map_err(|e| SaathiError::SwarmInit(e.to_string()))?;
+        }
 
         // Listen on a random TCP port
         swarm
@@ -162,6 +181,8 @@ impl SaathiEngine {
 
         // Channel for incoming messages surfaced to callers
         let (msg_tx, msg_rx) = mpsc::channel::<MeshMessage>(128);
+        // Channel for incoming sealed envelopes surfaced to callers.
+        let (sealed_tx, sealed_rx) = mpsc::channel::<Envelope>(128);
         // Channel for commands from callers into the swarm loop
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SaathiCmd>(64);
 
@@ -202,6 +223,21 @@ impl SaathiEngine {
                                         warn!("Saathi: outbox cache full, dropping message");
                                     }
                                 }
+                            }
+                            SaathiCmd::PublishSealed { bytes, ack } => {
+                                let topic = IdentTopic::new(DAK_TOPIC_NAME);
+                                let result = swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, bytes)
+                                    .map(|_| ())
+                                    .map_err(|e| e.to_string());
+                                if let Err(e) = &result {
+                                    debug!("Saathi: sealed publish rejected: {e}");
+                                }
+                                // A dropped receiver just means the caller gave
+                                // up waiting; the publish already happened.
+                                let _ = ack.send(result);
                             }
                             SaathiCmd::Shutdown => {
                                 info!("Saathi swarm shutting down");
@@ -267,6 +303,26 @@ impl SaathiEngine {
 
                             SwarmEvent::Behaviour(ComradeBehaviourEvent::Gossipsub(
                                 gossipsub::Event::Message { message, .. }
+                            )) if message.topic == IdentTopic::new(DAK_TOPIC_NAME).hash() => {
+                                // Sealed mail. The engine deliberately does not
+                                // try to open it: it has no keys and no business
+                                // knowing whether a frame is ours. It hands every
+                                // frame up, and the dak layer decides.
+                                match Envelope::decode(&message.data) {
+                                    Ok(envelope) => {
+                                        if sealed_tx.send(envelope).await.is_err() {
+                                            warn!("Saathi: sealed receiver dropped, stopping driver");
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!("Saathi: undecodable sealed frame: {e}");
+                                    }
+                                }
+                            }
+
+                            SwarmEvent::Behaviour(ComradeBehaviourEvent::Gossipsub(
+                                gossipsub::Event::Message { message, .. }
                             )) => {
                                 match serde_json::from_slice::<MeshMessage>(&message.data) {
                                     Ok(msg) => {
@@ -303,6 +359,7 @@ impl SaathiEngine {
         Ok(Self {
             cmd_tx,
             msg_rx: Arc::new(Mutex::new(msg_rx)),
+            sealed_rx: Arc::new(Mutex::new(sealed_rx)),
             shared,
             local_id: sender_label,
             local_peer_id,
@@ -318,6 +375,43 @@ impl SaathiEngine {
             .send(SaathiCmd::Broadcast(msg))
             .await
             .map_err(|_| SaathiError::BroadcastFailed("swarm task terminated".into()))
+    }
+
+    /// Publish a **sealed** envelope to every peer on the local network.
+    ///
+    /// The frame is opaque: peers see a rotating tag and ciphertext, and only
+    /// the addressee can open it. Returns an error when gossipsub has nobody to
+    /// publish to (no mesh peers yet) or rejects the frame — the caller's
+    /// outbox is the retry mechanism, so this reports rather than caches.
+    ///
+    /// # Errors
+    /// [`SaathiError::BroadcastFailed`] if the swarm task is gone or gossipsub
+    /// refused the publish (most often `InsufficientPeers`: nobody else is on
+    /// the network yet).
+    pub async fn publish_sealed(&self, envelope: &Envelope) -> Result<(), SaathiError> {
+        let (ack, wait) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(SaathiCmd::PublishSealed {
+                bytes: envelope.encode(),
+                ack,
+            })
+            .await
+            .map_err(|_| SaathiError::BroadcastFailed("swarm task terminated".into()))?;
+        match wait.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(SaathiError::BroadcastFailed(e)),
+            Err(_) => Err(SaathiError::BroadcastFailed(
+                "swarm task dropped the publish".into(),
+            )),
+        }
+    }
+
+    /// Receive the next sealed envelope seen on the network (blocks until one
+    /// arrives). Every frame is surfaced, addressed to us or not — deciding
+    /// that requires keys the engine does not have. Pass each one to
+    /// [`crate::dak::open_dm`].
+    pub async fn recv_sealed(&self) -> Option<Envelope> {
+        self.sealed_rx.lock().await.recv().await
     }
 
     /// Receive the next incoming mesh message (blocks until one arrives).
@@ -409,10 +503,123 @@ mod tests {
         .await
         .expect("engines should discover each other via mDNS within 20s");
 
-        assert_eq!(a.peer_count(), 1);
-        assert_eq!(b.peer_count(), 1);
+        // `>= 1`, not `== 1`: mDNS discovery is machine-wide, so any other
+        // engine alive on this host — another test running concurrently, a real
+        // Comrade on the same laptop — is a legitimate extra peer. The exact
+        // form used to pass only because this was the process's only mesh
+        // test; it asserted a property of the test harness, not of the code
+        // under test. What matters here is that the Discovered handler drives
+        // `peer_count` off zero at all.
+        assert!(a.peer_count() >= 1, "a discovered nobody");
+        assert!(b.peer_count() >= 1, "b discovered nobody");
 
         a.shutdown().await;
         b.shutdown().await;
+    }
+
+    /// The whole point of the sealed topic: two devices on one WiFi exchange a
+    /// private message with **no relay and no internet**, and a third device on
+    /// the same network cannot read it.
+    ///
+    /// Real mDNS discovery + real Gossipsub, in-process. This is the closest a
+    /// unit test gets to two phones on a café network.
+    #[tokio::test]
+    async fn two_devices_on_one_network_exchange_a_sealed_dm() {
+        use crate::{crypto::KeyProfile, dak};
+
+        let alice_keys = KeyProfile::generate().unwrap().keys;
+        let bob_keys = KeyProfile::generate().unwrap().keys;
+        let eve_keys = KeyProfile::generate().unwrap().keys;
+
+        let alice = SaathiEngine::new("alice").await.expect("alice engine");
+        let bob = SaathiEngine::new("bob").await.expect("bob engine");
+        let eve = SaathiEngine::new("eve").await.expect("eve engine");
+
+        // Wait for the gossipsub mesh to form. Peer discovery is mDNS, so this
+        // is genuinely asynchronous; publishing before a peer is subscribed
+        // fails with InsufficientPeers, which is what the retry below rides out.
+        async fn wait_for_peers(engine: &SaathiEngine, want: usize) {
+            let mut rx = engine.peer_count_stream();
+            while *rx.borrow() < want {
+                rx.changed().await.expect("driver alive");
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(
+                wait_for_peers(&alice, 2),
+                wait_for_peers(&bob, 2),
+                wait_for_peers(&eve, 2)
+            )
+        })
+        .await
+        .expect("three engines should find each other over mDNS");
+
+        let now = 1_700_000_000;
+        let dm = dak::MeshDm::new("queued:lan", "no signal here, but you are", None, now);
+        let frame = dak::seal_dm(&bob_keys.public_key(), &alice_keys, &dm, now).expect("seal");
+
+        // Gossipsub needs its mesh grafted before a publish lands; retry
+        // briefly rather than asserting on the first attempt.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if alice.publish_sealed(&frame).await.is_ok() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .expect("alice should get the frame onto the mesh");
+
+        let received = tokio::time::timeout(Duration::from_secs(30), bob.recv_sealed())
+            .await
+            .expect("bob should see the frame")
+            .expect("stream open");
+
+        let opened = dak::open_dm(&bob_keys, &received, now)
+            .expect("well-formed")
+            .expect("addressed to bob");
+        assert_eq!(opened.dm.content, "no signal here, but you are");
+        assert_eq!(
+            opened.sender,
+            alice_keys.public_key(),
+            "the inner MAC must identify the real sender"
+        );
+
+        // Eve is on the same network and sees the same frame — and cannot read
+        // it. (She may or may not have received it yet; what matters is that
+        // opening is impossible, so check the frame she would see.)
+        assert_eq!(
+            dak::open_dm(&eve_keys, &received, now).expect("not an error"),
+            None,
+            "a bystander on the LAN must not be able to open it"
+        );
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        eve.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn publishing_sealed_mail_with_nobody_around_fails_rather_than_silently_vanishing() {
+        use crate::{crypto::KeyProfile, dak};
+
+        let lonely = SaathiEngine::new("lonely").await.expect("engine");
+        let now = 1_700_000_000;
+        let frame = dak::seal_dm(
+            &KeyProfile::generate().unwrap().keys.public_key(),
+            &KeyProfile::generate().unwrap().keys,
+            &dak::MeshDm::new("queued:x", "anyone?", None, now),
+            now,
+        )
+        .expect("seal");
+
+        // No peers subscribed yet, so gossipsub has nowhere to send it. The
+        // caller must learn that, because its outbox is what retries.
+        assert!(
+            lonely.publish_sealed(&frame).await.is_err(),
+            "a publish into an empty mesh must report failure, not pretend to send"
+        );
+        lonely.shutdown().await;
     }
 }
