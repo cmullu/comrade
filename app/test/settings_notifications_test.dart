@@ -10,10 +10,16 @@ library;
 import 'package:comrade/src/data/fake_comrade_repository.dart';
 import 'package:comrade/src/platform/platform.dart'
     show
+        DownloadFailed,
+        DownloadIdle,
+        DownloadReady,
+        DownloadRunning,
         SystemChannel,
         UpdateAvailable,
         UpdateChannel,
+        UpdateDownload,
         UpdateSettings,
+        UpdateState,
         UpdateStatus,
         UpdateUnknown;
 import 'package:comrade/src/screens/settings_screen.dart';
@@ -29,10 +35,13 @@ import 'helpers.dart';
 class _FakeUpdateChannel extends UpdateChannel {
   _FakeUpdateChannel({
     UpdateStatus status = const UpdateUnknown(),
+    UpdateDownload download = const DownloadIdle(),
     this.settingsValue = const UpdateSettings.unknown(),
-  }) : _status = status;
+  })  : _status = status,
+        _download = download;
 
   final UpdateStatus _status;
+  final UpdateDownload _download;
   UpdateSettings settingsValue;
 
   final List<String> calls = <String>[];
@@ -40,7 +49,9 @@ class _FakeUpdateChannel extends UpdateChannel {
   bool? autoCheckSetTo;
 
   @override
-  Stream<UpdateStatus> get status => Stream<UpdateStatus>.value(_status);
+  Stream<UpdateState> get updates => Stream<UpdateState>.value(
+        UpdateState(check: _status, download: _download),
+      );
 
   @override
   Future<UpdateSettings> settings() async => settingsValue;
@@ -57,6 +68,7 @@ class _FakeUpdateChannel extends UpdateChannel {
       autoCheck: enabled,
       lastCheckedAt: settingsValue.lastCheckedAt,
       skippedVersion: settingsValue.skippedVersion,
+      canInstall: settingsValue.canInstall,
     );
   }
 
@@ -68,6 +80,23 @@ class _FakeUpdateChannel extends UpdateChannel {
 
   @override
   Future<void> unskip() async => calls.add('unskip');
+
+  @override
+  Future<void> download() async => calls.add('download');
+
+  @override
+  Future<void> cancelDownload() async => calls.add('cancelDownload');
+
+  @override
+  Future<void> install() async => calls.add('install');
+
+  @override
+  Future<void> refreshDownloadState() async =>
+      calls.add('refreshDownloadState');
+
+  @override
+  Future<void> openInstallPermissionSettings() async =>
+      calls.add('openInstallPermissionSettings');
 
   @override
   Future<void> openRelease() async => calls.add('openRelease');
@@ -190,13 +219,139 @@ void main() {
       expect(find.text('Comrade 0.0.9 is available'), findsOneWidget);
       expect(find.text('Fixed the thing'), findsOneWidget);
 
-      await tester.tap(find.text('Get the update'));
+      // The APK is fetched in-app; the release page is the fallback link.
+      await tester.tap(find.text('Download update'));
+      await tester.pumpAndSettle();
+      expect(updates.calls, contains('download'));
+
+      await tester.tap(find.text('Open the release page instead'));
       await tester.pumpAndSettle();
       expect(updates.calls, contains('openRelease'));
 
       await tester.tap(find.text('Skip this version'));
       await tester.pumpAndSettle();
       expect(updates.skipped, '0.0.9');
+    });
+
+    testWidgets('a running download shows progress and can be cancelled',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      final _FakeUpdateChannel updates = _FakeUpdateChannel(
+        status: const UpdateAvailable(
+          version: '0.0.9',
+          tag: 'v0.0.9',
+          notes: '',
+          pageUrl: 'https://github.test/releases/tag/v0.0.9',
+          apkBytes: 1000,
+          checkedAt: 1,
+        ),
+        download: const DownloadRunning(bytesRead: 400, totalBytes: 1000),
+        settingsValue: const UpdateSettings(
+          currentVersion: '0.0.8',
+          autoCheck: true,
+          lastCheckedAt: 1,
+        ),
+      );
+      await pumpSettings(tester, repo, updates: updates);
+
+      expect(find.text('Downloading… 40%'), findsOneWidget);
+      // No "Download update" while one is running — the only control is Cancel.
+      expect(find.text('Download update'), findsNothing);
+      await tester.tap(find.text('Cancel download'));
+      await tester.pumpAndSettle();
+      expect(updates.calls, contains('cancelDownload'));
+    });
+
+    testWidgets('a finished download offers the install',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      final _FakeUpdateChannel updates = _FakeUpdateChannel(
+        status: const UpdateAvailable(
+          version: '0.0.9',
+          tag: 'v0.0.9',
+          notes: '',
+          pageUrl: 'https://github.test/releases/tag/v0.0.9',
+          apkBytes: 1000,
+          checkedAt: 1,
+        ),
+        download: const DownloadReady(version: '0.0.9'),
+        settingsValue: const UpdateSettings(
+          currentVersion: '0.0.8',
+          autoCheck: true,
+          lastCheckedAt: 1,
+        ),
+      );
+      await pumpSettings(tester, repo, updates: updates);
+
+      await tester.tap(find.text('Install 0.0.9'));
+      await tester.pumpAndSettle();
+      expect(updates.calls, contains('install'));
+      // Nothing about a browser: the whole point is that the install happens
+      // from here.
+      expect(find.text('Allow installing'), findsNothing);
+    });
+
+    testWidgets('without the install permission, Install asks for it instead',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      final _FakeUpdateChannel updates = _FakeUpdateChannel(
+        status: const UpdateAvailable(
+          version: '0.0.9',
+          tag: 'v0.0.9',
+          notes: '',
+          pageUrl: 'https://github.test/releases/tag/v0.0.9',
+          apkBytes: 1000,
+          checkedAt: 1,
+        ),
+        download: const DownloadReady(version: '0.0.9'),
+        settingsValue: const UpdateSettings(
+          currentVersion: '0.0.8',
+          autoCheck: true,
+          lastCheckedAt: 1,
+          canInstall: false,
+        ),
+      );
+      await pumpSettings(tester, repo, updates: updates);
+
+      expect(find.text('Allow Comrade to install updates'), findsOneWidget);
+      await tester.tap(find.text('Install 0.0.9'));
+      await tester.pumpAndSettle();
+      // It must not pretend to install: the grant comes first, and it happens on
+      // a system screen.
+      expect(updates.calls, contains('openInstallPermissionSettings'));
+      expect(updates.calls, isNot(contains('install')));
+    });
+
+    testWidgets('a failed download says why, and offers another go',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      final _FakeUpdateChannel updates = _FakeUpdateChannel(
+        status: const UpdateAvailable(
+          version: '0.0.9',
+          tag: 'v0.0.9',
+          notes: '',
+          pageUrl: 'https://github.test/releases/tag/v0.0.9',
+          apkBytes: 1000,
+          checkedAt: 1,
+        ),
+        download: const DownloadFailed(
+          message: 'That download is signed by a different key',
+        ),
+        settingsValue: const UpdateSettings(
+          currentVersion: '0.0.8',
+          autoCheck: true,
+          lastCheckedAt: 1,
+        ),
+      );
+      await pumpSettings(tester, repo, updates: updates);
+
+      expect(
+        find.text('That download is signed by a different key'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Download update'));
+      await tester.pumpAndSettle();
+      expect(updates.calls, contains('download'));
     });
 
     testWidgets('the automatic-check switch reaches the native preference',
