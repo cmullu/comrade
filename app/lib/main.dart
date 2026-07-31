@@ -42,6 +42,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'src/app.dart';
 import 'src/data/comrade_repository.dart';
 import 'src/data/fake_comrade_repository.dart';
+import 'src/data/persistent_preferences.dart';
 import 'src/data/rust_comrade_repository.dart';
 import 'src/platform/platform.dart';
 import 'src/state/providers.dart';
@@ -64,6 +65,11 @@ Future<void> main() async {
   final ComradePlatform platform = ComradePlatform();
   final List<Override> mediaOverrides = await _mediaOverrides(platform);
 
+  // Opened before `runApp` on purpose: `AppPreferences`' getters are
+  // synchronous so that a provider's `build()` can read one, which means the
+  // store has to be warm before the first frame reads the theme out of it.
+  final PersistentPreferences preferences = await PersistentPreferences.open();
+
   runApp(
     ProviderScope(
       overrides: <Override>[
@@ -71,6 +77,7 @@ Future<void> main() async {
           ref.onDispose(repository.dispose);
           return repository;
         }),
+        appPreferencesProvider.overrideWithValue(preferences),
         screenSecurityProvider.overrideWithValue(platform.screen),
         ...mediaOverrides,
       ],

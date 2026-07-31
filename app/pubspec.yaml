@@ -23,6 +23,13 @@ dependencies:
   # the codegen emits them as freezed unions — the annotations are a runtime
   # dependency of the generated code, not just a build-time one.
   freezed_annotation: 3.1.0
+  # Persists the client-side settings (theme, Tara's opt-in, background
+  # connectivity) that must be readable *before* the vault is unlocked, so the
+  # encrypted store cannot hold them. First-party (flutter.dev) and pinned
+  # exactly, like everything else here. `PersistentPreferences` uses the
+  # `WithCache` variant specifically, because `AppPreferences`' getters are
+  # synchronous — see `lib/src/data/persistent_preferences.dart`.
+  shared_preferences: 2.5.5
 
 dev_dependencies:
   flutter_test:
@@ -33,6 +40,11 @@ dev_dependencies:
   # fails if either is missing.
   build_runner: 2.15.1
   freezed: 3.2.5
+  # `InMemorySharedPreferencesAsync`, the platform backend the settings tests
+  # substitute for a device's store. A transitive dependency of
+  # `shared_preferences` already, declared here because the tests import it
+  # directly and `depend_on_referenced_packages` is right to insist.
+  shared_preferences_platform_interface: 2.4.2
 
 flutter:
   uses-material-design: true
