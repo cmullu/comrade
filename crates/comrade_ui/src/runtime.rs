@@ -37,6 +37,7 @@ use comrade_core::call::{
 };
 use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
+use comrade_core::dak::{open_dm, seal_dm, MeshDm};
 use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
 use comrade_core::dm::{parse_profile_share, parse_receipt, ProfileShare, Receipt, ReceiptKind};
 use comrade_core::media::{
@@ -44,6 +45,7 @@ use comrade_core::media::{
     MAX_MEDIA_BYTES,
 };
 use comrade_core::metrics as core_metrics;
+use comrade_core::metrics::Metric as CoreMetric;
 use comrade_core::presence::{
     is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
     PRESENCE_HEARTBEAT_SECS, PRESENCE_SWEEP_SECS,
@@ -53,9 +55,11 @@ use comrade_core::sabha::{
     display_name_of, ChitthiCallback, FeedFilterSpec, FeedScope, SabhaEngine, DEFAULT_RELAYS,
 };
 use comrade_core::sakha::{LedgerEntry, SakhaEngine, SakhaSyncCallback};
-use comrade_core::seen::SeenSet;
+use comrade_core::seen::{content_key, SeenSet, CONTENT_KEY_PREFIX};
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
-use comrade_core::vault::{VaultCallback, VaultEngine, VaultMessage};
+use comrade_core::vault::{
+    build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
+};
 use nostr_sdk::{EventId, Metadata, PublicKey, ToBech32};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -140,6 +144,26 @@ const OUTBOX_FLUSH_INTERVAL_SECS: u64 = 60;
 /// wrapper can arrive repeatedly, and a duplicate `Answer` or terminal `Hangup`
 /// must not be re-applied downstream.
 const CALL_SIGNAL_DEDUP_CAPACITY: usize = 512;
+
+/// How long a message stays eligible for **cross-transport** dedup.
+///
+/// A DM can reach the same person twice by two different routes: sealed over
+/// the local mesh now, and over a relay when the internet comes back. The two
+/// copies carry different ids (the mesh copy is keyed by the sender's local id,
+/// the relay copy by the event id a relay assigned), so id dedup cannot catch
+/// the pair — the content can.
+///
+/// Deliberately narrow, and keyed by transport as well as content: two
+/// identical messages that arrive over the *same* route are a person typing
+/// "ok" twice and are kept. Only a copy arriving over the *other* route inside
+/// this window is treated as the same message. That is the whole trade — a
+/// wider window would start eating genuine repeats.
+const CROSS_TRANSPORT_DEDUP_SECS: u64 = 120;
+/// Recent (peer, content, transport) triples kept for the check above.
+const CROSS_TRANSPORT_DEDUP_CAPACITY: usize = 512;
+/// Transport labels for that key.
+const TRANSPORT_RELAY: &str = "relay";
+const TRANSPORT_MESH: &str = "mesh";
 
 /// A call signal older than this is meaningless — the ring timeout has long
 /// since passed on the sender's side (an `Offer`), and every other signal
@@ -878,6 +902,13 @@ pub struct ComradeRuntime {
     /// reason as [`Self::feed_task`] — [`Self::lock_vault`] must be able to
     /// stop announcing "I'm online" the moment the user locks up.
     presence_task: Option<tokio::task::JoinHandle<()>>,
+    /// Recently ingested (peer, content, transport) triples, so one message
+    /// delivered by two routes renders once — see
+    /// [`CROSS_TRANSPORT_DEDUP_SECS`].
+    transport_dedup: Arc<SeenSet>,
+    /// The task that opens sealed frames seen on the local mesh and feeds the
+    /// ones addressed to us through the normal DM ingress.
+    mesh_dm_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for ComradeRuntime {
@@ -918,6 +949,11 @@ impl ComradeRuntime {
             outbox: Arc::new(Outbox::new()),
             outbox_task: None,
             presence_task: None,
+            transport_dedup: Arc::new(SeenSet::with_ttl(
+                CROSS_TRANSPORT_DEDUP_CAPACITY,
+                std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+            )),
+            mesh_dm_task: None,
         }
     }
 
@@ -1043,6 +1079,11 @@ impl ComradeRuntime {
         ));
         self.restore_sakha_pairing().await;
 
+        // Local-network delivery is not a mode to opt into: bring the mesh up
+        // now that we have keys, so a DM can reach someone on this WiFi even
+        // with no internet at all. Best-effort — see `sync_saathi_lifecycle`.
+        self.sync_saathi_lifecycle().await;
+
         // Startup observability: the unlock is the gate every frontend waits
         // on, so record how long its two phases actually took.
         tracing::info!(
@@ -1094,6 +1135,7 @@ impl ComradeRuntime {
             self.sakha_sync_task.take(),
             self.outbox_task.take(),
             self.presence_task.take(),
+            self.mesh_dm_task.take(),
         ]
         .into_iter()
         .flatten()
@@ -1165,6 +1207,8 @@ impl ComradeRuntime {
             let vault_cb = vault.clone();
             let dedup = self.call_signal_dedup.clone();
             let outbox = self.outbox.clone();
+            let transport_dedup = self.transport_dedup.clone();
+            let mesh = self.mesh_link();
             // Widen the backfill window past the standard gift-wrap skew when
             // this device was last seen longer ago than that (see
             // `VaultEngine::subscribe_inbox_with_callback`'s `since_floor`).
@@ -1172,7 +1216,20 @@ impl ComradeRuntime {
             self.vault_task = Some(tokio::spawn(async move {
                 vault.connect().await;
                 let cb: VaultCallback = Box::new(move |msg| {
-                    dispatch_incoming_dm(&vault_cb, store.as_ref(), &tx, &dedup, &outbox, msg);
+                    let route = DmRoute {
+                        label: TRANSPORT_RELAY,
+                        dedup: &transport_dedup,
+                        mesh: mesh.as_ref(),
+                    };
+                    dispatch_incoming_dm(
+                        &vault_cb,
+                        store.as_ref(),
+                        &tx,
+                        &dedup,
+                        &outbox,
+                        &route,
+                        msg,
+                    );
                 });
                 if let Err(e) = vault.subscribe_inbox_with_callback(cb, since_floor).await {
                     warn!("vault inbox loop ended: {e}");
@@ -1204,6 +1261,11 @@ impl ComradeRuntime {
         }
 
         self.spawn_presence_loop();
+
+        // Begin opening the sealed frames the local mesh sees. The engine
+        // itself is started by `unlock_vault` (this method is sync); with no
+        // engine running this is a no-op.
+        self.spawn_mesh_dm_loop();
 
         // A pairing restored from a previous launch (see `restore_sakha_pairing`,
         // called from `unlock_vault`) should start syncing immediately too —
@@ -1249,6 +1311,84 @@ impl ComradeRuntime {
                 expire_stale_presence(handles.store.as_deref(), &tx);
                 tick = tick.wrapping_add(1);
             }
+        }));
+    }
+
+    /// Open the sealed frames the local mesh sees and feed the ones addressed to
+    /// us through the **same** ingress path a relay-delivered DM takes — so
+    /// message-request gating, persistence, receipts, and dedup behave
+    /// identically however a message arrived.
+    ///
+    /// Every peer on the network sees every frame; almost all of them are for
+    /// someone else and are skipped after one HMAC comparison against our
+    /// rotating tags. Idempotent: a second call replaces nothing, since
+    /// [`Self::lock_vault`] is what tears the task down.
+    fn spawn_mesh_dm_loop(&mut self) {
+        if self.mesh_dm_task.is_some() {
+            return;
+        }
+        let (Some(engine), Some(vault), Some(keys)) = (
+            self.saathi.clone(),
+            self.vault.clone(),
+            self.ui.identity_keys(),
+        ) else {
+            return;
+        };
+
+        let store = self.ui.store_arc();
+        let tx = self.events.clone();
+        let call_dedup = self.call_signal_dedup.clone();
+        let transport_dedup = self.transport_dedup.clone();
+        let outbox = self.outbox.clone();
+        let mesh = MeshLink {
+            engine: engine.clone(),
+            keys: keys.clone(),
+        };
+        let pay_regex = build_pay_regex().ok();
+
+        self.mesh_dm_task = Some(tokio::spawn(async move {
+            while let Some(envelope) = engine.recv_sealed().await {
+                let now = now_secs();
+                let opened = match open_dm(&keys, &envelope, now) {
+                    // Someone else's mail — the overwhelmingly common case.
+                    Ok(None) => continue,
+                    Ok(Some(opened)) => opened,
+                    Err(e) => {
+                        tracing::debug!("mesh: a frame addressed to us failed to open: {e}");
+                        continue;
+                    }
+                };
+
+                let sender_hex = opened.sender.to_hex();
+                let content = opened.dm.content;
+                let upi_intents = pay_regex
+                    .as_ref()
+                    .map(|re| extract_upi_intents(&content, re))
+                    .unwrap_or_default();
+                let msg = VaultMessage {
+                    event_id: opened.dm.id,
+                    sender_pubkey: sender_hex,
+                    content,
+                    created_at: opened.dm.created_at,
+                    upi_intents,
+                    reply_to: opened.dm.reply_to,
+                };
+                let route = DmRoute {
+                    label: TRANSPORT_MESH,
+                    dedup: &transport_dedup,
+                    mesh: Some(&mesh),
+                };
+                dispatch_incoming_dm(
+                    &vault,
+                    store.as_ref(),
+                    &tx,
+                    &call_dedup,
+                    &outbox,
+                    &route,
+                    msg,
+                );
+            }
+            tracing::debug!("mesh: sealed-frame stream ended");
         }));
     }
 
@@ -2520,7 +2660,16 @@ impl ComradeRuntime {
     /// a voice command, a future UI toggle, stepping back — drives the same
     /// real engine the persistent mesh-status indicator reads from.
     async fn sync_saathi_lifecycle(&mut self) {
-        let should_run = self.ui.current_workspace().mesh_active;
+        // Two independent reasons to be running, so this is an OR, not just the
+        // workspace flag:
+        //
+        //  • the OffGridTravel workspace, where the mesh *replaces* relays, and
+        //  • any unlocked vault, because "the person I'm messaging is on this
+        //    WiFi" is not a mode the user should have to select — it is the
+        //    fallback that makes a DM arrive when the internet is down.
+        //
+        // Only when neither holds does the engine stop.
+        let should_run = self.ui.current_workspace().mesh_active || self.is_vault_unlocked();
         match (should_run, self.saathi.is_some()) {
             (true, false) => self.start_saathi().await,
             (false, true) => self.stop_saathi().await,
@@ -2786,7 +2935,17 @@ impl ComradeRuntime {
             identity: self.ui.current_identity(),
             outbox: self.outbox.clone(),
             events: self.events.clone(),
+            mesh: self.mesh_link(),
         }
+    }
+
+    /// A sealed-mail sender for the running mesh, if there is one and we have
+    /// keys to seal with.
+    fn mesh_link(&self) -> Option<MeshLink> {
+        Some(MeshLink {
+            engine: self.saathi.clone()?,
+            keys: self.ui.identity_keys()?,
+        })
     }
 }
 
@@ -2819,6 +2978,9 @@ pub struct RuntimeHandles {
     /// Event bus, so a flush can report status changes (`sent` / `failed`)
     /// without going back through `ComradeRuntime`.
     events: broadcast::Sender<BridgeEvent>,
+    /// The local-network mesh, when it is running — the transport that carries
+    /// a DM when no relay will.
+    mesh: Option<MeshLink>,
 }
 
 impl RuntimeHandles {
@@ -2850,6 +3012,20 @@ impl RuntimeHandles {
             Err(e) => {
                 let local_id = local_message_id(&peer_npub, content, created_at);
                 tracing::info!(error = %e, "DM could not be published — queued for retry");
+                // No relay took it, but the recipient may be on this WiFi. Seal
+                // it and flood the local mesh. It stays queued either way: a
+                // mesh publish reaching *a* peer is not proof the recipient got
+                // it, so only their receipt clears the outbox.
+                if let Some(mesh) = &self.mesh {
+                    mesh.send(
+                        &peer,
+                        &local_id,
+                        content,
+                        reply_to.map(str::to_string),
+                        created_at,
+                    )
+                    .await;
+                }
                 let queued = QueuedMessage::new(
                     local_id.clone(),
                     peer_npub.clone(),
@@ -2993,7 +3169,20 @@ impl RuntimeHandles {
                     sent += 1;
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, "queued DM still undeliverable");
+                    tracing::debug!(error = %e, "queued DM still undeliverable by relay");
+                    // Still no relay — try the local network again on every
+                    // flush, since a peer may have joined the WiFi since the
+                    // last attempt.
+                    if let Some(mesh) = &self.mesh {
+                        mesh.send(
+                            &peer_pk,
+                            &queued.message_id,
+                            &queued.content,
+                            queued.reply_to.clone(),
+                            queued.queued_at,
+                        )
+                        .await;
+                    }
                     if matches!(
                         self.outbox
                             .record_attempt(&queued.peer_npub, &queued.message_id),
@@ -3971,7 +4160,12 @@ fn handle_presence_beacon(
 
 /// Fire a delivered receipt back to `sender_hex` for `message_id` (best-effort;
 /// only ever called for accepted conversations).
-fn send_delivered_receipt(vault: &Arc<VaultEngine>, sender_hex: &str, message_id: &str) {
+fn send_delivered_receipt(
+    vault: &Arc<VaultEngine>,
+    mesh: Option<&MeshLink>,
+    sender_hex: &str,
+    message_id: &str,
+) {
     let Ok(peer) = PublicKey::parse(sender_hex) else {
         return;
     };
@@ -3980,9 +4174,17 @@ fn send_delivered_receipt(vault: &Arc<VaultEngine>, sender_hex: &str, message_id
         return;
     };
     let vault = vault.clone();
+    let mesh = mesh.cloned();
+    let receipt_id = format!("receipt:{message_id}");
     tokio::spawn(async move {
         if let Err(e) = vault.send_dm(&peer, &json).await {
-            tracing::debug!("delivered receipt not sent: {e}");
+            tracing::debug!("delivered receipt not sent over a relay: {e}");
+            // Offline is exactly when the receipt matters most: it is what
+            // clears the *sender's* outbox, so without this a message delivered
+            // over the mesh would keep being retried until its attempt cap.
+            if let Some(mesh) = mesh {
+                mesh.send(&peer, &receipt_id, &json, None, now_secs()).await;
+            }
         }
     });
 }
@@ -4027,6 +4229,87 @@ fn load_or_create_device_seed(
     Ok(seed)
 }
 
+// ── Local-network delivery (see docs/OFFLINE_DELIVERY.md) ────────────────────
+
+/// A handle for putting sealed mail onto the local network.
+///
+/// Wraps the running mesh engine plus our keys, which is everything needed to
+/// seal a DM for a peer and flood it to whoever is on this WiFi. Cloneable and
+/// cheap, so a fire-and-forget task can own one.
+#[derive(Clone)]
+struct MeshLink {
+    engine: Arc<SaathiEngine>,
+    keys: nostr_sdk::Keys,
+}
+
+impl MeshLink {
+    /// Seal a DM for `peer` and publish it to the local mesh. Returns whether
+    /// the mesh accepted the frame — `false` when nobody else is on the network
+    /// (gossipsub has no peer to publish to), which is not an error: the
+    /// message stays queued in the outbox exactly as before.
+    async fn send(
+        &self,
+        peer: &PublicKey,
+        id: &str,
+        content: &str,
+        reply_to: Option<String>,
+        created_at: u64,
+    ) -> bool {
+        let dm = MeshDm::new(id, content, reply_to, created_at);
+        let envelope = match seal_dm(peer, &self.keys, &dm, created_at) {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                // Oversize is the realistic case: couriered/mesh mail is capped
+                // at 16 KiB, and a long message simply waits for a relay.
+                tracing::debug!("mesh: could not seal a DM: {e}");
+                return false;
+            }
+        };
+        match self.engine.publish_sealed(&envelope).await {
+            Ok(()) => {
+                tracing::info!(peer = %peer, "DM sealed onto the local mesh");
+                true
+            }
+            Err(e) => {
+                tracing::debug!("mesh: nobody to deliver to: {e}");
+                false
+            }
+        }
+    }
+}
+
+/// The route a DM arrived by, plus what the ingress needs to answer over the
+/// same route when there is no internet.
+struct DmRoute<'a> {
+    /// [`TRANSPORT_RELAY`] or [`TRANSPORT_MESH`].
+    label: &'static str,
+    /// Cross-transport dedup set — see [`CROSS_TRANSPORT_DEDUP_SECS`].
+    dedup: &'a SeenSet,
+    /// The local mesh, when one is running.
+    mesh: Option<&'a MeshLink>,
+}
+
+impl DmRoute<'_> {
+    /// Whether this message has already been ingested over the *other*
+    /// transport recently, i.e. it is the second copy of one message that took
+    /// two routes. Records it either way.
+    fn is_cross_transport_duplicate(&self, peer_npub: &str, content: &str) -> bool {
+        let key = content_key(content, CONTENT_KEY_PREFIX);
+        let other = if self.label == TRANSPORT_MESH {
+            TRANSPORT_RELAY
+        } else {
+            TRANSPORT_MESH
+        };
+        if self.dedup.contains(&format!("{peer_npub}|{key}|{other}")) {
+            core_metrics::record(CoreMetric::DuplicateDropped);
+            return true;
+        }
+        self.dedup
+            .already_seen(&format!("{peer_npub}|{key}|{}", self.label));
+        false
+    }
+}
+
 /// Read the persisted inbox high-watermark (unix seconds of the newest
 /// message processed so far), if any has been recorded yet.
 fn read_watermark(store: &comrade_storage::EncryptedStore) -> Option<u64> {
@@ -4067,6 +4350,7 @@ fn dispatch_incoming_dm(
     tx: &broadcast::Sender<BridgeEvent>,
     dedup: &SeenSet,
     outbox: &Arc<Outbox>,
+    route: &DmRoute<'_>,
     msg: VaultMessage,
 ) {
     if let Some(store) = store {
@@ -4228,7 +4512,7 @@ fn dispatch_incoming_dm(
                 size: env.size,
                 outgoing: false,
             }));
-            send_delivered_receipt(vault, &msg.sender_pubkey, &msg.event_id);
+            send_delivered_receipt(vault, route.mesh, &msg.sender_pubkey, &msg.event_id);
         } else {
             ensure_pending(store, &peer_npub);
             let _ = tx.send(BridgeEvent::IncomingMessageRequest(MessageRequestDto {
@@ -4243,6 +4527,16 @@ fn dispatch_incoming_dm(
     // 6) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
+    // A message can reach us twice by two routes — sealed over the local mesh
+    // now, over a relay when the internet returns — under two different ids, so
+    // the id check below cannot catch that pair. This can.
+    if route.is_cross_transport_duplicate(&peer_npub, &msg.content) {
+        tracing::debug!(
+            transport = route.label,
+            "dropping a message already delivered by the other transport"
+        );
+        return;
+    }
     if let Some(store) = store {
         if store.get_message(&msg.event_id).ok().flatten().is_some() {
             return;
@@ -4261,7 +4555,7 @@ fn dispatch_incoming_dm(
         }
     }
     if matches!(gate, IncomingGate::Accepted) {
-        send_delivered_receipt(vault, &msg.sender_pubkey, &msg.event_id);
+        send_delivered_receipt(vault, route.mesh, &msg.sender_pubkey, &msg.event_id);
         let _ = tx.send(BridgeEvent::IncomingDirectMessage(DirectMessageDto::from(
             msg,
         )));
@@ -5848,6 +6142,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         accepted_peer(&store, &peer, false);
 
@@ -5869,6 +6168,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", &envelope),
         );
 
@@ -5903,6 +6203,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e2", &odd),
         );
         let stored: MediaRef = store.get(MEDIA_REFS_TREE, "m2").unwrap().unwrap();
@@ -6096,6 +6397,15 @@ mod tests {
         )
     }
 
+    /// A relay-delivered route with no mesh — what most ingress tests want.
+    fn relay_route(dedup: &SeenSet) -> DmRoute<'_> {
+        DmRoute {
+            label: TRANSPORT_RELAY,
+            dedup,
+            mesh: None,
+        }
+    }
+
     fn incoming(sender_hex: &str, event_id: &str, content: &str) -> VaultMessage {
         VaultMessage {
             event_id: event_id.into(),
@@ -6115,6 +6425,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
 
         dispatch_incoming_dm(
@@ -6123,6 +6438,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", "hello?"),
         );
 
@@ -6148,6 +6464,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6166,6 +6487,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", "yo"),
         );
         assert!(matches!(
@@ -6194,6 +6516,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e2", &receipt),
         );
         assert_eq!(
@@ -6226,6 +6549,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6242,6 +6570,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", "let me in"),
         );
         assert!(store.messages_with(&peer).unwrap().is_empty());
@@ -6256,6 +6585,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&other_hex, "e2", &share),
         );
         match rx.try_recv().unwrap() {
@@ -6391,6 +6721,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         accepted_peer(&store, &peer, true);
         let now = now_secs();
@@ -6402,6 +6737,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "e1", &beacon, now),
         );
         match rx.try_recv().unwrap() {
@@ -6427,6 +6763,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "e2", &beacon, now + 1),
         );
         assert!(
@@ -6442,6 +6779,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "e3", &bye, now + 2),
         );
         match rx.try_recv().unwrap() {
@@ -6458,6 +6796,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         accepted_peer(&store, &peer, true);
         let now = now_secs();
@@ -6471,6 +6814,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "old", &beacon, now - 2 * 24 * 60 * 60),
         );
         assert!(rx.try_recv().is_err(), "a stale beacon emits nothing");
@@ -6483,6 +6827,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "new", &beacon, now),
         );
         assert!(matches!(
@@ -6496,6 +6841,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "late-bye", &stale_bye, now - 60),
         );
         assert!(
@@ -6513,6 +6859,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let now = now_secs();
         let beacon = PresenceBeacon::online().to_json().unwrap();
 
@@ -6525,6 +6876,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&stranger_hex, "s1", &beacon, now),
         );
         assert!(rx.try_recv().is_err());
@@ -6545,6 +6897,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "a1", &beacon, now),
         );
         assert!(
@@ -6656,6 +7009,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6681,7 +7039,7 @@ mod tests {
         // window) must never ring.
         let mut stale = incoming(&hex, "e1", &envelope);
         stale.created_at = now_secs().saturating_sub(7200);
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, stale);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, stale);
         assert!(
             rx.try_recv().is_err(),
             "a call signal older than CALL_SIGNAL_MAX_AGE_SECS must not reach the bus"
@@ -6691,12 +7049,20 @@ mod tests {
         // redelivered (at-least-once relay delivery) must not fire twice.
         let mut fresh = incoming(&hex, "e2", &envelope);
         fresh.created_at = now_secs();
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, fresh.clone());
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &route,
+            fresh.clone(),
+        );
         assert!(matches!(
             rx.try_recv().unwrap(),
             BridgeEvent::IncomingCallSignal(_)
         ));
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, fresh);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, fresh);
         assert!(
             rx.try_recv().is_err(),
             "the same wrapper event id must only ever dispatch one IncomingCallSignal"
@@ -6713,6 +7079,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6725,7 +7096,15 @@ mod tests {
             .unwrap();
 
         let msg = incoming(&hex, "dup1", "hello twice");
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg.clone());
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &route,
+            msg.clone(),
+        );
         assert!(matches!(
             rx.try_recv().unwrap(),
             BridgeEvent::IncomingDirectMessage(_)
@@ -6734,7 +7113,7 @@ mod tests {
 
         // Redelivered (same event id — relay at-least-once, or a backfill
         // re-scan on the next launch) must not re-notify or duplicate the row.
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
         assert!(
             rx.try_recv().is_err(),
             "an already-persisted event id must not re-fire IncomingDirectMessage"
@@ -6750,6 +7129,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6778,6 +7162,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "w1", &json),
         );
         assert!(matches!(
@@ -6792,6 +7177,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "w2", &json),
         );
         assert!(
@@ -6825,11 +7211,16 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, _peer) = stranger();
 
         let mut msg = incoming(&hex, "e1", "hi");
         msg.created_at = 12_345;
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
         assert_eq!(read_watermark(&store), Some(12_345));
     }
 
@@ -6951,6 +7342,11 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6984,6 +7380,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e-receipt", &receipt),
         );
 
@@ -7112,6 +7509,169 @@ mod tests {
     async fn flush_requires_an_unlocked_vault() {
         let rt = ComradeRuntime::with_relays(vec![]);
         assert!(matches!(rt.flush_outbox().await, Err(UiError::VaultLocked)));
+    }
+
+    // ── Local-network delivery (the "no internet, same WiFi" path) ──────────
+
+    #[tokio::test]
+    async fn the_mesh_comes_up_on_unlock_without_choosing_a_workspace() {
+        // The bug this fixes: LAN delivery used to require the user to switch to
+        // the OffGridTravel workspace, and even then carried no DMs.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        assert!(!rt.mesh_status().active, "nothing running before unlock");
+
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert_eq!(
+            rt.current_workspace().key,
+            "Base",
+            "still the ordinary workspace"
+        );
+        assert!(
+            rt.mesh_status().active,
+            "an unlocked vault must have a local-network transport"
+        );
+        assert!(
+            rt.handles().mesh.is_some(),
+            "and the send path must be able to reach it"
+        );
+
+        // Locking takes it back down: no beacons, no frames, nothing listening.
+        rt.lock_vault().await;
+        assert!(!rt.mesh_status().active);
+    }
+
+    #[tokio::test]
+    async fn a_dm_with_no_relay_is_sealed_onto_the_mesh_and_stays_queued() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+
+        let dto = rt.send_dm(&peer, "i'm outside, no signal").await.unwrap();
+
+        // Queued, because a mesh publish is not proof the *recipient* got it —
+        // only their receipt clears the outbox.
+        assert_eq!(dto.status.as_deref(), Some("queued"));
+        assert_eq!(rt.outbox_pending(), 1);
+        assert_eq!(
+            rt.messages_with(&peer).unwrap()[0].content,
+            "i'm outside, no signal"
+        );
+    }
+
+    /// The cross-transport case: the same message arrives sealed over the mesh
+    /// and later over a relay, under two different ids. It must render once.
+    #[tokio::test]
+    async fn one_message_delivered_by_both_routes_appears_once() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                updated_at: 1,
+                last_read_at: 0,
+            })
+            .unwrap();
+
+        // Over the mesh first, keyed by the sender's local id.
+        let mesh_route = DmRoute {
+            label: TRANSPORT_MESH,
+            dedup: &transport_dedup,
+            mesh: None,
+        };
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &mesh_route,
+            incoming(&hex, "queued:abc", "are you ok?"),
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::IncomingDirectMessage(_)
+        ));
+
+        // Then the relay comes back and delivers the same text under the event
+        // id a relay assigned it.
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &relay_route(&transport_dedup),
+            incoming(&hex, "e-relay-id", "are you ok?"),
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the second copy must not reach the UI"
+        );
+        assert_eq!(
+            store.messages_with(&peer).unwrap().len(),
+            1,
+            "and must not be stored twice"
+        );
+    }
+
+    /// The flip side, and the reason the dedup key includes the transport:
+    /// someone genuinely saying the same thing twice is not a duplicate.
+    #[tokio::test]
+    async fn the_same_text_sent_twice_over_one_route_is_two_messages() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                updated_at: 1,
+                last_read_at: 0,
+            })
+            .unwrap();
+
+        for id in ["e1", "e2"] {
+            dispatch_incoming_dm(
+                &vault,
+                Some(&store),
+                &tx,
+                &dedup,
+                &outbox,
+                &relay_route(&transport_dedup),
+                incoming(&hex, id, "ok"),
+            );
+        }
+
+        let delivered = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, BridgeEvent::IncomingDirectMessage(_)))
+            .count();
+        assert_eq!(
+            delivered, 2,
+            "\"ok\" twice is two messages, not a duplicate"
+        );
+        assert_eq!(store.messages_with(&peer).unwrap().len(), 2);
     }
 
     // ── Panic wipe ──────────────────────────────────────────────────────────

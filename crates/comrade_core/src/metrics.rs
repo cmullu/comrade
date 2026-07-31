@@ -55,6 +55,12 @@ pub enum Metric {
     /// Carried mail expired unread and was pruned.
     CourierExpired,
 
+    // ── Local-network mesh transport ─────────────────────────────────────────
+    /// A DM was published as a sealed frame onto the local mesh.
+    MeshSent,
+    /// A sealed mesh frame turned out to be addressed to us and opened.
+    MeshReceived,
+
     // ── Ingress dedup ───────────────────────────────────────────────────────
     /// A redelivered event was dropped by a [`crate::seen::SeenSet`].
     DuplicateDropped,
@@ -81,6 +87,8 @@ impl Metric {
             Self::CourierSprayed => "courier.sprayed",
             Self::CourierOpened => "courier.opened",
             Self::CourierExpired => "courier.expired",
+            Self::MeshSent => "mesh.sent",
+            Self::MeshReceived => "mesh.received",
             Self::DuplicateDropped => "dedup.dropped",
             Self::SyncServed => "sync.served",
             Self::SyncReceived => "sync.received",
@@ -88,7 +96,7 @@ impl Metric {
     }
 
     /// Every metric, for exhaustive snapshots and tests.
-    pub const ALL: [Metric; 14] = [
+    pub const ALL: [Metric; 16] = [
         Self::OutboxQueued,
         Self::OutboxResent,
         Self::OutboxDelivered,
@@ -100,6 +108,8 @@ impl Metric {
         Self::CourierSprayed,
         Self::CourierOpened,
         Self::CourierExpired,
+        Self::MeshSent,
+        Self::MeshReceived,
         Self::DuplicateDropped,
         Self::SyncServed,
         Self::SyncReceived,
