@@ -76,7 +76,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -97,9 +100,12 @@ import mullu.comrade.ui.FeedScreen
 import mullu.comrade.ui.HeartIcon
 import mullu.comrade.ui.JournalScreen
 import mullu.comrade.ui.NewChatScreen
+import mullu.comrade.ui.NotificationsIcon
+import mullu.comrade.ui.NotificationsOffIcon
 import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
+import mullu.comrade.ui.presenceHeaderText
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
@@ -111,6 +117,7 @@ import mullu.comrade.ui.shortNpub
 import mullu.comrade.ui.CallIcon
 import mullu.comrade.ui.VideocamIcon
 import mullu.comrade.ui.theme.ComradeTheme
+import mullu.comrade.update.UpdateChecker
 import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallScreen
 import mullu.comrade.call.CallUiState
@@ -121,16 +128,18 @@ import uniffi.comrade_core.CallMediaKind
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Screens can display key material — block screenshots and screen
-        // recording for the whole activity (AUDIT S5 / M1-6).
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE,
-        )
-        // A tapped "model is ready" notification asks for a specific tab; park
-        // the request so the shell honours it once it exists (the vault may
-        // still need unlocking first).
+        // Screenshots and screen recording work unless the user turned them off
+        // in Settings. Applied before the first frame, because a window that
+        // starts unprotected has already been captured by the recents
+        // thumbnail. See [ScreenSecurity] for why the unconditional FLAG_SECURE
+        // this used to set is gone.
+        ScreenSecurity.applyPreference(this)
+        // A tapped notification asks for a specific tab (or Settings), and a
+        // tapped message notification asks for a conversation; park both so the
+        // shell honours them once it exists (the vault may still need unlocking
+        // first).
         AppNavigation.request(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
+        AppNavigation.requestPeer(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
         // Picture-in-picture for a live video call — see [PipController]. The
         // Activity is the only thing that receives the PiP lifecycle callbacks.
         PipController.attachActivity(this)
@@ -178,10 +187,24 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         AppNavigation.request(intent.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
+        AppNavigation.requestPeer(intent.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
     }
 
     /**
-     * Coming back to the foreground re-announces our presence to the comrades.
+     * Becoming visible does two things.
+     *
+     * **It drains the native event queue.** While an Activity is on screen
+     * this process needs [EventPump] running — that is what makes a message,
+     * a call or a comrade coming online show up *now*. Deliberately not tied
+     * to [RelayConnectionService]: that service is gated on the user's "stay
+     * connected in the background" preference, and while it also owned the
+     * drain loop, turning the preference off silently stopped delivery even
+     * with the app open. The pump refcounts its holders, so exactly one loop
+     * runs whether it is this Activity, the service, or both. Acquiring here
+     * rather than after unlock is safe: with a locked vault nothing produces
+     * events, so the loop is an idle tick.
+     *
+     * **It re-announces our presence to the comrades.**
      *
      * The native side already beacons on unlock and heartbeats every few
      * minutes, so this is a freshness nicety rather than the mechanism: it
@@ -197,6 +220,11 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStart() {
         super.onStart()
+        EventPump.acquire(this, PumpHolder.FOREGROUND)
+        // At most one request a day, and none at all with the preference off
+        // (see UpdateChecker) — a sideloaded app otherwise has no way to tell
+        // anyone that a fix shipped.
+        UpdateChecker.maybeCheck(this)
         // The video surface is back: resume capture if a video call had it
         // suspended (a no-op otherwise, and idempotent — see PipController).
         PipController.onWindowVisibilityChanged(visible = true)
@@ -219,6 +247,9 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStop() {
         super.onStop()
+        // Nothing visible any more: the service keeps the drain loop alive if
+        // the user wants background delivery, and the pump stops it if not.
+        EventPump.release(PumpHolder.FOREGROUND)
         // Nothing is displaying the local video any more — stop capturing it
         // (unless a PiP window is showing the call). See PipController.
         PipController.onWindowVisibilityChanged(visible = false)
@@ -299,6 +330,10 @@ fun ComradeApp() {
                 runCatching { RelayConnectionService.start(context) }
                     .onFailure { Log.w("ComradeApp", "Failed to start RelayConnectionService", it) }
             }
+            // The store is readable now, so fill the feed/mesh/presence state
+            // the screens observe. Independent of the service: with background
+            // connectivity turned off there is no service to do it.
+            ChatEventRouter.seedFromStore()
         }
     }
 
@@ -400,12 +435,39 @@ private fun MainShell(
     val requestedTab by AppNavigation.requestedTab.collectAsState()
     LaunchedEffect(requestedTab) {
         val key = requestedTab ?: return@LaunchedEffect
-        MainTab.entries.firstOrNull { it.name.equals(key, ignoreCase = true) }?.let {
-            tab = it
-            if (it == MainTab.Chats) chatNav = ChatNav.List
-            settingsOpen = false
+        when {
+            // Settings is a pushed screen, not a tab — an update notice lands
+            // on the card that offers the update.
+            key.equals(AppNavigation.SCREEN_SETTINGS, ignoreCase = true) -> settingsOpen = true
+            key.equals(AppNavigation.SCREEN_REQUESTS, ignoreCase = true) -> {
+                tab = MainTab.Chats
+                chatNav = ChatNav.Requests
+                settingsOpen = false
+            }
+            else -> MainTab.entries.firstOrNull { it.name.equals(key, ignoreCase = true) }?.let {
+                tab = it
+                if (it == MainTab.Chats) chatNav = ChatNav.List
+                settingsOpen = false
+            }
         }
         AppNavigation.consume()
+    }
+
+    // A tapped message notification names a conversation: open it (WP11).
+    // The peer key is all the intent carries, so the title is resolved the same
+    // way the shade resolved it — off the main thread, because it reads the
+    // contact/conversation trees — and the notification for that thread is
+    // cleared, exactly as opening the chat from the list does.
+    val requestedPeer by AppNavigation.requestedPeer.collectAsState()
+    LaunchedEffect(requestedPeer) {
+        val peer = requestedPeer ?: return@LaunchedEffect
+        val label = withContext(Dispatchers.IO) {
+            runCatching { ChatEventRouter.peerLabel(peer) }.getOrDefault("")
+        }
+        tab = MainTab.Chats
+        chatNav = ChatNav.Open(peer = peer, alias = label.ifBlank { null }, username = null)
+        settingsOpen = false
+        AppNavigation.consumePeer()
     }
 
     // Notification channels + runtime permission (Android 13+). Notifications
@@ -512,8 +574,15 @@ private fun MainShell(
             runCatching { ComradeCore.comrades().any { it.npub == peer } }.getOrDefault(false)
         }
     }
-    val onlineNow by PresenceMonitor.online.collectAsState()
-    val comradeOnline = openChat?.peer?.let { onlineNow[it] == true } == true
+    // Whether this conversation is muted. A plain preference read rather than a
+    // flow: it only ever changes from the menu below, and the tick re-reads it.
+    var muteToggleTick by remember { mutableStateOf(0) }
+    val isMuted = remember(openChat?.peer, muteToggleTick) {
+        openChat?.peer?.let { MutedChats.isMuted(context, it) } ?: false
+    }
+    val presenceNow by PresenceMonitor.presence.collectAsState()
+    val peerPresence = openChat?.peer?.let { presenceNow[it] }
+    val comradeOnline = peerPresence?.online == true
     // Back priority, innermost first: an open drawer closes, then a pushed
     // Settings screen closes, then a Chats sub-screen returns to the list.
     BackHandler(
@@ -585,17 +654,32 @@ private fun MainShell(
                                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             // The npub tail always stays visible (handles are
                                             // claims, keys are identity); presence, when we have
-                                            // it, rides alongside rather than replacing it.
+                                            // it, rides alongside rather than replacing it —
+                                            // "online" while they are, a Telegram-style
+                                            // "last seen …" once they aren't.
+                                            val presenceLine = if (isComrade) {
+                                                presenceHeaderText(
+                                                    online = comradeOnline,
+                                                    lastSeenAt = peerPresence?.lastSeenAt ?: 0L,
+                                                    peerMarkedUs = peerPresence?.peerMarkedUs ?: false,
+                                                )
+                                            } else {
+                                                null
+                                            }
+                                            // Prose in the UI font, the key in
+                                            // monospace — one line, two jobs.
+                                            val subtitle = buildAnnotatedString {
+                                                presenceLine?.let { append("$it · ") }
+                                                withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) {
+                                                    append(shortNpub(openChat.peer))
+                                                }
+                                            }
                                             Text(
-                                                if (isComrade && comradeOnline) {
-                                                    stringResource(R.string.comrade_online) +
-                                                        " · " + shortNpub(openChat.peer)
-                                                } else {
-                                                    shortNpub(openChat.peer)
-                                                },
+                                                subtitle,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = if (isComrade && comradeOnline) {
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = if (comradeOnline) {
                                                     MaterialTheme.colorScheme.primary
                                                 } else {
                                                     MaterialTheme.colorScheme.onSurfaceVariant
@@ -641,7 +725,7 @@ private fun MainShell(
                                             expanded = chatMenuOpen,
                                             onDismissRequest = { chatMenuOpen = false },
                                         ) {
-                                            conversationMenu(isComrade).forEach { action ->
+                                            conversationMenu(isComrade, isMuted).forEach { action ->
                                                 ChatMenuRow(
                                                     action = action,
                                                     onClick = {
@@ -649,6 +733,26 @@ private fun MainShell(
                                                         when (action) {
                                                             ChatMenuAction.SetAlias ->
                                                                 editingAlias = true
+                                                            ChatMenuAction.Mute,
+                                                            ChatMenuAction.Unmute,
+                                                            -> {
+                                                                MutedChats.setMuted(
+                                                                    context,
+                                                                    openChat.peer,
+                                                                    !isMuted,
+                                                                )
+                                                                muteToggleTick++
+                                                                if (!isMuted) {
+                                                                    // Muting with a notice already
+                                                                    // in the shade would otherwise
+                                                                    // leave the buzz it was meant
+                                                                    // to stop sitting there.
+                                                                    Notifier.clearForPeer(
+                                                                        context,
+                                                                        openChat.peer,
+                                                                    )
+                                                                }
+                                                            }
                                                             ChatMenuAction.AddComrade,
                                                             ChatMenuAction.RemoveComrade,
                                                             -> scope.launch {
@@ -922,6 +1026,8 @@ private fun ChatMenuRow(action: ChatMenuAction, onClick: () -> Unit) {
             ChatMenuAction.SetAlias -> R.string.chat_menu_set_alias
             ChatMenuAction.AddComrade -> R.string.comrade_add
             ChatMenuAction.RemoveComrade -> R.string.comrade_remove
+            ChatMenuAction.Mute -> R.string.chat_menu_mute
+            ChatMenuAction.Unmute -> R.string.chat_menu_unmute
             ChatMenuAction.CopyKey -> R.string.chat_menu_copy_key
             ChatMenuAction.EncryptionInfo -> R.string.chat_menu_encryption
             ChatMenuAction.Block -> R.string.chat_menu_block
@@ -933,6 +1039,10 @@ private fun ChatMenuRow(action: ChatMenuAction, onClick: () -> Unit) {
         // star toggle in the bar used to give at a glance.
         ChatMenuAction.AddComrade -> StarOutlineIcon
         ChatMenuAction.RemoveComrade -> StarIcon
+        // The glyph shows what tapping *does*, matching the label: a struck-out
+        // bell on the row that turns notifications back on would read backwards.
+        ChatMenuAction.Mute -> NotificationsOffIcon
+        ChatMenuAction.Unmute -> NotificationsIcon
         ChatMenuAction.CopyKey -> CopyIcon
         ChatMenuAction.EncryptionInfo -> Icons.Filled.Lock
         ChatMenuAction.Block -> Icons.Filled.Warning

@@ -451,7 +451,7 @@ L ~3–5 days of focused work.
 
 ### Wave 3 — Messaging completion + engine lifecycle
 
-**WP11 — Notification deep-linking into a conversation**
+**WP11 — Notification deep-linking into a conversation** — ✅ **done** (2026-07-30)
 - *Goal:* Tapping a DM notification opens that conversation.
 - *Scope:* `Notifier.openAppIntent` (peer extra), `MainActivity.onNewIntent` (route to chat).
 - *Acceptance:* cold and warm taps land in the right conversation; no double-registration
@@ -459,6 +459,19 @@ L ~3–5 days of focused work.
 - *Tests:* JVM test for the intent→destination mapping (pure); emulator smoke in
   `android-apk.yml`.
 - *Size:* S · *Tier:* Sonnet · *Deps:* WP7 (nav target) · *Risk:* low.
+- *As built:* `Notifier.openAppIntent` takes an optional `peer` (message notifications) or
+  `screen` (an update notice → Settings, a request → the requests list), parked in
+  `AppNavigation.requestedPeer` so a tap that arrives while the vault is locked is honoured
+  after the unlock rather than dropped. **The PendingIntent request code is derived from the
+  target**: `FLAG_UPDATE_CURRENT` mutates the existing PendingIntent when the code matches, so
+  the previous shared `0` would have made every message notification in the shade re-point at
+  whichever peer notified last — a bug that only appears with two unread conversations. The
+  Flutter host forwards both extras through `SystemChannel`'s stash-and-collect pair
+  (`openConversation` / `consumePendingPeer`), and `HomeShell` opens the thread with the title
+  resolved from the chat list, exactly as the in-call chat button does. Not covered by a JVM
+  test: the intent→destination hop is Activity/Compose wiring rather than a pure mapping — the
+  testable half became `NotificationPolicy` (whether to notify at all), and the emulator lanes
+  in `android-apk.yml` remain the only thing that can exercise the tap itself.
 
 **WP12 — EventBus + ChatEventRouter test coverage**
 - *Goal:* Retire the "zero tests" liability on the event plumbing.

@@ -16,6 +16,7 @@ import '../../data/models.dart';
 import '../../state/chat_providers.dart';
 import '../../util/chat_thread.dart';
 import '../../widgets/app_chrome.dart';
+import '../../widgets/composer.dart';
 import '../../widgets/media_attachment.dart';
 import '../../widgets/message_bubble.dart';
 
@@ -72,11 +73,52 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
       pixels: _scroll.position.pixels,
       maxScrollExtent: _scroll.position.maxScrollExtent,
     );
+    // The controller can't see the viewport, so it is told: a message arriving
+    // while the reader is scrolled up has not been seen and must not be marked
+    // read. Reaching the bottom is also the moment anything left unread has
+    // actually been read.
+    ref
+        .read(conversationProvider(widget.peer).notifier)
+        .setReaderAtBottom(near);
     if (near != _atBottom || (near && _newMessagesBelow)) {
+      if (near) _markRead();
       setState(() {
         _atBottom = near;
         if (near) _newMessagesBelow = false;
       });
+    }
+  }
+
+  void _markRead() {
+    ref.read(conversationProvider(widget.peer).notifier).markReadNow();
+  }
+
+  /// Jump to [index], correcting for the fact that a lazily-built list only
+  /// *estimates* the extent of children it has not laid out yet.
+  ///
+  /// `ListView` has no scroll-to-index, and one `jumpTo` computed from
+  /// `maxScrollExtent` lands short in a long thread because the estimate
+  /// sharpens as items are built. So jump, let a frame settle, and jump again
+  /// while the target keeps moving — bounded, because a thread whose extent
+  /// never settles must not spin forever.
+  Future<void> _jumpToIndex(int index, int itemCount) async {
+    if (!_scroll.hasClients || itemCount <= 0) return;
+    const int maxCorrections = 8;
+    double previousTarget = -1;
+    for (int attempt = 0; attempt < maxCorrections; attempt++) {
+      if (!mounted || !_scroll.hasClients) return;
+      final ScrollPosition position = _scroll.position;
+      // Proportional estimate of where the index sits, clamped to the bottom
+      // for the last item so "open at newest" is exact rather than approximate.
+      final double target = index >= itemCount - 1
+          ? position.maxScrollExtent
+          : (position.maxScrollExtent * (index / itemCount))
+              .clamp(0.0, position.maxScrollExtent);
+      if ((target - previousTarget).abs() < 1.0) return;
+      previousTarget = target;
+      _scroll.jumpTo(target);
+      await Future<void>.delayed(Duration.zero);
+      await WidgetsBinding.instance.endOfFrame;
     }
   }
 
@@ -96,8 +138,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   }
 
   /// Apply the "don't yank the reader" rule after the list has been laid out
-  /// with its new contents.
-  void _onItemsChanged(int count) {
+  /// with its new contents, and on the first load open where the reader left
+  /// off rather than at the newest message.
+  void _onItemsChanged(ConversationState state) {
+    final int count = state.items.length;
     if (count == _knownItemCount) return;
     final bool grew = count > _knownItemCount;
     final bool wasNearBottom = !_scroll.hasClients ||
@@ -107,11 +151,17 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         );
     _knownItemCount = count;
     if (count == 0) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted || !_scroll.hasClients) return;
       if (!_loadedOnce) {
         _loadedOnce = true;
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        // Telegram's rule: the first unread message, else the newest one.
+        final int boundary = state.unreadBoundaryKey == null
+            ? count - 1
+            : state.items.indexWhere(
+                (ChatItem i) => i.key == state.unreadBoundaryKey,
+              );
+        await _jumpToIndex(boundary < 0 ? count - 1 : boundary, count);
       } else if (grew && wasNearBottom) {
         _jumpToLatest();
       } else if (grew) {
@@ -134,18 +184,9 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     if (mounted) _composerFocus.requestFocus();
   }
 
-  Future<void> _attach() async {
-    final PickedAttachment? picked =
-        await ref.read(attachmentPickerProvider).pick();
-    if (picked == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(
-          content: Text('No file picker is wired up on this platform yet.'),
-        ),
-      );
-      return;
-    }
+  /// Send one attachment, however it was obtained — picked, photographed, or
+  /// recorded. The composer owns *getting* it; this owns sending it.
+  Future<void> _sendAttachment(PickedAttachment picked) async {
     await ref.read(conversationProvider(widget.peer).notifier).attach(
           mimeType: picked.mimeType,
           bytes: picked.bytes,
@@ -168,7 +209,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         body: '$e',
       ),
       data: (ConversationState state) {
-        _onItemsChanged(state.items.length);
+        _onItemsChanged(state);
         return Column(
           children: <Widget>[
             Expanded(child: _thread(context, state)),
@@ -222,6 +263,8 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                 children: <Widget>[
                   if (startsNewDay(prevAt, item.createdAt))
                     DaySeparator(dayLabel(item.createdAt, nowSecs)),
+                  if (item.key == state.unreadBoundaryKey)
+                    const UnreadSeparator(),
                   switch (item) {
                     MediaChatItem(:final MediaMessageInfo media) => Row(
                         mainAxisAlignment: media.outgoing
@@ -297,61 +340,16 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         ),
       );
 
-  /// Attach + pill input + send.
-  ///
-  /// Android's composer swapped the send button for a hold-to-talk mic when
-  /// the draft was empty. That is **not** ported: press-and-hold has no
-  /// meaning with a mouse, and `VoiceRecorder` is a `MediaRecorder` wrapper
-  /// with no cross-platform equivalent here. Voice notes still arrive and
-  /// render; recording one is filed with the other platform-channel work
-  /// rather than faked with a button that cannot record.
-  Widget _composer(BuildContext context, ConversationState state) => Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: <Widget>[
-            IconButton(
-              key: const Key('dm-attach'),
-              tooltip: 'Attach encrypted media (max 10 MB)',
-              onPressed: state.attaching ? null : _attach,
-              icon: state.attaching
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.attach_file),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextField(
-                key: const Key('dm-input'),
-                controller: _draft,
-                focusNode: _composerFocus,
-                minLines: 1,
-                maxLines: 4,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _send(),
-                decoration: InputDecoration(
-                  hintText: 'Message',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(26),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            IconButton.filled(
-              key: const Key('dm-send'),
-              tooltip: 'Send',
-              onPressed: state.sending ? null : _send,
-              icon: state.sending
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.send),
-            ),
-          ],
-        ),
+  /// Emoji · text · paper clip, then one round button that is Send or the
+  /// swappable mic/camera — see [MessageComposer], which owns the layout and the
+  /// capability gating.
+  Widget _composer(BuildContext context, ConversationState state) =>
+      MessageComposer(
+        controller: _draft,
+        focusNode: _composerFocus,
+        sending: state.sending,
+        attaching: state.attaching,
+        onSend: _send,
+        onAttachment: _sendAttachment,
       );
 }

@@ -253,11 +253,17 @@ pub async fn block_conversation(
 }
 
 /// Send a read receipt for a conversation (call when the thread is opened).
+///
+/// Resolves to the read position the thread had *before* this call (unix
+/// seconds, 0 = never opened). The webview ignores it today — it has no
+/// unread-divider UI yet — but the value is the same one Android and the
+/// Flutter app position their threads with, so wiring it here later needs no
+/// engine change.
 #[tauri::command]
 pub async fn mark_conversation_read(
     state: tauri::State<'_, Runtime>,
     peer: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     state
         .read()
         .await

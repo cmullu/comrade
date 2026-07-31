@@ -137,6 +137,11 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byKey(const Key('dm-input')), 'On my way');
+      // A frame between typing and tapping, because Send is disabled while
+      // there is nothing to send: the composer's action button follows the
+      // draft (`MessageComposer._actionButton`), so the state it is in is a
+      // rendered fact, not an assumption.
+      await tester.pump();
       await tester.tap(find.byKey(const Key('dm-send')));
       await tester.pumpAndSettle();
 
@@ -215,6 +220,96 @@ void main() {
         state.messages.firstWhere((MessageInfo m) => m.id == 'm6').status,
         MessageStatus.sent,
       );
+    });
+  });
+
+  group('opening position', () {
+    testWidgets('a thread read up to date opens with no unread divider',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+      // Seed the watermark past everything in Bhaskar's thread.
+      repo.seedReadPosition(FakePeers.bhaskar, 1 << 40);
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('unread-divider')), findsNothing);
+    });
+
+    testWidgets('a first visit opens with no divider', (WidgetTester t) async {
+      setWindowSize(t, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+      // No seeded position at all — nothing is known about where they left off,
+      // so claiming an unread boundary would be an invention.
+      await t.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await t.pumpAndSettle();
+
+      expect(find.byKey(const Key('unread-divider')), findsNothing);
+    });
+
+    testWidgets('unread incoming messages get a divider',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+      final List<MessageInfo> seeded = await repo.messages(FakePeers.bhaskar);
+      // Read up to the first message; the rest are new. m5 is incoming, m6 is
+      // ours, so the boundary must be the incoming one.
+      repo.seedReadPosition(FakePeers.bhaskar, seeded.first.createdAt - 1);
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('unread-divider')), findsOneWidget);
+    });
+
+    testWidgets('a thread whose only new messages are your own has no divider',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+      final List<MessageInfo> seeded = await repo.messages(FakePeers.bhaskar);
+      final MessageInfo mine = seeded.lastWhere((MessageInfo m) => m.outgoing);
+      // Everything after the watermark is outgoing → nothing unread.
+      repo.seedReadPosition(FakePeers.bhaskar, mine.createdAt - 1);
+      // Guard the premise: the tail really is only ours.
+      expect(
+        seeded.where((MessageInfo m) => m.createdAt >= mine.createdAt).every(
+              (MessageInfo m) => m.outgoing,
+            ),
+        isTrue,
+      );
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('unread-divider')), findsNothing);
+    });
+
+    testWidgets('opening advances the watermark, so a re-visit is clean',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+      final List<MessageInfo> seeded = await repo.messages(FakePeers.bhaskar);
+      repo.seedReadPosition(FakePeers.bhaskar, seeded.first.createdAt - 1);
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('unread-divider')), findsOneWidget);
+
+      // Second visit: the first one marked everything read, so the line is gone
+      // rather than stuck where it was.
+      final int previous = await repo.markConversationRead(FakePeers.bhaskar);
+      expect(previous, seeded.last.createdAt);
     });
   });
 }

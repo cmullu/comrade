@@ -56,7 +56,25 @@ object Notifier {
      */
     const val CHANNEL_COMRADES = "comrade_presence"
 
+    /**
+     * A newer Comrade has been published. Its own channel because it is the one
+     * class of notification that is not about a person: someone who wants to be
+     * told about messages but not about releases (or the reverse) can say so in
+     * system settings without collateral damage. See [mullu.comrade.update.UpdateChecker].
+     */
+    const val CHANNEL_UPDATES = "comrade_updates"
+
     private const val GROUP_MESSAGES = "comrade_messages_group"
+    private const val GROUP_COMRADES = "comrade_presence_group"
+
+    /**
+     * How long an "is online" notice may sit in the shade unattended.
+     * Matches `comrade_core::presence::PRESENCE_TTL_SECS` — the point past
+     * which the claim it was raised from is no longer believed anywhere else
+     * either, so leaving it up would be the notification shade disagreeing
+     * with every dot in the app.
+     */
+    private const val ONLINE_TIMEOUT_MS = 480_000L
 
     /** Register notification channels once (no-op on < O). */
     fun ensureChannels(context: Context) {
@@ -114,24 +132,75 @@ object Notifier {
                 NotificationManager.IMPORTANCE_LOW,
             ).apply { description = "Progress for on-device speech and companion model downloads" },
         )
+        mgr.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_UPDATES,
+                "App updates",
+                // LOW: a new release is worth finding in the shade, never worth
+                // interrupting anything. It is also the one notice a user may
+                // reasonably want off entirely — hence its own channel.
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply { description = "When a newer version of Comrade has been published" },
+        )
     }
 
     private fun canPost(context: Context): Boolean =
         NotificationManagerCompat.from(context).areNotificationsEnabled()
 
-    private fun openAppIntent(context: Context): PendingIntent {
+    /**
+     * The id of the message group's summary. Posted alongside per-peer message
+     * notifications so several of them collapse into one "Comrade" entry
+     * instead of stacking; dropped again by [pruneMessageSummary] once no
+     * children are left, because a summary alone in the shade is a
+     * notification that says nothing.
+     */
+    private const val MESSAGE_SUMMARY_ID = 0xC0DE20
+
+    /**
+     * Where a tapped notification lands.
+     *
+     * [peer] opens that conversation (WP11 in `docs/COMMS_ARCHITECTURE.md`:
+     * before this, every notification dumped the user on whatever screen they
+     * had left, and they had to find the chat themselves). [screen] pushes a
+     * non-tab destination, e.g. Settings for an update notice.
+     *
+     * The request code is derived from the target rather than left at 0.
+     * `FLAG_UPDATE_CURRENT` mutates the *existing* PendingIntent when the
+     * request code matches, so a shared 0 would have every message
+     * notification in the shade quietly re-point at whichever peer notified
+     * last — a bug that only shows up with two conversations unread.
+     */
+    private fun openAppIntent(
+        context: Context,
+        peer: String? = null,
+        screen: String? = null,
+    ): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            peer?.let { putExtra(AppNavigation.EXTRA_OPEN_PEER, it) }
+            screen?.let { putExtra(AppNavigation.EXTRA_OPEN_TAB, it) }
+        }
+        val requestCode = when {
+            peer != null -> "open:$peer".hashCode()
+            screen != null -> "screen:$screen".hashCode()
+            else -> 0
         }
         return PendingIntent.getActivity(
             context,
-            0,
+            requestCode,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
 
-    /** A new encrypted DM from an accepted conversation. */
+    /**
+     * A new encrypted DM from an accepted conversation. Tapping it opens that
+     * conversation.
+     *
+     * Callers decide *whether* to notify — [NotificationPolicy.shouldNotifyMessage]
+     * holds that rule (the thread on screen, and per-conversation mute) so it is
+     * testable and identical for DMs and attachments.
+     */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
     fun notifyMessage(context: Context, peer: String, title: String, preview: String) {
         if (!canPost(context)) return
@@ -142,13 +211,51 @@ object Notifier {
             .setAutoCancel(true)
             .setGroup(GROUP_MESSAGES)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(openAppIntent(context))
+            .setContentIntent(openAppIntent(context, peer = peer))
             .build()
+        val mgr = NotificationManagerCompat.from(context)
         // Stable per-peer id so repeated messages from one peer collapse.
-        NotificationManagerCompat.from(context).notify(peer.hashCode(), n)
+        mgr.notify(peer.hashCode(), n)
+        postMessageSummary(context)
     }
 
-    /** A stranger's DM landed in the message-requests bucket. */
+    /**
+     * The group summary for message notifications. Needed for them to collapse
+     * into one entry rather than stack; carries no message content of its own.
+     */
+    @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
+    private fun postMessageSummary(context: Context) {
+        val n = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
+            .setSmallIcon(android.R.drawable.sym_action_chat)
+            .setContentTitle(context.getString(R.string.notification_messages_summary))
+            .setGroup(GROUP_MESSAGES)
+            .setGroupSummary(true)
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setContentIntent(openAppIntent(context))
+            .build()
+        NotificationManagerCompat.from(context).notify(MESSAGE_SUMMARY_ID, n)
+    }
+
+    /**
+     * Drop the message summary once its last child is gone. Android clears a
+     * summary by itself when children are *dismissed*, but not when the app
+     * cancels them (which is what opening a conversation does), and an orphaned
+     * summary reads as "you have a message" pointing at nothing.
+     */
+    private fun pruneMessageSummary(context: Context) {
+        val mgr = NotificationManagerCompat.from(context)
+        val children = runCatching {
+            mgr.activeNotifications.count { it.id != MESSAGE_SUMMARY_ID && it.notification.group == GROUP_MESSAGES }
+        }.getOrDefault(0)
+        if (NotificationPolicy.summaryStale(children)) mgr.cancel(MESSAGE_SUMMARY_ID)
+    }
+
+    /**
+     * A stranger's DM landed in the message-requests bucket. Tapping it opens
+     * the requests list — not the conversation, which does not exist until the
+     * request is accepted.
+     */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
     fun notifyRequest(context: Context, peer: String, preview: String) {
         if (!canPost(context)) return
@@ -157,10 +264,37 @@ object Notifier {
             .setContentTitle("Message request")
             .setContentText(preview)
             .setAutoCancel(true)
-            .setContentIntent(openAppIntent(context))
+            .setContentIntent(openAppIntent(context, screen = AppNavigation.SCREEN_REQUESTS))
             .build()
         NotificationManagerCompat.from(context).notify("req:$peer".hashCode(), n)
     }
+
+    /**
+     * A newer Comrade has been published. Content-light on purpose: the version
+     * and the fact, with the release notes a tap away in Settings rather than
+     * pasted into the shade.
+     */
+    @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
+    fun notifyUpdateAvailable(context: Context, version: String) {
+        if (!canPost(context)) return
+        val n = NotificationCompat.Builder(context, CHANNEL_UPDATES)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(context.getString(R.string.update_available_title, version))
+            .setContentText(context.getString(R.string.update_available_text))
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(openAppIntent(context, screen = AppNavigation.SCREEN_SETTINGS))
+            .build()
+        NotificationManagerCompat.from(context).notify(UPDATE_ID, n)
+    }
+
+    /** Drop the update notice — it was skipped, or the update has been installed. */
+    fun clearUpdate(context: Context) {
+        NotificationManagerCompat.from(context).cancel(UPDATE_ID)
+    }
+
+    /** One update notice at a time, replaced in place when a newer one lands. */
+    private const val UPDATE_ID = 0xC0DE21
 
     /**
      * An incoming call is ringing. Uses [NotificationCompat.CallStyle] so the
@@ -225,24 +359,41 @@ object Notifier {
 
     /**
      * A comrade — someone the user deliberately chose — just came online.
+     * The title is their name ("Ana is online"), resolved by the caller with
+     * the same alias → published-handle → key precedence the chat list uses.
      *
      * Content-light like the rest: a name and the fact itself, nothing about
      * what they are doing (the beacon doesn't carry it, and the notification
      * store is not the place for it either). Tapping opens the app;
-     * [clearForPeer] drops it when their chat is opened.
+     * [clearForPeer] drops it when their chat is opened, [clearComradeOnline]
+     * when they go offline again — and [ONLINE_TIMEOUT_MS] drops it on its own
+     * if neither happens, so the shade can never keep claiming someone is
+     * around long after their presence claim has lapsed.
      */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
     fun notifyComradeOnline(context: Context, peer: String, title: String) {
         if (!canPost(context)) return
         val n = NotificationCompat.Builder(context, CHANNEL_COMRADES)
-            .setSmallIcon(android.R.drawable.presence_online)
+            .setSmallIcon(R.drawable.ic_notification_comrade)
             .setContentTitle(context.getString(R.string.comrade_online_title, title.ifBlank { shortNpub(peer) }))
             .setContentText(context.getString(R.string.comrade_online_text))
             .setAutoCancel(true)
+            .setGroup(GROUP_COMRADES)
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setTimeoutAfter(ONLINE_TIMEOUT_MS)
             .setContentIntent(openAppIntent(context))
             .build()
         NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+    }
+
+    /**
+     * Drop the "is online" notice for `peer` — they went offline (or their
+     * claim aged out) before the user got to it. A stale "Ana is online" is
+     * worse than no notification: it invites a call to someone who isn't
+     * there any more.
+     */
+    fun clearComradeOnline(context: Context, peer: String) {
+        NotificationManagerCompat.from(context).cancel("online:$peer".hashCode())
     }
 
     /** Clear any notification we posted for `peer` (e.g. on opening the chat). */
@@ -252,6 +403,8 @@ object Notifier {
         mgr.cancel("req:$peer".hashCode())
         mgr.cancel("call:$peer".hashCode())
         mgr.cancel("online:$peer".hashCode())
+        // The summary outlives its children unless we take it down ourselves.
+        pruneMessageSummary(context)
     }
 
     /** Clear only the incoming-call notification for `peer` (call answered/ended). */

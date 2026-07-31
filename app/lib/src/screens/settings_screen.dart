@@ -1,5 +1,5 @@
-/// Settings: profile/@handle, background connectivity, the TURN relay card,
-/// vault lock, and an honest "in the lab" note.
+/// Settings: profile/@handle, background connectivity, notifications, app
+/// updates, the TURN relay card, vault lock, and an honest "in the lab" note.
 ///
 /// Port of `ui/SettingsScreen.kt`, merged with desktop's TURN modal.
 ///
@@ -23,6 +23,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/comrade_repository.dart';
 import '../data/models.dart';
+// `show`-listed: `platform.dart` also re-exports the call channel's own
+// `TurnServerStatus`/`TurnDiagnostic`, which would collide with `models.dart`.
+import '../platform/platform.dart'
+    show
+        UpdateAvailable,
+        UpdateChecking,
+        UpdateFailed,
+        UpdateSettings,
+        UpdateStatus,
+        UpdateUnknown,
+        UpdateUpToDate;
 import '../state/providers.dart';
 import '../state/settings_providers.dart';
 import '../widgets/app_chrome.dart';
@@ -42,7 +53,15 @@ class SettingsScreen extends ConsumerWidget {
         children: <Widget>[
           _ProfileCard(profile: profile),
           const SizedBox(height: 12),
+          const _AppearanceCard(),
+          const SizedBox(height: 12),
           const _BackgroundConnectivityCard(),
+          const SizedBox(height: 12),
+          const _ScreenshotCard(),
+          const SizedBox(height: 12),
+          const _NotificationsCard(),
+          const SizedBox(height: 12),
+          const _UpdatesCard(),
           const SizedBox(height: 12),
           const _TurnRelayCard(),
           const SizedBox(height: 12),
@@ -230,6 +249,79 @@ class _EditUsernameDialogState extends ConsumerState<_EditUsernameDialog> {
       );
 }
 
+/// Dark / light / follow-the-OS.
+///
+/// A segmented control rather than a single "Dark mode" switch, because a
+/// switch cannot express *three* states and the third one — "whatever the OS
+/// says" — is the default. See `settings_providers.dart`'s
+/// [ThemeModeController] for why the override has to exist at all.
+class _AppearanceCard extends ConsumerWidget {
+  const _AppearanceCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ThemeMode mode = ref.watch(themeModeProvider);
+    return SectionCard(
+      title: 'Appearance',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          // Icons omitted on purpose: three icon+label segments overflow the
+          // card on a 360 dp phone, and the labels are already unambiguous.
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<ThemeMode>(
+              key: const Key('theme-mode'),
+              showSelectedIcon: false,
+              segments: const <ButtonSegment<ThemeMode>>[
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.system,
+                  label: Text('System'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.light,
+                  label: Text('Light'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.dark,
+                  label: Text('Dark'),
+                ),
+              ],
+              selected: <ThemeMode>{mode},
+              onSelectionChanged: (Set<ThemeMode> selection) =>
+                  ref.read(themeModeProvider.notifier).set(selection.first),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            switch (mode) {
+              ThemeMode.system =>
+                'Following your system setting. Desktop sessions that report no '
+                    'preference land on light — pick Dark here to override that.',
+              ThemeMode.light => 'Light everywhere, whatever the system says.',
+              ThemeMode.dark => 'Dark everywhere, whatever the system says.',
+            },
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'A call is always dark, in every mode — a bright screen held to '
+            'your face at 3am is a bug, not a preference. This choice is not '
+            'remembered across restarts yet: like every client preference it '
+            'lives in memory until the app gets a persisted store.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _BackgroundConnectivityCard extends ConsumerWidget {
   const _BackgroundConnectivityCard();
 
@@ -270,6 +362,326 @@ class _BackgroundConnectivityCard extends ConsumerWidget {
         ],
       ),
     );
+  }
+}
+
+/// Screenshots: allowed by default, blockable by the user.
+///
+/// The Compose app set `FLAG_SECURE` on its whole window and never cleared it,
+/// so nothing in the app could be screenshotted — chats, journal, feed, settings
+/// — to protect key material that is not on any of those screens (what is shown
+/// is an npub, which is public). That is now the user's decision instead of a
+/// blanket default, and the copy says plainly what it can and cannot do: it
+/// stops the OS screenshotting, it cannot stop a camera pointed at the screen.
+///
+/// The whole card is absent where the platform has no equivalent — the settings
+/// screen's own "no fake switches" rule.
+class _ScreenshotCard extends ConsumerWidget {
+  const _ScreenshotCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ScreenshotPolicy? policy = ref.watch(screenshotPolicyProvider).value;
+    if (policy == null || !policy.supported) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: SectionCard(
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(
+                    'Block screenshots',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Off by default: screenshots and screen recording work '
+                    'everywhere in Comrade. Turn this on and the system refuses '
+                    'both, and the app is hidden from the recents preview. It '
+                    'cannot stop a photo of your screen, and it applies to your '
+                    'device only — never to the person you are talking to.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
+                  const SizedBox(height: 4),
+                  // Said out loud because the card above it (Appearance) has to
+                  // admit the opposite: unlike every other client preference,
+                  // this one survives a restart. It has to — the window flag is
+                  // set before the first frame, long before there is a vault to
+                  // read a setting out of — so it lives on the platform side and
+                  // is shared with the Compose app.
+                  Text(
+                    'Remembered across restarts, and shared with the older '
+                    'Android app on the same device.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Switch(
+              key: const Key('settings-block-screenshots'),
+              value: policy.blocked,
+              onChanged: (bool v) =>
+                  ref.read(screenshotPolicyProvider.notifier).setBlocked(v),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// What Comrade may notify about, and what it has been told to stay quiet about.
+///
+/// The per-channel detail lives in the OS's own screen (Android owns that UI and
+/// duplicating it would drift), so this card's job is the three things that
+/// screen cannot say: that notifications are off entirely, how many
+/// conversations *this app* is muting, and that muting is device-local.
+class _NotificationsCard extends ConsumerWidget {
+  const _NotificationsCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ThemeData theme = Theme.of(context);
+    final bool enabled = ref.watch(notificationsEnabledProvider).value ?? true;
+    final Set<String> muted =
+        ref.watch(mutedChatsProvider).value ?? const <String>{};
+    return SectionCard(
+      title: 'Notifications',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            'Messages, message requests, calls, comrades coming online and app '
+            'updates each have their own channel, so you can silence one '
+            'without silencing the rest.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          if (!enabled) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              'Notifications are turned off for Comrade — nothing will reach '
+              'you while the app is in the background, including calls.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.error),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Text(
+            muted.isEmpty
+                ? 'No conversations are muted.'
+                : '${muted.length} '
+                    '${muted.length == 1 ? "conversation is" : "conversations are"} '
+                    'muted (on this device).',
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Muting is stored on this device only — Comrade has no server to '
+            'sync it through — and a muted chat still shows its unread count '
+            'and still rings for calls.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          if (muted.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            OutlinedButton(
+              onPressed: () =>
+                  ref.read(mutedChatsProvider.notifier).unmuteAll(),
+              child: const Text('Unmute all'),
+            ),
+          ],
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: () =>
+                ref.read(mutedChatsProvider.notifier).openSystemSettings(),
+            child: const Text('Notification settings'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Whether a newer Comrade exists, and how to get it.
+///
+/// Comrade is installed by sideload, so nothing otherwise tells anyone that a
+/// release — including a security fix — has shipped. "Get the update" opens the
+/// release page in a browser: the app never downloads or installs an APK
+/// itself, which would mean holding the permission that lets an app install
+/// other apps.
+class _UpdatesCard extends ConsumerWidget {
+  const _UpdatesCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ThemeData theme = Theme.of(context);
+    final UpdateSettings settings = ref.watch(updateSettingsProvider).value ??
+        const UpdateSettings.unknown();
+    final UpdateStatus status =
+        ref.watch(updateStatusProvider).value ?? const UpdateUnknown();
+
+    return SectionCard(
+      title: 'App updates',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            "You're running ${settings.currentVersion}",
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 8),
+          ..._statusRows(context, ref, status, settings),
+          if (settings.skippedVersion != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              "Skipped ${settings.skippedVersion} — you'll be told about "
+              'anything newer.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            TextButton(
+              onPressed: () =>
+                  ref.read(updateSettingsProvider.notifier).unskip(),
+              child: const Text('Stop skipping'),
+            ),
+          ],
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: status is UpdateChecking
+                ? null
+                : () => ref.read(updateSettingsProvider.notifier).checkNow(),
+            child: const Text('Check now'),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(
+                      'Check for updates automatically',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Asks github.com once a day whether a newer Comrade has '
+                      'been published. That tells GitHub your IP address and '
+                      'nothing else — no account, no identifier, no message '
+                      'data. With this off, nothing is checked until you tap '
+                      '“Check now”.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Switch(
+                value: settings.autoCheck,
+                onChanged: (bool v) =>
+                    ref.read(updateSettingsProvider.notifier).setAutoCheck(v),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The status half of the card: one of checking / available / up to date /
+  /// failed / never looked.
+  List<Widget> _statusRows(
+    BuildContext context,
+    WidgetRef ref,
+    UpdateStatus status,
+    UpdateSettings settings,
+  ) {
+    final ThemeData theme = Theme.of(context);
+    switch (status) {
+      case UpdateChecking():
+        return <Widget>[
+          Text(
+            'Checking…',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ];
+      case UpdateAvailable(:final String version, :final String notes):
+        return <Widget>[
+          Text(
+            'Comrade $version is available',
+            style: theme.textTheme.titleSmall
+                ?.copyWith(color: theme.colorScheme.primary),
+          ),
+          if (notes.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              // Bounded: release notes in this repo run long, and a settings
+              // card is not a changelog viewer — the full text is one tap away.
+              notes.split('\n').take(12).join('\n'),
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ],
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: () =>
+                ref.read(updateSettingsProvider.notifier).openRelease(),
+            child: const Text('Get the update'),
+          ),
+          const SizedBox(height: 4),
+          OutlinedButton(
+            onPressed: () =>
+                ref.read(updateSettingsProvider.notifier).skip(version),
+            child: const Text('Skip this version'),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Comrade is installed by sideload, so the download opens in your '
+            'browser. Android only installs it if it is signed with the same '
+            'key as the copy you already have.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.outline),
+          ),
+        ];
+      case UpdateFailed(:final String message):
+        return <Widget>[
+          Text(
+            "Couldn't check: $message",
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.error),
+          ),
+        ];
+      case UpdateUpToDate():
+        return <Widget>[
+          Text(
+            'Up to date',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ];
+      case UpdateUnknown():
+        return <Widget>[
+          Text(
+            settings.lastCheckedAt > 0 ? 'Up to date' : 'Not checked yet',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ];
+    }
   }
 }
 

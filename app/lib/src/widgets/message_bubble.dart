@@ -73,6 +73,43 @@ class DaySeparator extends StatelessWidget {
   }
 }
 
+/// "Unread messages" line marking where the reader left off.
+///
+/// A full-width rule rather than a day-style pill: it is a boundary through the
+/// thread, not a label on one message, and it has to be findable at a glance
+/// after scrolling away from it. Mirrors `ChatsScreen.kt`'s `UnreadSeparator`.
+class UnreadSeparator extends StatelessWidget {
+  const UnreadSeparator({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Divider(color: colors.primary.withValues(alpha: 0.5)),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            'Unread messages',
+            key: const Key('unread-divider'),
+            style: Theme.of(context)
+                .textTheme
+                .labelSmall
+                ?.copyWith(color: colors.primary),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Divider(color: colors.primary.withValues(alpha: 0.5)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// A small quoted line rendered above a reply's own text.
 class QuotedPreview extends StatelessWidget {
   const QuotedPreview(this.text, {super.key});

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/comrade_repository.dart';
 import '../data/models.dart';
+import '../util/chat_thread.dart';
 import 'providers.dart';
 
 // ── Chat list ───────────────────────────────────────────────────────────────
@@ -160,6 +161,9 @@ sealed class ChatItem {
 
   int get createdAt;
 
+  /// Whether *this device* sent it — your own messages are never "unread".
+  bool get outgoing;
+
   /// Stable list key. Media ids are namespaced so a media event id can never
   /// collide with a message id.
   String get key;
@@ -173,6 +177,9 @@ class TextChatItem extends ChatItem {
   int get createdAt => message.createdAt;
 
   @override
+  bool get outgoing => message.outgoing;
+
+  @override
   String get key => message.id;
 }
 
@@ -182,6 +189,9 @@ class MediaChatItem extends ChatItem {
 
   @override
   int get createdAt => media.createdAt;
+
+  @override
+  bool get outgoing => media.outgoing;
 
   @override
   String get key => 'media:${media.eventId}';
@@ -210,11 +220,21 @@ class ConversationState {
     this.sending = false,
     this.attaching = false,
     this.error,
+    this.unreadBoundaryKey,
   });
 
   final List<MessageInfo> messages;
   final List<MediaMessageInfo> media;
   final List<ChatItem> items;
+
+  /// [ChatItem.key] of the first message the reader had not seen when they
+  /// opened this thread, or null for "nothing unread".
+  ///
+  /// Held by key rather than index so a backfill of older history above it
+  /// cannot slide the divider onto the wrong message, and captured once per
+  /// visit: Telegram leaves the line where you found it for the rest of the
+  /// visit, which is what makes it useful to read down to.
+  final String? unreadBoundaryKey;
   final MessageInfo? replyingTo;
   final bool sending;
   final bool attaching;
@@ -251,6 +271,7 @@ class ConversationState {
       sending: sending ?? this.sending,
       attaching: attaching ?? this.attaching,
       error: clearError ? null : (error ?? this.error),
+      unreadBoundaryKey: unreadBoundaryKey,
     );
   }
 }
@@ -282,12 +303,59 @@ class ConversationController
     final ComradeRepository repo = ref.watch(comradeRepositoryProvider);
     final List<MessageInfo> messages = await repo.messages(_peer);
     final List<MediaMessageInfo> media = await repo.media(_peer);
-    // Opening the thread marks it read (sends a read receipt).
-    fireAndForget(repo.markConversationRead(_peer));
+    final List<ChatItem> items = mergeChatItems(messages, media);
+    // Opening the thread marks it read (sends a read receipt) *and* reports
+    // where the reader had got to, which is what the thread opens at. Awaited
+    // rather than fire-and-forget precisely because that answer is needed —
+    // and it must be read before this same call overwrites it.
+    //
+    // A failure here costs the divider, not the thread: an unreadable position
+    // means "open at the newest message", which is the old behaviour.
+    int previousRead = 0;
+    try {
+      previousRead = await repo.markConversationRead(_peer);
+    } on ComradeException catch (_) {
+      previousRead = 0;
+    }
+    final int? firstUnread = firstUnreadIndex(
+      createdAt: <int>[for (final ChatItem i in items) i.createdAt],
+      outgoing: <bool>[for (final ChatItem i in items) i.outgoing],
+      lastReadAt: previousRead,
+    );
     return ConversationState(
       messages: messages,
       media: media,
-      items: mergeChatItems(messages, media),
+      items: items,
+      unreadBoundaryKey: firstUnread == null ? null : items[firstUnread].key,
+    );
+  }
+
+  /// Whether the reader currently has the newest message in view.
+  ///
+  /// The screen owns the scroll position, so it tells the controller: messages
+  /// arriving while someone is scrolled up in history have *not* been seen, and
+  /// marking them read would both lie to the peer's receipt and cost the reader
+  /// their divider on the next visit.
+  bool _readerAtBottom = true;
+
+  // ignore: use_setters_to_change_properties
+  void setReaderAtBottom(bool atBottom) => _readerAtBottom = atBottom;
+
+  /// Mark read, but only when the arriving message is actually on screen.
+  void _markReadIfVisible() {
+    if (!_readerAtBottom) return;
+    markReadNow();
+  }
+
+  /// Mark read unconditionally — the caller has established that the reader can
+  /// see the newest message (e.g. they just scrolled back down to it).
+  ///
+  /// The return value is discarded here on purpose: only the first call of a
+  /// visit, in [build], is positioning the thread. The store's advance is
+  /// monotonic, so repeating this is harmless.
+  void markReadNow() {
+    fireAndForget(
+      ref.read(comradeRepositoryProvider).markConversationRead(_peer),
     );
   }
 
@@ -302,9 +370,7 @@ class ConversationController
         );
         // Receipts for messages that arrive while the thread is on screen —
         // the mark-read on open only covers backlog.
-        fireAndForget(
-          ref.read(comradeRepositoryProvider).markConversationRead(_peer),
-        );
+        _markReadIfVisible();
       case IncomingMedia(:final MediaMessageInfo media):
         if (_state.media.any(
           (MediaMessageInfo m) => m.eventId == media.eventId,
@@ -314,9 +380,7 @@ class ConversationController
         state = AsyncData<ConversationState>(
           _state.copyWith(media: <MediaMessageInfo>[..._state.media, media]),
         );
-        fireAndForget(
-          ref.read(comradeRepositoryProvider).markConversationRead(_peer),
-        );
+        _markReadIfVisible();
       case MessageStatusChanged(
           :final List<String> messageIds,
           :final MessageStatus status

@@ -209,9 +209,12 @@
                 android:resource="@xml/recognition_service" />
         </service>
 
-        <!-- Hands a decrypted media attachment to another app (e.g. opening a
-             video/document externally) as a content:// URI instead of a raw
-             file:// path, which Android has blocked cross-app since N. -->
+        <!-- Camera capture only: a camera app needs a real file to write its
+             full-resolution output to (EXTRA_OUTPUT), and cross-app file://
+             URIs have been blocked since N. MediaChannel reads that file once
+             and deletes it in a finally, so the plaintext window is the seconds
+             between the shutter and the send. Received attachments do NOT go
+             through here — see the in-memory provider below. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -221,6 +224,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Serves a decrypted attachment to another app straight from memory,
+             so "open externally" never writes plaintext to disk — the property
+             the Compose app had to pay for with an explicit purge on
+             backgrounding. Not exported: the only way another app reaches a
+             staged blob is the FLAG_GRANT_READ_URI_PERMISSION on the Intent
+             this app hands it, carrying a single-use random token. -->
+        <provider
+            android:name=".media.InMemoryMediaProvider"
+            android:authorities="${applicationId}.media"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 
     <!-- Required to query activities that can process text, see:

@@ -2,10 +2,14 @@ package mullu.comrade.channel
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.os.Build
+import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import mullu.comrade.MutedChats
 import mullu.comrade.Notifier
 
 /**
@@ -44,10 +48,25 @@ internal class SystemChannel(
     @Volatile
     private var pendingTab: String? = null
 
+    /**
+     * The same stash for a tapped **message** notification, which names a
+     * conversation rather than a tab (WP11). Kept separate from [pendingTab]
+     * because both can be pending at once — a cold start from a message
+     * notification wants the Chats tab *and* that thread.
+     */
+    @Volatile
+    private var pendingPeer: String? = null
+
     fun requestTab(tab: String?) {
         if (tab.isNullOrBlank()) return
         pendingTab = tab
         methods.invokeMethod("openTab", mapOf("tab" to tab))
+    }
+
+    fun requestPeer(peer: String?) {
+        if (peer.isNullOrBlank()) return
+        pendingPeer = peer
+        methods.invokeMethod("openConversation", mapOf("peer" to peer))
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -71,6 +90,42 @@ internal class SystemChannel(
                     val tab = pendingTab
                     pendingTab = null
                     result.postSuccess(tab)
+                }
+                "consumePendingPeer" -> {
+                    val peer = pendingPeer
+                    pendingPeer = null
+                    result.postSuccess(peer)
+                }
+                // Per-conversation mute. Device-local by construction (see
+                // `MutedChats`), and read by the *native* notification path, so
+                // Dart cannot hold this state itself — it has to ask.
+                "mutedPeers" -> result.postSuccess(MutedChats.muted(appContext).toList())
+                "isMuted" -> result.postSuccess(MutedChats.isMuted(appContext, call.requireString("peer")))
+                "setMuted" -> {
+                    val peer = call.requireString("peer")
+                    val muted = call.requireBool("muted")
+                    MutedChats.setMuted(appContext, peer, muted)
+                    // Muting with a notice already in the shade would otherwise
+                    // leave the buzz it was meant to stop sitting there.
+                    if (muted) Notifier.clearForPeer(appContext, peer)
+                    result.postSuccess()
+                }
+                "unmuteAll" -> {
+                    MutedChats.unmuteAll(appContext)
+                    result.postSuccess()
+                }
+                "areNotificationsEnabled" ->
+                    result.postSuccess(NotificationManagerCompat.from(appContext).areNotificationsEnabled())
+                // The OS's own per-app notification screen, where the channels
+                // live. Launched with NEW_TASK because this may be called with
+                // no Activity attached.
+                "openNotificationSettings" -> {
+                    appContext.startActivity(
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, appContext.packageName)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                    result.postSuccess()
                 }
                 else -> result.postNotImplemented()
             }

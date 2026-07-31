@@ -360,6 +360,75 @@ val CopyIcon: ImageVector = materialIcon(name = "Filled.ContentCopy") {
     }
 }
 
+/** Material "notifications" (filled) — the ⋮ menu's mute row. */
+val NotificationsIcon: ImageVector = materialIcon(name = "Filled.Notifications") {
+    materialPath {
+        moveTo(12.0f, 22.0f)
+        curveToRelative(1.1f, 0.0f, 2.0f, -0.9f, 2.0f, -2.0f)
+        horizontalLineToRelative(-4.0f)
+        curveToRelative(0.0f, 1.1f, 0.9f, 2.0f, 2.0f, 2.0f)
+        close()
+        moveTo(18.0f, 16.0f)
+        verticalLineToRelative(-5.0f)
+        curveToRelative(0.0f, -3.07f, -1.63f, -5.64f, -4.5f, -6.32f)
+        verticalLineTo(4.0f)
+        curveToRelative(0.0f, -0.83f, -0.67f, -1.5f, -1.5f, -1.5f)
+        reflectiveCurveToRelative(-1.5f, 0.67f, -1.5f, 1.5f)
+        verticalLineToRelative(0.68f)
+        curveTo(7.64f, 5.36f, 6.0f, 7.92f, 6.0f, 11.0f)
+        verticalLineToRelative(5.0f)
+        lineToRelative(-2.0f, 2.0f)
+        verticalLineToRelative(1.0f)
+        horizontalLineToRelative(16.0f)
+        verticalLineToRelative(-1.0f)
+        lineToRelative(-2.0f, -2.0f)
+        close()
+    }
+}
+
+/**
+ * Material "notifications off" (filled) — the unmute row. Drawn as the bell
+ * with the diagonal bar Material uses for every "off" glyph, so it reads the
+ * same way [VideocamOffIcon] does next to it.
+ */
+val NotificationsOffIcon: ImageVector = materialIcon(name = "Filled.NotificationsOff") {
+    materialPath {
+        moveTo(20.0f, 18.69f)
+        lineTo(7.84f, 6.14f)
+        curveTo(8.47f, 5.69f, 9.2f, 5.35f, 10.0f, 5.18f)
+        verticalLineTo(4.0f)
+        curveToRelative(0.0f, -0.83f, 0.67f, -1.5f, 1.5f, -1.5f)
+        reflectiveCurveToRelative(1.5f, 0.67f, 1.5f, 1.5f)
+        verticalLineToRelative(0.68f)
+        curveToRelative(2.87f, 0.68f, 4.5f, 3.25f, 4.5f, 6.32f)
+        verticalLineToRelative(5.0f)
+        lineToRelative(2.0f, 2.0f)
+        verticalLineToRelative(0.69f)
+        close()
+        moveTo(12.0f, 22.0f)
+        curveToRelative(1.1f, 0.0f, 2.0f, -0.9f, 2.0f, -2.0f)
+        horizontalLineToRelative(-4.0f)
+        curveToRelative(0.0f, 1.1f, 0.9f, 2.0f, 2.0f, 2.0f)
+        close()
+        moveTo(6.0f, 11.0f)
+        curveToRelative(0.0f, -0.5f, 0.05f, -0.98f, 0.14f, -1.44f)
+        lineTo(4.41f, 7.83f)
+        curveTo(4.15f, 8.82f, 4.0f, 9.88f, 4.0f, 11.0f)
+        verticalLineToRelative(5.0f)
+        lineToRelative(-2.0f, 2.0f)
+        verticalLineToRelative(1.0f)
+        horizontalLineToRelative(14.14f)
+        lineTo(6.0f, 12.86f)
+        close()
+        // The diagonal bar every Material "off" glyph carries.
+        moveTo(2.81f, 2.81f)
+        lineTo(1.39f, 4.22f)
+        lineTo(19.78f, 22.61f)
+        lineTo(21.19f, 21.19f)
+        close()
+    }
+}
+
 /**
  * Material "screen_share" (filled) — share your screen during a call.
  *

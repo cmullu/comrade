@@ -1,12 +1,25 @@
 import 'package:comrade/src/util/chat_menu.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Pins the conversation ⋮ menu: the comrade row names the action rather than
-/// the state, destructive entries stay last, and nothing is offered twice.
+/// Pins the conversation ⋮ menu: the comrade and mute rows name the action
+/// rather than the state, destructive entries stay last, and nothing is offered
+/// twice.
 ///
 /// Mirrors `ChatMenuTest.kt` — a change on one frontend that isn't made on the
 /// other shows up as a failing test rather than as silent UI drift.
 void main() {
+  /// Every combination of the two toggles the menu is built from.
+  List<List<ChatMenuAction>> allMenus() => <List<ChatMenuAction>>[
+        for (final bool isComrade in <bool>[true, false])
+          for (final bool isMuted in <bool>[true, false])
+            conversationMenu(isComrade: isComrade, isMuted: isMuted),
+      ];
+
+  bool isComradeRow(ChatMenuAction a) =>
+      a == ChatMenuAction.addComrade || a == ChatMenuAction.removeComrade;
+  bool isMuteRow(ChatMenuAction a) =>
+      a == ChatMenuAction.mute || a == ChatMenuAction.unmute;
+
   group('conversationMenu', () {
     test('a non-comrade is offered the add', () {
       final List<ChatMenuAction> menu = conversationMenu(isComrade: false);
@@ -20,39 +33,49 @@ void main() {
       expect(menu, isNot(contains(ChatMenuAction.addComrade)));
     });
 
+    test('an unmuted chat is offered mute, and vice versa', () {
+      final List<ChatMenuAction> loud =
+          conversationMenu(isComrade: false, isMuted: false);
+      expect(loud, contains(ChatMenuAction.mute));
+      expect(loud, isNot(contains(ChatMenuAction.unmute)));
+
+      final List<ChatMenuAction> quiet =
+          conversationMenu(isComrade: false, isMuted: true);
+      expect(quiet, contains(ChatMenuAction.unmute));
+      expect(quiet, isNot(contains(ChatMenuAction.mute)));
+    });
+
     test('order is stable', () {
-      expect(conversationMenu(isComrade: false), <ChatMenuAction>[
+      expect(
+          conversationMenu(isComrade: false, isMuted: false), <ChatMenuAction>[
         ChatMenuAction.setAlias,
         ChatMenuAction.addComrade,
+        ChatMenuAction.mute,
         ChatMenuAction.copyKey,
         ChatMenuAction.encryptionInfo,
         ChatMenuAction.block,
       ]);
     });
 
-    test('toggling comrade swaps one row in place, it does not reorder', () {
-      final List<ChatMenuAction> off = conversationMenu(isComrade: false);
-      final List<ChatMenuAction> on = conversationMenu(isComrade: true);
+    test('toggling comrade or mute swaps one row in place, never reorders', () {
       // Otherwise a tap lands on a different action than the one reached for.
-      expect(on.length, off.length);
       expect(
-        on.indexOf(ChatMenuAction.removeComrade),
-        off.indexOf(ChatMenuAction.addComrade),
-      );
+          allMenus().map((List<ChatMenuAction> m) => m.length).toSet().length,
+          1);
+      for (final List<ChatMenuAction> menu in allMenus()) {
+        expect(menu.indexWhere(isComradeRow), 1);
+        expect(menu.indexWhere(isMuteRow), 2);
+      }
     });
 
     test('no action appears twice', () {
-      for (final bool isComrade in <bool>[true, false]) {
-        final List<ChatMenuAction> menu =
-            conversationMenu(isComrade: isComrade);
+      for (final List<ChatMenuAction> menu in allMenus()) {
         expect(menu.toSet().length, menu.length);
       }
     });
 
     test('block is the only destructive entry and it is last', () {
-      for (final bool isComrade in <bool>[true, false]) {
-        final List<ChatMenuAction> menu =
-            conversationMenu(isComrade: isComrade);
+      for (final List<ChatMenuAction> menu in allMenus()) {
         expect(menu.last, ChatMenuAction.block);
         expect(
           menu.where((ChatMenuAction a) => a.destructive),
@@ -65,10 +88,7 @@ void main() {
       // A menu entry nobody can reach is a dead code path; an action missing
       // from the enum is a non-exhaustive switch at the call site.
       expect(
-        <ChatMenuAction>{
-          ...conversationMenu(isComrade: true),
-          ...conversationMenu(isComrade: false),
-        },
+        allMenus().expand((List<ChatMenuAction> m) => m).toSet(),
         ChatMenuAction.values.toSet(),
       );
     });

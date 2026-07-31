@@ -27,7 +27,7 @@ import org.webrtc.VideoTrack
  * `SurfaceView`-versus-Flutter-surface conflict. This file exists so that a
  * device where the texture path misbehaves has a one-line switch rather than a
  * feature gap, and so the two paths can be compared on real hardware — which
- * has not happened, because none of this has been run (§10).
+ * has not happened, because none of this has been run (§11).
  *
  * Note the z-order line below. It is the specific wart the texture path
  * removes: the picture-in-picture tile's surface has to be explicitly stacked

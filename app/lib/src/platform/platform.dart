@@ -31,26 +31,32 @@
 /// Compiles and analyzes clean; the Kotlin side builds into a real APK. **No
 /// behaviour has been verified** — nothing here has been run on a device or an
 /// emulator, and there are no tests for this layer yet. The APK also does not
-/// yet package `libcomrade_jni.so`, so it cannot start. See §10 of
+/// yet package `libcomrade_jni.so`, so it cannot start. See §11 of
 /// `../../../android/app/src/main/kotlin/mullu/comrade/PLATFORM_CHANNELS.md`
 /// for the precise line between what was checked and what was not.
 library;
 
 import 'call_channel.dart';
+import 'media_channel.dart';
 import 'model_download_channel.dart';
 import 'pip_channel.dart';
 import 'relay_channel.dart';
+import 'screen_channel.dart';
 import 'system_channel.dart';
+import 'update_channel.dart';
 import 'voice_recorder_channel.dart';
 import 'wake_word_channel.dart';
 
 export 'call_channel.dart';
 export 'call_video.dart';
 export 'channels.dart';
+export 'media_channel.dart';
 export 'model_download_channel.dart';
 export 'pip_channel.dart';
 export 'relay_channel.dart';
+export 'screen_channel.dart';
 export 'system_channel.dart';
+export 'update_channel.dart';
 export 'voice_recorder_channel.dart';
 export 'wake_word_channel.dart';
 
@@ -68,14 +74,20 @@ class ComradePlatform {
     RelayChannel? relay,
     ModelDownloadChannel? models,
     VoiceRecorderChannel? recorder,
+    MediaChannel? media,
+    ScreenSecurityChannel? screen,
     SystemChannel? system,
+    UpdateChannel? updates,
   })  : call = call ?? CallChannel(),
         pip = pip ?? PipChannel(),
         wakeWord = wakeWord ?? WakeWordChannel(),
         relay = relay ?? RelayChannel(),
         models = models ?? ModelDownloadChannel(),
         recorder = recorder ?? VoiceRecorderChannel(),
-        system = system ?? SystemChannel();
+        media = media ?? MediaChannel(),
+        screen = screen ?? ScreenSecurityChannel(),
+        system = system ?? SystemChannel(),
+        updates = updates ?? UpdateChannel();
 
   final CallChannel call;
   final PipChannel pip;
@@ -83,7 +95,10 @@ class ComradePlatform {
   final RelayChannel relay;
   final ModelDownloadChannel models;
   final VoiceRecorderChannel recorder;
+  final MediaChannel media;
+  final ScreenSecurityChannel screen;
   final SystemChannel system;
+  final UpdateChannel updates;
 
   void dispose() => system.dispose();
 }

@@ -218,6 +218,49 @@
     return new Blob([arr], { type: mime || "application/octet-stream" });
   }
 
+  // ── Decrypted-media object URLs, bounded and revocable ────────────────────
+  //
+  // An object URL pins its Blob — the *decrypted* attachment — in memory until
+  // it is revoked, and this UI never revoked one: every attachment viewed in a
+  // session stayed in the webview's heap for the life of the process, and
+  // re-unlocking as a different identity left the previous one's plaintext
+  // behind. Android bounded the same cache at 24 bitmaps and purged it on
+  // backgrounding; this is the desktop equivalent.
+  //
+  // The eviction policy lives in media_cache.mjs (with node tests) for the same
+  // reason the call decisions do: the rule is testable, the DOM glue is not.
+  // Loaded through the same cached dynamic import as call_decisions.mjs — see
+  // its note above for why this file cannot use a static `import`.
+  const MEDIA_URL_CAPACITY = 8;
+  const mediaCacheReady = import("./media_cache.mjs").then(
+    ({ createBlobUrlCache }) =>
+      createBlobUrlCache({
+        create: (blob) => URL.createObjectURL(blob),
+        revoke: (url) => URL.revokeObjectURL(url),
+        capacity: MEDIA_URL_CAPACITY,
+        // Forget the bubble's own reference, so a re-view re-fetches instead of
+        // rendering a dead `blob:` link.
+        onEvict: (eventId) => {
+          for (const msgs of state.dms.values()) {
+            for (const m of msgs) {
+              if (m.media && m.media.eventId === eventId) m.media.objectUrl = null;
+            }
+          }
+        },
+      }),
+  );
+
+  /** Mint (or reuse) the object URL for one attachment. */
+  async function mediaUrlFor(eventId, blob) {
+    return (await mediaCacheReady).get(eventId, blob);
+  }
+
+  /** Drop every decrypted attachment this window is holding — the deliberate
+   *  version of "the app should not be sitting on plaintext". */
+  async function revokeAllMediaUrls() {
+    (await mediaCacheReady).clear();
+  }
+
   function renderMediaEl(mime, url) {
     if (mime.startsWith("image/")) return el("img", { class: "media-img", src: url, alt: "media" });
     if (mime.startsWith("audio/")) return el("audio", { controls: "", src: url });
@@ -297,6 +340,9 @@
       state.identity = id;
       $("#identity-npub").textContent = shortNpub(id.npub);
       $("#passphrase").value = "";
+      // A fresh unlock may be a different identity in the same window: nothing
+      // decrypted for the previous one may still be renderable.
+      await revokeAllMediaUrls();
       showToast(`Vault unlocked · ${shortNpub(id.npub)}`, "success");
 
       const ws = await safeInvoke("current_workspace", undefined, {
@@ -473,8 +519,8 @@
               ? [
                   el("span", {
                     class: "presence-dot" + (presenceOf(k).online ? " is-online" : ""),
-                    title: presenceOf(k).online ? "Online now" : "Not online",
-                    "aria-label": presenceOf(k).online ? "Online now" : "Not online",
+                    title: presenceLabel(presenceOf(k)),
+                    "aria-label": presenceLabel(presenceOf(k)),
                   }),
                 ]
               : []),
@@ -628,13 +674,7 @@
         // Honest about the mutual model: a comrade who hasn't chosen back
         // will never show as online, and the header says why rather than
         // leaving a grey dot to be misread as "they're ignoring me".
-        text: !presence.comrade
-          ? ""
-          : presence.online
-            ? "online"
-            : presence.peerMarkedUs
-              ? "not online"
-              : "waiting for them to choose you back",
+        text: presenceLabel(presence),
       }),
       el(
         "div",
@@ -787,6 +827,45 @@
     return (
       state.presence.get(peer) || { comrade: false, online: false, lastSeenAt: 0, peerMarkedUs: false }
     );
+  }
+
+  /**
+   * How a peer's presence reads, in the same vocabulary the phone uses
+   * (see `android/.../DisplayName.kt` lastSeenOf): "online" while they are,
+   * a relative sighting while it is fresh, a wall clock once it isn't, a date
+   * beyond that — and an honest explanation when there is nothing to show.
+   * Returns "" for a peer who isn't a comrade: we know nothing about them and
+   * must not imply otherwise.
+   */
+  function presenceLabel(presence) {
+    if (!presence.comrade) return "";
+    if (presence.online) return "online";
+    if (!presence.lastSeenAt) {
+      return presence.peerMarkedUs ? "last seen recently" : "waiting for them to choose you back";
+    }
+    const seen = new Date(presence.lastSeenAt * 1000);
+    const ageSecs = Math.max(0, nowSecs() - presence.lastSeenAt);
+    if (ageSecs < 60) return "last seen just now";
+    if (ageSecs < 3600) {
+      const mins = Math.floor(ageSecs / 60);
+      return `last seen ${mins} minute${mins === 1 ? "" : "s"} ago`;
+    }
+    const time = seen.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    const today = new Date();
+    const sameDay = (a, b) => a.toDateString() === b.toDateString();
+    const yesterday = new Date(today.getTime() - 86_400_000);
+    if (sameDay(seen, today)) return `last seen at ${time}`;
+    if (sameDay(seen, yesterday)) return `last seen yesterday at ${time}`;
+    if (ageSecs < 7 * 86_400) {
+      return `last seen ${seen.toLocaleDateString(undefined, { weekday: "long" })} at ${time}`;
+    }
+    const sameYear = seen.getFullYear() === today.getFullYear();
+    const date = seen.toLocaleDateString(undefined, {
+      day: "numeric",
+      month: "short",
+      ...(sameYear ? {} : { year: "numeric" }),
+    });
+    return `last seen ${date}`;
   }
 
   /** Load who was chosen as a comrade, and what their last beacon said. */
@@ -2244,7 +2323,12 @@
           });
           const mime = out.mime_type || m.media.mime;
           if (!m.media.objectUrl) {
-            m.media.objectUrl = URL.createObjectURL(base64ToBlob(out.base64, mime));
+            // Through the bounded cache: an object URL pins the decrypted blob
+            // until it is revoked, so they cannot simply accumulate.
+            m.media.objectUrl = await mediaUrlFor(
+              m.media.eventId,
+              base64ToBlob(out.base64, mime),
+            );
           }
           // Re-render from state (not replaceChild on a possibly-detached node)
           // so the inline media lands in the live DOM for whichever screen shows it.

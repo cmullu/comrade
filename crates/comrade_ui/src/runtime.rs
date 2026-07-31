@@ -421,6 +421,129 @@ fn parse_media_envelope(content: &str) -> Option<MediaEnvelope> {
     (env.comrade_media == 1).then_some(env)
 }
 
+/// Whether a queued outbox payload is a media reference rather than chat text.
+///
+/// The flush loop needs this: a text message that finally reaches a relay gets
+/// its stored row re-keyed to the relay's event id, but a media envelope has no
+/// stored row — re-keying one would *create* a text message whose body is the
+/// raw envelope JSON, which would then render as a chat bubble and as the chat
+/// list's preview. See [`RuntimeHandles::flush_outbox`].
+fn is_media_envelope(content: &str) -> bool {
+    parse_media_envelope(content).is_some()
+}
+
+/// Longest MIME type accepted from a caller or a peer. Real types are short
+/// (`application/vnd.openxmlformats-officedocument.presentationml.slide` is 65);
+/// this bounds what a peer can make us persist and render.
+const MAX_MIME_LEN: usize = 128;
+
+/// Longest attachment caption we send or store. A caption is free text chosen
+/// by the sender and rendered verbatim by every frontend, so it is bounded on
+/// both the way out and the way in.
+const MAX_CAPTION_LEN: usize = 512;
+
+/// Fallback for an attachment whose MIME type we could not use.
+const DEFAULT_MIME: &str = "application/octet-stream";
+
+/// Validate and normalise a caller-supplied MIME type.
+///
+/// MIME types are case-insensitive (RFC 2045 §5.1), so this lowercases them —
+/// otherwise `IMAGE/PNG` would miss every `starts_with("image/")` test a
+/// frontend makes and a photo would render as an unopenable file. Anything
+/// blank, oversized, or carrying control characters / newlines is rejected
+/// rather than quietly patched: it is a caller bug, and a header-shaped value
+/// has no business reaching an HTTP `Content-Type`.
+fn validate_mime_type(mime: &str) -> Result<String, UiError> {
+    let trimmed = mime.trim();
+    if trimmed.is_empty() {
+        return Err(UiError::Engine("attachment has no MIME type".into()));
+    }
+    if trimmed.len() > MAX_MIME_LEN {
+        return Err(UiError::Engine(format!(
+            "MIME type is {} characters; the limit is {MAX_MIME_LEN}",
+            trimmed.len()
+        )));
+    }
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(UiError::Engine(
+            "MIME type contains control characters".into(),
+        ));
+    }
+    if !trimmed.contains('/') {
+        return Err(UiError::Engine(format!("malformed MIME type: {trimmed}")));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+/// Make a peer-supplied string safe to persist and render: strip control
+/// characters (a caption is one line of text in every frontend, and an embedded
+/// newline or `\r` would let a peer forge extra UI lines) and truncate to `max`
+/// on a character boundary.
+fn sanitise_untrusted_text(text: &str, max: usize) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// The chat-list / message-request line for a conversation whose newest item is
+/// an attachment. One helper so every surface says the same thing.
+fn attachment_preview(caption: &str) -> String {
+    let caption = caption.trim();
+    if caption.is_empty() {
+        "📎 Attachment".to_string()
+    } else {
+        format!("📎 {caption}")
+    }
+}
+
+/// The newest attachment in one conversation, reduced to what a chat-list row
+/// needs. Built by [`newest_media_by_peer`].
+struct MediaSummary {
+    created_at: u64,
+    preview: String,
+    outgoing: bool,
+}
+
+/// Newest attachment per peer (keyed by npub), for the chat list and the
+/// message-request inbox.
+///
+/// Media references are *not* stored as messages — the envelope that carries
+/// them is consumed by `dispatch_incoming_dm` and never persisted as chat text
+/// (otherwise every attachment would also appear as a bubble full of JSON). So
+/// any surface that answers "what is the newest thing in this thread?" has to
+/// read this tree too, or a photo-only conversation is invisible and a thread
+/// whose last item is a photo shows a stale text preview.
+fn newest_media_by_peer(
+    store: &comrade_storage::EncryptedStore,
+) -> Result<std::collections::HashMap<String, MediaSummary>, UiError> {
+    let mut newest: std::collections::HashMap<String, MediaSummary> =
+        std::collections::HashMap::new();
+    for reff in store
+        .values::<MediaRef>(MEDIA_REFS_TREE)
+        .map_err(|e| UiError::Storage(e.to_string()))?
+    {
+        let peer = to_npub(&reff.peer_pubkey);
+        if newest
+            .get(&peer)
+            .is_some_and(|existing| existing.created_at >= reff.created_at)
+        {
+            continue;
+        }
+        newest.insert(
+            peer,
+            MediaSummary {
+                created_at: reff.created_at,
+                preview: attachment_preview(&reff.caption),
+                outgoing: reff.outgoing,
+            },
+        );
+    }
+    Ok(newest)
+}
+
 /// Parse an npub (bech32) or hex public key.
 fn parse_pubkey(s: &str) -> Result<PublicKey, UiError> {
     PublicKey::parse(s).map_err(|e| UiError::Engine(format!("invalid pubkey: {e}")))
@@ -1306,40 +1429,48 @@ impl ComradeRuntime {
         // as an ordinary accepted conversation.
         let gated = self.gated_peers(store)?;
 
-        let mut newest: std::collections::HashMap<String, comrade_storage::StoredMessage> =
+        // `(created_at, preview, outgoing)` for the newest item in each thread —
+        // text or attachment, whichever is newer.
+        let mut newest: std::collections::HashMap<String, (u64, String, bool)> =
             std::collections::HashMap::new();
+        let mut consider = |peer: String, at: u64, preview: String, outgoing: bool| {
+            if gated.contains(&peer) {
+                return;
+            }
+            match newest.get(&peer) {
+                Some((existing_at, _, _)) if *existing_at >= at => {}
+                _ => {
+                    newest.insert(peer, (at, preview, outgoing));
+                }
+            }
+        };
         for msg in store
             .all_messages()
             .map_err(|e| UiError::Storage(e.to_string()))?
         {
-            if gated.contains(&msg.peer_npub) {
-                continue;
-            }
-            match newest.get(&msg.peer_npub) {
-                Some(existing) if existing.created_at >= msg.created_at => {}
-                _ => {
-                    newest.insert(msg.peer_npub.clone(), msg);
-                }
-            }
+            consider(msg.peer_npub, msg.created_at, msg.content, msg.outgoing);
+        }
+        // An attachment is a thread's newest item as often as a text message is,
+        // and a thread that only ever exchanged photos has no messages at all.
+        for (peer, media) in newest_media_by_peer(store)? {
+            consider(peer, media.created_at, media.preview, media.outgoing);
         }
 
         let mut list: Vec<ConversationDto> = newest
-            .into_values()
-            .map(|m| {
-                let comrade = comrades.contains(&m.peer_npub);
+            .into_iter()
+            .map(|(peer, (last_at, last_message, last_outgoing))| {
+                let comrade = comrades.contains(&peer);
                 ConversationDto {
-                    alias: aliases
-                        .get(&m.peer_npub)
-                        .and_then(|a| user_alias(a, &m.peer_npub)),
-                    peer_name: cached_peer_name(store, &m.peer_npub),
+                    alias: aliases.get(&peer).and_then(|a| user_alias(a, &peer)),
+                    peer_name: cached_peer_name(store, &peer),
                     // Presence only exists between comrades — never imply
                     // knowledge about anyone else's whereabouts.
-                    online: comrade && peer_is_online(store, &m.peer_npub, now),
+                    online: comrade && peer_is_online(store, &peer, now),
                     comrade,
-                    peer: m.peer_npub,
-                    last_message: m.content,
-                    last_at: m.created_at,
-                    last_outgoing: m.outgoing,
+                    peer,
+                    last_message,
+                    last_at,
+                    last_outgoing,
                 }
             })
             .collect();
@@ -1406,28 +1537,39 @@ impl ComradeRuntime {
         if pending.is_empty() {
             return Ok(vec![]);
         }
-        let mut newest: std::collections::HashMap<String, comrade_storage::StoredMessage> =
+        // Newest item per pending peer: `(created_at, preview)`.
+        let mut newest: std::collections::HashMap<String, (u64, String)> =
             std::collections::HashMap::new();
+        let mut consider = |peer: String, at: u64, preview: String| {
+            if !pending.contains(&peer) {
+                return;
+            }
+            match newest.get(&peer) {
+                Some((existing_at, _)) if *existing_at >= at => {}
+                _ => {
+                    newest.insert(peer, (at, preview));
+                }
+            }
+        };
         for msg in store
             .all_messages()
             .map_err(|e| UiError::Storage(e.to_string()))?
         {
-            if !pending.contains(&msg.peer_npub) {
-                continue;
-            }
-            match newest.get(&msg.peer_npub) {
-                Some(existing) if existing.created_at >= msg.created_at => {}
-                _ => {
-                    newest.insert(msg.peer_npub.clone(), msg);
-                }
-            }
+            consider(msg.peer_npub, msg.created_at, msg.content);
+        }
+        // A stranger whose first contact was an attachment is still a request
+        // with something to preview — and, before this, a request row with an
+        // empty line (the gated branch of `dispatch_incoming_dm` persists the
+        // media ref but no message).
+        for (peer, media) in newest_media_by_peer(store)? {
+            consider(peer, media.created_at, media.preview);
         }
         let mut list: Vec<MessageRequestDto> = newest
-            .into_values()
-            .map(|m| MessageRequestDto {
-                peer: m.peer_npub,
-                last_message: m.content,
-                last_at: m.created_at,
+            .into_iter()
+            .map(|(peer, (last_at, last_message))| MessageRequestDto {
+                peer,
+                last_message,
+                last_at,
             })
             .collect();
         list.sort_by_key(|r| std::cmp::Reverse(r.last_at));
@@ -1461,10 +1603,15 @@ impl ComradeRuntime {
             .to_bech32()
             .map_err(|e| UiError::Engine(e.to_string()))?;
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        // Carry the read position across the block. Nothing reads it while the
+        // thread is hidden, but throwing it away would silently restart the
+        // history of a peer who is later talked to again.
+        let last_read_at = store.read_position(&peer_npub).unwrap_or(0);
         let meta = comrade_storage::ConversationMeta {
             peer_npub,
             state: STATE_BLOCKED.to_string(),
             profile_shared: false,
+            last_read_at,
             updated_at: now_secs(),
         };
         store
@@ -1474,9 +1621,24 @@ impl ComradeRuntime {
     }
 
     /// Mark a conversation read: send a read receipt covering the peer's
-    /// incoming messages. The frontend calls this when the thread is opened
-    /// (accepted conversations only — we never ack a pending request).
-    pub fn mark_conversation_read(&self, peer: &str) -> Result<(), UiError> {
+    /// incoming messages, record how far the user has now read, and return the
+    /// position they had reached *before* this call.
+    ///
+    /// The frontend uses that previous position to open the thread at the first
+    /// unread message rather than at the newest one (Telegram's behaviour), and
+    /// to draw the "unread messages" divider. It is returned from this call
+    /// rather than exposed as a separate getter so there is no window in which
+    /// the caller's own mark-read has already overwritten the answer it is
+    /// about to position on.
+    ///
+    /// Returns 0 when the thread has never been opened, which the UI reads as
+    /// "no divider, open at the newest message" — for a first visit there is no
+    /// meaningful "where I left off".
+    ///
+    /// Accepted conversations only: we never ack a pending request. A pending
+    /// thread also keeps its read position untouched, because acking or
+    /// recording it would leak that we read it before deciding to accept.
+    pub fn mark_conversation_read(&self, peer: &str) -> Result<u64, UiError> {
         let peer_pk = parse_pubkey(peer)?;
         let peer_npub = peer_pk
             .to_bech32()
@@ -1490,11 +1652,22 @@ impl ComradeRuntime {
             .map(|m| m.state == STATE_ACCEPTED)
             .unwrap_or(true); // no gate record ⇒ ordinary conversation
         if !accepted {
-            return Ok(());
+            return Ok(0);
         }
+        // Everything currently in the thread is what the reader is being shown,
+        // so the newest stored message is the new watermark. Taken from the
+        // store rather than the clock: a message that arrives one second after
+        // this call must stay unread, and a clock-based mark would swallow it.
+        let newest = store
+            .messages_with(&peer_npub)
+            .map(|msgs| msgs.iter().map(|m| m.created_at).max().unwrap_or(0))
+            .unwrap_or(0);
+        let previous = store
+            .advance_read_position(&peer_npub, newest, now_secs(), STATE_ACCEPTED)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
         let ids = self.incoming_ids(&peer_npub);
         self.spawn_receipt(&peer_pk, ReceiptKind::Read, ids);
-        Ok(())
+        Ok(previous)
     }
 
     /// Event ids of the peer's incoming (received) messages in this thread.
@@ -2744,9 +2917,28 @@ impl RuntimeHandles {
         let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
         let now = now_secs();
 
+        // Who each queued item was for, captured *before* pruning: a media
+        // reference has no stored message row, so `peer_of_stored` cannot name
+        // its conversation once the queue entry is gone.
+        let queued_peers: std::collections::HashMap<String, String> = self
+            .outbox
+            .snapshot()
+            .queues
+            .into_iter()
+            .flat_map(|(peer, queue)| {
+                queue
+                    .into_iter()
+                    .map(move |m| (m.message_id, peer.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
         // Expired or attempt-exhausted mail: stop lying about it in the UI.
         for dropped in self.outbox.prune(now) {
-            if let Some(peer) = self.peer_of_stored(&dropped) {
+            if let Some(peer) = self
+                .peer_of_stored(&dropped)
+                .or_else(|| queued_peers.get(&dropped).cloned())
+            {
                 self.mark_status(&peer, &[dropped], STATUS_FAILED);
             }
         }
@@ -2772,13 +2964,23 @@ impl RuntimeHandles {
                 Ok(event_id) => {
                     self.outbox
                         .ack(&queued.peer_npub, std::slice::from_ref(&queued.message_id));
-                    // Re-key the stored row to the relay's event id: a later
-                    // delivered/read receipt names *that* id, so without this
-                    // the ticks would never advance past `sent`.
-                    self.rekey_stored_message(&queued, &event_id.to_hex());
+                    // A media reference has no stored text row. Re-keying it
+                    // would *create* one whose body is the envelope JSON — a
+                    // bubble full of machine-readable noise, and the chat
+                    // list's preview. Its own NIP-94 event id is the handle the
+                    // UI already holds, so that is what the status names.
+                    let status_id = if is_media_envelope(&queued.content) {
+                        queued.message_id.clone()
+                    } else {
+                        // Re-key the stored row to the relay's event id: a later
+                        // delivered/read receipt names *that* id, so without
+                        // this the ticks would never advance past `sent`.
+                        self.rekey_stored_message(&queued, &event_id.to_hex());
+                        event_id.to_hex()
+                    };
                     let _ = self.events.send(BridgeEvent::MessageStatus {
                         peer: queued.peer_npub.clone(),
-                        message_ids: vec![event_id.to_hex()],
+                        message_ids: vec![status_id],
                         status: "sent".into(),
                     });
                     share_profile_on_accept(
@@ -3053,6 +3255,21 @@ impl RuntimeHandles {
                 bytes.len()
             )));
         }
+        // Fail before the upload, not after it: a zero-byte blob is a picker or
+        // permission failure on the frontend's side (a content URI that could
+        // not be read yields exactly this), and sending it would cost a real
+        // upload and put an undecodable bubble in both people's threads.
+        if bytes.is_empty() {
+            return Err(UiError::Engine("attachment is empty".into()));
+        }
+        let mime_type = validate_mime_type(mime_type)?;
+        let mime_type = mime_type.as_str();
+        let caption = sanitise_untrusted_text(caption, MAX_CAPTION_LEN);
+        let caption = caption.as_str();
+        // The vault is needed to deliver the reference — check before uploading
+        // so a locked vault never leaves a paid-for blob on a host with nothing
+        // pointing at it.
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
         let keys = self.keys.clone().ok_or(UiError::NoIdentity)?;
         let peer = parse_pubkey(target_pubkey)?;
         let key = derive_media_key(keys.secret_key(), &peer, MEDIA_LABEL)
@@ -3099,7 +3316,7 @@ impl RuntimeHandles {
                 .map_err(|e| UiError::Storage(e.to_string()))?;
         }
 
-        // Privately deliver the reference to the recipient over NIP-04.
+        // Privately deliver the reference over the E2E DM channel.
         let envelope = MediaEnvelope {
             comrade_media: 1,
             event_id: event_id.clone(),
@@ -3111,11 +3328,36 @@ impl RuntimeHandles {
         };
         let envelope_json =
             serde_json::to_string(&envelope).map_err(|e| UiError::Engine(e.to_string()))?;
-        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
-        vault
-            .send_dm(&peer, &envelope_json)
-            .await
-            .map_err(|e| UiError::Engine(e.to_string()))?;
+
+        // A relay that will not take the reference must not orphan the upload.
+        // Before this, a publish failure returned an error *after* the blob was
+        // uploaded and the local ref persisted: the sender saw a failure, saw
+        // the attachment in their own thread anyway, and the recipient never
+        // learned the blob existed — with nothing left to retry from. The
+        // reference is ordinary DM content, so it queues in the same outbox as
+        // text (`docs/BITCHAT_ADOPTION.md` store-and-forward) keyed by its
+        // NIP-94 event id, and the flush loop delivers it when a relay returns.
+        let peer_npub = to_npub(target_pubkey);
+        if let Err(e) = vault.send_dm(&peer, &envelope_json).await {
+            tracing::info!(error = %e, "media reference could not be published — queued for retry");
+            let queued = QueuedMessage::new(
+                event_id.clone(),
+                peer_npub.clone(),
+                &envelope_json,
+                None,
+                created_at,
+            );
+            if let QueueOutcome::Displaced(dropped) = self.outbox.queue(queued) {
+                self.mark_status(&peer_npub, &[dropped], STATUS_FAILED);
+            }
+            if let Some(store) = &self.store {
+                persist_outbox(store, &self.outbox);
+            }
+            // Not a lie about delivery: `queued` is the same status a text DM
+            // gets on the same failure, and it is keyed by the media event id so
+            // the flush loop's later "sent" names the same handle the UI holds.
+            self.mark_status(&peer_npub, std::slice::from_ref(&event_id), STATUS_QUEUED);
+        }
 
         let sender = keys
             .public_key()
@@ -3430,6 +3672,8 @@ fn ensure_pending(store: Option<&Arc<comrade_storage::EncryptedStore>>, peer_npu
             peer_npub: peer_npub.to_string(),
             state: STATE_PENDING.to_string(),
             profile_shared: false,
+            // Only reached when no record exists, so there is nothing read yet.
+            last_read_at: 0,
             updated_at: now_secs(),
         };
         if let Err(e) = store
@@ -3471,16 +3715,15 @@ fn share_profile_on_accept(
     let Some(store) = store else {
         return;
     };
-    let already_shared = store
-        .get_conversation_meta(peer_npub)
-        .ok()
-        .flatten()
-        .map(|m| m.profile_shared)
-        .unwrap_or(false);
+    let existing = store.get_conversation_meta(peer_npub).ok().flatten();
+    let already_shared = existing.as_ref().map(|m| m.profile_shared).unwrap_or(false);
     let meta = comrade_storage::ConversationMeta {
         peer_npub: peer_npub.to_string(),
         state: STATE_ACCEPTED.to_string(),
         profile_shared: already_shared,
+        // Accepting rewrites the record, so the position has to be carried or
+        // the freshly accepted thread would forget what had been read.
+        last_read_at: existing.as_ref().map(|m| m.last_read_at).unwrap_or(0),
         updated_at: now_secs(),
     };
     if let Err(e) = store
@@ -3502,10 +3745,15 @@ fn share_profile_on_accept(
             return;
         };
         if vault.send_dm(&peer, &json).await.is_ok() {
+            // Re-read rather than reuse the value from before the await: the
+            // send is a relay round-trip, and the thread may well have been
+            // opened and read in the meantime.
+            let last_read_at = store.read_position(&peer_npub).unwrap_or(0);
             let meta = comrade_storage::ConversationMeta {
                 peer_npub,
                 state: STATE_ACCEPTED.to_string(),
                 profile_shared: true,
+                last_read_at,
                 updated_at: now_secs(),
             };
             let _ = store
@@ -3622,6 +3870,12 @@ fn presence_display_name(
         .flatten()
         .and_then(|c| user_alias(&c.petname, peer_npub))
         .or_else(|| cached_peer_name(store, peer_npub))
+        // A peer's published handle is *their* string: a whitespace-only one
+        // would otherwise reach a frontend as "a name", and a notification
+        // titled " is online" helps nobody. `None` lets every frontend fall
+        // back to the key, which is always meaningful.
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// Apply one incoming [`PresenceBeacon`] from an accepted conversation:
@@ -3921,6 +4175,21 @@ fn dispatch_incoming_dm(
     // 5) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
+        // Everything in the envelope is chosen by the peer. The MIME type
+        // decides which renderer every frontend reaches for and the caption is
+        // drawn verbatim, so both are bounded and stripped of control
+        // characters before they are persisted — once, here, rather than in
+        // each of three UIs.
+        let mime = match validate_mime_type(&env.mime) {
+            Ok(mime) => mime,
+            // Not a reason to drop the attachment: it downloads and opens fine,
+            // it just gets the generic renderer instead of a claimed one.
+            Err(e) => {
+                tracing::debug!(error = %e, "incoming media has an unusable MIME type");
+                DEFAULT_MIME.to_string()
+            }
+        };
+        let caption = sanitise_untrusted_text(&env.caption, MAX_CAPTION_LEN);
         if let Some(store) = store {
             if store
                 .get::<MediaRef>(MEDIA_REFS_TREE, &env.event_id)
@@ -3934,8 +4203,8 @@ fn dispatch_incoming_dm(
                 event_id: env.event_id.clone(),
                 url: env.url.clone(),
                 peer_pubkey: msg.sender_pubkey.clone(),
-                mime_type: env.mime.clone(),
-                caption: env.caption.clone(),
+                mime_type: mime.clone(),
+                caption: caption.clone(),
                 size: env.size,
                 sha256_hex: env.sha256_hex.clone(),
                 outgoing: false,
@@ -3952,8 +4221,8 @@ fn dispatch_incoming_dm(
             let _ = tx.send(BridgeEvent::IncomingMedia(MediaMessageDto {
                 event_id: env.event_id,
                 url: env.url,
-                mime_type: env.mime,
-                caption: env.caption,
+                mime_type: mime,
+                caption,
                 sender: to_npub(&msg.sender_pubkey),
                 created_at: msg.created_at,
                 size: env.size,
@@ -3962,14 +4231,9 @@ fn dispatch_incoming_dm(
             send_delivered_receipt(vault, &msg.sender_pubkey, &msg.event_id);
         } else {
             ensure_pending(store, &peer_npub);
-            let preview = if env.caption.is_empty() {
-                "📎 Attachment".to_string()
-            } else {
-                format!("📎 {}", env.caption)
-            };
             let _ = tx.send(BridgeEvent::IncomingMessageRequest(MessageRequestDto {
                 peer: peer_npub,
-                last_message: preview,
+                last_message: attachment_preview(&caption),
                 last_at: msg.created_at,
             }));
         }
@@ -4602,6 +4866,62 @@ mod tests {
             r#"{"comrade_media":1,"event_id":"e","url":"https://b/x","mime":"image/png","caption":"","size":1}"#
         )
         .is_some());
+        // The flush loop routes on this: a queued envelope must never be
+        // re-keyed into a stored text message (that is how raw JSON ends up in
+        // a chat bubble).
+        assert!(is_media_envelope(&json));
+        assert!(!is_media_envelope("just a normal message"));
+    }
+
+    #[test]
+    fn mime_types_are_normalised_and_hostile_ones_refused() {
+        // Case-insensitive per RFC 2045: without lowercasing, `IMAGE/PNG` fails
+        // every frontend's `starts_with("image/")` and a photo renders as an
+        // unopenable file.
+        assert_eq!(validate_mime_type(" IMAGE/PNG ").unwrap(), "image/png");
+        assert_eq!(
+            validate_mime_type("application/vnd.oasis.opendocument.text").unwrap(),
+            "application/vnd.oasis.opendocument.text"
+        );
+        // Blank, header-shaped, structureless, or oversized: refused, not patched.
+        for bad in [
+            "",
+            "   ",
+            "image/png\r\nX-Evil: 1",
+            "image png",
+            "notamimetype",
+        ] {
+            assert!(
+                validate_mime_type(bad).is_err(),
+                "must reject {bad:?} as a MIME type"
+            );
+        }
+        assert!(validate_mime_type(&format!("image/{}", "x".repeat(MAX_MIME_LEN))).is_err());
+    }
+
+    #[test]
+    fn captions_are_stripped_of_control_characters_and_bounded() {
+        // A peer's caption is drawn verbatim in every frontend. Newlines would
+        // let them forge extra UI lines; an unbounded one is a storage and
+        // layout problem.
+        assert_eq!(
+            sanitise_untrusted_text("holiday\r\nphoto\u{0}", MAX_CAPTION_LEN),
+            "holidayphoto"
+        );
+        assert_eq!(sanitise_untrusted_text("  spaced  ", 64), "spaced");
+        let long = "é".repeat(MAX_CAPTION_LEN * 2);
+        let cut = sanitise_untrusted_text(&long, MAX_CAPTION_LEN);
+        // Truncation counts characters, not bytes — a multi-byte character is
+        // never split in half.
+        assert_eq!(cut.chars().count(), MAX_CAPTION_LEN);
+        assert!(cut.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn attachment_previews_never_render_an_empty_line() {
+        assert_eq!(attachment_preview("sunset.jpg"), "📎 sunset.jpg");
+        assert_eq!(attachment_preview("   "), "📎 Attachment");
+        assert_eq!(attachment_preview(""), "📎 Attachment");
     }
 
     #[test]
@@ -5252,6 +5572,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "pending".into(),
                 profile_shared: false,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -5283,6 +5604,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn marking_read_reports_the_previous_position_and_watermarks_the_newest() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        let store = rt.ui.store_ref().unwrap();
+        let save = |id: &str, at: u64| {
+            store
+                .save_message(&comrade_storage::StoredMessage {
+                    id: id.into(),
+                    peer_npub: peer.clone(),
+                    content: "hi".into(),
+                    created_at: at,
+                    outgoing: false,
+                    status: None,
+                    reply_to: None,
+                })
+                .unwrap();
+        };
+        save("in1", 100);
+        save("in2", 200);
+
+        // First visit: nothing had been read, so the UI gets 0 and opens at the
+        // newest message with no divider.
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 0);
+        assert_eq!(store.read_position(&peer).unwrap(), 200);
+
+        // Two more arrive while away; re-opening reports where they had been,
+        // which is what the divider is drawn from.
+        save("in3", 300);
+        save("in4", 400);
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 200);
+        assert_eq!(store.read_position(&peer).unwrap(), 400);
+
+        // Re-opening with nothing new still reports the position, so a thread
+        // with no unread messages simply opens at the bottom.
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 400);
+    }
+
+    #[tokio::test]
+    async fn marking_a_pending_request_read_records_nothing() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        let store = rt.ui.store_ref().unwrap();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "pending".into(),
+                profile_shared: false,
+                last_read_at: 0,
+                updated_at: 1,
+            })
+            .unwrap();
+        store
+            .save_message(&comrade_storage::StoredMessage {
+                id: "in1".into(),
+                peer_npub: peer.clone(),
+                content: "hi, can we talk?".into(),
+                created_at: 5,
+                outgoing: false,
+                status: None,
+                reply_to: None,
+            })
+            .unwrap();
+
+        // Not just "no receipt": no *stored* position either. Recording one
+        // would be a local trace that we read a request before deciding on it,
+        // and it would survive into the accepted thread.
+        assert_eq!(rt.mark_conversation_read(&peer).unwrap(), 0);
+        assert_eq!(store.read_position(&peer).unwrap(), 0);
+        let meta = store.get_conversation_meta(&peer).unwrap().unwrap();
+        assert_eq!(meta.state, "pending");
+    }
+
+    #[tokio::test]
     async fn blocked_peer_is_hidden_from_both_lists() {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
@@ -5304,6 +5702,211 @@ mod tests {
         rt.block_conversation(&peer).unwrap();
         assert!(rt.conversations().unwrap().is_empty());
         assert!(rt.message_requests().unwrap().is_empty());
+    }
+
+    /// Persist an attachment reference exactly as the send/receive paths do.
+    fn save_media_ref(
+        store: &comrade_storage::EncryptedStore,
+        event_id: &str,
+        peer_hex: &str,
+        caption: &str,
+        created_at: u64,
+        outgoing: bool,
+    ) {
+        store
+            .put(
+                MEDIA_REFS_TREE,
+                event_id,
+                &MediaRef {
+                    event_id: event_id.into(),
+                    url: "https://blob.example/x".into(),
+                    peer_pubkey: peer_hex.into(),
+                    mime_type: "image/jpeg".into(),
+                    caption: caption.into(),
+                    size: 1234,
+                    sha256_hex: "a".repeat(64),
+                    outgoing,
+                    created_at,
+                },
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_thread_of_only_attachments_still_appears_in_the_chat_list() {
+        // Media references are not stored as messages, so a chat list built from
+        // messages alone made a photo-only conversation invisible — the thread
+        // existed, the photo was in the store, and the list showed nothing.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (hex, peer) = stranger();
+        let store = rt.ui.store_ref().unwrap();
+        accepted_peer(store, &peer, false);
+        save_media_ref(store, "m1", &hex, "sunset.jpg", 100, false);
+
+        let convos = rt.conversations().unwrap();
+        assert_eq!(convos.len(), 1);
+        assert_eq!(convos[0].peer, peer);
+        assert_eq!(convos[0].last_message, "📎 sunset.jpg");
+        assert_eq!(convos[0].last_at, 100);
+        assert!(!convos[0].last_outgoing);
+    }
+
+    #[tokio::test]
+    async fn the_chat_list_preview_follows_whichever_is_newer() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (hex, peer) = stranger();
+        let store = rt.ui.store_ref().unwrap();
+        accepted_peer(store, &peer, false);
+        store
+            .save_message(&comrade_storage::StoredMessage {
+                id: "in1".into(),
+                peer_npub: peer.clone(),
+                content: "look at this".into(),
+                created_at: 100,
+                outgoing: false,
+                status: None,
+                reply_to: None,
+            })
+            .unwrap();
+
+        // Older attachment: the text still wins.
+        save_media_ref(store, "m1", &hex, "old.jpg", 50, false);
+        assert_eq!(rt.conversations().unwrap()[0].last_message, "look at this");
+
+        // Newer attachment, sent by us: the row becomes the attachment, and
+        // `last_outgoing` follows it (the list renders a "You: " prefix from it).
+        save_media_ref(store, "m2", &hex, "", 150, true);
+        let convo = &rt.conversations().unwrap()[0];
+        assert_eq!(convo.last_message, "📎 Attachment");
+        assert_eq!(convo.last_at, 150);
+        assert!(convo.last_outgoing);
+    }
+
+    #[tokio::test]
+    async fn a_stranger_whose_only_contact_was_an_attachment_is_a_previewable_request() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (hex, peer) = stranger();
+        let store = rt.ui.store_ref().unwrap();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: STATE_PENDING.into(),
+                profile_shared: false,
+                last_read_at: 0,
+                updated_at: 1,
+            })
+            .unwrap();
+        save_media_ref(store, "m1", &hex, "receipt.pdf", 42, false);
+
+        // Gated out of the chat list...
+        assert!(rt.conversations().unwrap().is_empty());
+        // ...and a request with a real preview rather than an empty line.
+        let reqs = rt.message_requests().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].peer, peer);
+        assert_eq!(reqs[0].last_message, "📎 receipt.pdf");
+        assert_eq!(reqs[0].last_at, 42);
+    }
+
+    #[tokio::test]
+    async fn sending_media_refuses_an_empty_or_unusable_payload_before_uploading() {
+        // These must fail *before* the network: the alternative is paying for an
+        // upload and putting an undecodable bubble in both people's threads.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+
+        let empty = rt
+            .upload_and_send_media(&peer, vec![], "image/png", "")
+            .await;
+        assert!(matches!(empty, Err(UiError::Engine(_))), "empty payload");
+
+        let no_mime = rt
+            .upload_and_send_media(&peer, vec![1, 2, 3], "  ", "")
+            .await;
+        assert!(matches!(no_mime, Err(UiError::Engine(_))), "blank MIME");
+
+        let oversized = rt
+            .upload_and_send_media(&peer, vec![0u8; MAX_MEDIA_BYTES + 1], "image/png", "")
+            .await;
+        assert!(matches!(oversized, Err(UiError::Engine(_))), "over the cap");
+    }
+
+    #[tokio::test]
+    async fn incoming_media_is_sanitised_before_it_is_stored_or_surfaced() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let envelope = serde_json::to_string(&MediaEnvelope {
+            comrade_media: 1,
+            event_id: "m1".into(),
+            url: "https://blob.example/x".into(),
+            // A peer can claim anything; the type decides which renderer every
+            // frontend reaches for.
+            mime: "IMAGE/JPEG".into(),
+            caption: "holiday\r\nDelivered ✓✓".into(),
+            size: 10,
+            sha256_hex: "a".repeat(64),
+        })
+        .unwrap();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            incoming(&hex, "e1", &envelope),
+        );
+
+        let stored: MediaRef = store.get(MEDIA_REFS_TREE, "m1").unwrap().unwrap();
+        assert_eq!(stored.mime_type, "image/jpeg");
+        assert_eq!(stored.caption, "holidayDelivered ✓✓");
+        match rx.try_recv().unwrap() {
+            BridgeEvent::IncomingMedia(m) => {
+                assert_eq!(m.mime_type, "image/jpeg");
+                assert_eq!(m.caption, "holidayDelivered ✓✓");
+                assert_eq!(m.sender, peer);
+                assert!(!m.outgoing);
+            }
+            other => panic!("expected IncomingMedia, got {other:?}"),
+        }
+
+        // An unusable MIME type downgrades the renderer; it never drops the
+        // attachment (the blob still downloads and opens).
+        let odd = serde_json::to_string(&MediaEnvelope {
+            comrade_media: 1,
+            event_id: "m2".into(),
+            url: "https://blob.example/y".into(),
+            mime: "not a mime type".into(),
+            caption: String::new(),
+            size: 10,
+            sha256_hex: String::new(),
+        })
+        .unwrap();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            incoming(&hex, "e2", &odd),
+        );
+        let stored: MediaRef = store.get(MEDIA_REFS_TREE, "m2").unwrap().unwrap();
+        assert_eq!(stored.mime_type, DEFAULT_MIME);
     }
 
     #[tokio::test]
@@ -5551,6 +6154,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -5628,6 +6232,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "blocked".into(),
                 profile_shared: false,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -5687,6 +6292,7 @@ mod tests {
                 peer_npub: peer.to_string(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -5742,6 +6348,39 @@ mod tests {
             Err(UiError::Engine(_))
         ));
         assert!(matches!(rt.peer_presence("junk"), Err(UiError::Engine(_))));
+    }
+
+    #[tokio::test]
+    async fn a_presence_event_carries_a_usable_name_or_none_at_all() {
+        // The name rides the event so a frontend can title a notification
+        // without a store round-trip — which makes a blank one worse than
+        // useless ("  is online"). Alias wins, a published handle is next,
+        // and anything whitespace-only is no name at all.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        let store = rt.ui.store_arc().unwrap();
+
+        assert_eq!(presence_display_name(&store, &peer), None, "no contact yet");
+
+        rt.set_comrade(&peer, true).unwrap();
+        assert_eq!(
+            presence_display_name(&store, &peer),
+            None,
+            "choosing someone doesn't invent a name for them"
+        );
+
+        store.set_contact_comrade(&peer, true).unwrap();
+        rt.set_contact_alias(&peer, "   ").unwrap();
+        assert_eq!(
+            presence_display_name(&store, &peer),
+            None,
+            "a whitespace alias is not a name"
+        );
+
+        rt.set_contact_alias(&peer, "  Ana  ").unwrap();
+        assert_eq!(presence_display_name(&store, &peer).as_deref(), Some("Ana"));
     }
 
     #[tokio::test]
@@ -6023,6 +6662,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6079,6 +6719,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6115,6 +6756,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6315,6 +6957,7 @@ mod tests {
                 peer_npub: peer.clone(),
                 state: "accepted".into(),
                 profile_shared: true,
+                last_read_at: 0,
                 updated_at: 1,
             })
             .unwrap();
@@ -6381,6 +7024,81 @@ mod tests {
             Some("failed"),
             "a dropped message must stop showing as in flight"
         );
+    }
+
+    #[tokio::test]
+    async fn a_queued_media_reference_retries_like_text_and_never_becomes_a_chat_bubble() {
+        // The reference to an uploaded blob is ordinary DM content, so it rides
+        // the same store-and-forward queue as text. What it must *not* do is
+        // acquire a stored message row: the flush loop's re-key step would turn
+        // the envelope's JSON into a chat bubble and the chat list's preview.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let envelope = serde_json::to_string(&MediaEnvelope {
+            comrade_media: 1,
+            event_id: "m1".into(),
+            url: "https://blob.example/x".into(),
+            mime: "image/jpeg".into(),
+            caption: "sunset.jpg".into(),
+            size: 1234,
+            sha256_hex: "a".repeat(64),
+        })
+        .unwrap();
+        rt.outbox
+            .queue(QueuedMessage::new("m1", &peer, &envelope, None, now_secs()));
+
+        // No relay will take it: attempted, kept, counted — same as text.
+        assert_eq!(rt.flush_outbox().await.unwrap(), 0);
+        assert_eq!(
+            rt.outbox_pending(),
+            1,
+            "a media reference no relay accepted must be retried, not dropped"
+        );
+        assert!(
+            rt.messages_with(&peer).unwrap().is_empty(),
+            "a media envelope must never appear in the thread as text"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_media_reference_is_reported_failed_against_its_conversation() {
+        // The reaping pass names a failed message by id and looks its peer up
+        // from the stored row. A media reference has no stored row, so before
+        // this its expiry was silent — the sender was never told the photo
+        // never went out.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let envelope = serde_json::to_string(&MediaEnvelope {
+            comrade_media: 1,
+            event_id: "m1".into(),
+            url: "https://blob.example/x".into(),
+            mime: "image/jpeg".into(),
+            caption: String::new(),
+            size: 1,
+            sha256_hex: String::new(),
+        })
+        .unwrap();
+        let stale = now_secs() - comrade_core::dak::outbox::TTL_SECS - 1;
+        rt.outbox
+            .queue(QueuedMessage::new("m1", &peer, &envelope, None, stale));
+
+        let mut rx = rt.subscribe_events();
+        rt.flush_outbox().await.unwrap();
+        assert_eq!(rt.outbox_pending(), 0, "expired mail is reaped");
+        match rx.try_recv().unwrap() {
+            BridgeEvent::MessageStatus {
+                peer: event_peer,
+                message_ids,
+                status,
+            } => {
+                assert_eq!(event_peer, peer);
+                assert_eq!(message_ids, vec!["m1".to_string()]);
+                assert_eq!(status, STATUS_FAILED);
+            }
+            other => panic!("expected a failed MessageStatus, got {other:?}"),
+        }
     }
 
     #[tokio::test]

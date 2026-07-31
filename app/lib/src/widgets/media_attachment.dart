@@ -34,7 +34,8 @@ import '../util/display_name.dart';
 /// The default refuses rather than pretending: a button that silently does
 /// nothing is worse than one that says it isn't wired yet.
 abstract interface class MediaPlaybackDelegate {
-  /// Play (or pause) decrypted audio bytes. Returns whether playback started.
+  /// Play (or pause) decrypted audio bytes. Returns whether it is *playing*
+  /// after the call, so a bubble can render play/pause from the answer.
   Future<bool> toggleAudio(String eventId, MediaBytes bytes);
 
   /// Hand decrypted bytes to the platform's own viewer.
@@ -42,6 +43,12 @@ abstract interface class MediaPlaybackDelegate {
 
   /// A widget playing decrypted video, or `null` if unsupported here.
   Widget? videoPlayer(String eventId, MediaBytes bytes);
+
+  /// Drop every decrypted plaintext the *platform* side is holding — a playing
+  /// audio buffer, anything staged for an external viewer. Called together with
+  /// [DecryptedMediaCache.clear] when the app leaves the foreground or the vault
+  /// locks (see [purgeDecryptedMedia]).
+  Future<void> purge();
 }
 
 class UnsupportedMediaPlayback implements MediaPlaybackDelegate {
@@ -55,6 +62,9 @@ class UnsupportedMediaPlayback implements MediaPlaybackDelegate {
 
   @override
   Widget? videoPlayer(String eventId, MediaBytes bytes) => null;
+
+  @override
+  Future<void> purge() async {}
 }
 
 final Provider<MediaPlaybackDelegate> mediaPlaybackProvider =
@@ -100,6 +110,22 @@ final Provider<DecryptedMediaCache> decryptedMediaCacheProvider =
   ref.onDispose(cache.clear);
   return cache;
 });
+
+/// Drop every decrypted attachment this app is holding, on both sides of the
+/// platform boundary, and invalidate the futures that served them so the next
+/// view re-fetches rather than reading a disposed cache.
+///
+/// Called when the app leaves the foreground and when the vault locks. Compose
+/// had `purgeDecryptedMedia(context)` for the same reason (AUDIT S-4) and it had
+/// files to delete; here there are none — this is memory only, which is why the
+/// property holds even if the call is missed. It is still made, because a
+/// screenshot of the recents thumbnail, or a phone handed over unlocked, should
+/// not come with the last photo someone sent you.
+Future<void> purgeDecryptedMedia(WidgetRef ref) async {
+  ref.read(decryptedMediaCacheProvider).clear();
+  ref.invalidate(decryptedMediaProvider);
+  await ref.read(mediaPlaybackProvider).purge();
+}
 
 /// Fetch + decrypt an attachment once, then serve it from the cache.
 final FutureProviderFamily<MediaBytes, String> decryptedMediaProvider =
@@ -235,6 +261,13 @@ enum _Kind { audio, video, file }
 
 /// Audio, video, and generic files: decrypt on an explicit tap
 /// (bandwidth-conscious), then hand off to the platform delegate.
+///
+/// Video has a two-step fallback rather than one refusal. An in-app player
+/// needs a PlatformView and a media engine, so [MediaPlaybackDelegate.videoPlayer]
+/// is allowed to return null — and when it does, the bytes go to the system
+/// player through [MediaPlaybackDelegate.openExternally] (from memory, never a
+/// file). A received video is watchable either way; only a platform with neither
+/// gets the honest "not wired up here" line.
 class _TapToLoad extends ConsumerStatefulWidget {
   const _TapToLoad({required this.info, required this.kind});
 
@@ -250,6 +283,9 @@ class _TapToLoadState extends ConsumerState<_TapToLoad> {
   String? _error;
   Widget? _player;
 
+  /// Playing, for audio only — the glyph is a pause while it is.
+  bool _playing = false;
+
   Future<void> _activate() async {
     if (_loading) return;
     setState(() {
@@ -262,24 +298,31 @@ class _TapToLoadState extends ConsumerState<_TapToLoad> {
       final MediaPlaybackDelegate delegate = ref.read(mediaPlaybackProvider);
       switch (widget.kind) {
         case _Kind.audio:
-          final bool ok =
+          // "Not playing" after a toggle means *paused* if it was playing
+          // before, and "no audio support here" if it was not. Without the
+          // distinction, pausing a voice note would claim the platform cannot
+          // play it.
+          final bool wasPlaying = _playing;
+          final bool playing =
               await delegate.toggleAudio(widget.info.eventId, bytes);
-          if (!ok) {
+          _playing = playing;
+          if (!playing && !wasPlaying) {
             _error = 'Audio playback is not wired up on this platform yet.';
           }
         case _Kind.video:
           final Widget? player =
               delegate.videoPlayer(widget.info.eventId, bytes);
-          if (player == null) {
-            _error = 'Video playback is not wired up on this platform yet.';
-          } else {
+          if (player != null) {
             _player = player;
+          } else if (!await delegate.openExternally(
+              widget.info.eventId, bytes)) {
+            _error = 'Nothing on this device can play this video.';
           }
         case _Kind.file:
           final bool ok =
               await delegate.openExternally(widget.info.eventId, bytes);
           if (!ok) {
-            _error = 'No handler for this file type on this platform yet.';
+            _error = 'No app on this device can open this file.';
           }
       }
     } on ComradeException catch (e) {
@@ -296,12 +339,12 @@ class _TapToLoadState extends ConsumerState<_TapToLoad> {
       return AspectRatio(aspectRatio: 16 / 9, child: _player);
     }
     final String label = switch (widget.kind) {
-      _Kind.audio => 'Voice message',
+      _Kind.audio => _playing ? 'Playing…' : 'Voice message',
       _Kind.video => 'Tap to load video',
       _Kind.file => 'Open ${widget.info.mimeType.split('/').last}',
     };
     final IconData icon = switch (widget.kind) {
-      _Kind.audio => Icons.play_arrow,
+      _Kind.audio => _playing ? Icons.pause : Icons.play_arrow,
       _Kind.video => Icons.movie_outlined,
       _Kind.file => Icons.download_outlined,
     };
@@ -340,6 +383,79 @@ class _TapToLoadState extends ConsumerState<_TapToLoad> {
 abstract interface class AttachmentPicker {
   Future<PickedAttachment?> pick();
 }
+
+/// Capturing something new, rather than choosing something that exists.
+///
+/// The two `can…` getters exist so the composer can *omit* a control instead of
+/// offering one that fails on tap — the settings screen's "no fake switches"
+/// rule, applied to the camera button.
+abstract interface class MediaCaptureDelegate {
+  bool get canCapturePhoto;
+  bool get canCaptureVideo;
+
+  /// `null` when the user backed out without capturing.
+  Future<PickedAttachment?> capturePhoto();
+
+  Future<PickedAttachment?> captureVideo();
+}
+
+class NoMediaCapture implements MediaCaptureDelegate {
+  const NoMediaCapture();
+
+  @override
+  bool get canCapturePhoto => false;
+
+  @override
+  bool get canCaptureVideo => false;
+
+  @override
+  Future<PickedAttachment?> capturePhoto() async => null;
+
+  @override
+  Future<PickedAttachment?> captureVideo() async => null;
+}
+
+final Provider<MediaCaptureDelegate> mediaCaptureProvider =
+    Provider<MediaCaptureDelegate>((Ref ref) => const NoMediaCapture());
+
+/// Recording a voice note — the Telegram mic button's engine.
+///
+/// Android's Compose composer had this as press-and-hold; the unified composer
+/// makes it tap-to-start / tap-to-send instead, because press-and-hold has no
+/// discoverable equivalent with a mouse (divergence D13, revisited: the
+/// *feature* was the part worth keeping, the gesture was not).
+abstract interface class VoiceNoteRecorder {
+  bool get available;
+
+  /// Begin capturing. False when the recorder could not be set up (mic busy, no
+  /// mic, permission refused) — nothing to clean up on that path.
+  Future<bool> start();
+
+  /// Stop and return the note, or `null` when the press was too short to be one.
+  Future<PickedAttachment?> stop();
+
+  /// Abort and discard.
+  Future<void> cancel();
+}
+
+class NoVoiceNoteRecorder implements VoiceNoteRecorder {
+  const NoVoiceNoteRecorder();
+
+  @override
+  bool get available => false;
+
+  @override
+  Future<bool> start() async => false;
+
+  @override
+  Future<PickedAttachment?> stop() async => null;
+
+  @override
+  Future<void> cancel() async {}
+}
+
+final Provider<VoiceNoteRecorder> voiceNoteRecorderProvider =
+    Provider<VoiceNoteRecorder>((Ref ref) => const NoVoiceNoteRecorder());
 
 class PickedAttachment {
   const PickedAttachment({

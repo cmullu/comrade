@@ -364,9 +364,14 @@ object ComradeCore {
         rethrowing("Block") { ffi.blockConversation(peer) }
     }
 
-    fun markConversationReadTyped(peer: String) {
-        rethrowing("Mark read") { runBlocking { ffi.markConversationRead(peer) } }
-    }
+    /**
+     * Mark the thread read and get back the position the reader had reached
+     * *before* this call — `createdAt` of the newest message they had already
+     * seen, or 0 on a first visit. Drives the open-at-first-unread rule
+     * (`firstUnreadIndex`).
+     */
+    fun markConversationReadTyped(peer: String): Long =
+        rethrowing("Mark read") { runBlocking { ffi.markConversationRead(peer) }.toLong() }
 
     // ── Profile & contacts ────────────────────────────────────────────────────
 

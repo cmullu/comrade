@@ -11,20 +11,17 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallUiState
+import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.shortNpub
 import uniffi.comrade_ui.BridgeEvent
 
@@ -38,16 +35,16 @@ import uniffi.comrade_ui.BridgeEvent
  * deliberately minimal notification Android requires for one) buys the
  * process a real priority floor for as long as this runs.
  *
- * This is also, now, the **sole** consumer of [ComradeCore.pollEvent] — it
- * used to be drained from inside [MainActivity]'s Compose tree
- * (Activity-scoped, so it stopped the moment nothing was visible, and would
- * have raced a second drainer had one ever been added). Moving the drain
- * loop here, with [ChatEventRouter] holding the resulting state as
- * `StateFlow`s the UI observes instead of running its own pump, is what
- * makes "Activity recreation never creates duplicate listeners or duplicate
- * notifications" hold structurally: there is exactly one drain loop, owned
- * by this service, independent of how many times `MainActivity` is
- * recreated.
+ * It is **not** where the native event queue is drained. That loop lives in
+ * [EventPump], which any component can hold open — this service while it
+ * runs, an Activity while it is visible. The distinction matters because this
+ * service is gated on a user preference: when it owned the loop, turning
+ * "stay connected in the background" off stopped delivery *entirely*, even
+ * with the app on screen, which is the opposite of what that setting says.
+ * [EventPump] still guarantees exactly one loop no matter how many holders
+ * there are, so the property this service was introduced for — an Activity
+ * recreation can never duplicate listeners or notifications — still holds
+ * structurally.
  *
  * ## Lifecycle
  * Started ([start]) once the vault is unlocked (see `ComradeApp`'s
@@ -73,7 +70,6 @@ import uniffi.comrade_ui.BridgeEvent
  */
 class RelayConnectionService : Service() {
 
-    private var pumpJob: Job? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
@@ -83,16 +79,17 @@ class RelayConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundNotified()
-        if (pumpJob == null) {
-            pumpJob = scope.launch { pump() }
-        }
+        // Delivery must outlive the visible app from here on.
+        EventPump.acquire(applicationContext, PumpHolder.SERVICE)
+        // Only ever started after an unlock, so the store is readable now.
+        scope.launch { ChatEventRouter.seedFromStore() }
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        pumpJob?.cancel()
-        pumpJob = null
+        // A visible Activity may still need the loop; the pump decides.
+        EventPump.release(PumpHolder.SERVICE)
         scope.cancel()
     }
 
@@ -126,48 +123,8 @@ class RelayConnectionService : Service() {
         }
     }
 
-    /**
-     * Seed offline-first state, then drain [ComradeCore.pollEvent] until
-     * cancelled. Draining is immediate while events are queued (no
-     * artificial batching delay a call/DM would sit behind) and only backs
-     * off to [POLL_IDLE_MS] once the queue is actually empty.
-     */
-    private suspend fun pump() {
-        val cached = withContext(Dispatchers.IO) {
-            runCatching { ComradeCore.sabhaTimeline() }.getOrDefault(emptyList())
-        }
-        ChatEventRouter.seedCachedFeed(cached)
-
-        val initialMesh = withContext(Dispatchers.IO) {
-            runCatching { ComradeCore.meshStatusTyped() }
-                .getOrDefault(ComradeCore.MeshStatus(active = false, peerCount = 0))
-        }
-        MeshStatusMonitor.update(initialMesh)
-
-        // Seed the comrade dots from what the store already knows (a beacon
-        // that arrived before this launch may still be live), so the chat list
-        // is right on the first frame rather than after the next beacon.
-        val comrades = withContext(Dispatchers.IO) {
-            runCatching { ComradeCore.comrades() }.getOrDefault(emptyList())
-        }
-        PresenceMonitor.seed(comrades)
-
-        ChatEventRouter.maybeRefreshNames()
-
-        val appContext = applicationContext
-        while (currentCoroutineContext().isActive) {
-            val event = ComradeCore.pollEvent()
-            if (event == null) {
-                delay(POLL_IDLE_MS)
-                continue
-            }
-            ChatEventRouter.route(appContext, event)
-        }
-    }
-
     companion object {
         private const val NOTIFICATION_ID = 0xC0A1EC7
-        private const val POLL_IDLE_MS = 200L
 
         /** Start the service — a no-op if the user has disabled the feature. */
         fun start(context: Context) {
@@ -275,6 +232,38 @@ object ChatEventRouter {
     }
 
     /**
+     * Fill the observable state from what the encrypted store already knows,
+     * so the first frame after an unlock is right rather than empty: the
+     * cached public feed, the mesh indicator, and the comrade dots (a beacon
+     * that arrived before this launch may still be live).
+     *
+     * Called on the vault-unlocked transition and by
+     * [RelayConnectionService.onStartCommand]; safe to run more than once —
+     * feed items dedup by id, and the two monitors take whole snapshots.
+     * Every read is `runCatching`-guarded, so a locked or busy store degrades
+     * to "nothing seeded" instead of failing the caller.
+     */
+    suspend fun seedFromStore() {
+        val cached = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.sabhaTimeline() }.getOrDefault(emptyList())
+        }
+        seedCachedFeed(cached)
+
+        val initialMesh = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.meshStatusTyped() }
+                .getOrDefault(ComradeCore.MeshStatus(active = false, peerCount = 0))
+        }
+        MeshStatusMonitor.update(initialMesh)
+
+        val comrades = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.comrades() }.getOrDefault(emptyList())
+        }
+        PresenceMonitor.seed(comrades)
+
+        maybeRefreshNames()
+    }
+
+    /**
      * Fetch peers' published @handles so chats are titled by name instead of
      * key — single-flight and rate-limited (the Rust side is also
      * TTL-gated), and never awaited by [RelayConnectionService.pump], so a
@@ -297,6 +286,38 @@ object ChatEventRouter {
         }
     }
 
+    /**
+     * How a peer should be titled in a notification: the alias the user gave
+     * them, else the @handle they published, else the shortened key — the
+     * same precedence [mullu.comrade.ui.peerTitle] applies on every screen,
+     * so the shade and the app never disagree about who someone is.
+     *
+     * Contacts first because that read is a small tree; the conversation list
+     * is only consulted for a peer who was accepted but never saved (an
+     * accepted message request), and both fall back to the key on any
+     * failure — a notification must never be lost to a naming lookup.
+     */
+    fun peerLabel(peer: String): String {
+        val contact = runCatching { ComradeCore.contacts() }.getOrDefault(emptyList())
+            .find { it.npub == peer }
+        if (contact != null) return peerTitle(peer, contact.alias, contact.name)
+        val convo = runCatching { ComradeCore.conversations() }.getOrDefault(emptyList())
+            .find { it.peer == peer }
+        return peerTitle(peer, convo?.alias, convo?.peerName)
+    }
+
+    /**
+     * Whether a message from [peer] may raise a notification — the thread on
+     * screen and the per-conversation mute, in one place so DMs and attachments
+     * cannot drift apart. The rule itself is [NotificationPolicy.shouldNotifyMessage].
+     */
+    private fun mayNotify(context: Context, peer: String): Boolean =
+        NotificationPolicy.shouldNotifyMessage(
+            peer = peer,
+            openConversationPeer = _openConversationPeer.value,
+            muted = MutedChats.isMuted(context, peer),
+        )
+
     private fun uniffi.comrade_ui.ChitthiDto.toInfo() = ComradeCore.ChitthiInfo(
         id = id,
         author = author,
@@ -312,11 +333,11 @@ object ChatEventRouter {
             is BridgeEvent.IncomingDirectMessage -> {
                 _chatTick.update { it + 1 }
                 val peer = event.v1.sender
-                if (peer != _openConversationPeer.value) {
+                if (mayNotify(context, peer)) {
                     Notifier.notifyMessage(
                         context,
                         peer,
-                        shortNpub(peer),
+                        peerLabel(peer),
                         event.v1.content.ifBlank { "New message" },
                     )
                 }
@@ -328,11 +349,11 @@ object ChatEventRouter {
             is BridgeEvent.IncomingMedia -> {
                 _chatTick.update { it + 1 }
                 val peer = event.v1.sender
-                if (peer != _openConversationPeer.value) {
+                if (mayNotify(context, peer)) {
                     Notifier.notifyMessage(
                         context,
                         peer,
-                        shortNpub(peer),
+                        peerLabel(peer),
                         "📎 " + event.v1.caption.ifBlank { "Attachment" },
                     )
                 }
@@ -346,18 +367,34 @@ object ChatEventRouter {
                 maybeRefreshNames()
             }
             is BridgeEvent.ComradePresence -> {
-                val becameOnline = PresenceMonitor.update(event.peer, event.online)
+                val becameOnline = PresenceMonitor.update(
+                    peer = event.peer,
+                    online = event.online,
+                    at = event.at.toLong(),
+                )
                 // The chat list carries the dot too, so it has to re-read.
                 _chatTick.update { it + 1 }
-                // Don't tell someone their comrade is around while they are
-                // literally looking at that conversation — same rule the DM
-                // notification follows.
-                if (becameOnline && event.peer != _openConversationPeer.value) {
-                    Notifier.notifyComradeOnline(
-                        context,
-                        event.peer,
-                        event.name ?: shortNpub(event.peer),
+                if (!event.online) {
+                    // They left before the user got to the notice — a shade
+                    // still saying "Ana is online" would invite a call to
+                    // someone who isn't there.
+                    Notifier.clearComradeOnline(context, event.peer)
+                } else if (
+                    NotificationPolicy.shouldNotifyPresence(
+                        peer = event.peer,
+                        openConversationPeer = _openConversationPeer.value,
+                        muted = MutedChats.isMuted(context, event.peer),
+                        becameOnline = becameOnline,
                     )
+                ) {
+                    // Don't tell someone their comrade is around while they
+                    // are literally looking at that conversation — same rule
+                    // the DM notification follows. The event's own name is
+                    // the core's view at send time; fall back to a fresh
+                    // store lookup so the title is a name whenever one
+                    // exists at all.
+                    val title = event.name?.takeIf { it.isNotBlank() } ?: peerLabel(event.peer)
+                    Notifier.notifyComradeOnline(context, event.peer, title)
                 }
             }
             is BridgeEvent.MeshStatusChanged -> MeshStatusMonitor.update(

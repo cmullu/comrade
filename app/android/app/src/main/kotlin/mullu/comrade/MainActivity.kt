@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import mullu.comrade.call.CallManager
 import mullu.comrade.call.PipController
+import mullu.comrade.update.UpdateChecker
 
 /**
  * The single Activity hosting the Flutter UI.
@@ -25,7 +26,8 @@ import mullu.comrade.call.PipController
  *
  *  1. registering this Activity's window with [CallStateReactor] so an
  *     incoming call can light the screen over the keyguard;
- *  2. forwarding a notification's `AppNavigation.EXTRA_OPEN_TAB` to Dart;
+ *  2. forwarding a notification's `AppNavigation.EXTRA_OPEN_TAB` /
+ *     `EXTRA_OPEN_PEER` to Dart;
  *  3. the picture-in-picture callbacks — `onUserLeaveHint` and
  *     `onPictureInPictureModeChanged` are delivered to the Activity and
  *     nowhere else.
@@ -47,8 +49,15 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Screenshots are allowed unless the user asked for them to be blocked.
+        // Applied here, before the first frame, because the preference has to
+        // hold before any Flutter engine exists — a window that starts
+        // unprotected and is secured a frame later has already been captured by
+        // the recents thumbnail. See ScreenSecurityChannel for why the
+        // Compose app's unconditional FLAG_SECURE is gone.
+        ScreenSecurity.applyPreference(this)
         CallStateReactor.attachActivity(this)
-        forwardRequestedTab(intent)
+        forwardNavigationRequest(intent)
         // A video call that starts (or ends) has to update the platform's
         // auto-enter flag, or swiping home lands on the wrong behaviour.
         scope.launch {
@@ -102,16 +111,20 @@ class MainActivity : FlutterActivity() {
     override fun onStart() {
         super.onStart()
         PipController.onWindowVisibilityChanged(visible = true)
+        // At most one request a day, and none at all with the preference off
+        // (see UpdateChecker) — the same trigger point the Compose app uses, so
+        // both frontends check on exactly the same schedule.
+        UpdateChecker.maybeCheck(this)
     }
 
     /**
      * `launchMode="singleTop"` (see the manifest) means a second tap on a
      * notification re-delivers here rather than creating a new Activity, so the
-     * tab extra has to be read from both entry points.
+     * navigation extras have to be read from both entry points.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        forwardRequestedTab(intent)
+        forwardNavigationRequest(intent)
     }
 
     override fun onDestroy() {
@@ -123,10 +136,15 @@ class MainActivity : FlutterActivity() {
     /**
      * Fire-and-forget. If the engine is not attached yet (a cold start from a
      * notification is exactly that case), `SystemChannel` stashes the request
-     * and Dart picks it up with `consumePendingTab` once it is running.
+     * and Dart picks it up with `consumePendingTab`/`consumePendingPeer` once it
+     * is running.
+     *
+     * Both extras are read, not one or the other: a tapped message notification
+     * carries a peer, a tapped model/update notification carries a tab, and a
+     * future notification could reasonably carry both.
      */
-    private fun forwardRequestedTab(intent: Intent?) {
-        val tab = intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB) ?: return
-        plugin.systemChannel?.requestTab(tab)
+    private fun forwardNavigationRequest(intent: Intent?) {
+        intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB)?.let { plugin.systemChannel?.requestTab(it) }
+        intent?.getStringExtra(AppNavigation.EXTRA_OPEN_PEER)?.let { plugin.systemChannel?.requestPeer(it) }
     }
 }

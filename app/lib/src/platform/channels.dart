@@ -42,7 +42,21 @@ abstract final class Channels {
 
   static const recorder = 'mullu.comrade/recorder';
 
+  /// Attachments: pick, capture, play in memory, hand to another app.
+  static const media = 'mullu.comrade/media';
+
+  /// `FLAG_SECURE` — a *window* concern like [pip], not a media one. Screenshots
+  /// are allowed by default; this carries the user's opt-in block and any
+  /// screen-scoped hold.
+  static const screen = 'mullu.comrade/screen';
+
   static const system = 'mullu.comrade/system';
+
+  /// The in-app update check. Control + a state stream, like the model
+  /// downloads: the answer can arrive long after the request, and it must
+  /// survive an engine detach in between.
+  static const updates = 'mullu.comrade/updates';
+  static const updatesState = 'mullu.comrade/updates/state';
 }
 
 /// Stable `PlatformException.code` values. The `message` is for humans and may

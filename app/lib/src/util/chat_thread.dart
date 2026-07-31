@@ -48,6 +48,40 @@ bool isNearBottom({
 }) =>
     totalCount <= 0 || lastVisibleIndex >= totalCount - 1 - slack;
 
+/// Where to open a thread: the index of the first message the user has not
+/// seen, or `null` for "open at the newest message".
+///
+/// Telegram's rule. [lastReadAt] is the `createdAt` of the newest message they
+/// had already seen (what `markConversationRead` hands back). An item counts as
+/// unread only if it is *newer* than that **and** came from the peer — your own
+/// messages are read by definition, and a thread whose only new items are
+/// things you sent from another device must not claim unread mail.
+///
+/// `null` for a first visit ([lastReadAt] of 0) on purpose: with no record of
+/// where someone left off there is no honest "where you left off", and dropping
+/// them at the top of a long history would be worse than the newest message.
+///
+/// [createdAt] must be the same time-ordered merge the thread renders, so the
+/// returned index addresses the list the caller is about to scroll.
+int? firstUnreadIndex({
+  required List<int> createdAt,
+  required List<bool> outgoing,
+  required int lastReadAt,
+}) {
+  if (lastReadAt <= 0) return null;
+  for (int i = 0; i < createdAt.length; i++) {
+    final bool isOutgoing = i < outgoing.length && outgoing[i];
+    if (createdAt[i] > lastReadAt && !isOutgoing) return i;
+  }
+  return null;
+}
+
+/// Whether an "unread messages" divider belongs above the item at [index] —
+/// true only for the boundary itself, so the caller can render it inline while
+/// walking the list.
+bool startsUnread(int index, int? firstUnread) =>
+    firstUnread != null && index == firstUnread;
+
 /// Pixel-space equivalent of [isNearBottom] for Flutter's scrollable, which
 /// reports offsets rather than item indices.
 ///

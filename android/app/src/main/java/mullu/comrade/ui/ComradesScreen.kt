@@ -1,5 +1,6 @@
 package mullu.comrade.ui
 
+import android.text.format.DateFormat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,7 +30,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -87,7 +90,7 @@ fun ComradesScreen(
     var reloadTick by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val onlineNow by PresenceMonitor.online.collectAsState()
+    val presenceNow by PresenceMonitor.presence.collectAsState()
 
     LaunchedEffect(chatTick, reloadTick) {
         val (chosen, all) = withContext(Dispatchers.IO) {
@@ -154,12 +157,20 @@ fun ComradesScreen(
         items(chosen, key = { "comrade:" + it.npub }) { comrade ->
             // Prefer the live flow over the snapshot this screen loaded, so a
             // beacon arriving while it is open moves the dot immediately.
-            val online = onlineNow[comrade.npub] ?: comrade.online
+            val live = presenceNow[comrade.npub]
+            val online = live?.online ?: comrade.online
             ComradeRow(
                 title = peerTitle(comrade.npub, comrade.alias, comrade.name),
                 seed = comrade.npub,
                 online = online,
-                subtitle = presenceSubtitle(online, comrade.lastSeenAt, comrade.peerMarkedUs),
+                subtitle = presenceText(
+                    online = online,
+                    // The store's timestamp is authoritative (it also records
+                    // an explicit goodbye); the flow only ever fills in a
+                    // sighting the store hasn't been re-read for yet.
+                    lastSeenAt = maxOf(comrade.lastSeenAt, live?.lastSeenAt ?: 0L),
+                    peerMarkedUs = comrade.peerMarkedUs || live?.peerMarkedUs == true,
+                ),
                 checked = true,
                 onCheckedChange = { toggle(comrade.npub, it) },
                 onClick = { onOpen(comrade.npub, comrade.alias.ifBlank { null }, comrade.name) },
@@ -198,15 +209,63 @@ fun ComradesScreen(
     }
 }
 
-/** The presence line under a comrade's name — see [presenceLabelOf]. */
+/**
+ * The presence line for a peer — "online", a Telegram-style "last seen …",
+ * or the honest explanation when neither applies. Shared by the comrades
+ * list and the conversation header so the two can never word it differently.
+ *
+ * The clock is read at composition, like [relativeTime] elsewhere in this
+ * package: presence changes bump the chat tick, so a line that matters
+ * refreshes on its own.
+ */
 @Composable
-private fun presenceSubtitle(online: Boolean, lastSeenAt: Long, peerMarkedUs: Boolean): String =
+fun presenceText(online: Boolean, lastSeenAt: Long, peerMarkedUs: Boolean): String =
     when (presenceLabelOf(online, lastSeenAt, peerMarkedUs)) {
         PresenceLabel.Online -> stringResource(R.string.comrade_online)
-        PresenceLabel.LastSeen -> stringResource(R.string.comrade_last_seen, relativeTime(lastSeenAt))
+        PresenceLabel.LastSeen -> lastSeenText(lastSeenAt)
         PresenceLabel.AwaitingReciprocity -> stringResource(R.string.comrade_awaiting_reciprocity)
         PresenceLabel.NeverSeen -> stringResource(R.string.comrade_never_seen)
     }
+
+/**
+ * The presence line for a conversation header, or `null` when there is
+ * nothing short enough to say.
+ *
+ * The header shares one cramped line with the npub tail, which always stays
+ * visible (handles are claims, keys are identity). "Waiting for them to
+ * choose you back" is the one label that would push the key off the end, and
+ * it is also the one the comrades screen already explains at length — so the
+ * header shows the grey dot alone and lets that screen do the explaining.
+ */
+@Composable
+fun presenceHeaderText(online: Boolean, lastSeenAt: Long, peerMarkedUs: Boolean): String? =
+    when (presenceLabelOf(online, lastSeenAt, peerMarkedUs)) {
+        PresenceLabel.AwaitingReciprocity -> null
+        else -> presenceText(online, lastSeenAt, peerMarkedUs)
+    }
+
+/** Renders one [LastSeen] case; the device's own 12/24-hour setting decides the clock. */
+@Composable
+private fun lastSeenText(lastSeenAt: Long): String {
+    val use24Hour = DateFormat.is24HourFormat(LocalContext.current)
+    val seen = lastSeenOf(lastSeenAt, System.currentTimeMillis() / 1000, use24Hour)
+    return when (seen) {
+        LastSeen.JustNow -> stringResource(R.string.comrade_last_seen_just_now)
+        is LastSeen.MinutesAgo -> pluralStringResource(
+            R.plurals.comrade_last_seen_minutes,
+            seen.minutes,
+            seen.minutes,
+        )
+        is LastSeen.TodayAt -> stringResource(R.string.comrade_last_seen_today, seen.time)
+        is LastSeen.YesterdayAt -> stringResource(R.string.comrade_last_seen_yesterday, seen.time)
+        is LastSeen.WeekdayAt -> stringResource(
+            R.string.comrade_last_seen_weekday,
+            seen.weekday,
+            seen.time,
+        )
+        is LastSeen.OnDate -> stringResource(R.string.comrade_last_seen_date, seen.date)
+    }
+}
 
 @Composable
 private fun ComradeRow(
