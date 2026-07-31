@@ -1,6 +1,7 @@
 package mullu.comrade.ui
 
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -61,12 +62,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -465,7 +468,10 @@ fun ConversationScreen(
 ) {
     var messages by remember { mutableStateOf<List<ComradeCore.MessageInfo>>(emptyList()) }
     var mediaItems by remember { mutableStateOf<List<ComradeCore.MediaMessageInfo>>(emptyList()) }
-    var draft by remember { mutableStateOf("") }
+    // A TextFieldValue rather than a String: the emoji picker inserts at the
+    // caret, which needs the selection.
+    var draft by remember { mutableStateOf(TextFieldValue()) }
+    var emojiOpen by remember { mutableStateOf(false) }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var replyingTo by remember { mutableStateOf<ComradeCore.MessageInfo?>(null) }
@@ -486,6 +492,17 @@ fun ConversationScreen(
     val listState = rememberLazyListState()
     val context = LocalContext.current
     val recorder = remember { VoiceRecorder(context) }
+    // What this device can actually capture, probed once. Capability-gated so a
+    // tablet with no camera gets a mic and nothing to swap to, rather than a
+    // control that fails on tap.
+    val availableModes = remember {
+        availableCaptureModes(
+            canRecordAudio = context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE),
+            canTakePhoto = context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY),
+            canRecordVideo = context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY),
+        )
+    }
+    var captureMode by remember { mutableStateOf(availableModes.firstOrNull()) }
     // MediaRecorder holds the mic while active; a composition that leaves the
     // conversation mid-record (back-navigation) must not leak it.
     DisposableEffect(Unit) { onDispose { recorder.cancel() } }
@@ -566,7 +583,7 @@ fun ConversationScreen(
     LaunchedEffect(peer) { Notifier.clearForPeer(context, peer) }
 
     fun send() {
-        val text = draft.trim()
+        val text = draft.text.trim()
         if (text.isEmpty() || sending) return
         sending = true
         error = null
@@ -575,7 +592,7 @@ fun ConversationScreen(
             runCatching {
                 withContext(Dispatchers.IO) { ComradeCore.sendDmReplyTyped(peer, text, replyId) }
             }.onSuccess { sent ->
-                draft = ""
+                draft = TextFieldValue()
                 replyingTo = null
                 sending = false
                 messages = messages + sent
@@ -614,6 +631,113 @@ fun ConversationScreen(
                 attaching = false
                 error = it.message ?: "Could not send the attachment."
             }
+        }
+    }
+
+    // ── Camera capture (the composer's photo/video modes) ───────────────────
+    //
+    // Written into `cache/capture/`, which `file_paths.xml` exposes to the
+    // camera app through the existing FileProvider. A separate subdirectory
+    // from `cache/media/` on purpose: that one holds decrypted attachments and
+    // is swept by `purgeDecryptedMedia`, which must not race a capture that is
+    // still being written.
+    fun newCaptureFile(extension: String): File {
+        val dir = File(context.cacheDir, "capture").apply { mkdirs() }
+        return File(dir, "cap-${System.nanoTime()}.$extension")
+    }
+
+    fun captureUri(file: File): Uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        file,
+    )
+
+    // Read the captured file, send it, and delete the plaintext immediately —
+    // the same rule voice notes follow (AUDIT S-4): a decrypted clip must not
+    // linger in the cache after the send resolves, successfully or not.
+    fun sendCapturedFile(file: File, mime: String) {
+        if (attaching) return
+        attaching = true
+        error = null
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    try {
+                        val bytes = file.readBytes()
+                        if (bytes.isEmpty()) {
+                            throw IllegalStateException("The capture was empty.")
+                        }
+                        if (bytes.size > 10 * 1024 * 1024) {
+                            throw IllegalStateException("Attachments are limited to 10 MB.")
+                        }
+                        ComradeCore.sendMediaBytesTyped(peer, mime, "", bytes)
+                    } finally {
+                        file.delete()
+                    }
+                }
+            }.onSuccess {
+                attaching = false
+                mediaItems = mediaItems + it
+                scope.launch { listState.scrollToItem(messages.size + mediaItems.size - 1) }
+            }.onFailure {
+                attaching = false
+                error = it.message ?: "Could not send the capture."
+            }
+        }
+    }
+
+    // The pending capture target: the contracts hand back only success/failure,
+    // not the file, so the launcher and the result have to agree out of band.
+    var pendingCapture by remember { mutableStateOf<Pair<File, String>?>(null) }
+
+    val takePhoto = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { ok ->
+        val pending = pendingCapture
+        pendingCapture = null
+        if (pending == null) return@rememberLauncherForActivityResult
+        // Cancelled: drop the empty placeholder rather than sending 0 bytes.
+        if (!ok) { pending.first.delete(); return@rememberLauncherForActivityResult }
+        sendCapturedFile(pending.first, pending.second)
+    }
+
+    val recordVideo = rememberLauncherForActivityResult(
+        ActivityResultContracts.CaptureVideo(),
+    ) { ok ->
+        val pending = pendingCapture
+        pendingCapture = null
+        if (pending == null) return@rememberLauncherForActivityResult
+        if (!ok) { pending.first.delete(); return@rememberLauncherForActivityResult }
+        sendCapturedFile(pending.first, pending.second)
+    }
+
+    val requestCameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Re-checked on the next press; nothing to do here. */ }
+
+    fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+
+    fun launchCapture(mode: CaptureMode) {
+        if (attaching) return
+        if (!hasCameraPermission()) {
+            requestCameraPermission.launch(android.Manifest.permission.CAMERA)
+            return
+        }
+        when (mode) {
+            CaptureMode.Photo -> {
+                val file = newCaptureFile("jpg")
+                pendingCapture = file to "image/jpeg"
+                takePhoto.launch(captureUri(file))
+            }
+            CaptureMode.Video -> {
+                val file = newCaptureFile("mp4")
+                pendingCapture = file to "video/mp4"
+                recordVideo.launch(captureUri(file))
+            }
+            // Voice never routes here — it has its own press-and-hold button.
+            CaptureMode.Voice -> Unit
         }
     }
 
@@ -875,21 +999,24 @@ fun ConversationScreen(
             }
         }
 
-        // Composer: attach + pill input + send / hold-to-talk, Telegram-style.
+        // Composer, Telegram's layout:
+        //
+        //   ╭────────────────────────────────╮      ╭────╮
+        //   │ 🙂  Message…               📎  │  ⧉   │ 🎤 │
+        //   ╰────────────────────────────────╯      ╰────╯
+        //     emoji     text field     attach  swap  capture → send
+        //
+        // Emoji and the paper clip sit *inside* the field, which is what makes
+        // the pill read as one control instead of a row of loose buttons. Only
+        // the round button (and its swap) live outside, because they are the
+        // ones whose meaning changes.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            IconButton(
-                onClick = { if (!attaching) pickMedia.launch("*/*") },
-                enabled = !attaching,
-                modifier = Modifier.size(48.dp).testTag("dm-attach"),
-            ) {
-                Text(if (attaching) "…" else "📎", style = MaterialTheme.typography.titleLarge)
-            }
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
@@ -899,11 +1026,65 @@ fun ConversationScreen(
                     .weight(1f)
                     .testTag("dm-input"),
                 maxLines = 4,
+                leadingIcon = {
+                    IconButton(
+                        onClick = { emojiOpen = true },
+                        modifier = Modifier.testTag("dm-emoji"),
+                    ) {
+                        Icon(
+                            EmojiIcon,
+                            contentDescription = stringResource(R.string.composer_emoji),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                trailingIcon = {
+                    IconButton(
+                        onClick = { if (!attaching) pickMedia.launch("*/*") },
+                        enabled = !attaching,
+                        modifier = Modifier.testTag("dm-attach"),
+                    ) {
+                        if (attaching) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(
+                                AttachFileIcon,
+                                contentDescription = stringResource(R.string.composer_attach),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                },
             )
-            // A non-empty draft means "send text"; an empty one offers the mic,
-            // exactly like a mainstream messenger's composer.
-            if (draft.isNotBlank()) {
-                FilledIconButton(
+            // The swap control, only when this device offers more than one way
+            // to capture. Telegram hides this behind a press-and-hold on the
+            // mic; that shares a target with the tap that starts recording, so
+            // it is a visible button here — showing the mode it moves *to*.
+            val swapTo = nextCaptureMode(captureMode, availableModes)
+            if (draft.text.isBlank() && swapTo != null) {
+                IconButton(
+                    onClick = { captureMode = swapTo },
+                    modifier = Modifier.size(36.dp).testTag("dm-capture-swap"),
+                ) {
+                    Icon(
+                        captureIcon(swapTo),
+                        contentDescription = stringResource(
+                            R.string.composer_swap_capture,
+                            stringResource(captureLabel(swapTo)),
+                        ),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            // Text to send outranks everything: the round button is Send the
+            // moment the field is non-empty, which is what keeps one button
+            // doing the obvious thing rather than two competing for the corner.
+            val mode = effectiveCaptureMode(captureMode, availableModes)
+            when {
+                draft.text.isNotBlank() -> FilledIconButton(
                     onClick = { send() },
                     enabled = !sending,
                     modifier = Modifier
@@ -912,11 +1093,10 @@ fun ConversationScreen(
                 ) {
                     Icon(
                         Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Send",
+                        contentDescription = stringResource(R.string.composer_send),
                     )
                 }
-            } else {
-                VoiceRecordButton(
+                mode == CaptureMode.Voice -> VoiceRecordButton(
                     recording = recording,
                     sending = voiceSending,
                     enabled = !attaching,
@@ -934,9 +1114,57 @@ fun ConversationScreen(
                         recorder.stop()?.let { sendVoiceNote(it) }
                     },
                 )
+                mode != null -> FilledIconButton(
+                    onClick = { launchCapture(mode) },
+                    enabled = !attaching,
+                    modifier = Modifier
+                        .size(52.dp)
+                        .testTag("dm-capture"),
+                ) {
+                    Icon(
+                        captureIcon(mode),
+                        contentDescription = stringResource(captureLabel(mode)),
+                    )
+                }
+                // No recorder and no camera: a Send button that is simply
+                // disabled until there is text, rather than a control that
+                // fails on tap. Same "no fake switches" rule as Settings.
+                else -> FilledIconButton(
+                    onClick = { send() },
+                    enabled = false,
+                    modifier = Modifier
+                        .size(52.dp)
+                        .testTag("dm-send"),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = stringResource(R.string.composer_send),
+                    )
+                }
             }
         }
     }
+
+    if (emojiOpen) {
+        EmojiPickerSheet(
+            onPick = { draft = insertEmoji(draft, it) },
+            onDismiss = { emojiOpen = false },
+        )
+    }
+}
+
+/** The glyph for a capture mode. */
+private fun captureIcon(mode: CaptureMode) = when (mode) {
+    CaptureMode.Voice -> MicIcon
+    CaptureMode.Photo -> PhotoCameraIcon
+    CaptureMode.Video -> VideocamIcon
+}
+
+/** The string resource naming what a capture mode does. */
+private fun captureLabel(mode: CaptureMode): Int = when (mode) {
+    CaptureMode.Voice -> R.string.composer_record_voice
+    CaptureMode.Photo -> R.string.composer_take_photo
+    CaptureMode.Video -> R.string.composer_record_video
 }
 
 /**

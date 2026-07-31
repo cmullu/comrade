@@ -166,6 +166,15 @@
     <string name="chat_menu_block">Block this person</string>
     <!-- Boundary line where the reader left off (Telegram's unread divider) -->
     <string name="unread_messages">Unread messages</string>
+
+    <!-- Composer (Telegram-style: emoji + field + clip, then capture/send) -->
+    <string name="composer_emoji">Emoji</string>
+    <string name="composer_attach">Attach a file</string>
+    <string name="composer_send">Send</string>
+    <string name="composer_record_voice">Record a voice note</string>
+    <string name="composer_take_photo">Take a photo</string>
+    <string name="composer_record_video">Record a video</string>
+    <string name="composer_swap_capture">Switch to: %1$s</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->

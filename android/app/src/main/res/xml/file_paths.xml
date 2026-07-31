@@ -4,4 +4,8 @@
      one subdirectory those files are ever written into. -->
 <paths>
     <cache-path name="media" path="media/" />
+    <!-- Where the composer's camera captures are written, so the camera app can
+         write into them. Separate from media/ because purgeDecryptedMedia sweeps
+         that directory and must not race a capture still being written. -->
+    <cache-path name="capture" path="capture/" />
 </paths>
