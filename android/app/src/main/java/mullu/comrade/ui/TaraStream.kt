@@ -26,8 +26,14 @@ object TaraStream {
     /** Roughly a short word per chunk — fast enough to read, slow enough to feel alive. */
     const val DEFAULT_CHUNK_CHARS = 8
 
-    /** Pause between chunks. ~28 ms lands near a brisk but readable typing speed. */
+    /** Base pause between chunks. ~28 ms lands near a brisk but readable typing speed. */
     const val DEFAULT_DELAY_MS = 28L
+
+    /** Extra breath at a sentence boundary — a human pauses at a full stop. */
+    const val SENTENCE_PAUSE_FACTOR = 5L
+
+    /** Smaller breath at a clause boundary (comma, dash, colon…). */
+    const val CLAUSE_PAUSE_FACTOR = 2L
 
     /**
      * Split [text] into successive pieces of at least [targetChars] that each
@@ -51,9 +57,24 @@ object TaraStream {
     }
 
     /**
+     * How long to pause before the chunk that follows [previous]. A human
+     * doesn't type at metronome pace: they breathe at a full stop and lean
+     * on a comma. Pure so the rhythm rule is unit-tested.
+     */
+    fun delayAfter(previous: String, baseMs: Long = DEFAULT_DELAY_MS): Long {
+        val tail = previous.trimEnd().lastOrNull() ?: return baseMs
+        return when (tail) {
+            '.', '!', '?', '…' -> baseMs * SENTENCE_PAUSE_FACTOR
+            ',', ';', ':', '—', '–' -> baseMs * CLAUSE_PAUSE_FACTOR
+            else -> baseMs
+        }
+    }
+
+    /**
      * Emit [text] as a growing prefix — the value to render as the reply
      * bubble's contents. The first chunk lands immediately (no dead air after
-     * the thinking indicator); the rest are paced by [perChunkDelayMs].
+     * the thinking indicator); the rest are paced by [delayAfter], so the
+     * rhythm slows at sentence boundaries instead of ticking uniformly.
      * Cancelling the collecting coroutine simply stops it mid-sentence.
      */
     fun stream(
@@ -62,9 +83,11 @@ object TaraStream {
         targetChars: Int = DEFAULT_CHUNK_CHARS,
     ): Flow<String> = flow {
         val builder = StringBuilder()
+        var previous = ""
         chunk(text, targetChars).forEachIndexed { index, piece ->
-            if (index > 0) delay(perChunkDelayMs)
+            if (index > 0) delay(delayAfter(previous, perChunkDelayMs))
             builder.append(piece)
+            previous = piece
             emit(builder.toString())
         }
     }
