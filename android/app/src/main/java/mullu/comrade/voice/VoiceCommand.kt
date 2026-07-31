@@ -16,6 +16,12 @@ sealed interface VoiceCommand {
     /** Save [text] as a private journal entry (local-only, never posted). */
     data class Journal(val text: String) : VoiceCommand
 
+    /**
+     * Say [text] to Tara, the reflective companion, and hear her reply.
+     * Local-only like [Journal] — the thread never leaves the device.
+     */
+    data class Tara(val text: String) : VoiceCommand
+
     /** Read the cached Sabha timeline aloud. */
     data object ReadTimeline : VoiceCommand
 
@@ -44,6 +50,11 @@ sealed interface VoiceCommand {
         // through to the public feed because of prefix overlap.
         private val JOURNAL_PREFIXES =
             listOf("journal", "write down", "note down", "dear diary", "note")
+
+        // Also private, also checked before the post prefixes. Longest phrasings
+        // first so "talk to tara" isn't shadowed by the bare "tara".
+        private val TARA_PREFIXES =
+            listOf("talk to tara", "ask tara", "tell tara", "tara")
         private val TIMELINE_PHRASES = listOf(
             "read timeline", "read my timeline", "read feed", "read my feed",
             "show feed", "show timeline", "what's new", "whats new", "catch me up",
@@ -113,6 +124,17 @@ sealed interface VoiceCommand {
                 if (text.startsWith(withSpace)) {
                     val body = text.removePrefix(withSpace).trim()
                     return if (body.isEmpty()) Empty else Journal(body)
+                }
+            }
+
+            for (prefix in TARA_PREFIXES) {
+                // A bare "tara" is an address with nothing said yet, not a
+                // message — Empty prompts the user rather than sending "".
+                if (text == prefix) return Empty
+                val withSpace = "$prefix "
+                if (text.startsWith(withSpace)) {
+                    val body = text.removePrefix(withSpace).trim()
+                    return if (body.isEmpty()) Empty else Tara(body)
                 }
             }
 

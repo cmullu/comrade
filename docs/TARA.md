@@ -135,6 +135,28 @@ with no further UI work. What remains is genuinely the inference side:
    guessed: an invented sha256 would fail every install, and an unverified
    download is worse than none.
 
-Open follow-ups: the OQ9 model/runtime decision and its inference backend, a
-desktop web UI surface, and a `tara <text>` voice-dispatcher command
-(`ComradeBackend` already has the shape for it).
+Open follow-ups: the OQ9 model/runtime decision and its inference backend, and
+a desktop web UI surface.
+
+## Talking to Tara by voice
+
+"Hey Comrade, tara I've been anxious all week" reaches the same engine as the
+tab. `VoiceCommand.Tara` parses `tara` / `talk to tara` / `ask tara` /
+`tell tara` (longest phrasing first, so `talk to tara` isn't shadowed by the
+bare `tara`), and it is matched **before** the post prefixes — like the journal,
+a thought meant for the companion must never fall through to the public feed.
+Addressing her with nothing after it prompts rather than sending an empty
+message.
+
+Two details the voice modality forced:
+
+* **`CRISIS_REPLY` is modality-neutral.** It used to say "the helplines shown
+  below", which is meaningless read aloud. It now just says to reach a crisis
+  helpline, and each surface adds its own affordance — the app renders the card,
+  the voice layer reads a number out.
+* **Spoken numbers are spelled digit by digit.** `14416` is passed to TTS as
+  `1 4 4 1 6`, or it gets read as "fourteen thousand four hundred and sixteen"
+  — a number nobody can dial. Tested.
+
+The crisis gate itself is not duplicated for voice: `detect_distress` lives in
+the Rust engine, so every surface inherits it by construction.
