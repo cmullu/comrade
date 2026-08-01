@@ -112,6 +112,24 @@ saathi: carry sealed DMs, so a message reaches someone on the same WiFi
 
 Not `fix(media): add fallback array`.
 
+## Claude Code setup
+
+Committed under `.claude/`, so every session — terminal or cloud — gets it:
+`settings.json` (permissions, hooks, plugins), `rules/` (per-language, loaded by
+path glob), `skills/verify`, `agents/comrade-reviewer`, `hooks/`.
+
+The `caveman` plugin is enabled repo-wide and pinned to a commit; it compresses
+prose while leaving code, commands, errors and paths byte-exact. Declaring a
+plugin is not installing it, so the SessionStart hook repairs a cold container's
+plugin cache. On a brand-new container that repair lands one session late — run
+`/reload-plugins`, or put `claude plugin marketplace update caveman` in the cloud
+environment's setup script, which runs before the session boots.
+
+The cloud sandbox is **not** a devcontainer; there is no `.devcontainer/` here.
+It is an Anthropic-managed VM configured per *cloud environment* (network policy,
+env vars, setup script) at claude.ai. Repo-committed settings and hooks are the
+parts that travel with the code.
+
 ## Working across sessions
 
 Each session starts fresh in a throwaway container, so **anything not committed

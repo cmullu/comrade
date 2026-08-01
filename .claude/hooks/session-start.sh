@@ -59,6 +59,32 @@ fi
 
 have maturin || blocked+=("maturin — the comrade_py wheel cannot be built here (\`cargo test -p comrade_py\` still works)")
 
+# ── Plugins ──────────────────────────────────────────────────────────────────
+# .claude/settings.json declares the caveman marketplace and enables the plugin,
+# but declaring is not installing: a plugin from an external source only loads
+# once its marketplace has been cloned into the local cache. A fresh cloud
+# container has no cache, so the plugin reports `cache-miss` until something
+# populates it. This does that, idempotently.
+#
+# Caveat worth knowing: plugins are resolved as the session starts, so on the
+# very first session in a brand-new container the repair lands a beat late and
+# caveman is active from the next session (or after `/reload-plugins`). To have
+# it ready on turn one, run the same command from the cloud environment's setup
+# script, which executes before the session boots.
+if command -v claude >/dev/null 2>&1 && [ -f "$ROOT/.claude/settings.json" ]; then
+  if jq -e '.enabledPlugins // {} | keys | length > 0' "$ROOT/.claude/settings.json" >/dev/null 2>&1; then
+    if claude plugin list 2>/dev/null | grep -q 'failed to load'; then
+      for mp in $(jq -r '.extraKnownMarketplaces // {} | keys[]' "$ROOT/.claude/settings.json" 2>/dev/null); do
+        if claude plugin marketplace update "$mp" >/dev/null 2>&1; then
+          notes+=("repaired plugin marketplace \`$mp\` (cold container cache); active next session or after \`/reload-plugins\`")
+        else
+          notes+=("plugin marketplace \`$mp\` could not be refreshed — plugins from it will not load")
+        fi
+      done
+    fi
+  fi
+fi
+
 # ── Repo state ───────────────────────────────────────────────────────────────
 # `main` moves under you in this repo: several sessions run concurrently, and a
 # stale ref has already caused a wrong call once. Surface it up front.
