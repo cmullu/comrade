@@ -6,6 +6,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -60,6 +63,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
@@ -489,7 +495,7 @@ fun ConversationScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var replyingTo by remember { mutableStateOf<ComradeCore.MessageInfo?>(null) }
     var attaching by remember { mutableStateOf(false) }
-    // Push-to-talk voice notes: hold the mic to record, release to send.
+    // Voice notes: tap the action icon to record, tap again to send.
     var recording by remember { mutableStateOf(false) }
     var voiceSending by remember { mutableStateOf(false) }
     // Keyed on `peer` so switching conversations resets the scroll bookkeeping.
@@ -794,6 +800,23 @@ fun ConversationScreen(
         }
     }
 
+    // Tap-to-start, tap-to-send. Returns silently if the mic is unavailable or
+    // the permission was refused — the press is then simply a no-op rather than
+    // leaving the icon stuck in a recording pose.
+    fun toggleRecording() {
+        if (recording) {
+            recording = false
+            recorder.stop()?.let { sendVoiceNote(it) }
+            return
+        }
+        if (!hasMicPermission()) {
+            requestMicPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        if (recorder.start()) recording = true
+    }
+
+
     // Whether the newest message is (nearly) on screen right now — drives
     // both the jump-to-latest button and clearing its "new" highlight.
     val atBottom by remember {
@@ -994,8 +1017,8 @@ fun ConversationScreen(
             }
         }
 
-        // While the mic is held, replace the composer hint with a live "● Recording…"
-        // banner so it's unmistakable the microphone is hot.
+        // While recording, a live "● Recording…" banner so it is unmistakable
+        // that the microphone is hot.
         if (recording) {
             Row(
                 modifier = Modifier
@@ -1011,7 +1034,7 @@ fun ConversationScreen(
                         .background(MaterialTheme.colorScheme.error),
                 )
                 Text(
-                    "Recording… release to send",
+                    stringResource(R.string.composer_recording),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
@@ -1058,109 +1081,46 @@ fun ConversationScreen(
                     }
                 },
                 trailingIcon = {
-                    IconButton(
-                        onClick = { if (!attaching) pickMedia.launch("*/*") },
-                        enabled = !attaching,
-                        modifier = Modifier.testTag("dm-attach"),
-                    ) {
-                        if (attaching) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                            )
-                        } else {
-                            Icon(
-                                AttachFileIcon,
-                                contentDescription = stringResource(R.string.composer_attach),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = { if (!attaching) pickMedia.launch("*/*") },
+                            enabled = !attaching,
+                            modifier = Modifier.testTag("dm-attach"),
+                        ) {
+                            if (attaching) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(
+                                    AttachFileIcon,
+                                    contentDescription = stringResource(R.string.composer_attach),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
+                        // The one action control, inside the field. Send while
+                        // there is text; otherwise the current capture mode,
+                        // which a right-swipe on this same icon cycles.
+                        ComposerActionIcon(
+                            hasText = draft.text.isNotBlank(),
+                            mode = effectiveCaptureMode(captureMode, availableModes),
+                            recording = recording,
+                            busy = sending || voiceSending || attaching,
+                            onSend = { send() },
+                            onCycle = { next -> captureMode = next },
+                            nextMode = { nextCaptureMode(captureMode, availableModes) },
+                            onCapture = { mode ->
+                                when (mode) {
+                                    CaptureMode.Voice -> toggleRecording()
+                                    else -> launchCapture(mode)
+                                }
+                            },
+                        )
                     }
                 },
             )
-            // The swap control, only when this device offers more than one way
-            // to capture. Telegram hides this behind a press-and-hold on the
-            // mic; that shares a target with the tap that starts recording, so
-            // it is a visible button here — showing the mode it moves *to*.
-            val swapTo = nextCaptureMode(captureMode, availableModes)
-            if (draft.text.isBlank() && swapTo != null) {
-                IconButton(
-                    onClick = { captureMode = swapTo },
-                    modifier = Modifier.size(36.dp).testTag("dm-capture-swap"),
-                ) {
-                    Icon(
-                        captureIcon(swapTo),
-                        contentDescription = stringResource(
-                            R.string.composer_swap_capture,
-                            stringResource(captureLabel(swapTo)),
-                        ),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            // Text to send outranks everything: the round button is Send the
-            // moment the field is non-empty, which is what keeps one button
-            // doing the obvious thing rather than two competing for the corner.
-            val mode = effectiveCaptureMode(captureMode, availableModes)
-            when {
-                draft.text.isNotBlank() -> FilledIconButton(
-                    onClick = { send() },
-                    enabled = !sending,
-                    modifier = Modifier
-                        .size(52.dp)
-                        .testTag("dm-send"),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = stringResource(R.string.composer_send),
-                    )
-                }
-                mode == CaptureMode.Voice -> VoiceRecordButton(
-                    recording = recording,
-                    sending = voiceSending,
-                    enabled = !attaching,
-                    hasPermission = ::hasMicPermission,
-                    onRequestPermission = {
-                        requestMicPermission.launch(android.Manifest.permission.RECORD_AUDIO)
-                    },
-                    onStart = {
-                        val ok = recorder.start()
-                        if (ok) recording = true
-                        ok
-                    },
-                    onStop = {
-                        recording = false
-                        recorder.stop()?.let { sendVoiceNote(it) }
-                    },
-                )
-                mode != null -> FilledIconButton(
-                    onClick = { launchCapture(mode) },
-                    enabled = !attaching,
-                    modifier = Modifier
-                        .size(52.dp)
-                        .testTag("dm-capture"),
-                ) {
-                    Icon(
-                        captureIcon(mode),
-                        contentDescription = stringResource(captureLabel(mode)),
-                    )
-                }
-                // No recorder and no camera: a Send button that is simply
-                // disabled until there is text, rather than a control that
-                // fails on tap. Same "no fake switches" rule as Settings.
-                else -> FilledIconButton(
-                    onClick = { send() },
-                    enabled = false,
-                    modifier = Modifier
-                        .size(52.dp)
-                        .testTag("dm-send"),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = stringResource(R.string.composer_send),
-                    )
-                }
-            }
         }
     }
 
@@ -1187,68 +1147,114 @@ private fun captureLabel(mode: CaptureMode): Int = when (mode) {
 }
 
 /**
- * A press-and-hold microphone button: it starts recording on touch-down and
- * sends on release, like WhatsApp/Telegram voice notes. A too-brief tap records
- * nothing (see [VoiceRecorder.stop]); the first press without the mic permission
- * asks for it instead of recording.
+ * The composer's single action control, inside the text field.
  *
- * [onStart] returns whether recording actually began — only then does the
- * release ([onStop]) run, so a denied permission or a busy mic can't leave the
- * button stuck in a "recording" pose.
+ * One icon, three jobs:
+ *  * **Send**, whenever there is text — that outranks everything.
+ *  * **Tap** otherwise performs the current capture mode: start/stop a voice
+ *    note, or open the camera for a photo or a video.
+ *  * **Swipe right** cycles the mode (voice → photo → video → voice).
+ *
+ * Recording is tap-to-start / tap-to-send rather than press-and-hold, because a
+ * hold and a swipe cannot share one target: holding to record would have to win
+ * the gesture before a swipe could be recognised, so one of the two would
+ * always lose. Tap and drag compose cleanly, and it matches what the Flutter
+ * composer already chose for the same reason a mouse cannot press-and-hold
+ * meaningfully.
+ *
+ * Swiping is not discoverable on its own, and it is unavailable to anyone using
+ * a screen reader or a switch device — so the mode is also exposed as a
+ * semantics custom action, which is what assistive tech offers instead.
  */
 @Composable
-private fun VoiceRecordButton(
+private fun ComposerActionIcon(
+    hasText: Boolean,
+    mode: CaptureMode?,
     recording: Boolean,
-    sending: Boolean,
-    enabled: Boolean,
-    hasPermission: () -> Boolean,
-    onRequestPermission: () -> Unit,
-    onStart: () -> Boolean,
-    onStop: () -> Unit,
-    modifier: Modifier = Modifier,
+    busy: Boolean,
+    onSend: () -> Unit,
+    onCycle: (CaptureMode) -> Unit,
+    nextMode: () -> CaptureMode?,
+    onCapture: (CaptureMode) -> Unit,
 ) {
-    val bg = when {
-        recording -> MaterialTheme.colorScheme.error
-        else -> MaterialTheme.colorScheme.primary
+    // Accumulated horizontal travel of the current drag. Reset on each stop, so
+    // a left-then-right wobble does not add up into a mode change.
+    var dragX by remember { mutableStateOf(0f) }
+    val swapTo = nextMode()
+    val cycleLabel = swapTo?.let {
+        stringResource(R.string.composer_swap_capture, stringResource(captureLabel(it)))
     }
+
+    val icon = when {
+        hasText -> Icons.AutoMirrored.Filled.Send
+        recording -> StopIcon
+        mode != null -> captureIcon(mode)
+        // Nothing to capture on this device: a Send that is simply inert until
+        // there is text, rather than a control that fails on tap.
+        else -> Icons.AutoMirrored.Filled.Send
+    }
+    val label = when {
+        hasText -> stringResource(R.string.composer_send)
+        recording -> stringResource(R.string.composer_stop_recording)
+        mode != null -> stringResource(captureLabel(mode))
+        else -> stringResource(R.string.composer_send)
+    }
+    val tint = when {
+        recording -> MaterialTheme.colorScheme.error
+        hasText -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    val enabled = !busy || recording
     Box(
-        modifier = modifier
-            .size(52.dp)
-            .testTag("dm-voice")
+        modifier = Modifier
+            .size(48.dp)
+            .testTag("dm-action")
             .clip(CircleShape)
-            .background(bg)
-            .pointerInput(enabled, sending) {
-                if (!enabled || sending) return@pointerInput
-                detectTapGestures(
-                    onPress = {
-                        if (!hasPermission()) {
-                            onRequestPermission()
-                        } else if (onStart()) {
-                            // Suspends until the finger lifts (or the gesture is
-                            // cancelled), then sends whatever was captured.
-                            tryAwaitRelease()
-                            onStop()
-                        }
-                    },
-                )
-            },
+            .semantics {
+                // The swipe, offered to assistive tech as a real action.
+                if (!hasText && swapTo != null && cycleLabel != null) {
+                    customActions = listOf(
+                        CustomAccessibilityAction(cycleLabel) { onCycle(swapTo); true },
+                    )
+                }
+            }
+            .clickable(enabled = enabled) {
+                when {
+                    hasText -> onSend()
+                    mode != null -> onCapture(mode)
+                    else -> Unit
+                }
+            }
+            .draggable(
+                orientation = Orientation.Horizontal,
+                enabled = !hasText && swapTo != null && !recording,
+                state = rememberDraggableState { delta -> dragX += delta },
+                onDragStopped = {
+                    // Rightwards only, and far enough to be deliberate rather
+                    // than a slip while reaching for the icon.
+                    if (dragX > SWIPE_THRESHOLD_PX) nextMode()?.let(onCycle)
+                    dragX = 0f
+                },
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        if (sending) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(22.dp),
-                strokeWidth = 2.dp,
-                color = MaterialTheme.colorScheme.onPrimary,
-            )
+        if (busy && !recording) {
+            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
-            Icon(
-                MicIcon,
-                contentDescription = "Hold to record a voice note",
-                tint = MaterialTheme.colorScheme.onPrimary,
-            )
+            Icon(icon, contentDescription = label, tint = tint)
         }
     }
 }
+
+/**
+ * How far right the finger has to travel to count as a mode swipe.
+ *
+ * In pixels rather than dp because [androidx.compose.foundation.gestures.draggable]
+ * reports raw deltas; ~64px is comfortably past touch slop on every density the
+ * app targets without demanding a full swipe across the field.
+ */
+private const val SWIPE_THRESHOLD_PX = 64f
 
 /** Centred "Today" / "Yesterday" / "12 Jul 2026" pill between days. */
 @Composable

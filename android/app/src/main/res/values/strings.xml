@@ -182,6 +182,8 @@
     <string name="composer_take_photo">Take a photo</string>
     <string name="composer_record_video">Record a video</string>
     <string name="composer_swap_capture">Switch to: %1$s</string>
+    <string name="composer_stop_recording">Stop and send</string>
+    <string name="composer_recording">Recording… tap to send</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->

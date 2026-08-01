@@ -142,7 +142,7 @@ void main() {
       // draft (`MessageComposer._actionButton`), so the state it is in is a
       // rendered fact, not an assumption.
       await tester.pump();
-      await tester.tap(find.byKey(const Key('dm-send')));
+      await tester.tap(find.byKey(const Key('dm-action')));
       await tester.pumpAndSettle();
 
       expect(find.text('On my way'), findsOneWidget);

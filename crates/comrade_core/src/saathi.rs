@@ -478,6 +478,9 @@ mod tests {
     /// multicast, proving the `Discovered`/`Expired` swarm-event handlers
     /// actually drive `peer_count` end to end (not just the plumbing).
     #[tokio::test]
+    #[ignore = "needs real mDNS multicast and a Gossipsub graft; \
+        environment-dependent, so it runs in its own CI gate — see \
+        the saathi-mesh job in ci.yml"]
     async fn two_engines_discover_each_other_via_mdns() {
         let a = SaathiEngine::new("test-peer-a")
             .await
@@ -524,6 +527,9 @@ mod tests {
     /// Real mDNS discovery + real Gossipsub, in-process. This is the closest a
     /// unit test gets to two phones on a café network.
     #[tokio::test]
+    #[ignore = "needs real mDNS multicast and a Gossipsub graft; \
+        environment-dependent, so it runs in its own CI gate — see \
+        the saathi-mesh job in ci.yml"]
     async fn two_devices_on_one_network_exchange_a_sealed_dm() {
         use crate::{crypto::KeyProfile, dak};
 

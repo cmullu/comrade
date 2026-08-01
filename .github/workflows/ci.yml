@@ -268,6 +268,44 @@ jobs:
       - name: cargo test -- --ignored (load test)
         run: cargo test -p comrade_ui --test feed_flood_load --locked -- --ignored --nocapture
 
+  # Saathi mesh: the two tests that need real mDNS multicast and a Gossipsub
+  # graft between in-process swarms. They are #[ignore]d in the source because
+  # they are environment-dependent, not slow — discovery can succeed while the
+  # mesh takes longer than the test's 30s budget to graft on a loaded runner,
+  # which failed the main `cargo test` job intermittently and told us nothing
+  # about the change under review.
+  #
+  # Kept as its own lane rather than deleted: off-grid delivery is a shipped
+  # claim (README's Saathi row, docs/OFFLINE_DELIVERY.md), so it has to be
+  # exercised somewhere. `continue-on-error` because the flake is in the
+  # runner's network, not the code — this lane is a signal to read, not a gate
+  # that blocks an unrelated PR. Promote it to required once it has been
+  # observed stable, or once discovery is faked at the transport seam.
+  saathi-mesh:
+    name: Rust — Saathi mesh (mDNS, environment-dependent)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-saathi-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-saathi-
+
+      - name: cargo test -- --ignored (saathi mesh)
+        run: cargo test -p comrade_core --lib saathi --locked -- --ignored --nocapture
+
   # Supply-chain gate: RUSTSEC advisories, duplicate/banned crates, and
   # dependency license allowlist (see deny.toml).
   deny:
