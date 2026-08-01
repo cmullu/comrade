@@ -175,13 +175,17 @@ fn normalise(text: &str) -> String {
 /// frontend (and the voice dispatcher) can share one definition.
 pub fn detect_distress(text: &str) -> bool {
     let n = normalise(text);
-    // Speech-to-text often renders reflexives split ("kill my self"); collapse
-    // the split so the voice path is caught by the same cues as typed text.
-    let padded = format!(" {n} ").replace(" my self ", " myself ");
+    let padded = format!(" {n} ");
+    // Speech-to-text often renders reflexives split ("kill my self"). Match
+    // against BOTH forms rather than rewriting the text: collapsing in place
+    // would turn "my self harm" into "myself harm" and destroy the "self harm"
+    // cue — a phrasing the detector must never miss. Additive only, always.
+    let collapsed = padded.replace(" my self ", " myself ");
     DISTRESS_CUES.iter().any(|cue| {
         // Whole-phrase containment on normalised text; pad so "suicide"
         // matches at the edges without also matching inside another word.
-        padded.contains(&format!(" {cue} "))
+        let needle = format!(" {cue} ");
+        padded.contains(&needle) || collapsed.contains(&needle)
     })
 }
 
@@ -301,12 +305,130 @@ const NEGATORS: &[&str] = &[
     "stopped", "without", "barely", "hardly", "less",
 ];
 
+/// Phrases that cancel a feeling cue *after* it ("happy, but not anymore").
+/// Deliberately a phrase list rather than a bare negator scan over the
+/// following words: "I'm happy but not sure why" is still happy, and a
+/// scan for "not" would quietly bury it.
+const POST_NEGATORS: &[&str] = &[
+    "anymore",
+    "any more",
+    "no longer",
+    "no more",
+    "not really",
+    "not at all",
+    "not so much",
+];
+
 /// First-person tokens that must never appear inside an echoed topic — a
 /// grammatical person flip ("about my boss and me") is exactly the ELIZA
 /// failure mode this guard exists to avoid.
 const FIRST_PERSON: &[&str] = &[
     "i", "im", "ive", "id", "ill", "me", "my", "mine", "myself", "we", "us", "our", "ours",
 ];
+
+/// Ways of addressing Tara directly, including the text-speak the on-screen
+/// keyboard invites ("r u a bot"). Matched as a prefix to a subject word by
+/// [`addressed_about`], not on their own.
+const TARA_ADDRESS: &[&str] = &[
+    "are you",
+    "are u",
+    "r u",
+    "r you",
+    "youre",
+    "you are",
+    "u are",
+    "ur",
+    "is this",
+    "am i talking to",
+    "am i speaking to",
+    "am i chatting with",
+];
+
+/// Professions Tara must disclaim when asked. Honesty gate 1 lives or dies on
+/// this list, so it is wide: someone asking "r u a shrink?" is asking exactly
+/// the question the gate exists to answer.
+const THERAPIST_WORDS: &[&str] = &[
+    "therapist",
+    "therapists",
+    "therapy",
+    "psychiatrist",
+    "psychologist",
+    "counsellor",
+    "counselor",
+    "counselling",
+    "counseling",
+    "clinician",
+    "shrink",
+    "doctor",
+];
+
+/// Subject words for "what *are* you" questions, used after an address form.
+const PERSONHOOD_WORDS: &[&str] = &[
+    "ai",
+    "bot",
+    "chatbot",
+    "robot",
+    "human",
+    "person",
+    "machine",
+    "program",
+    "real",
+    "alive",
+    "sentient",
+    "conscious",
+];
+
+/// The unambiguous subset of [`PERSONHOOD_WORDS`], safe to match anywhere in
+/// a question. "real" and "person" are excluded on purpose — "what's the real
+/// problem?" is not a question about Tara.
+const NONHUMAN_WORDS: &[&str] = &[
+    "ai", "bot", "chatbot", "robot", "human", "machine", "sentient",
+];
+
+/// Subject words for questions about Tara's inner life ("are you okay?").
+const INNER_LIFE_WORDS: &[&str] = &[
+    "happy", "sad", "okay", "ok", "lonely", "tired", "bored", "fine",
+];
+
+/// Above this length, an inner-life question is almost always reported speech
+/// ("he asked are you okay and i just started crying") — where the feeling is
+/// the point and answering it as a question about Tara would be tone-deaf. A
+/// short "are you happy?" really is asking her, and gets the honest answer.
+const INNER_LIFE_MAX_WORDS: usize = 8;
+
+/// Whole-token phrase containment: " are you ai " matches "are you ai", but
+/// not "are you aiming". Substring matching on normalised text is a trap —
+/// every cue is a prefix of some innocent word.
+fn contains_phrase(norm: &str, phrase: &str) -> bool {
+    format!(" {norm} ").contains(&format!(" {phrase} "))
+}
+
+/// Whether any `subject` word appears within `window` tokens *after* any
+/// `address` phrase. The window is the whole point: "are you a **therapist**"
+/// is a question about Tara, "are you tired of hearing about my **therapist**"
+/// is not, and a bare co-occurrence test cannot tell them apart.
+fn addressed_about(norm: &str, address: &[&str], subject: &[&str], window: usize) -> bool {
+    let tokens: Vec<&str> = norm.split_whitespace().collect();
+    for phrase in address {
+        let phrase_tokens: Vec<&str> = phrase.split_whitespace().collect();
+        if phrase_tokens.is_empty() || phrase_tokens.len() > tokens.len() {
+            continue;
+        }
+        for start in 0..=(tokens.len() - phrase_tokens.len()) {
+            if tokens[start..start + phrase_tokens.len()] != phrase_tokens[..] {
+                continue;
+            }
+            let after = start + phrase_tokens.len();
+            if tokens[after..(after + window).min(tokens.len())]
+                .iter()
+                .any(|t| subject.contains(t))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 // ── Reply pools ───────────────────────────────────────────────────────────────
 //
@@ -589,8 +711,11 @@ fn detect_feelings(norm: &str) -> (Vec<usize>, bool) {
                     .iter()
                     .any(|t| NEGATORS.contains(t));
                 let after = start + cue_tokens.len();
-                let negated_after =
-                    tokens[after..(after + 2).min(tokens.len())].contains(&"anymore");
+                // "I was happy but not anymore" cancels the cue three tokens
+                // later — a two-token peek at the literal word "anymore" is
+                // narrower than how people actually take a feeling back.
+                let tail = tokens[after..(after + 5).min(tokens.len())].join(" ");
+                let negated_after = POST_NEGATORS.iter().any(|p| contains_phrase(&tail, p));
                 if negated_before || negated_after {
                     if *label == "good" {
                         negated_good = true;
@@ -726,50 +851,50 @@ impl ReflectiveCompanion {
     }
 
     fn is_meta_therapist(norm: &str) -> bool {
-        const CUES: &[&str] = &[
-            "are you a therapist",
-            "are you my therapist",
-            "are you a real therapist",
-            "youre a therapist",
-            "are you a doctor",
-            "are you a counsellor",
-            "are you a counselor",
-            "are you a psychologist",
-            "is this therapy",
-        ];
-        CUES.iter().any(|c| norm.contains(c))
+        // Window of 4 so "are you a real therapist" and "r u my therapist"
+        // both land, while "are you tired of me talking about my therapist"
+        // does not.
+        addressed_about(norm, TARA_ADDRESS, THERAPIST_WORDS, 4)
+            || contains_phrase(norm, "is this therapy")
+            || contains_phrase(norm, "this is therapy")
     }
 
     fn is_meta_ai(norm: &str) -> bool {
-        const CUES: &[&str] = &[
-            "are you an ai",
-            "are you ai",
-            "are you a bot",
-            "are you a robot",
-            "are you real",
-            "are you a real person",
-            "are you human",
-            "are you a person",
-            "are you alive",
+        if addressed_about(norm, TARA_ADDRESS, PERSONHOOD_WORDS, 4) {
+            return true;
+        }
+        const IDENTITY: &[&str] = &[
             "who are you",
             "what are you",
-            "am i talking to a robot",
-            "am i talking to a person",
-            // Questions about Tara's inner life are about HER, not the user —
-            // without these, "are you happy?" would hit the good-feelings
-            // pool and Tara would celebrate herself. The honest answer is the
-            // same: she doesn't have feelings, and says so.
-            "are you happy",
-            "are you sad",
-            "are you okay",
-            "are you ok",
+            "who am i talking to",
+            "what am i talking to",
+        ];
+        if IDENTITY.iter().any(|p| contains_phrase(norm, p)) {
+            return true;
+        }
+        // Questions about Tara's inner life are about HER, not the user —
+        // without these, "are you happy?" would hit the good-feelings pool and
+        // Tara would celebrate herself. The honest answer is that she doesn't
+        // have feelings, and she says so. Length-gated: see
+        // `INNER_LIFE_MAX_WORDS`.
+        if norm.split_whitespace().count() > INNER_LIFE_MAX_WORDS {
+            return false;
+        }
+        const INNER: &[&str] = &[
             "do you feel",
+            "do you ever feel",
             "do you have feelings",
             "can you feel",
             "do you get lonely",
             "do you get tired",
         ];
-        CUES.iter().any(|c| norm.contains(c))
+        INNER.iter().any(|p| contains_phrase(norm, p))
+            || addressed_about(
+                norm,
+                &["are you", "are u", "r u", "r you"],
+                INNER_LIFE_WORDS,
+                2,
+            )
     }
 
     fn is_advice_seeking(norm: &str) -> bool {
@@ -863,7 +988,19 @@ impl CompanionEngine for ReflectiveCompanion {
         } else if Self::is_advice_seeking(&norm) {
             choose(ADVICE_LINES, &norm, turn, None)
         } else if Self::is_generic_question(message, &norm) {
-            choose(QUESTION_LINES, &norm, turn, None)
+            // Backstop for honesty gate 1: a question phrased in a way the
+            // matchers above missed ("so what exactly is this, therapy?")
+            // still gets the honest answer rather than a reflective deflection.
+            // Deflecting a direct question about what Tara *is* is the one
+            // failure mode this pillar cannot afford.
+            let tokens: Vec<&str> = norm.split_whitespace().collect();
+            if tokens.iter().any(|t| THERAPIST_WORDS.contains(t)) {
+                choose(META_THERAPIST_LINES, &norm, turn, None)
+            } else if tokens.iter().any(|t| NONHUMAN_WORDS.contains(t)) {
+                choose(META_AI_LINES, &norm, turn, None)
+            } else {
+                choose(QUESTION_LINES, &norm, turn, None)
+            }
         } else if norm.split_whitespace().count() >= VENT_WORDS {
             choose(VENT_LINES, &norm, turn, None)
         } else {
@@ -960,6 +1097,11 @@ mod tests {
             // be caught by the same net.
             "i want to kill my self",
             "i keep wanting to hurt my self",
+            // …and the split must be matched ADDITIVELY. Rewriting "my self"
+            // to "myself" in place destroys the "self harm" cue in exactly
+            // these two sentences, which is how the guard got this test.
+            "my self-harm is back",
+            "my self harm is getting worse",
         ] {
             assert!(detect_distress(msg), "should flag: {msg}");
         }
@@ -1144,6 +1286,113 @@ mod tests {
                 "line hides what tara is: {line}"
             );
         }
+    }
+
+    #[test]
+    fn the_therapist_question_is_answered_however_it_is_phrased() {
+        for msg in [
+            "are you a therapist?",
+            "are you my therapist",
+            "r u a therapist",
+            "are u a shrink",
+            "you are a psychiatrist right",
+            "youre a counsellor arent you",
+            "are you a clinician",
+            "is this therapy",
+        ] {
+            let reply = text(msg, 0);
+            assert!(
+                from_pool(&reply, META_THERAPIST_LINES),
+                "'{msg}' dodged honesty gate 1: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn talking_about_a_therapist_is_not_asking_if_tara_is_one() {
+        // The address window exists for this: the profession word is present,
+        // but the question is about the user's life, not about Tara.
+        let reply = text("are you tired of me talking about my therapist", 0);
+        assert!(
+            !from_pool(&reply, META_THERAPIST_LINES),
+            "co-occurrence beat the address window: {reply}"
+        );
+    }
+
+    #[test]
+    fn meta_cues_match_whole_words_only() {
+        // " are you ai " must not match "are you aiming"; " are you real "
+        // must not match "are you really". Substring matching shipped both.
+        for msg in [
+            "are you aiming to fix this for me",
+            "are you really going to remember all this",
+        ] {
+            let reply = text(msg, 0);
+            assert!(
+                !from_pool(&reply, META_AI_LINES),
+                "'{msg}' was misread as a question about tara: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_speech_is_heard_as_the_feeling_not_as_a_meta_question() {
+        let reply = text("he asked are you okay and i just started crying", 0);
+        assert!(
+            !from_pool(&reply, META_AI_LINES),
+            "answered someone else's question instead of hearing them: {reply}"
+        );
+        assert!(
+            from_pool(&reply, LOW_LINES),
+            "the crying went unheard: {reply}"
+        );
+    }
+
+    #[test]
+    fn a_question_about_what_tara_is_never_falls_through_to_deflection() {
+        // Backstop: phrasings the matchers miss must still land on honesty
+        // rather than QUESTION_LINES.
+        let therapy = text("so what exactly is this, some kind of therapy?", 0);
+        assert!(
+            from_pool(&therapy, META_THERAPIST_LINES),
+            "deflected a direct question about what tara is: {therapy}"
+        );
+        let ai = text("wait, is there a human anywhere in this or just a bot?", 0);
+        assert!(
+            from_pool(&ai, META_AI_LINES),
+            "deflected a direct question about what tara is: {ai}"
+        );
+    }
+
+    #[test]
+    fn a_feeling_taken_back_after_the_fact_is_not_celebrated() {
+        // "I was happy but not anymore" is the shape people actually use;
+        // a two-token peek for the literal word "anymore" missed it.
+        for msg in [
+            "i was happy but not anymore",
+            "i felt proud about it, not really",
+            "i was excited earlier, now not so much",
+        ] {
+            let reply = text(msg, 0);
+            assert!(
+                !from_pool(&reply, GOOD_LINES),
+                "'{msg}' was celebrated: {reply}"
+            );
+        }
+        assert!(
+            from_pool(&text("i was happy but not anymore", 0), LOW_LINES),
+            "a withdrawn positive should read as low"
+        );
+    }
+
+    #[test]
+    fn a_positive_qualified_but_not_withdrawn_is_still_positive() {
+        // The guard above must not swallow every "not" that follows a cue.
+        let reply = text("im happy but not sure why", 0);
+        assert!(
+            from_pool(&reply, GOOD_LINES),
+            "a qualified positive was buried: {reply}"
+        );
     }
 
     #[test]

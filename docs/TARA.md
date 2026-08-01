@@ -110,6 +110,19 @@ fully deterministic and on-device but changes what it does with that budget:
   questions, generic questions and long vents each route to their own pool.
   The meta pools are honesty gate 1 in miniature: asked directly, Tara says
   no, she is not a therapist and not a person — every line, unhedged.
+* **The meta question is recognised however it's typed.** "r u a shrink",
+  "youre a counsellor arent you", "are you a clinician" all land, because the
+  matcher pairs an *address* form with a *subject* word inside a short window
+  rather than enumerating whole sentences. The window is what keeps "are you
+  tired of me talking about my therapist" out of it. And any unmatched
+  question that still names a profession or a non-human noun falls through to
+  the honest answer rather than to a reflective deflection — deflecting
+  "so what is this, therapy?" is the one failure this pillar can't afford.
+* **Whole words, never substrings.** Cues are matched on padded token
+  boundaries: " are you ai " does not fire on "are you **ai**ming", and
+  " are you real " does not fire on "are you **real**ly". Inner-life questions
+  ("are you okay?") additionally only count in short messages, so "he asked
+  are you okay and i just started crying" is heard as the crying.
 * **Whole sentences per feeling.** Eight complete lines per family, mixed
   shapes — some validate without asking anything, some end with an open
   question, some just invite. No more "That sounds worn out, and it makes
@@ -117,10 +130,13 @@ fully deterministic and on-device but changes what it does with that budget:
 * **Seeded variety.** Line choice is `(fnv1a(message) + turn) % pool_len`:
   same (message, turn) is stable for tests; consecutive turns never repeat;
   different messages start at different offsets.
-* **Negation awareness.** "I'm not happy" reads as low, never celebrated;
-  "I don't feel lonely" isn't mirrored; "not anxious anymore" is left in the
-  past. Ambiguous bare cues ("the wifi has been down") no longer count as
-  feelings — only "feel"-anchored phrasings do.
+* **Negation awareness, before and after the cue.** "I'm not happy" reads as
+  low, never celebrated; "I don't feel lonely" isn't mirrored; "not anxious
+  anymore" is left in the past; and "I was happy but not anymore" / "now not
+  so much" are taken back rather than congratulated. The after-window matches
+  a list of *withdrawal phrases*, not any stray "not" — "I'm happy but not
+  sure why" is still happy. Ambiguous bare cues ("the wifi has been down") no
+  longer count as feelings — only "feel"-anchored phrasings do.
 * **Both feelings named.** "Exhausted and scared" is acknowledged as both, in
   the user's own order, instead of whichever the cue table lists first.
 * **Safe topic echo.** "…about the review tomorrow" can come back as "It
