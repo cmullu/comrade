@@ -111,7 +111,11 @@ Beacons are sent when:
    at all, so the feature is invisible and free until someone opts in;
 3. a comrade is chosen or un-chosen (`online` / `offline` respectively, so
    neither side waits on a heartbeat to learn about the change);
-4. the app returns to the foreground (Android) — freshness, not mechanism;
+4. **the app comes to the foreground** (Android) — and an `offline` beacon
+   goes out when it leaves it. This is the definition, not a nicety:
+   *online means the app is open.* A phone in a pocket with the connection
+   service running is still receiving messages, but nobody is at it, and a
+   green dot for that is exactly the small lie this feature exists to avoid;
 5. **a comrade we thought was offline arrives** — we answer with
    `reply: true`, so they learn we are already here instead of waiting up to a
    heartbeat. Only an *arrival* is answered: a heartbeat from a peer we already
@@ -121,9 +125,22 @@ Beacons are sent when:
 And an `offline` beacon is sent when the vault locks. Process death sends
 nothing, by definition — that is what the TTL is for.
 
-Backgrounding deliberately does **not** announce offline: the connection
-service keeps delivering while the app is backgrounded, so the user really is
-still reachable. Claiming otherwise would be the dishonest direction.
+The heartbeat refreshes the claim **only while the app is open**
+(`ComradeRuntime::presence_active`, set by the frontend through
+`announce_presence`). Without that gate the loop would undo every goodbye: a
+backgrounded phone would announce itself offline and then, a heartbeat later,
+cheerfully claim to be online again. It also makes the feature free while
+backgrounded — no beacons, no relay traffic — and it is why choosing a comrade
+from a backgrounded app sends `offline` rather than `online`: they still learn
+we chose them (that is what any beacon proves), without a claim we are at the
+phone.
+
+A video call in picture-in-picture keeps the Activity started, so a call still
+reads as online — which is true.
+
+Delivery is a separate question from presence, and stays separate: messages
+and calls keep arriving while backgrounded (that is the connection service's
+job). What stops is the claim that anyone is there to read them.
 
 ## 5. How it reads on screen
 

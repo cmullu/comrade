@@ -212,16 +212,16 @@ class MainActivity : ComponentActivity() {
      * rather than after unlock is safe: with a locked vault nothing produces
      * events, so the loop is an idle tick.
      *
-     * **It re-announces our presence to the comrades.**
+     * **It tells the comrades we are online**, and [onStop] tells them we are
+     * not. That pairing is the whole definition: *online means the app is
+     * open*. A phone in a pocket with the connection service running is still
+     * receiving messages, but its owner is not at it — showing a green dot
+     * for that is precisely the small lie this feature exists to avoid, and
+     * it is what a user reported seeing.
      *
-     * The native side already beacons on unlock and heartbeats every few
-     * minutes, so this is a freshness nicety rather than the mechanism: it
-     * means someone who picks their phone up shows as around to the people
-     * they chose immediately, instead of up to a heartbeat later. Deliberately
-     * *not* paired with an "offline" on backgrounding — the connection service
-     * keeps delivering while backgrounded, so the app really is still
-     * reachable; the honest "offline" moments are a vault lock (which the Rust
-     * side announces) and process death (which the beacon's own TTL covers).
+     * The native heartbeat refreshes the claim only while this flag holds
+     * (see `ComradeRuntime::presence_active`), so a backgrounded app goes
+     * quiet rather than re-announcing itself a few minutes later.
      *
      * Runs on the application scope, off the main thread: the beacon send is a
      * relay round-trip per comrade.
@@ -236,10 +236,21 @@ class MainActivity : ComponentActivity() {
         // The video surface is back: resume capture if a video call had it
         // suspended (a no-op otherwise, and idempotent — see PipController).
         PipController.onWindowVisibilityChanged(visible = true)
+        announcePresence(online = true)
+    }
+
+    /**
+     * Tell the comrades whether this device is at the user's attention right
+     * now. Fire-and-forget on the application scope so a relay round-trip
+     * never runs on a lifecycle callback, and silent on failure — presence is
+     * a courtesy, and the beacon's own TTL covers a goodbye that never
+     * lands.
+     */
+    private fun announcePresence(online: Boolean) {
         val app = application as? ComradeApplication ?: return
         app.appScope.launch(Dispatchers.IO) {
             if (ComradeCore.isVaultUnlocked()) {
-                runCatching { ComradeCore.announcePresenceTyped(online = true) }
+                runCatching { ComradeCore.announcePresenceTyped(online = online) }
                     .onFailure { Log.w("ComradeApp", "presence announce failed", it) }
             }
         }
@@ -258,6 +269,12 @@ class MainActivity : ComponentActivity() {
         // Nothing visible any more: the service keeps the drain loop alive if
         // the user wants background delivery, and the pump stops it if not.
         EventPump.release(PumpHolder.FOREGROUND)
+        // …and the comrades are told, because "online" means the app is open.
+        // Delivery continues (that is the service's job); what stops is the
+        // claim that anyone is at the phone. A PiP video call does not reach
+        // here — the Activity stays started — so a call still reads as online,
+        // which is true.
+        announcePresence(online = false)
         // Nothing is displaying the local video any more — stop capturing it
         // (unless a PiP window is showing the call). See PipController.
         PipController.onWindowVisibilityChanged(visible = false)

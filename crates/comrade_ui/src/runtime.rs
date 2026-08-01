@@ -994,6 +994,17 @@ pub struct ComradeRuntime {
     /// The periodic outbox-flush task, tracked like [`Self::feed_task`] so
     /// [`Self::lock_vault`] can abort it.
     outbox_task: Option<tokio::task::JoinHandle<()>>,
+    /// Whether this device currently counts as *online* for presence.
+    ///
+    /// "Online" means **the app is open**, not merely that the process is
+    /// alive: a phone in someone's pocket with a connection service running
+    /// is reachable, but its owner is not at it, and a green dot that says
+    /// otherwise is the kind of small lie this feature exists to avoid.
+    /// Frontends set it through [`Self::announce_presence`] (Android: on
+    /// foreground/background); the heartbeat refreshes the claim only while
+    /// it holds. Behind an `Arc` so the heartbeat task and the
+    /// [`RuntimeHandles`] every bridge takes share one answer.
+    presence_active: Arc<std::sync::atomic::AtomicBool>,
     /// The comrade-presence heartbeat/expiry loop, tracked for the same
     /// reason as [`Self::feed_task`] — [`Self::lock_vault`] must be able to
     /// stop announcing "I'm online" the moment the user locks up.
@@ -1049,6 +1060,10 @@ impl ComradeRuntime {
             call_signal_dedup: Arc::new(SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY)),
             outbox: Arc::new(Outbox::new()),
             outbox_task: None,
+            // Default `true`: a frontend that never says otherwise (desktop,
+            // CLI) is one whose app is simply open. Android overrides it on
+            // every foreground/background transition.
+            presence_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             presence_task: None,
             transport_dedup: Arc::new(SeenSet::with_ttl(
                 CROSS_TRANSPORT_DEDUP_CAPACITY,
@@ -1149,6 +1164,12 @@ impl ComradeRuntime {
                 self.outbox = Arc::new(Outbox::from_snapshot(snapshot));
             }
         }
+
+        // Unlocking is someone standing at the app with a passphrase typed, so
+        // presence starts active again — a previous `lock_vault` left it off
+        // (see `spawn_farewell_beacons`), and this runtime outlives the lock.
+        self.presence_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Restore the saved identity, or seed and persist a fresh one so the
         // engines always have keys to sign with.
@@ -1412,7 +1433,9 @@ impl ComradeRuntime {
             loop {
                 ticker.tick().await;
                 if tick.is_multiple_of(announce_every) {
-                    handles.announce_presence(true).await;
+                    // Refreshes only while the app is open — a backgrounded
+                    // device stays silent instead of undoing its own goodbye.
+                    handles.refresh_presence().await;
                 }
                 expire_stale_presence(handles.store.as_deref(), &tx);
                 // Abandoned drafts ride this sweep rather than a timer of
@@ -1956,6 +1979,11 @@ impl ComradeRuntime {
     /// engine to the spawned send, so the store's file lock is free to be
     /// reclaimed immediately regardless of how long the relay takes.
     fn spawn_farewell_beacons(&self) {
+        // A locked vault is not online, whatever the app was doing a moment
+        // ago — record that before the beacon, so nothing re-announces in the
+        // window before the heartbeat task is aborted.
+        self.presence_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let Some(store) = self.ui.store_ref() else {
             return;
         };
@@ -2405,7 +2433,14 @@ impl ComradeRuntime {
 
         // Tell them straight away, either way: a new comrade shouldn't wait a
         // heartbeat to see us, and a dropped one shouldn't keep seeing us.
-        let beacon = if comrade {
+        // A beacon either way is also what proves reciprocity to them, so
+        // choosing someone while the app isn't in the foreground still tells
+        // them we chose them — it just doesn't claim we're at the phone.
+        let beacon = if comrade
+            && self
+                .presence_active
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             PresenceBeacon::online()
         } else {
             PresenceBeacon::offline()
@@ -2499,6 +2534,13 @@ impl ComradeRuntime {
     /// for why the network half never runs under the runtime lock.
     pub async fn announce_presence(&self, online: bool) -> u64 {
         self.handles().announce_presence(online).await
+    }
+
+    /// Whether this device currently counts as online — see
+    /// [`Self::presence_active`] (the field) for what that means.
+    pub fn is_presence_active(&self) -> bool {
+        self.presence_active
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // ── The nudge (abandoned drafts — see `comrade_core::nudge`) ─────────────
@@ -3464,6 +3506,7 @@ impl ComradeRuntime {
             mesh: self.mesh_link(),
             prefer_local: self.ui.current_workspace().mesh_active,
             draft_watch: self.draft_watch.clone(),
+            presence_active: self.presence_active.clone(),
         }
     }
 
@@ -3515,6 +3558,8 @@ pub struct RuntimeHandles {
     /// The composer watch, shared with the runtime the frontends call into —
     /// see [`ComradeRuntime::draft_watch`] and [`Self::nudge_abandoned_drafts`].
     draft_watch: Arc<DraftWatch>,
+    /// Shared with [`ComradeRuntime::presence_active`] — see its doc comment.
+    presence_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RuntimeHandles {
@@ -3934,14 +3979,51 @@ impl RuntimeHandles {
         }
     }
 
+    /// Whether this device currently counts as online — see
+    /// [`ComradeRuntime::presence_active`].
+    pub fn presence_active(&self) -> bool {
+        self.presence_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Announce presence to every comrade, one gift-wrapped beacon each, and
     /// return how many were accepted by a relay.
+    ///
+    /// This is the **frontend's** call, and it is what decides the answer:
+    /// `online` is recorded, so the heartbeat afterwards keeps refreshing
+    /// (or keeps quiet) accordingly. An Android shell calls it `true` when an
+    /// Activity comes to the foreground and `false` when the last one goes
+    /// away — the app being open is the thing "online" claims, not the
+    /// process being alive.
     ///
     /// Never fails loudly: presence is a courtesy, and a relay hiccup must
     /// not surface as an error in a UI that only ever calls this in the
     /// background. Sends are sequential — the comrade list is a handful of
     /// people by design, and a burst of parallel gift wraps buys nothing.
     pub async fn announce_presence(&self, online: bool) -> u64 {
+        self.presence_active
+            .store(online, std::sync::atomic::Ordering::Relaxed);
+        self.send_presence(online).await
+    }
+
+    /// The heartbeat's call: re-assert "online" **only while the app is
+    /// open**.
+    ///
+    /// Without this gate the loop would undo every goodbye — a backgrounded
+    /// phone would announce itself offline and then, a heartbeat later,
+    /// cheerfully claim to be online again. Returns 0 while inactive, which
+    /// is also what makes the whole feature free for a backgrounded app: no
+    /// beacons, no relay traffic.
+    pub async fn refresh_presence(&self) -> u64 {
+        if !self.presence_active() {
+            return 0;
+        }
+        self.send_presence(true).await
+    }
+
+    /// Fan one beacon out to every comrade. Shared by the two callers above so
+    /// the "who gets told, and what" half stays in one place.
+    async fn send_presence(&self, online: bool) -> u64 {
         let Some(vault) = self.vault.clone() else {
             return 0;
         };
@@ -7891,6 +7973,50 @@ mod tests {
             Err(UiError::Engine(_))
         ));
         assert!(matches!(rt.peer_presence("junk"), Err(UiError::Engine(_))));
+    }
+
+    #[tokio::test]
+    async fn presence_follows_the_app_being_open_not_the_process_being_alive() {
+        // "Online" is a claim about the person, not the process: a phone in a
+        // pocket with a connection service running is reachable, but nobody
+        // is at it. The heartbeat must therefore refresh only while the
+        // frontend says the app is open — otherwise it would undo every
+        // goodbye a backgrounded app sends.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        rt.set_comrade(&peer, true).unwrap();
+
+        assert!(
+            rt.is_presence_active(),
+            "a frontend that never says otherwise (desktop, CLI) is simply open"
+        );
+
+        // Backgrounded: the flag flips, and the heartbeat has nothing to say.
+        rt.announce_presence(false).await;
+        assert!(!rt.is_presence_active());
+        assert_eq!(
+            rt.handles().refresh_presence().await,
+            0,
+            "a backgrounded app must not re-announce itself online"
+        );
+
+        // Foregrounded again: the heartbeat resumes. (Both sends fail here —
+        // there is no relay — so the count is 0 either way; what this pins is
+        // the gate, which the two-peer suite then exercises for real.)
+        rt.announce_presence(true).await;
+        assert!(rt.is_presence_active());
+
+        // Locking is its own kind of "not online", whatever the app was doing.
+        rt.lock_vault().await;
+        assert!(!rt.is_presence_active());
+
+        // …and unlocking again is someone standing at the app, so presence
+        // resumes. (Without this the heartbeat would stay silent for the rest
+        // of the process's life after any lock/unlock cycle.)
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(rt.is_presence_active());
     }
 
     #[tokio::test]
