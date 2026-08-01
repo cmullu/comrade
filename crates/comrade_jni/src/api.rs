@@ -774,6 +774,22 @@ pub fn abandon_draft(peer: String) {
     }
 }
 
+/// Tell every comrade, once, that this person might need them — the deliberate
+/// trigger behind the breathing screen.
+///
+/// What this discloses, stated plainly: each comrade — nobody else, and no
+/// relay — is told that you might need them, and *nothing else*. It is the same
+/// envelope an abandoned draft sends, so they cannot tell which happened, and
+/// it shares that trigger's cooldown so the two can never add up to two
+/// notifications. Nothing is stored locally about having done it.
+///
+/// Returns how many nudges a relay accepted; `0` when no comrades are chosen.
+/// Never fails — like presence, this is a courtesy.
+pub async fn nudge_comrades() -> u64 {
+    let handles = runtime().read().await.handles();
+    handles.nudge_comrades().await
+}
+
 // ── Journal (strictly local) ─────────────────────────────────────────────────
 
 pub fn add_journal_entry(text: String, mood: Option<String>) -> Result<JournalEntryDto, UiError> {

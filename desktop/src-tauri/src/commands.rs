@@ -573,6 +573,21 @@ pub async fn abandon_draft(state: tauri::State<'_, Runtime>, peer: String) -> Re
     Ok(())
 }
 
+/// Tell every comrade, once, that this person might need them — the deliberate
+/// trigger behind the breathing screen. Returns how many nudges a relay
+/// accepted.
+///
+/// The same envelope an abandoned draft sends, so a comrade cannot tell which
+/// happened, and the same cooldown, so the two never add up to two
+/// notifications. Never errors: a locked vault or no comrades is a quiet `0`.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn nudge_comrades(state: tauri::State<'_, Runtime>) -> Result<u64, String> {
+    let handles = state.read().await.handles();
+    Ok(handles.nudge_comrades().await)
+}
+
 /// Best-effort people search by handle over NIP-50-capable relays.
 ///
 /// See [`sync_ledger`]'s doc comment for the lock discipline.

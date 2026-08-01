@@ -46,6 +46,11 @@
 /// * `metricsSnapshot` — device-local delivery counters for a diagnostics
 ///   screen.
 /// * `panicWipe` — the irreversible local-state destroy.
+/// * `nudgeComrades` — the deliberate "I might need you", which on Android is
+///   sent by the breathing screen. This app has no breathing screen yet (the
+///   attention pillar is Android-first, see `docs/ATTENTION.md`), and a
+///   disclosure with no UI to explain it is the one thing this feature must
+///   not be. It is one line here the day that screen exists.
 ///
 /// Each is a one-line addition to the interface plus a fake implementation
 /// when a screen wants it. Nothing here is half-wired: every method the

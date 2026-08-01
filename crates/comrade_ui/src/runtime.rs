@@ -49,7 +49,7 @@ use comrade_core::media::{
 };
 use comrade_core::metrics as core_metrics;
 use comrade_core::metrics::Metric as CoreMetric;
-use comrade_core::nudge::{is_fresh_at, nudge_expires_at, parse_nudge, DraftWatch, Nudge};
+use comrade_core::nudge::{is_fresh_at, nudge_expires_at, parse_nudge, Nudge, NudgeWatch};
 use comrade_core::presence::{
     is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
     PRESENCE_HEARTBEAT_SECS, PRESENCE_SWEEP_SECS,
@@ -1020,7 +1020,7 @@ pub struct ComradeRuntime {
     /// nudge ([`comrade_core::nudge`]). Behind an `Arc` so the presence sweep —
     /// which runs on a detached [`RuntimeHandles`], not on `&self` — watches
     /// the same map the frontends report into.
-    draft_watch: Arc<DraftWatch>,
+    nudge_watch: Arc<NudgeWatch>,
 }
 
 impl Default for ComradeRuntime {
@@ -1070,7 +1070,7 @@ impl ComradeRuntime {
                 std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
             )),
             mesh_dm_task: None,
-            draft_watch: Arc::new(DraftWatch::new()),
+            nudge_watch: Arc::new(NudgeWatch::new()),
         }
     }
 
@@ -1277,7 +1277,7 @@ impl ComradeRuntime {
         // A hesitation belongs to the session it happened in. Locking up is a
         // deliberate exit — the goodbye beacon above has just told the comrades
         // we are gone, and a nudge landing after it would claim the opposite.
-        self.draft_watch.clear();
+        self.nudge_watch.clear();
         self.ui.lock();
     }
 
@@ -2558,7 +2558,7 @@ impl ComradeRuntime {
     /// courtesy, and a locked vault or an unparseable key simply means there
     /// is nobody to be courteous to.
     pub fn note_draft(&self, peer: &str) {
-        self.draft_watch.writing(&to_npub(peer), now_secs());
+        self.nudge_watch.writing(&to_npub(peer), now_secs());
     }
 
     /// `peer`'s draft is gone — the box was emptied, or the thread was closed
@@ -2569,7 +2569,20 @@ impl ComradeRuntime {
     /// *not* the moment anything is sent: see
     /// [`RuntimeHandles::nudge_abandoned_drafts`] for the wait that follows.
     pub fn abandon_draft(&self, peer: &str) {
-        self.draft_watch.abandoned(&to_npub(peer), now_secs());
+        self.nudge_watch.abandoned(&to_npub(peer), now_secs());
+    }
+
+    /// Tell every comrade, once, that this person might need them — for
+    /// someone deliberately reaching for a pause rather than giving up on a
+    /// message. Returns how many nudges a relay accepted.
+    ///
+    /// The same envelope the abandoned-draft trigger sends, so a comrade
+    /// cannot tell the two apart, and the same cooldown, so they cannot add up
+    /// to two notifications. Delegates to
+    /// [`RuntimeHandles::nudge_comrades`] — see [`Self::send_dm`] for why the
+    /// network half never runs under the runtime lock.
+    pub async fn nudge_comrades(&self) -> u64 {
+        self.handles().nudge_comrades().await
     }
 
     // ── Journal (wellbeing pillar #1 — strictly local, never networked) ──────
@@ -3505,7 +3518,7 @@ impl ComradeRuntime {
             events: self.events.clone(),
             mesh: self.mesh_link(),
             prefer_local: self.ui.current_workspace().mesh_active,
-            draft_watch: self.draft_watch.clone(),
+            nudge_watch: self.nudge_watch.clone(),
             presence_active: self.presence_active.clone(),
         }
     }
@@ -3556,8 +3569,8 @@ pub struct RuntimeHandles {
     /// `OffGridTravel` workspace, switched from the app bar).
     prefer_local: bool,
     /// The composer watch, shared with the runtime the frontends call into —
-    /// see [`ComradeRuntime::draft_watch`] and [`Self::nudge_abandoned_drafts`].
-    draft_watch: Arc<DraftWatch>,
+    /// see [`ComradeRuntime::nudge_watch`] and [`Self::nudge_abandoned_drafts`].
+    nudge_watch: Arc<NudgeWatch>,
     /// Shared with [`ComradeRuntime::presence_active`] — see its doc comment.
     presence_active: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -3627,7 +3640,7 @@ impl RuntimeHandles {
         // where the outbox will deliver them without the user doing anything
         // else. No frontend has to remember this: sending is the one way to
         // leave a composer that must never look like abandoning it.
-        self.draft_watch.sent(&peer_npub);
+        self.nudge_watch.sent(&peer_npub);
 
         let dto = MessageDto {
             id,
@@ -4058,7 +4071,7 @@ impl RuntimeHandles {
     /// feature is idle, which is almost always).
     ///
     /// Three gates, in this order, and each is load-bearing:
-    ///  * **[`DraftWatch::due`] decides**, so every timing rule lives in one
+    ///  * **[`NudgeWatch::due`] decides**, so every timing rule lives in one
     ///    tested place and the cooldown is recorded at the moment we decide —
     ///    a relay that refuses the DM does not earn the writer a second nudge.
     ///  * **Only comrades are told.** Marking someone is what consents to
@@ -4080,14 +4093,11 @@ impl RuntimeHandles {
     pub async fn nudge_abandoned_drafts(&self, now: u64) -> u64 {
         // Take the decisions out from under the mutex *before* any await —
         // `due` hands back owned keys for exactly this reason.
-        let peers = self.draft_watch.due(now);
+        let peers = self.nudge_watch.due(now);
         if peers.is_empty() {
             return 0;
         }
         let (Some(vault), Some(store)) = (self.vault.clone(), self.store.as_deref()) else {
-            return 0;
-        };
-        let Ok(json) = Nudge::new().to_json() else {
             return 0;
         };
         // Every store read happens here, before the first await — the same
@@ -4104,15 +4114,54 @@ impl RuntimeHandles {
             })
             .filter_map(|npub| PublicKey::parse(&npub).ok())
             .collect();
+        deliver_nudges(&vault, recipients).await
+    }
 
-        let mut sent = 0u64;
-        for peer in recipients {
-            match vault.send_dm(&peer, &json).await {
-                Ok(_) => sent += 1,
-                Err(e) => tracing::debug!(%peer, "nudge not sent: {e}"),
-            }
+    /// Tell every comrade, once, that this person might need them — the
+    /// deliberate trigger, for someone reaching for the breathing screen
+    /// (`docs/ATTENTION.md`) rather than giving up on a message.
+    ///
+    /// Returns how many nudges a relay accepted; `0` for someone who has
+    /// chosen no comrades, which is what makes the whole thing free until
+    /// somebody opts in.
+    ///
+    /// Deliberately the **same envelope** as the abandoned-draft trigger, not a
+    /// second kind of message: a comrade learns "they might need you" and
+    /// cannot tell which of the two happened, so this reason added nothing to
+    /// what anyone learns. It shares the cooldown too — see
+    /// [`comrade_core::nudge::nudged_recently`] — so tapping the button after a
+    /// hard half-hour of writing and deleting does not page anyone twice.
+    ///
+    /// Never fails, like its neighbours: a locked vault, no comrades, or an
+    /// unreachable relay all just mean nothing is sent.
+    ///
+    /// Reads the clock itself, unlike [`Self::nudge_abandoned_drafts`]: there
+    /// is no settle window for a test to stand on the far side of here, and
+    /// the one timing rule that does apply — the cooldown — is pinned in
+    /// `comrade_core::nudge`'s own tests.
+    pub async fn nudge_comrades(&self) -> u64 {
+        let now = now_secs();
+        let (Some(vault), Some(store)) = (self.vault.clone(), self.store.as_deref()) else {
+            return 0;
+        };
+        // Both store reads — who the comrades are, and their keys — happen
+        // before the cooldown is claimed, and the claim before any await.
+        let comrades: Vec<String> = store
+            .list_comrades()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.npub)
+            .collect();
+        if comrades.is_empty() {
+            return 0;
         }
-        sent
+        let recipients: Vec<PublicKey> = self
+            .nudge_watch
+            .due_among(&comrades, now)
+            .iter()
+            .filter_map(|npub| PublicKey::parse(npub).ok())
+            .collect();
+        deliver_nudges(&vault, recipients).await
     }
 
     pub async fn broadcast_chitthi(
@@ -4322,7 +4371,7 @@ impl RuntimeHandles {
         // same debt — see the same call in [`Self::send_dm_reply`]. Any text
         // still in the composer starts its own clock again the next time they
         // touch it.
-        self.draft_watch.sent(&peer_npub);
+        self.nudge_watch.sent(&peer_npub);
 
         let sender = keys
             .public_key()
@@ -4846,6 +4895,30 @@ fn spawn_presence_beacons(
             }
         }
     });
+}
+
+/// Fan one nudge out to peers the caller has already established are comrades,
+/// returning how many a relay accepted.
+///
+/// The one place a nudge is actually put on the wire, so both triggers — an
+/// abandoned draft and a deliberate "I might need you" — send byte-identical
+/// envelopes. Two send sites would be two chances for one of them to start
+/// carrying a reason.
+async fn deliver_nudges(vault: &Arc<VaultEngine>, recipients: Vec<PublicKey>) -> u64 {
+    if recipients.is_empty() {
+        return 0;
+    }
+    let Ok(json) = Nudge::new().to_json() else {
+        return 0;
+    };
+    let mut sent = 0u64;
+    for peer in recipients {
+        match vault.send_dm(&peer, &json).await {
+            Ok(_) => sent += 1,
+            Err(e) => tracing::debug!(%peer, "nudge not sent: {e}"),
+        }
+    }
+    sent
 }
 
 /// Whether `peer`'s last beacon still claims them online at `now`. The one
@@ -8402,7 +8475,7 @@ mod tests {
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
         let (_hex, peer) = stranger();
 
-        let watch = rt.draft_watch.clone();
+        let watch = rt.nudge_watch.clone();
         let at = now_secs() - NUDGE_SETTLE_SECS - 60;
         watch.writing(&peer, at);
         watch.abandoned(&peer, at + 30);
@@ -8420,6 +8493,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reaching_for_a_pause_with_no_comrades_tells_nobody() {
+        // The whole feature has to be free for someone who never chose anyone
+        // — no relay traffic, and nothing remembered either.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert_eq!(rt.nudge_comrades().await, 0);
+
+        // …and it is safe before there is a vault at all, since the breathing
+        // screen has no idea what state the runtime is in.
+        let locked = ComradeRuntime::new();
+        assert_eq!(locked.nudge_comrades().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_pause_claims_the_same_cooldown_an_abandoned_draft_would() {
+        // The wiring behind `nudge_watch`'s shared cooldown: after a
+        // deliberate nudge, a draft given up on moments later must not become
+        // a second notification. (The relay is unreachable here, so nothing
+        // actually sends — what this pins is that the *decision* was spent.)
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        rt.set_comrade(&peer, true).unwrap();
+
+        rt.nudge_comrades().await;
+
+        let watch = rt.nudge_watch.clone();
+        let at = now_secs() - NUDGE_SETTLE_SECS - 60;
+        watch.writing(&peer, at);
+        watch.abandoned(&peer, at + 30);
+        assert!(
+            watch.due(now_secs()).is_empty(),
+            "one hard half-hour is one notification, not two"
+        );
+    }
+
+    #[tokio::test]
     async fn locking_the_vault_drops_a_pending_nudge() {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
@@ -8427,7 +8539,7 @@ mod tests {
         let (_hex, peer) = stranger();
         rt.set_comrade(&peer, true).unwrap();
 
-        let watch = rt.draft_watch.clone();
+        let watch = rt.nudge_watch.clone();
         let at = now_secs() - NUDGE_SETTLE_SECS - 60;
         watch.writing(&peer, at);
         watch.abandoned(&peer, at + 30);

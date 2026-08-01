@@ -728,6 +728,20 @@ impl Comrade {
         }
     }
 
+    /// Tell every comrade, once, that this person might need them — the
+    /// deliberate trigger behind the breathing screen. Returns how many nudges
+    /// a relay accepted.
+    ///
+    /// Async, unlike its two neighbours, because this one does reach a relay:
+    /// it is a deliberate tap, not a keystroke, so it can afford to be
+    /// awaited. Never throws — a locked vault or no comrades is a quiet `0`.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn nudge_comrades(&self) -> u64 {
+        let handles = self.inner.read().await.handles();
+        handles.nudge_comrades().await
+    }
+
     // ── Journal (strictly local) ─────────────────────────────────────────────
 
     pub fn add_journal_entry(
