@@ -679,3 +679,14 @@ val WifiTetheringIcon: ImageVector = materialIcon(name = "Filled.WifiTethering")
         close()
     }
 }
+
+/** Material "stop" (filled) — stop and send an in-progress voice note. */
+val StopIcon: ImageVector = materialIcon(name = "Filled.Stop") {
+    materialPath {
+        moveTo(6.0f, 6.0f)
+        horizontalLineToRelative(12.0f)
+        verticalLineToRelative(12.0f)
+        horizontalLineTo(6.0f)
+        close()
+    }
+}
