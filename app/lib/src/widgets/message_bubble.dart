@@ -140,13 +140,70 @@ class QuotedPreview extends StatelessWidget {
   }
 }
 
-/// One text message.
+/// Makes [child] repliable: long-press (touch) or a reply button that appears
+/// on hover (pointer).
 ///
-/// Long-press (touch) or the hover reply affordance (pointer) starts a reply —
 /// Android used `combinedClickable`'s long-press, desktop used a button that
 /// appeared on `:hover`. Both are wired here: a phone gets the long-press, a
 /// mouse gets a visible target, and neither platform loses its idiom.
-class MessageBubble extends StatefulWidget {
+///
+/// Shared by text and media bubbles so "reply to that photo" behaves exactly
+/// like "reply to that message" — including which side of the bubble the button
+/// appears on, which is the outside edge in both directions.
+class ReplyAffordance extends StatefulWidget {
+  const ReplyAffordance({
+    required this.child,
+    required this.onReply,
+    required this.outgoing,
+    super.key,
+  });
+
+  final Widget child;
+
+  /// Null where replying is not offered (a not-yet-sent item, a test harness
+  /// with no controller): the long-press and the hover button both disappear
+  /// rather than becoming buttons that do nothing.
+  final VoidCallback? onReply;
+
+  final bool outgoing;
+
+  @override
+  State<ReplyAffordance> createState() => _ReplyAffordanceState();
+}
+
+class _ReplyAffordanceState extends State<ReplyAffordance> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool out = widget.outgoing;
+    final Widget row = Row(
+      mainAxisAlignment: out ? MainAxisAlignment.end : MainAxisAlignment.start,
+      children: <Widget>[
+        if (out && _hovering && widget.onReply != null) _button(),
+        Flexible(child: widget.child),
+        if (!out && _hovering && widget.onReply != null) _button(),
+      ],
+    );
+    if (widget.onReply == null) return row;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: GestureDetector(onLongPress: widget.onReply, child: row),
+    );
+  }
+
+  Widget _button() => IconButton(
+        onPressed: widget.onReply,
+        iconSize: 18,
+        visualDensity: VisualDensity.compact,
+        tooltip: 'Reply',
+        icon: const Icon(Icons.reply),
+      );
+}
+
+/// One text message.
+class MessageBubble extends StatelessWidget {
   const MessageBubble({
     required this.message,
     required this.onReply,
@@ -161,20 +218,13 @@ class MessageBubble extends StatefulWidget {
   final double maxWidth;
 
   @override
-  State<MessageBubble> createState() => _MessageBubbleState();
-}
-
-class _MessageBubbleState extends State<MessageBubble> {
-  bool _hovering = false;
-
-  @override
   Widget build(BuildContext context) {
-    final MessageInfo msg = widget.message;
+    final MessageInfo msg = message;
     final ColorScheme colors = Theme.of(context).colorScheme;
     final bool out = msg.outgoing;
 
     final Widget bubble = Container(
-      constraints: BoxConstraints(maxWidth: widget.maxWidth),
+      constraints: BoxConstraints(maxWidth: maxWidth),
       decoration: BoxDecoration(
         color: out ? colors.primaryContainer : colors.surfaceContainerHighest,
         borderRadius: BorderRadius.only(
@@ -193,7 +243,7 @@ class _MessageBubbleState extends State<MessageBubble> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          if (widget.quotedText != null) QuotedPreview(widget.quotedText!),
+          if (quotedText != null) QuotedPreview(quotedText!),
           Text(msg.content, style: Theme.of(context).textTheme.bodyLarge),
           Padding(
             padding: const EdgeInsets.only(top: 2),
@@ -219,30 +269,10 @@ class _MessageBubbleState extends State<MessageBubble> {
       ),
     );
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovering = true),
-      onExit: (_) => setState(() => _hovering = false),
-      child: GestureDetector(
-        onLongPress: widget.onReply,
-        child: Row(
-          mainAxisAlignment:
-              out ? MainAxisAlignment.end : MainAxisAlignment.start,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: <Widget>[
-            if (out && _hovering) _replyButton(context),
-            Flexible(child: bubble),
-            if (!out && _hovering) _replyButton(context),
-          ],
-        ),
-      ),
+    return ReplyAffordance(
+      onReply: onReply,
+      outgoing: out,
+      child: bubble,
     );
   }
-
-  Widget _replyButton(BuildContext context) => IconButton(
-        onPressed: widget.onReply,
-        iconSize: 18,
-        visualDensity: VisualDensity.compact,
-        tooltip: 'Reply',
-        icon: const Icon(Icons.reply),
-      );
 }

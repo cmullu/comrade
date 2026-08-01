@@ -452,16 +452,34 @@ private sealed interface ChatItem {
      */
     val key: String
 
+    /**
+     * The nostr event id a reply points at.
+     *
+     * **Not** [key]: the namespacing that keeps the list keys apart would make
+     * a reply address `media:abc…`, which is not an event and would never
+     * resolve on the other side. A message and an attachment are both ordinary
+     * events, which is why replying to media needs no core change —
+     * `send_dm_reply` tags whatever id it is given.
+     */
+    val eventId: String
+
+    /** One line naming this item, for a reply chip or a quoted preview. */
+    val preview: String
+
     data class TextItem(val msg: ComradeCore.MessageInfo) : ChatItem {
         override val createdAt get() = msg.createdAt
         override val outgoing get() = msg.outgoing
         override val key get() = msg.id
+        override val eventId get() = msg.id
+        override val preview get() = msg.content
     }
 
     data class MediaItem(val info: ComradeCore.MediaMessageInfo) : ChatItem {
         override val createdAt get() = info.createdAt
         override val outgoing get() = info.outgoing
         override val key get() = "media:${info.eventId}"
+        override val eventId get() = info.eventId
+        override val preview get() = mediaQuoteLabel(info.mimeType, info.caption)
     }
 }
 
@@ -493,7 +511,10 @@ fun ConversationScreen(
     var emojiOpen by remember { mutableStateOf(false) }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var replyingTo by remember { mutableStateOf<ComradeCore.MessageInfo?>(null) }
+    // A reply target is any chat item, text or attachment: the `e` tag does not
+    // care which kind of event it names, so "reply to that photo" needs nothing
+    // from the core that "reply to that message" did not already have.
+    var replyingTo by remember { mutableStateOf<ChatItem?>(null) }
     var attaching by remember { mutableStateOf(false) }
     // Voice notes: tap the action icon to record, tap again to send.
     var recording by remember { mutableStateOf(false) }
@@ -529,8 +550,6 @@ fun ConversationScreen(
         ActivityResultContracts.RequestPermission(),
     ) { /* Granted state is re-checked on the next press; nothing to do here. */ }
 
-    // Quick lookup so a bubble carrying reply_to can show a quoted preview.
-    val byId = remember(messages) { messages.associateBy { it.id } }
     // Text and media interleaved in one time-ordered thread, like a real chat.
     // Named `chatItems`, not `items`, to avoid shadowing the LazyListScope
     // `items(...)` DSL function called with it below.
@@ -538,6 +557,10 @@ fun ConversationScreen(
         (messages.map(ChatItem::TextItem) + mediaItems.map(ChatItem::MediaItem))
             .sortedBy { it.createdAt }
     }
+    // Quick lookup so a bubble carrying reply_to can show a quoted preview.
+    // Keyed over the merged thread, not just the messages: a reply to an
+    // attachment resolves to that attachment, and quoting it says what it was.
+    val byId = remember(chatItems) { chatItems.associateBy { it.eventId } }
 
     // `chatTick` is a GLOBAL event tick — it fires for activity in any
     // conversation, and repeatedly while this one is open. So a reload must
@@ -612,7 +635,7 @@ fun ConversationScreen(
         if (text.isEmpty() || sending) return
         sending = true
         error = null
-        val replyId = replyingTo?.id
+        val replyId = replyingTo?.eventId
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) { ComradeCore.sendDmReplyTyped(peer, text, replyId) }
@@ -630,12 +653,20 @@ fun ConversationScreen(
     }
 
     // Encrypt + send a picked file as an attachment (NIP-94 over the DM channel).
+    //
+    // The caption ("tag") is whatever is in the composer, per
+    // [captionForAttachment] — Telegram's rule, minus the case where those
+    // words are a half-written reply. The box is emptied only once the send has
+    // actually succeeded and only if its text went along: a failed upload must
+    // leave what the person typed where they typed it.
     val pickMedia = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri ->
         if (uri == null || attaching) return@rememberLauncherForActivityResult
         attaching = true
         error = null
+        val caption = captionForAttachment(draft.text, replyingTo != null)
+        val consumed = captionConsumesDraft(draft.text, replyingTo != null)
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -645,10 +676,11 @@ fun ConversationScreen(
                         throw IllegalStateException("Attachments are limited to 10 MB.")
                     }
                     val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-                    ComradeCore.sendMediaBytesTyped(peer, mime, "", bytes)
+                    ComradeCore.sendMediaBytesTyped(peer, mime, caption, bytes)
                 }
             }.onSuccess {
                 attaching = false
+                if (consumed) editDraft(TextFieldValue())
                 // Render the real attachment inline — not a synthetic text line.
                 mediaItems = mediaItems + it
                 scope.launch { listState.scrollToItem(messages.size + mediaItems.size - 1) }
@@ -684,6 +716,8 @@ fun ConversationScreen(
         if (attaching) return
         attaching = true
         error = null
+        val caption = captionForAttachment(draft.text, replyingTo != null)
+        val consumed = captionConsumesDraft(draft.text, replyingTo != null)
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -695,13 +729,14 @@ fun ConversationScreen(
                         if (bytes.size > 10 * 1024 * 1024) {
                             throw IllegalStateException("Attachments are limited to 10 MB.")
                         }
-                        ComradeCore.sendMediaBytesTyped(peer, mime, "", bytes)
+                        ComradeCore.sendMediaBytesTyped(peer, mime, caption, bytes)
                     } finally {
                         file.delete()
                     }
                 }
             }.onSuccess {
                 attaching = false
+                if (consumed) editDraft(TextFieldValue())
                 mediaItems = mediaItems + it
                 scope.launch { listState.scrollToItem(messages.size + mediaItems.size - 1) }
             }.onFailure {
@@ -884,7 +919,10 @@ fun ConversationScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = if (item.info.outgoing) Arrangement.End else Arrangement.Start,
                             ) {
-                                MediaAttachmentBubble(item.info)
+                                MediaAttachmentBubble(
+                                    item.info,
+                                    onReply = { replyingTo = item },
+                                )
                             }
                             is ChatItem.TextItem -> {
                                 val msg = item.msg
@@ -894,7 +932,7 @@ fun ConversationScreen(
                                         .fillMaxWidth()
                                         .combinedClickable(
                                             onClick = {},
-                                            onLongClick = { replyingTo = msg },
+                                            onLongClick = { replyingTo = item },
                                         ),
                                     horizontalArrangement = if (msg.outgoing) Arrangement.End else Arrangement.Start,
                                 ) {
@@ -915,7 +953,7 @@ fun ConversationScreen(
                                     ) {
                                         Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
                                             if (quoted != null) {
-                                                QuotedPreview(quoted.content)
+                                                QuotedPreview(quoted.preview)
                                             }
                                             Text(msg.content, style = MaterialTheme.typography.bodyLarge)
                                             Row(
@@ -1006,7 +1044,7 @@ fun ConversationScreen(
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(
-                        "↩ " + r.content,
+                        "↩ " + r.preview,
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
