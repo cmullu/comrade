@@ -15,10 +15,11 @@
 use std::sync::Arc;
 
 use comrade_ui::{
-    CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
-    ConversationDto, CrisisResourceDto, FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto,
-    MediaBytesDto, MediaMessageDto, MessageDto, MessageRequestDto, PresenceDto, ProfileDto,
-    SakhaStatusDto, TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    AttentionDayDto, AttentionSummaryDto, CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto,
+    ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
+    FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
+    MessageDto, MessageRequestDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto,
+    TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -634,6 +635,174 @@ pub async fn tara_crisis_resources(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<CrisisResourceDto>, String> {
     Ok(state.read().await.tara_crisis_resources())
+}
+
+// ── Attention (usage mirror · focus sessions · long read) ──────────────────────
+//
+// Strictly local, like the journal and Tara. Registered here for parity with
+// the Android bridge; the vanilla-JS web UI does not render these yet (same
+// state as the journal and Tara — see `docs/ATTENTION.md` OQ14).
+//
+// `date`/`today` are `YYYY-MM-DD` in the frontend's timezone.
+
+/// Record (or update) one day's usage rollup.
+#[tauri::command]
+pub async fn record_attention_day(
+    state: tauri::State<'_, Runtime>,
+    date: String,
+    screen_minutes: u32,
+    pickups: u32,
+    doom_minutes: u32,
+) -> Result<AttentionDayDto, String> {
+    state
+        .read()
+        .await
+        .record_attention_day(&date, screen_minutes, pickups, doom_minutes)
+        .map_err(|e| e.to_string())
+}
+
+/// Every recorded usage day, newest first.
+#[tauri::command]
+pub async fn attention_days(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Vec<AttentionDayDto>, String> {
+    state.read().await.attention_days().map_err(|e| e.to_string())
+}
+
+/// Today's rollup against the user's own recent medians.
+#[tauri::command]
+pub async fn attention_summary(
+    state: tauri::State<'_, Runtime>,
+    today: String,
+) -> Result<AttentionSummaryDto, String> {
+    state
+        .read()
+        .await
+        .attention_summary(&today)
+        .map_err(|e| e.to_string())
+}
+
+/// The package names the user tagged as their own scroll traps.
+#[tauri::command]
+pub async fn doom_apps(state: tauri::State<'_, Runtime>) -> Result<Vec<String>, String> {
+    state.read().await.doom_apps().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_doom_apps(
+    state: tauri::State<'_, Runtime>,
+    packages: Vec<String>,
+) -> Result<Vec<String>, String> {
+    state
+        .read()
+        .await
+        .set_doom_apps(packages)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn start_focus_session(
+    state: tauri::State<'_, Runtime>,
+    intent: String,
+    planned_minutes: u32,
+) -> Result<FocusSessionDto, String> {
+    state
+        .read()
+        .await
+        .start_focus_session(&intent, planned_minutes)
+        .map_err(|e| e.to_string())
+}
+
+/// Finish the running session; `None` if none was running.
+#[tauri::command]
+pub async fn finish_focus_session(
+    state: tauri::State<'_, Runtime>,
+    completed: bool,
+) -> Result<Option<FocusSessionDto>, String> {
+    state
+        .read()
+        .await
+        .finish_focus_session(completed)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn active_focus_session(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Option<FocusSessionDto>, String> {
+    state
+        .read()
+        .await
+        .active_focus_session()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn focus_sessions(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Vec<FocusSessionDto>, String> {
+    state.read().await.focus_sessions().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn suggested_focus_minutes(state: tauri::State<'_, Runtime>) -> Result<u32, String> {
+    state
+        .read()
+        .await
+        .suggested_focus_minutes()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn focus_prompt(state: tauri::State<'_, Runtime>) -> Result<String, String> {
+    state.read().await.focus_prompt().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn focus_reflection(
+    state: tauri::State<'_, Runtime>,
+    outcome: String,
+) -> Result<String, String> {
+    state
+        .read()
+        .await
+        .focus_reflection(&outcome)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_reading(
+    state: tauri::State<'_, Runtime>,
+    title: String,
+    text: String,
+) -> Result<ReadingDto, String> {
+    state
+        .read()
+        .await
+        .save_reading(&title, &text)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reading(state: tauri::State<'_, Runtime>) -> Result<Option<ReadingDto>, String> {
+    state.read().await.reading().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_reading_position(
+    state: tauri::State<'_, Runtime>,
+    position: u32,
+) -> Result<Option<ReadingDto>, String> {
+    state
+        .read()
+        .await
+        .set_reading_position(position)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_reading(state: tauri::State<'_, Runtime>) -> Result<bool, String> {
+    state.read().await.clear_reading().map_err(|e| e.to_string())
 }
 
 // ── Milestone 3: progressive-disclosure workspace controller ──────────────────

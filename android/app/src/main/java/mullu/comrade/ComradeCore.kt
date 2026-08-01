@@ -539,6 +539,137 @@ object ComradeCore {
         }
     }
 
+    // ── Attention (usage mirror · focus · long read — strictly local) ─────────
+    //
+    // Wellbeing pillar #5 (docs/ATTENTION.md). Nothing here is ever networked,
+    // and only *rollups* cross this boundary: the raw UsageStats event stream
+    // is reduced in [mullu.comrade.attention.UsageStatsReader] and dropped
+    // there, so which apps were opened and when is never persisted.
+
+    data class AttentionDayInfo(
+        /** Local calendar date, `YYYY-MM-DD`. */
+        val date: String,
+        val screenMinutes: Int,
+        val pickups: Int,
+        /** Minutes in the apps the *user* tagged as their own scroll traps. */
+        val doomMinutes: Int,
+    )
+
+    /** Today against the user's **own** recent medians — never a normative target. */
+    data class AttentionSummaryInfo(
+        val today: AttentionDayInfo?,
+        val medianScreenMinutes: Int,
+        val medianDoomMinutes: Int,
+        val medianPickups: Int,
+        /** How many prior days (0–7) the medians rest on. 0 means "no baseline yet". */
+        val sampleDays: Int,
+    )
+
+    data class FocusSessionInfo(
+        val id: String,
+        val intent: String,
+        val plannedMinutes: Int,
+        val startedAt: Long,
+        val endedAt: Long?,
+        /** `completed` / `abandoned` / `lapsed`; null while running. */
+        val outcome: String?,
+        val remainingSecs: Long,
+    )
+
+    data class ReadingInfo(val title: String, val chunks: List<String>, val position: Int)
+
+    private fun uniffi.comrade_ui.AttentionDayDto.toInfo() = AttentionDayInfo(
+        date = date,
+        screenMinutes = screenMinutes.toInt(),
+        pickups = pickups.toInt(),
+        doomMinutes = doomMinutes.toInt(),
+    )
+
+    private fun uniffi.comrade_ui.FocusSessionDto.toInfo() = FocusSessionInfo(
+        id = id,
+        intent = intent,
+        plannedMinutes = plannedMinutes.toInt(),
+        startedAt = startedAt.toLong(),
+        endedAt = endedAt?.toLong(),
+        outcome = outcome,
+        remainingSecs = remainingSecs.toLong(),
+    )
+
+    private fun uniffi.comrade_ui.ReadingDto.toInfo() =
+        ReadingInfo(title = title, chunks = chunks, position = position.toInt())
+
+    fun recordAttentionDayTyped(
+        date: String,
+        screenMinutes: Int,
+        pickups: Int,
+        doomMinutes: Int,
+    ): AttentionDayInfo = rethrowing("Usage record") {
+        ffi.recordAttentionDay(
+            date,
+            screenMinutes.toUInt(),
+            pickups.toUInt(),
+            doomMinutes.toUInt(),
+        ).toInfo()
+    }
+
+    fun attentionDays(): List<AttentionDayInfo> =
+        rethrowing("Usage history") { ffi.attentionDays().map { it.toInfo() } }
+
+    fun attentionSummaryTyped(today: String): AttentionSummaryInfo = rethrowing("Usage summary") {
+        ffi.attentionSummary(today).let {
+            AttentionSummaryInfo(
+                today = it.today?.toInfo(),
+                medianScreenMinutes = it.medianScreenMinutes.toInt(),
+                medianDoomMinutes = it.medianDoomMinutes.toInt(),
+                medianPickups = it.medianPickups.toInt(),
+                sampleDays = it.sampleDays.toInt(),
+            )
+        }
+    }
+
+    /** The user's own scroll-trap list. Comrade ships no built-in blacklist. */
+    fun doomApps(): List<String> = rethrowing("Scroll traps") { ffi.doomApps() }
+
+    fun setDoomAppsTyped(packages: List<String>): List<String> =
+        rethrowing("Scroll traps") { ffi.setDoomApps(packages) }
+
+    fun startFocusSessionTyped(intent: String, plannedMinutes: Int): FocusSessionInfo =
+        rethrowing("Focus session") {
+            ffi.startFocusSession(intent, plannedMinutes.toUInt()).toInfo()
+        }
+
+    /**
+     * Finish the running session; null if none was. A session past its grace
+     * window is recorded as `lapsed` whatever [completed] says — see
+     * `ComradeRuntime::finish_focus_session`.
+     */
+    fun finishFocusSessionTyped(completed: Boolean): FocusSessionInfo? =
+        rethrowing("Focus session") { ffi.finishFocusSession(completed)?.toInfo() }
+
+    fun activeFocusSessionTyped(): FocusSessionInfo? =
+        rethrowing("Focus session") { ffi.activeFocusSession()?.toInfo() }
+
+    fun focusSessions(): List<FocusSessionInfo> =
+        rethrowing("Focus history") { ffi.focusSessions().map { it.toInfo() } }
+
+    fun suggestedFocusMinutesTyped(): Int =
+        rethrowing("Focus suggestion") { ffi.suggestedFocusMinutes().toInt() }
+
+    fun focusPrompt(): String = rethrowing("Focus prompt") { ffi.focusPrompt() }
+
+    fun focusReflectionTyped(outcome: String): String =
+        rethrowing("Focus reflection") { ffi.focusReflection(outcome) }
+
+    fun saveReadingTyped(title: String, text: String): ReadingInfo =
+        rethrowing("Reading") { ffi.saveReading(title, text).toInfo() }
+
+    fun reading(): ReadingInfo? = rethrowing("Reading") { ffi.reading()?.toInfo() }
+
+    fun setReadingPositionTyped(position: Int): ReadingInfo? =
+        rethrowing("Reading") { ffi.setReadingPosition(position.toUInt())?.toInfo() }
+
+    fun clearReadingTyped(): Boolean = rethrowing("Reading") { ffi.clearReading() }
+
     // ── Encrypted media (NIP-94/96 · Blossom) ─────────────────────────────────
 
     /** An encrypted-media message (send result, incoming reference, or history entry). */

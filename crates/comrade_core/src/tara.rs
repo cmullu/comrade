@@ -323,6 +323,32 @@ impl ReflectiveCompanion {
     }
 }
 
+impl ReflectiveCompanion {
+    /// [`CompanionEngine::opener`], optionally extended with a pre-built
+    /// heavy-scroll-day nudge (`comrade_core::attention::usage_opener`).
+    ///
+    /// Precedence is deliberate and lives here so it can never be decided two
+    /// ways by two frontends: **mood outranks usage** — two low journal days
+    /// this week are a heavier signal than yesterday's screen time, and the
+    /// usage line must never displace the low-mood invitation. The usage
+    /// nudge only ever replaces the generic openers.
+    ///
+    /// Data minimisation still holds: the caller passes a finished sentence
+    /// built from rollup *numbers* (see `attention::usage_opener`), so this
+    /// method learns nothing about the user's apps or words.
+    pub fn opener_with_usage(
+        &self,
+        recent: &[JournalSignal],
+        usage_nudge: Option<String>,
+    ) -> String {
+        let base = self.opener(recent);
+        if base.contains("felt low") {
+            return base;
+        }
+        usage_nudge.unwrap_or(base)
+    }
+}
+
 impl CompanionEngine for ReflectiveCompanion {
     fn reply(&self, message: &str, prior_user_turns: u64) -> CompanionReply {
         if detect_distress(message) {
@@ -491,6 +517,24 @@ mod tests {
         assert!(ReflectiveCompanion
             .opener(&[neutral])
             .contains("journaling this week"));
+    }
+
+    #[test]
+    fn low_mood_outranks_the_usage_nudge_and_usage_replaces_only_generic_openers() {
+        let low = JournalSignal {
+            mood: Some("😞".into()),
+            age_days: 1,
+        };
+        let nudge = Some("Yesterday had about 120 minutes…".to_string());
+        // Two low days: the mood invitation wins, whatever usage says.
+        let s = ReflectiveCompanion.opener_with_usage(&[low.clone(), low], nudge.clone());
+        assert!(s.contains("felt low"));
+        // No low days: the usage nudge replaces the generic opener.
+        let s = ReflectiveCompanion.opener_with_usage(&[], nudge);
+        assert!(s.contains("120 minutes"));
+        // No nudge: exactly the plain opener.
+        let s = ReflectiveCompanion.opener_with_usage(&[], None);
+        assert_eq!(s, ReflectiveCompanion.opener(&[]));
     }
 
     #[test]

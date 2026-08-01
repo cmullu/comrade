@@ -30,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,14 +40,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.ComradeCore
+import mullu.comrade.attention.UsageStatsReader
 import mullu.comrade.voice.OneShotRecognizer
 import mullu.comrade.voice.VoiceModelMissingException
 import mullu.comrade.voice.VoskModel
@@ -58,12 +63,65 @@ private val Moods = listOf("😞", "😕", "😐", "🙂", "😄")
  * The private journal — wellbeing pillar #1. Everything written here stays on
  * this device, sealed inside the encrypted store; nothing is ever published
  * to a relay. Supports typing or on-device Vosk dictation.
+ *
+ * Also carries the attention **mirror** ([MirrorCard], `docs/ATTENTION.md`
+ * phase 1). That is deliberate placement rather than convenience: a screen-time
+ * number is only useful next to somewhere to put what you make of it, and a
+ * dashboard people open to feel bad about themselves is the thing this pillar
+ * is treating. The mirror is opt-in and absent entirely until the user grants
+ * usage access.
  */
 @Composable
 fun JournalScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var entries by remember { mutableStateOf<List<ComradeCore.JournalEntryInfo>?>(null) }
+    // Mirror state. `mirrorTick` re-reads after returning from the system
+    // permission screen or changing the marked-app list.
+    var mirrorTick by remember { mutableStateOf(0) }
+    var hasUsageAccess by remember { mutableStateOf(false) }
+    var summary by remember { mutableStateOf<ComradeCore.AttentionSummaryInfo?>(null) }
+    var pickingApps by remember { mutableStateOf(false) }
+    var installedApps by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var doomApps by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Coming back from the system usage-access screen must not leave the
+    // invitation showing when the grant has just been made.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) mirrorTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Read usage, record today's rollup, and re-read the summary — all off the
+    // main thread (queryEvents walks a day of events, and the record call
+    // writes to the encrypted store).
+    LaunchedEffect(mirrorTick) {
+        val access = UsageStatsReader.hasAccess(context)
+        hasUsageAccess = access
+        if (!access) {
+            summary = null
+            return@LaunchedEffect
+        }
+        summary = withContext(Dispatchers.IO) {
+            runCatching {
+                val marked = ComradeCore.doomApps()
+                doomApps = marked.toSet()
+                UsageStatsReader.todayRollup(context, marked.toSet())?.let { rollup ->
+                    ComradeCore.recordAttentionDayTyped(
+                        date = UsageStatsReader.today(),
+                        screenMinutes = rollup.screenMinutes,
+                        pickups = rollup.pickups,
+                        doomMinutes = rollup.doomMinutes,
+                    )
+                }
+                ComradeCore.attentionSummaryTyped(UsageStatsReader.today())
+            }.getOrNull()
+        }
+    }
     var draft by remember { mutableStateOf("") }
     var mood by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
@@ -152,6 +210,27 @@ fun JournalScreen(modifier: Modifier = Modifier) {
         )
     }
 
+    if (pickingApps) {
+        DoomAppPicker(
+            apps = installedApps,
+            selected = doomApps,
+            onToggle = { pkg ->
+                val updated = doomApps.toMutableSet().apply {
+                    if (!add(pkg)) remove(pkg)
+                }
+                doomApps = updated
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        runCatching { ComradeCore.setDoomAppsTyped(updated.toList()) }
+                    }
+                    // The marked-minutes line changes with the list.
+                    mirrorTick++
+                }
+            },
+            onDismiss = { pickingApps = false },
+        )
+    }
+
     val list = entries
     LazyColumn(
         modifier = modifier
@@ -228,6 +307,25 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                     }
                 }
             }
+        }
+
+        // The mirror sits under the composer: the number is context for
+        // writing, not the point of the screen.
+        item(key = "mirror") {
+            MirrorCard(
+                summary = summary,
+                hasAccess = hasUsageAccess,
+                onEnable = {
+                    runCatching { context.startActivity(UsageStatsReader.accessSettingsIntent()) }
+                        .onFailure { error = "Couldn't open the system settings screen." }
+                },
+                onPickApps = {
+                    scope.launch {
+                        installedApps = withContext(Dispatchers.IO) { launchableApps(context) }
+                        pickingApps = true
+                    }
+                },
+            )
         }
 
         when {
@@ -327,4 +425,36 @@ private fun JournalEntryCard(
             }
         }
     }
+}
+
+/**
+ * Installed, launchable apps as `(packageName, label)`, alphabetically —
+ * the candidate list for the doom-app picker.
+ *
+ * Deliberately only apps with a launcher entry: system services and libraries
+ * are not things anyone chooses to open, so listing them would bury the handful
+ * of apps the question is actually about. Comrade's own package is excluded for
+ * the same reason [UsageMirror] excludes it from the figures.
+ *
+ * Reads the package manager, so callers must be off the main thread.
+ */
+internal fun launchableApps(context: Context): List<Pair<String, String>> {
+    val pm = context.packageManager
+    val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+        .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+    return runCatching {
+        pm.queryIntentActivities(intent, 0)
+            .asSequence()
+            .mapNotNull { it.activityInfo?.packageName }
+            .filter { it != context.packageName }
+            .distinct()
+            .map { pkg ->
+                val label = runCatching {
+                    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                }.getOrDefault(pkg)
+                pkg to label
+            }
+            .sortedBy { it.second.lowercase() }
+            .toList()
+    }.getOrDefault(emptyList())
 }

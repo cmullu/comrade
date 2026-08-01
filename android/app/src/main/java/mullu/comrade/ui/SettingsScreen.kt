@@ -62,6 +62,7 @@ import mullu.comrade.MutedChats
 import mullu.comrade.R
 import mullu.comrade.RelayConnectionService
 import mullu.comrade.ScreenSecurity
+import mullu.comrade.attention.QuietHours
 import mullu.comrade.update.UpdateChecker
 import mullu.comrade.update.UpdateStatus
 import mullu.comrade.call.CallManager
@@ -145,6 +146,7 @@ fun SettingsScreen(
         BackgroundConnectivitySection()
         ScreenshotSection()
         NotificationsSection()
+        QuietHoursSection()
         UpdatesSection()
         TurnRelaySection()
         VaultLockSection(onLock = onLock)
@@ -440,6 +442,126 @@ private fun NotificationsSection() {
             ) { Text(stringResource(R.string.settings_notifications_open_system)) }
         }
     }
+}
+
+// ── Quiet hours (docs/ATTENTION.md phase 0) ─────────────────────────────────
+
+/**
+ * The nightly window in which Comrade stays quiet.
+ *
+ * Opt-in, unlike the feed's gentle stop: silencing notifications can make
+ * someone miss something they wanted, so it is theirs to choose. The copy says
+ * plainly that a ringing call still comes through — a quiet-hours feature that
+ * quietly swallowed a call would be a serious thing to discover by accident.
+ *
+ * The window is adjusted in whole hours from this card. A minute-precision time
+ * picker would be more configurable and no more useful: nobody's sleep depends
+ * on 22:15 versus 22:00, and the extra dialog is one more thing to get wrong.
+ */
+@Composable
+private fun QuietHoursSection() {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(QuietHours.isEnabled(context)) }
+    var start by remember { mutableStateOf(QuietHours.startMinute(context)) }
+    var end by remember { mutableStateOf(QuietHours.endMinute(context)) }
+
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.settings_quiet_hours_title),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        stringResource(R.string.settings_quiet_hours_summary),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = {
+                        enabled = it
+                        QuietHours.setEnabled(context, it)
+                    },
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
+            if (enabled) {
+                Text(
+                    stringResource(
+                        R.string.settings_quiet_hours_window,
+                        QuietHours.formatMinute(start),
+                        QuietHours.formatMinute(end),
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    HourStepper(
+                        label = stringResource(R.string.settings_quiet_hours_start),
+                        minute = start,
+                        onChange = {
+                            start = it
+                            QuietHours.setWindow(context, it, end)
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    HourStepper(
+                        label = stringResource(R.string.settings_quiet_hours_end),
+                        minute = end,
+                        onChange = {
+                            end = it
+                            QuietHours.setWindow(context, start, it)
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    stringResource(R.string.settings_quiet_hours_device_only),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+    }
+}
+
+/** −/+ one hour, wrapping at midnight. */
+@Composable
+private fun HourStepper(
+    label: String,
+    minute: Int,
+    onChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            TextButton(onClick = { onChange(stepHour(minute, -1)) }) { Text("−") }
+            Text(QuietHours.formatMinute(minute), style = MaterialTheme.typography.bodyMedium)
+            TextButton(onClick = { onChange(stepHour(minute, +1)) }) { Text("+") }
+        }
+    }
+}
+
+/** Move [minute] by [hours], wrapping within the day. */
+private fun stepHour(minute: Int, hours: Int): Int {
+    val stepped = minute + hours * 60
+    val day = QuietHours.MINUTES_PER_DAY
+    return ((stepped % day) + day) % day
 }
 
 /** The system's own per-app notification screen — where the channels live. */

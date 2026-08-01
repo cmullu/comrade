@@ -17,7 +17,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.BuildConfig
+import mullu.comrade.NotificationPolicy
 import mullu.comrade.Notifier
+import mullu.comrade.attention.QuietHours
 
 /** Where a check has got to. Observed by both frontends' settings screens. */
 sealed class UpdateStatus {
@@ -170,8 +172,17 @@ object UpdateChecker {
         if (!notify) return
         val store = prefs(context)
         if (UpdateCheck.shouldNotify(release, skippedVersion(context), store.getString(KEY_NOTIFIED, null))) {
-            Notifier.notifyUpdateAvailable(context, release.versionName)
-            store.edit().putString(KEY_NOTIFIED, release.versionName).apply()
+            // A release can always wait until morning; the Settings card shows
+            // it either way. Deliberately does *not* mark it as notified when
+            // the window suppressed it, so the notice still arrives once the
+            // quiet hours end rather than being silently swallowed for good.
+            val calendar = java.util.Calendar.getInstance()
+            val minute = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+                calendar.get(java.util.Calendar.MINUTE)
+            if (NotificationPolicy.shouldNotifyUpdate(QuietHours.isQuietNow(context, minute))) {
+                Notifier.notifyUpdateAvailable(context, release.versionName)
+                store.edit().putString(KEY_NOTIFIED, release.versionName).apply()
+            }
         }
     }
 

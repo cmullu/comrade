@@ -12,10 +12,14 @@ class CommandDispatcherTest {
         var timelineResult: Result<List<String>> = Result.success(emptyList()),
         var switchResult: Result<String> = Result.success("Off-Grid Travel"),
         var identityResult: Result<String> = Result.success("npub1abc"),
+        /** The length the backend reports actually starting. */
+        var focusResult: Result<Int> = Result.success(25),
     ) : ComradeBackend {
         var lastPost: String? = null
         var lastJournal: String? = null
         var lastSwitchKey: String? = null
+        var lastFocusMinutes: Int? = null
+        var focusCalled = false
         override fun post(text: String): Result<String> { lastPost = text; return postResult }
         override fun journal(text: String): Result<String> {
             lastJournal = text; return journalResult
@@ -25,6 +29,37 @@ class CommandDispatcherTest {
             lastSwitchKey = key; return switchResult
         }
         override fun generateIdentity(): Result<String> = identityResult
+        override fun startFocus(minutes: Int?): Result<Int> {
+            focusCalled = true
+            lastFocusMinutes = minutes
+            return focusResult
+        }
+    }
+
+    @Test
+    fun `focus with no duration lets the engine choose and states the result`() {
+        val backend = FakeBackend(focusResult = Result.success(45))
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.StartFocus(null))
+        assertTrue(backend.focusCalled)
+        assertEquals(null, backend.lastFocusMinutes)
+        // The reply must state what actually started, not what was asked for.
+        assertTrue(reply, reply.contains("45 minutes"))
+    }
+
+    @Test
+    fun `focus with a spoken duration forwards it`() {
+        val backend = FakeBackend(focusResult = Result.success(90))
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.StartFocus(90))
+        assertEquals(90, backend.lastFocusMinutes)
+        assertTrue(reply, reply.contains("90 minutes"))
+    }
+
+    @Test
+    fun `focus failure is spoken back with the error`() {
+        val backend = FakeBackend(focusResult = Result.failure(RuntimeException("vault is locked")))
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.StartFocus(null))
+        assertTrue(reply, reply.contains("couldn't start", ignoreCase = true))
+        assertTrue(reply, reply.contains("vault is locked"))
     }
 
     @Test

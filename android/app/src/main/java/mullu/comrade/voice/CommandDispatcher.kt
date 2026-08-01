@@ -21,6 +21,13 @@ interface ComradeBackend {
 
     /** Mint a fresh identity; returns the public `npub` (never the nsec). */
     fun generateIdentity(): Result<String>
+
+    /**
+     * Start a focus session of [minutes], or of the engine's own suggested
+     * length when null. Returns the length actually started, so the spoken
+     * reply can state it rather than guess.
+     */
+    fun startFocus(minutes: Int?): Result<Int>
 }
 
 /**
@@ -65,6 +72,14 @@ class CommandDispatcher(private val backend: ComradeBackend) {
             onFailure = { "I couldn't switch workspace. ${it.message ?: "Unknown error"}." },
         )
 
+        is VoiceCommand.StartFocus -> backend.startFocus(command.minutes).fold(
+            onSuccess = { started ->
+                "Focus session started — $started minutes on one thing. " +
+                    "Stop whenever you need to."
+            },
+            onFailure = { "I couldn't start a focus session. ${it.message ?: "Unknown error"}." },
+        )
+
         VoiceCommand.GenerateKeypair -> backend.generateIdentity().fold(
             onSuccess = { "Created a new identity. Your public key is on screen." },
             onFailure = { "I couldn't create an identity. ${it.message ?: "Unknown error"}." },
@@ -73,7 +88,8 @@ class CommandDispatcher(private val backend: ComradeBackend) {
         VoiceCommand.Help -> HELP_SENTENCE
 
         VoiceCommand.Empty ->
-            "I'm listening. Try: journal, post, read my timeline, or switch workspace."
+            "I'm listening. Try: journal, post, start a focus session, read my " +
+                "timeline, or switch workspace."
 
         is VoiceCommand.Unknown ->
             "Sorry, I can't do that yet. Say \"help\" to hear what I understand."
@@ -83,7 +99,7 @@ class CommandDispatcher(private val backend: ComradeBackend) {
         const val MAX_SPOKEN_ITEMS = 3
         const val HELP_SENTENCE =
             "You can say: journal, followed by a private thought; post, followed " +
-                "by your message; read my timeline; switch to off grid, base, " +
-                "sakha or sakhi; or create a new identity."
+                "by your message; start a focus session; read my timeline; switch " +
+                "to off grid, base, sakha or sakhi; or create a new identity."
     }
 }

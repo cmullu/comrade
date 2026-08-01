@@ -1,8 +1,10 @@
 # Attention restoration — the fifth wellbeing pillar
 
-_Analysis + build plan, 2026-07-31. Status: proposal — nothing in this
-document is wired yet. Companion to AUDIT §8 (wellbeing north star) and
-[`TARA.md`](TARA.md)._
+_Analysis + build plan, 2026-07-31. **Status: phases 0, 1, 2 and 4 shipped**
+(same day) — see [§7 What shipped](#7-what-shipped) for the as-built map and
+what is deliberately still open. Phase 3 (loved-one accountability) remains
+blocked on the Sakha pairing UI, as planned. Companion to AUDIT §8 (wellbeing
+north star) and [`TARA.md`](TARA.md)._
 
 The ask: help users **reinstate cognitive capabilities — above all a
 shortened attention span — eroded by extreme smartphone use, doomscrolling,
@@ -106,6 +108,10 @@ Codify what the feed already accidentally is, so it can never regress:
 - **Quiet hours**: a Settings window (e.g. 22:00–07:00) during which every
   notification channel except calls is silenced. Extends the existing
   per-class channel work in `Notifier`; preference in the encrypted store.
+  *(As built: device-local SharedPreferences instead — the notification path
+  must decide before the vault is unlocked, and a quiet hour that only works
+  once you have opened the app is not a quiet hour. Same reasoning, and same
+  trade, as `MutedChats`; what it stores is two integers.)*
 
 *Touches:* `FeedScreen.kt`, `Notifier`, Settings screen, one new pure Kotlin
 rule class + tests. No Rust changes.
@@ -265,3 +271,95 @@ limits in as many words.
   data are the pathology, not the cure.
 - **Cloud analytics of any kind** — gate 2; there is nothing to A/B test on
   a server that is worth the promise it breaks.
+
+---
+
+## 7. What shipped
+
+Built in one pass on 2026-07-31. The plan above is preserved as written; this
+section is the as-built record, including where the implementation chose
+differently from the sketch and why.
+
+### Engine (`comrade_core::attention`)
+
+Pure, deterministic, no new dependencies, 15 unit tests:
+
+| Piece | What it does |
+|---|---|
+| `UsageSignal` / `compare_today` | Today's rollup against the user's own median over ≤7 prior days, with `sample_days` so a thin baseline can be *said* rather than faked |
+| `usage_opener` | The Tara nudge for a heavy scroll day. Quiet unless yesterday was both ≥60 min in marked apps **and** ≥1.5× the user's own median (≥90 min with no baseline yet) — an ordinary day never earns a comment |
+| `FOCUS_PRESETS`, `suggest_focus_minutes` | The progressive ladder: 25 → 45 → 90, each rung unlocked by **two** completions at that length or longer. Abandoned and lapsed sessions cost nothing (gate 3 — no loss aversion) |
+| `FocusOutcome`, `resolve_stale`, `remaining_secs` | The session lifecycle, including the grace window past which an unattended session becomes `lapsed` rather than a claimed completion |
+| `focus_prompt`, `focus_reflection` | Turn-rotated intention nudges and close-out lines; abandoned/lapsed get plain acknowledgement, never guilt |
+| `chunk_reading` | Chapter-sized chunking for the reader, **lossless by test** (`chunks.concat() == text`), preferring paragraph then whitespace boundaries, UTF-8 safe |
+
+`ReflectiveCompanion::opener_with_usage` holds the precedence rule in one
+place: **mood outranks usage.** Two low journal days this week is a heavier
+signal than yesterday's screen time, so the usage line only ever replaces the
+*generic* openers — it can never displace the low-mood invitation. Keeping this
+in the engine rather than in a frontend is why two UIs cannot decide it
+differently.
+
+### Storage (`comrade_storage`)
+
+Four new trees, all sealed exactly like the journal: `attention_days`
+(date-keyed rollups), `focus_sessions`, `reading_state` (one slot),
+`attention_meta` (the doom-app list). Tests cover round-trip, ordering,
+upsert-in-place, legacy-row deserialisation, **ciphertext-at-rest** for the
+focus intent and the saved text, and that the **panic wipe reaches all four** —
+a wipe that left a usage ledger behind would betray precisely the users it
+exists for.
+
+### View-model (`comrade_ui`) and bridges
+
+16 runtime commands + 4 DTOs, exposed identically over uniffi (Android) and
+Tauri (desktop). 12 lifecycle tests, including that every command fails closed
+with `VaultLocked`. Three decisions worth naming:
+
+- **The frontend owns the calendar.** `record_attention_day` and
+  `attention_summary` take a `YYYY-MM-DD` string, because only the frontend
+  knows the device's timezone. The Rust side validates the *shape* and uses a
+  UTC `iso_date` only to answer "is the newest row still today's?" for the Tara
+  nudge — an approximation whose worst case is delaying one journaling nudge
+  near midnight, which is why no timezone database was pulled in for it.
+- **Reads may write.** `active_focus_session` resolves and persists a lapse, so
+  every caller gets one consistent answer instead of each frontend inventing
+  its own staleness rule.
+- **A lapsed session ends when its plan did**, not when someone finally looked
+  — stamping "now" would credit hours nobody was present for, and the ladder
+  reads that history.
+
+### Android
+
+| Surface | Notes |
+|---|---|
+| **Calm-feed contract** | Documented on `FeedScreen` and now load-bearing: chronological only, no ranking, no autoplay, no counters. Plus the gentle stop — one inline card after 10 unbroken minutes, dismissible for the sitting, quoting **no duration and no count** (a number invites a score). Rule in `attention/ScrollSitting.kt`, 8 tests |
+| **Quiet hours** | `attention/QuietHours.kt` + `NotificationPolicy`: silences messages, requests, presence and update notices in a nightly window — **never a ringing call.** 6 tests on the window arithmetic, where the overnight wrap is the normal case and an empty window (`start == end`) silences nothing rather than the whole day |
+| **Usage mirror** | Opt-in `PACKAGE_USAGE_STATS` behind an explainer that states what is read and that it cannot leave the device. `attention/UsageMirror.kt` reduces the event stream to three integers **in memory** and drops it (8 tests, including that overlapping stretches count once, so a day can never exceed itself, and that Comrade excludes its own screen time). Card lives on the Journal tab, self-relative, no red |
+| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the one-minute breathing screen |
+| **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |
+
+Verified locally against the real CI lanes: `cargo fmt --check`, `clippy
+--workspace --all-targets -D warnings`, `cargo test --workspace` (449 tests),
+the desktop Tauri clippy lane, and `./gradlew test` (188 Android tests).
+
+### Open, and honestly so
+
+- **Phase 3 (loved-one accountability)** — unbuilt by design; it depends on the
+  Sakha pairing UI, which does not exist yet (AUDIT §8 pillar 3). OQ13 stays
+  open with it.
+- **OQ11** answered as "offer it, never require it": the whole pillar works
+  with usage access refused — only the mirror card is absent.
+- **OQ12** answered as "on by default": the gentle stop needs no permission and
+  costs nothing, so a calm product is calm out of the box.
+- **OQ14** answered as Android-first, matching every pillar so far. The desktop
+  Tauri commands are registered and compile-checked in CI, but the vanilla-JS
+  web UI renders neither these nor the journal nor Tara.
+- **No on-device trend chart yet.** Phase 4's *storage and API* shipped
+  (`attention_days` keeps the full history and `attention_days()` returns it),
+  and the monthly self-check-in did not — it is a small addition on top of the
+  journal once someone wants it.
+- **Not verified on a physical device.** The Android lanes here are JVM unit
+  tests and (in CI) emulator smoke tests; `UsageStatsManager` behaviour varies
+  across OEM builds, and the pickup count in particular deserves a real-handset
+  sanity check before anyone quotes it as precise.

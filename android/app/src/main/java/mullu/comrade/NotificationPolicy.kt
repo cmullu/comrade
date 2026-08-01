@@ -21,8 +21,16 @@ object NotificationPolicy {
      * attachments exactly as to text: "mute this chat" means the chat, not the
      * text half of it.
      */
-    fun shouldNotifyMessage(peer: String, openConversationPeer: String?, muted: Boolean): Boolean {
+    fun shouldNotifyMessage(
+        peer: String,
+        openConversationPeer: String?,
+        muted: Boolean,
+        quietHours: Boolean = false,
+    ): Boolean {
         if (muted) return false
+        // Quiet hours (mullu.comrade.attention.QuietHours) silence everything
+        // except a ringing call — see the note at the bottom of this file.
+        if (quietHours) return false
         return peer != openConversationPeer
     }
 
@@ -39,16 +47,34 @@ object NotificationPolicy {
         openConversationPeer: String?,
         muted: Boolean,
         becameOnline: Boolean,
+        quietHours: Boolean = false,
     ): Boolean {
         if (!becameOnline) return false
         if (muted) return false
+        if (quietHours) return false
         return peer != openConversationPeer
     }
 
-    // Incoming calls deliberately have no rule here: mute never silences a
-    // ringing call. A muted conversation is a preference about chatter, and
-    // dropping a call would lose the user something they cannot get back —
-    // Telegram draws the same line (its mute has a separate "mute calls").
+    /**
+     * A message request from a stranger. Quiet hours apply; nothing else does
+     * (a request has no conversation to be "on screen", and mute is per
+     * accepted conversation).
+     */
+    fun shouldNotifyRequest(quietHours: Boolean = false): Boolean = !quietHours
+
+    /**
+     * An "a newer Comrade shipped" notice. Quiet hours apply — a release can
+     * always wait until morning.
+     */
+    fun shouldNotifyUpdate(quietHours: Boolean = false): Boolean = !quietHours
+
+    // Incoming calls deliberately have no rule here: neither mute nor quiet
+    // hours silences a ringing call. A muted conversation is a preference about
+    // chatter, and quiet hours are about sleep — but dropping a call would lose
+    // the user something they cannot get back, and someone ringing at 3am may
+    // be exactly the person this app exists for. Telegram draws the same line
+    // (its mute has a separate "mute calls"), and `docs/ATTENTION.md` states it
+    // as a rule: attention features never come between a user and a call.
 
     /** Whether the message group's summary is now orphaned (no children left). */
     fun summaryStale(messageChildren: Int): Boolean = messageChildren <= 0

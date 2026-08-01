@@ -438,14 +438,44 @@ user has)? Owner call required before any companion code.
 > url+sha256 switches the whole flow on. **OQ9 remains open** — the inference
 > backend is the one piece still missing.
 
-> **Proposal (2026-07-31, attention restoration).** A fifth pillar is
-> proposed — helping users rebuild attention eroded by doomscrolling and
-> short-video overuse: a tested "calm feed" contract + gentle session stop,
-> an opt-in on-device usage mirror, focus sessions + long-form reading
-> practice, and E2E-shared accountability with a loved one (presence-style
-> semantics). Design doc + phased plan with honesty gates and open
-> questions OQ11–OQ14: [`docs/ATTENTION.md`](docs/ATTENTION.md). Nothing
-> is wired yet.
+> **Status (2026-07-31, attention pillar landed — phases 0, 1, 2, 4).** A fifth
+> pillar shipped: helping users rebuild an attention span eroded by
+> doomscrolling and short video. Wired end-to-end on Android, with the engine,
+> storage, view-model and both bridges tested.
+>
+> - **Phase 0 — do no harm.** The public feed's calm properties (chronological,
+>   no ranking, no autoplay, no engagement counters) are now a documented
+>   contract rather than an accident, plus a dismissible **gentle stop** after
+>   ten unbroken minutes (`attention/ScrollSitting.kt`, tested). **Quiet hours**
+>   silence every notification class except a ringing call
+>   (`attention/QuietHours.kt` + `NotificationPolicy`, tested) — device-local,
+>   because the notification path must decide before the vault is unlocked.
+> - **Phase 1 — the mirror.** Opt-in `PACKAGE_USAGE_STATS`, reduced *in memory*
+>   to three integers a day and dropped (`attention/UsageMirror.kt`, tested);
+>   stored in the new `attention_days` tree and shown on the Journal tab against
+>   the user's **own** median only. OQ11 answered "offer it, never require it":
+>   the whole pillar works with the grant refused.
+> - **Phase 2 — the practice.** `comrade_core::attention`: focus-session
+>   lifecycle with a progressive 25→45→90 ladder, lossless chapter chunking for
+>   a distraction-free reader, rotated intention/reflection prompts. New
+>   **Focus** tab (sessions · reader · breathing), optional DND that still lets
+>   calls ring, and a `"start a focus session"` voice command.
+> - **Phase 4 (partial).** The full local history is stored and exposed
+>   (`attention_days()`); the trend chart and the monthly self-check-in are
+>   small follow-ups on top of it.
+> - **Phase 3 — not built, by design.** Loved-one accountability depends on the
+>   Sakha pairing UI (pillar 3 above), which is still unreachable from any UI.
+>   OQ13 stays open with it.
+>
+> Both honesty gates hold and are stated in the UI: this is **attention
+> practice, not treatment** (no scores, no levels, no streak to break — an
+> abandoned session is recorded plainly), and nothing leaves the device. A
+> session nobody was present for is recorded as *lapsed* rather than allowed to
+> flatter the ladder that reads it. OQ12 answered "on by default" (the gentle
+> stop costs nothing and needs no permission); OQ14 answered "Android-first",
+> matching every pillar so far — the desktop's 17 Tauri commands are registered
+> and compile-checked, its web UI still pending like the journal's. Design doc
+> and as-built record: [`docs/ATTENTION.md`](docs/ATTENTION.md).
 
 ### 8.1 Calls — voice & video (owner request, 2026-07-12)
 
