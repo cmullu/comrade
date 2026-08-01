@@ -19,7 +19,7 @@ entirely in Rust, with a shared view-model layer driving an Android
 | **Sabha** | Nostr Kind-1 + NIP-10 | Public microblogging — the **Chitthi Feed**, with nested `ChitthiThread` reply trees | ✅ Wired (desktop + Android: broadcast + live feed; reply threading in live feed pending) |
 | **Vault** | NIP-44 + NIP-17/NIP-59 (gift-wrapped); legacy NIP-04 read-only | End-to-end encrypted direct messages; replies (NIP-10 `e` tag), delivered/read receipts, `/pay` UPI intent detection | ✅ Send + receive wired (desktop + Android), offline chat history persisted. New DMs are NIP-44-encrypted and gift-wrapped (no sender/content metadata leaks to relays); a peer's older NIP-04 DMs still decrypt |
 | **Message requests** | Conversation gate + Kind-4 profile share | A stranger's DM lands in a *requests* bucket, not your chat list; **your @handle is shared only when you accept**; accept / block; blocked keys are dropped | ✅ Engine + bridges tested; UI wired (desktop + Android) |
-| **Comrades** | Presence beacons over the NIP-44/NIP-17 DM channel | Mark a contact as your **comrade** and get told when they come online — a green dot in the chat list and a notification. Presence is disclosed to the peers you choose and to no one else (never to a relay: the beacon is gift-wrapped), is **mutual by construction** (you see them once they choose you back — the UI says so), and expires on its own so a phone that dies doesn't leave a permanent green dot | ✅ Wired (Android: Comrades screen + ★ toggle in any conversation + presence dots + notification channel; desktop: ★ toggle, dots, toast; engine, storage and both bridges tested) |
+| **Comrades** | Presence beacons over the NIP-44/NIP-17 DM channel | Mark a contact as your **comrade** and get told when they come online — a green dot in the chat list and a notification. Presence is disclosed to the peers you choose and to no one else (never to a relay: the beacon is gift-wrapped), is **mutual by construction** (you see them once they choose you back — the UI says so), and expires on its own so a phone that dies doesn't leave a permanent green dot. A comrade who **writes something and never sends it** raises one *"your comrade might need you"* — once, after the fact, carrying nothing about what was written | ✅ Wired (Android: Comrades screen + ★ toggle in any conversation + presence dots + notification channel; desktop: ★ toggle, dots, toast; engine, storage and both bridges tested) |
 | **Profiles** | Nostr Kind-0 + NIP-50 | @username display handles: published with retry **and republished on every launch**, searched on dedicated NIP-50 relays; peers' handles cached locally so chats are titled by name; per-contact aliases | ✅ Wired (Android onboarding + settings + chat UI; desktop backend commands) |
 | **Saathi** | libp2p mDNS + Gossipsub, carrying sealed `dak` frames | **Same-WiFi delivery with no internet.** A DM no relay will take is sealed and flooded to the local network: every peer sees an opaque frame (rotating recipient tag, no sender identity, padded length) and only the addressee can open it. An opened frame runs through the *same* ingress as a relay DM, so gating, receipts and dedup behave identically; a delivered receipt falls back to the mesh too, which is what clears the sender's outbox offline. The mesh now runs whenever the vault is unlocked — `OffGridTravel` keeps its own meaning (mesh *replaces* relays) | ✅ Wired (engine + runtime, both send paths and the receive path, cross-transport dedup; tested with three real engines over real mDNS). ⚠️ Needs a **shared IP network** — WiFi, a hotspot, ad-hoc. **Not Bluetooth**: two phones with no router cannot use it; see [`docs/OFFLINE_DELIVERY.md`](docs/OFFLINE_DELIVERY.md). Untested on two physical devices, and guest-WiFi client isolation defeats it |
 | **Sakha/Sakhi** | Yrs CRDT + AES-256-GCM | Cryptographically isolated shared ledger for couples | 🧪 Engine built; pairing handshake not yet reachable from any UI |
@@ -35,7 +35,7 @@ entirely in Rust, with a shared view-model layer driving an Android
 | **Location channels** | Geohash-scoped Nostr rooms (kinds 20000/20001) | Public rooms scoped to a place instead of a follow graph, spoken under a per-cell persona. Presence heartbeats **only** at region/province/city precision — never street level — and an empty fine-precision channel reports "?" rather than a misleading 0 | 🧪 Engine + tests only (publish/subscribe/presence + geohash arithmetic); no UI yet |
 | **Screenshots** | Android `FLAG_SECURE`, off by default | Screenshots and screen recording **work everywhere in the app**, and blocking them is a setting you turn on rather than a default you cannot turn off. Both frontends read one stored preference; a screen that genuinely shows a secret (today: the passphrase field *while revealed*) takes a scoped, reference-counted hold regardless | ✅ Wired (Compose settings switch; Flutter settings switch + `SecureScreen`). Honest about its limits: it stops the OS capturing the screen, not a camera pointed at it, and it says so in the UI |
 | **App updates** | GitHub Releases + a version rule shared by both frontends | Comrade is installed by sideload, so nothing otherwise tells anyone that a release — including a security fix — shipped. A once-a-day check of the project's own `releases/latest` raises a low-priority notification ("Comrade 0.0.9 is available"), and a Settings card shows the running version, the release notes, and the download. **The APK is fetched in-app by a foreground service**: leaving the screen (or the app) does not stop it, the shade carries live progress, and it finishes with a tappable *ready to install* — no browser, no hunt through Downloads. Before anything is handed to the installer the file is checked against the running app — package name, version code, and signing certificate — and refused with a reason if any of the three disagree; Android then shows its own confirmation and applies its own same-signature rule. Installing needs the one-time "install unknown apps" grant, which the card explains and links to; the release page stays as a fallback for a release with no single APK and for anyone who would rather not grant it. "Skip this version" silences that version, not the next one. The daily check is a real disclosure (your IP address, to GitHub) and the card says so in as many words; it is a switch, and turning it off leaves a manual "Check now" | ✅ Wired (Compose + Flutter; the rule, the fetch and the install are one shared native implementation, unit-tested on the host JVM). Not on desktop: no desktop artifact is published to update *to* |
-| **Notifications** | Per-class channels + device-local mute | Messages, requests, calls, comrades-online and updates each get their own channel, so one can be silenced without the rest. Tapping a message notification **opens that conversation** (not "wherever you left off"), a request opens the requests list, an update notice opens its Settings card; several unread chats collapse under one summary. Any conversation can be **muted** from its ⋮ menu — which silences its messages, attachments *and* its comrade-online notice, but never a ringing call | ✅ Wired (Compose + Flutter; mute is device-local by construction — there is no server to sync it through — and the Settings card says so) |
+| **Notifications** | Per-class channels + device-local mute | Messages, requests, calls, comrades-online and updates each get their own channel, so one can be silenced without the rest. Tapping a message notification **opens that conversation** (not "wherever you left off"), a request opens the requests list, an update notice opens its Settings card; several unread chats collapse under one summary. Any conversation can be **muted** from its ⋮ menu — which silences its messages, attachments *and* its comrade-online notice (and the *"might need you"* nudge that shares its line in the shade), but never a ringing call | ✅ Wired (Compose + Flutter; mute is device-local by construction — there is no server to sync it through — and the Settings card says so) |
 | **Panic wipe** | Whole-store shred + re-lock | One call destroys every stored value — identity keys, DM history, journal, Tara thread, queued mail — then re-locks to a pre-onboarding state. Enumerates the database's *actual* tables, so a store added later cannot be forgotten | ✅ Wired (`ComradeRuntime::panic_wipe`, Android bridge command); a UI entry point is the follow-up. Wipes rather than hides, and needs the app unlocked — deliberately **not** a duress feature |
 | **Metrics** | Device-local counters | Delivery-behaviour tallies (queued/resent/delivered/dropped, courier deposits and handovers, dedup drops) with **no** peer, message id, content, or timestamp — so they can never become a record of who talked to whom. No exporter, no endpoint; cleared by the panic wipe | ✅ Wired at the outbox/courier call sites + `metrics_snapshot()`; diagnostics screen pending |
 
@@ -122,7 +122,42 @@ so the rules are deliberately narrow and stated in the UI itself:
   goodbye immediately.
 - **Nothing else leaks.** A beacon carries "online / offline" and how long to
   believe it. No activity, no location, no last-seen timeline for
-  non-comrades, no typing indicators.
+  non-comrades, and **no typing indicators** — the only thing a comrade ever
+  learns beyond "around / not around" is the nudge described next, which is one
+  signal after the fact rather than a live feed.
+
+### When someone nearly wrote to you
+
+Someone opens your chat, types a few words, and then clears the box or walks
+away without sending. Nothing about that used to reach you — the message was
+never sent, so there was nothing to deliver — and it is often the moment that
+mattered most. If they marked you as a comrade, you now get one notification:
+**"Bhaskar is online" / "Your comrade might need you"**, tapping through to
+their conversation.
+
+It is deliberately not a typing indicator, and the difference is the whole
+design:
+
+- **Once, after the fact** — not continuously while someone types. The signal
+  fires only when the draft is *gone*, at most once every half hour per person,
+  and never for a draft that lasted less than a few seconds (a stray keystroke
+  is not a hesitation).
+- **Nothing about what was written.** The envelope carries a marker and a
+  deadline. Not the text, not its length, not how long they typed, not whether
+  they cleared it or walked away — and a test asserts the wire shape rather than
+  trusting the comment.
+- **Clearing the box to rewrite the same sentence discloses nothing.** Nothing
+  is sent until the draft has stayed gone for a short while, so the ordinary
+  edit — clear, retype, send — never leaves the device. Sending anything at all
+  cancels it, because the message says what the nudge would have.
+- **Same consent, same channel as presence.** Only a comrade you chose is ever
+  told, only from an accepted conversation, gift-wrapped so no relay learns
+  anything, and it expires from its own send time — so a nudge replayed out of
+  the relay backfill, or held by a phone that slept for an hour, raises nothing.
+  Muting a conversation silences it, like every other notice about a person.
+
+See [`docs/PRESENCE.md`](docs/PRESENCE.md) §7 for why this line was drawn where
+it is, having previously been drawn to exclude the feature entirely.
 
 Honest limit: presence needs the app process alive, exactly like calls and
 message delivery (there is no push wakeup — see the notes on

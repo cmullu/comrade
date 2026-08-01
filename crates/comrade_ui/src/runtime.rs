@@ -46,6 +46,7 @@ use comrade_core::media::{
 };
 use comrade_core::metrics as core_metrics;
 use comrade_core::metrics::Metric as CoreMetric;
+use comrade_core::nudge::{is_fresh_at, nudge_expires_at, parse_nudge, DraftWatch, Nudge};
 use comrade_core::presence::{
     is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
     PRESENCE_HEARTBEAT_SECS, PRESENCE_SWEEP_SECS,
@@ -842,6 +843,20 @@ pub enum BridgeEvent {
         /// moment the claim lapsed for an aged-out `offline` edge.
         at: u64,
     },
+    /// A comrade wrote something for us and did not send it — see
+    /// [`comrade_core::nudge`]. Emitted once per hesitation, only for a peer
+    /// the user marked as a comrade, and only while the nudge is still fresh:
+    /// what a frontend turns into "they're around, and they might need you".
+    ///
+    /// Carries no more than [`Self::ComradePresence`] does, because the wire
+    /// envelope carries no more than that either — never the draft, its
+    /// length, or how the writing ended.
+    ComradeNudge {
+        peer: String,
+        /// Display name at the time of the event (alias → published handle),
+        /// so a notification can be raised without a store round-trip.
+        name: Option<String>,
+    },
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
     MeshStatusChanged(MeshStatusDto),
@@ -918,6 +933,11 @@ pub struct ComradeRuntime {
     /// The task that opens sealed frames seen on the local mesh and feeds the
     /// ones addressed to us through the normal DM ingress.
     mesh_dm_task: Option<tokio::task::JoinHandle<()>>,
+    /// Which composers hold unsent text, for the "your comrade might need you"
+    /// nudge ([`comrade_core::nudge`]). Behind an `Arc` so the presence sweep —
+    /// which runs on a detached [`RuntimeHandles`], not on `&self` — watches
+    /// the same map the frontends report into.
+    draft_watch: Arc<DraftWatch>,
 }
 
 impl Default for ComradeRuntime {
@@ -963,6 +983,7 @@ impl ComradeRuntime {
                 std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
             )),
             mesh_dm_task: None,
+            draft_watch: Arc::new(DraftWatch::new()),
         }
     }
 
@@ -1160,6 +1181,10 @@ impl ComradeRuntime {
         self.sakha = None;
         self.loops_spawned = false;
         self.sakha_sync_spawned = false;
+        // A hesitation belongs to the session it happened in. Locking up is a
+        // deliberate exit — the goodbye beacon above has just told the comrades
+        // we are gone, and a nudge landing after it would claim the opposite.
+        self.draft_watch.clear();
         self.ui.lock();
     }
 
@@ -1318,6 +1343,12 @@ impl ComradeRuntime {
                     handles.announce_presence(true).await;
                 }
                 expire_stale_presence(handles.store.as_deref(), &tx);
+                // Abandoned drafts ride this sweep rather than a timer of
+                // their own: a nudge is a courtesy that costs one DM, and
+                // arriving a sweep late only makes it more certain (the
+                // writer had that much longer to come back). What it must
+                // never do is arrive *early* — see `NUDGE_SETTLE_SECS`.
+                handles.nudge_abandoned_drafts(now_secs()).await;
                 tick = tick.wrapping_add(1);
             }
         }));
@@ -2398,6 +2429,35 @@ impl ComradeRuntime {
         self.handles().announce_presence(online).await
     }
 
+    // ── The nudge (abandoned drafts — see `comrade_core::nudge`) ─────────────
+
+    /// There is unsent text in `peer`'s composer, as of now.
+    ///
+    /// Frontends call this as the user types — it is idempotent, holds a
+    /// mutex for a hash lookup, touches no store and no relay, so it is safe
+    /// on a keystroke. What it starts is a clock, not a disclosure: nothing
+    /// leaves the device unless the draft is later abandoned *and* every rule
+    /// in [`comrade_core::nudge::draft_verdict`] agrees, and nothing at all
+    /// happens for a peer who was never marked as a comrade.
+    ///
+    /// Infallible on purpose, like [`Self::announce_presence`]: a nudge is a
+    /// courtesy, and a locked vault or an unparseable key simply means there
+    /// is nobody to be courteous to.
+    pub fn note_draft(&self, peer: &str) {
+        self.draft_watch.writing(&to_npub(peer), now_secs());
+    }
+
+    /// `peer`'s draft is gone — the box was emptied, or the thread was closed
+    /// with it still unsent. Safe (and intended) to call unconditionally when a
+    /// conversation closes: a composer that never held text does nothing here.
+    ///
+    /// This is the only trigger for the whole feature, and it is deliberately
+    /// *not* the moment anything is sent: see
+    /// [`RuntimeHandles::nudge_abandoned_drafts`] for the wait that follows.
+    pub fn abandon_draft(&self, peer: &str) {
+        self.draft_watch.abandoned(&to_npub(peer), now_secs());
+    }
+
     // ── Journal (wellbeing pillar #1 — strictly local, never networked) ──────
 
     /// Save a new journal entry. `mood` is an optional self-reported marker.
@@ -2945,6 +3005,7 @@ impl ComradeRuntime {
             outbox: self.outbox.clone(),
             events: self.events.clone(),
             mesh: self.mesh_link(),
+            draft_watch: self.draft_watch.clone(),
         }
     }
 
@@ -2990,6 +3051,9 @@ pub struct RuntimeHandles {
     /// The local-network mesh, when it is running — the transport that carries
     /// a DM when no relay will.
     mesh: Option<MeshLink>,
+    /// The composer watch, shared with the runtime the frontends call into —
+    /// see [`ComradeRuntime::draft_watch`] and [`Self::nudge_abandoned_drafts`].
+    draft_watch: Arc<DraftWatch>,
 }
 
 impl RuntimeHandles {
@@ -3053,6 +3117,13 @@ impl RuntimeHandles {
                 (local_id, STATUS_QUEUED)
             }
         };
+
+        // The words are out of the composer and into the pipeline, so there is
+        // nothing left unsaid to nudge about — including in the queued case,
+        // where the outbox will deliver them without the user doing anything
+        // else. No frontend has to remember this: sending is the one way to
+        // leave a composer that must never look like abandoning it.
+        self.draft_watch.sent(&peer_npub);
 
         let dto = MessageDto {
             id,
@@ -3360,6 +3431,69 @@ impl RuntimeHandles {
         sent
     }
 
+    /// Send the nudge for every draft that has now been abandoned long enough
+    /// to mean it — the sending half of [`comrade_core::nudge`]. Called on the
+    /// presence sweep; returns how many nudges went out (0 whenever the
+    /// feature is idle, which is almost always).
+    ///
+    /// Three gates, in this order, and each is load-bearing:
+    ///  * **[`DraftWatch::due`] decides**, so every timing rule lives in one
+    ///    tested place and the cooldown is recorded at the moment we decide —
+    ///    a relay that refuses the DM does not earn the writer a second nudge.
+    ///  * **Only comrades are told.** Marking someone is what consents to
+    ///    disclosing anything about being at your phone; without it there is
+    ///    nothing to send and no one to send it to.
+    ///  * **The store read happens here, not on the keystroke.** Watching a
+    ///    composer must stay free, and the comrade flag can change between
+    ///    typing and sending anyway — so the answer that counts is the one at
+    ///    send time.
+    ///
+    /// Never fails: a locked vault, a peer un-chosen in the meantime, or an
+    /// unreachable relay all just mean nothing is sent.
+    ///
+    /// `now` is passed in rather than read here so a test can stand on the far
+    /// side of [`comrade_core::nudge::NUDGE_SETTLE_SECS`] without sleeping
+    /// through it — the same
+    /// injectable-clock treatment the presence labels get. Production has one
+    /// call site, and it passes the real clock.
+    pub async fn nudge_abandoned_drafts(&self, now: u64) -> u64 {
+        // Take the decisions out from under the mutex *before* any await —
+        // `due` hands back owned keys for exactly this reason.
+        let peers = self.draft_watch.due(now);
+        if peers.is_empty() {
+            return 0;
+        }
+        let (Some(vault), Some(store)) = (self.vault.clone(), self.store.as_deref()) else {
+            return 0;
+        };
+        let Ok(json) = Nudge::new().to_json() else {
+            return 0;
+        };
+        // Every store read happens here, before the first await — the same
+        // shape [`Self::announce_presence`] uses, so the encrypted store is
+        // never being read between two relay round-trips.
+        let recipients: Vec<PublicKey> = peers
+            .into_iter()
+            .filter(|npub| {
+                store
+                    .get_contact(npub)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.comrade)
+            })
+            .filter_map(|npub| PublicKey::parse(&npub).ok())
+            .collect();
+
+        let mut sent = 0u64;
+        for peer in recipients {
+            match vault.send_dm(&peer, &json).await {
+                Ok(_) => sent += 1,
+                Err(e) => tracing::debug!(%peer, "nudge not sent: {e}"),
+            }
+        }
+        sent
+    }
+
     pub async fn broadcast_chitthi(
         &self,
         content: &str,
@@ -3562,6 +3696,12 @@ impl RuntimeHandles {
             // the flush loop's later "sent" names the same handle the UI holds.
             self.mark_status(&peer_npub, std::slice::from_ref(&event_id), STATUS_QUEUED);
         }
+
+        // An attachment reaches them just as a message does, so it settles the
+        // same debt — see the same call in [`Self::send_dm_reply`]. Any text
+        // still in the composer starts its own clock again the next time they
+        // touch it.
+        self.draft_watch.sent(&peer_npub);
 
         let sender = keys
             .public_key()
@@ -4179,6 +4319,57 @@ fn handle_presence_beacon(
     }
 }
 
+/// Apply one incoming [`Nudge`] from an accepted conversation: raise it, once,
+/// if it is fresh and from someone the user chose.
+///
+/// Four rules, each the receiving-side mirror of something the sender promised:
+///  * **Stale nudges raise nothing.** Freshness is measured from the send time
+///    ([`nudge_expires_at`]), so a nudge delayed by a slow relay or replayed out
+///    of the two-day backfill is already spent. Without this, every launch would
+///    re-announce every hesitation of the last two days.
+///  * **A redelivered wrapper raises nothing.** Relays deliver at-least-once, so
+///    the same nudge can arrive twice inside its own TTL; the shared dedup set
+///    (the one the call-signal branch uses) makes the second one silent.
+///  * **Only our own comrades are announced.** A nudge from someone we have not
+///    marked is dropped, not recorded: unlike a presence beacon — whose
+///    arrival is *how* the mutual model becomes discoverable
+///    (`peer_marked_us`) — a nudge writes no presence state at all, so it can
+///    neither advance a "last seen" nor light a dot from outside the one path
+///    that owns them.
+///  * **Nothing about the draft is knowable here**, because nothing about it
+///    was sent. The event carries a name for the notification and no more.
+fn handle_nudge(
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    tx: &broadcast::Sender<BridgeEvent>,
+    dedup: &SeenSet,
+    peer_npub: &str,
+    event_id: &str,
+    created_at: u64,
+    nudge: Nudge,
+) {
+    let Some(store) = store else { return };
+    if !is_fresh_at(nudge_expires_at(created_at, nudge.ttl_secs), now_secs()) {
+        tracing::debug!(peer = %peer_npub, created_at, "dropping stale nudge");
+        return;
+    }
+    if dedup.already_seen(event_id) {
+        tracing::debug!(%event_id, "dropping duplicate nudge");
+        return;
+    }
+    let is_our_comrade = store
+        .get_contact(peer_npub)
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.comrade);
+    if !is_our_comrade {
+        return;
+    }
+    let _ = tx.send(BridgeEvent::ComradeNudge {
+        name: presence_display_name(store, peer_npub),
+        peer: peer_npub.to_string(),
+    });
+}
+
 /// Fire a delivered receipt back to `sender_hex` for `message_id` (best-effort;
 /// only ever called for accepted conversations).
 fn send_delivered_receipt(
@@ -4451,7 +4642,27 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 4) Call signaling — only from an established conversation, so a stranger
+    // 4) Nudge — a comrade wrote something for us and did not send it. Gated
+    //    exactly like a presence beacon: a stranger must not be able to page us
+    //    before their message request is accepted, and returning either way
+    //    keeps a nudge from an unaccepted peer from surfacing as a message
+    //    request full of JSON.
+    if let Some(nudge) = parse_nudge(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            handle_nudge(
+                store,
+                tx,
+                dedup,
+                &peer_npub,
+                &msg.event_id,
+                msg.created_at,
+                nudge,
+            );
+        }
+        return;
+    }
+
+    // 5) Call signaling — only from an established conversation, so a stranger
     //    cannot ring you before their message request is accepted. Stale or
     //    already-dispatched signals are dropped: offers older than the ring
     //    timeout are meaningless, and a redelivered wrapper (relay
@@ -4477,7 +4688,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 5) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 6) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         // Everything in the envelope is chosen by the peer. The MIME type
@@ -4545,7 +4756,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 6) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 7) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
     // A message can reach us twice by two routes — sealed over the local mesh
@@ -4756,6 +4967,7 @@ fn normalize_handle(raw: &str) -> Result<String, UiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comrade_core::nudge::NUDGE_SETTLE_SECS;
     use tempfile::TempDir;
 
     fn assert_send_sync<T: Send + Sync>() {}
@@ -6928,6 +7140,198 @@ mod tests {
         let recorded = store.get_peer_presence(&peer).unwrap().unwrap();
         assert!(recorded.online);
         assert!(recorded.peer_marked_us);
+    }
+
+    /// Everything `dispatch_incoming_dm` needs, for the nudge cases below —
+    /// the presence tests above spell the same set out inline, which is
+    /// exactly why the fourth copy became a helper.
+    struct Ingress {
+        vault: Arc<VaultEngine>,
+        store: Arc<comrade_storage::EncryptedStore>,
+        dedup: SeenSet,
+        outbox: Arc<Outbox>,
+        transport_dedup: SeenSet,
+        events: broadcast::Sender<BridgeEvent>,
+    }
+
+    impl Ingress {
+        async fn new(dir: &TempDir) -> (Self, broadcast::Receiver<BridgeEvent>) {
+            let (events, rx) = broadcast::channel(16);
+            let ingress = Self {
+                vault: test_vault().await,
+                store: Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap()),
+                dedup: SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY),
+                outbox: Arc::new(Outbox::new()),
+                transport_dedup: SeenSet::with_ttl(
+                    CROSS_TRANSPORT_DEDUP_CAPACITY,
+                    std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+                ),
+                events,
+            };
+            (ingress, rx)
+        }
+
+        fn deliver(&self, sender_hex: &str, event_id: &str, content: &str, created_at: u64) {
+            dispatch_incoming_dm(
+                &self.vault,
+                Some(&self.store),
+                &self.events,
+                &self.dedup,
+                &self.outbox,
+                &relay_route(&self.transport_dedup),
+                incoming_at(sender_hex, event_id, content, created_at),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_comrade_who_gave_up_on_a_message_is_announced_once() {
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, true);
+        let now = now_secs();
+        let nudge = Nudge::new().to_json().unwrap();
+
+        ingress.deliver(&hex, "n1", &nudge, now);
+        match rx.try_recv().unwrap() {
+            BridgeEvent::ComradeNudge { peer: p, .. } => assert_eq!(p, peer),
+            other => panic!("expected ComradeNudge, got {other:?}"),
+        }
+
+        // A nudge is never a chat message, a request, or a stored DM…
+        assert!(ingress.store.messages_with(&peer).unwrap().is_empty());
+        // …and it writes no presence state: "last seen" and the dot belong to
+        // beacons alone.
+        assert!(ingress.store.get_peer_presence(&peer).unwrap().is_none());
+
+        // Relays deliver at-least-once, and the same wrapper can land twice
+        // well inside the nudge's own TTL.
+        ingress.deliver(&hex, "n1", &nudge, now);
+        assert!(
+            rx.try_recv().is_err(),
+            "a redelivered nudge must not page someone twice"
+        );
+
+        // A second, genuinely new hesitation is news again — the receiver does
+        // not hold the cooldown, the sender does.
+        ingress.deliver(&hex, "n2", &nudge, now + 1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::ComradeNudge { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_nudge_replayed_out_of_the_backfill_raises_nothing() {
+        // The vault inbox re-scans two days on every launch. Without the
+        // freshness rule, every launch would re-announce every hesitation in
+        // that window — and each one would read as if it had just happened.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, true);
+        let two_days_ago = now_secs() - 2 * 24 * 60 * 60;
+
+        ingress.deliver(&hex, "old", &Nudge::new().to_json().unwrap(), two_days_ago);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_nudge_from_a_stranger_or_someone_we_did_not_choose_raises_nothing() {
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let now = now_secs();
+        let nudge = Nudge::new().to_json().unwrap();
+
+        // An unaccepted stranger cannot page us before we accept them — and
+        // their envelope must not leak into the requests bucket as raw JSON.
+        let (stranger_hex, stranger_npub) = stranger();
+        ingress.deliver(&stranger_hex, "s1", &nudge, now);
+        assert!(rx.try_recv().is_err());
+        assert!(ingress
+            .store
+            .messages_with(&stranger_npub)
+            .unwrap()
+            .is_empty());
+        assert!(ingress
+            .store
+            .get_conversation_meta(&stranger_npub)
+            .unwrap()
+            .is_none());
+
+        // An accepted peer we never chose as a comrade: silent, and unlike a
+        // presence beacon it records nothing either — a nudge is not the thing
+        // that reveals a one-sided comrade relationship.
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        ingress.deliver(&hex, "a1", &nudge, now);
+        assert!(
+            rx.try_recv().is_err(),
+            "someone we didn't choose is not our comrade to be paged about"
+        );
+        assert!(ingress.store.get_peer_presence(&peer).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn watching_a_composer_is_safe_before_unlock_and_survives_junk_keys() {
+        // Frontends call these on a keystroke and on every thread close, so
+        // they must be harmless in every state the app can be in — a courtesy
+        // feature has no business raising an error into a text field.
+        let rt = ComradeRuntime::new();
+        rt.note_draft("npub1definitelynotakey");
+        rt.abandon_draft("npub1definitelynotakey");
+        rt.note_draft("");
+        rt.abandon_draft("");
+        // Nothing to send to, and nothing anywhere to send it with.
+        assert_eq!(rt.handles().nudge_abandoned_drafts(now_secs()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_hesitation_towards_someone_who_is_not_a_comrade_is_never_sent() {
+        // The consent gate, checked at send time: presence — and this — flow
+        // only to people the user deliberately chose.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+
+        let watch = rt.draft_watch.clone();
+        let at = now_secs() - NUDGE_SETTLE_SECS - 60;
+        watch.writing(&peer, at);
+        watch.abandoned(&peer, at + 30);
+        assert_eq!(
+            rt.handles().nudge_abandoned_drafts(now_secs()).await,
+            0,
+            "no comrade flag, no disclosure"
+        );
+
+        // And the decision is spent either way: the same abandoned draft is
+        // not reconsidered on the next sweep just because they were marked in
+        // between.
+        rt.set_comrade(&peer, true).unwrap();
+        assert_eq!(rt.handles().nudge_abandoned_drafts(now_secs()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn locking_the_vault_drops_a_pending_nudge() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        rt.set_comrade(&peer, true).unwrap();
+
+        let watch = rt.draft_watch.clone();
+        let at = now_secs() - NUDGE_SETTLE_SECS - 60;
+        watch.writing(&peer, at);
+        watch.abandoned(&peer, at + 30);
+
+        rt.lock_vault().await;
+        assert!(
+            watch.due(now_secs()).is_empty(),
+            "the goodbye beacon has already said we are gone; a nudge after it \
+             would claim the opposite"
+        );
     }
 
     #[tokio::test]

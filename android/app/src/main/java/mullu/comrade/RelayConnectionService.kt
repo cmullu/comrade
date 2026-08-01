@@ -397,6 +397,22 @@ object ChatEventRouter {
                     Notifier.notifyComradeOnline(context, event.peer, title)
                 }
             }
+            is BridgeEvent.ComradeNudge -> {
+                // Nothing to record: a nudge is not presence state, so it
+                // moves no dot and advances no "last seen" — the core keeps
+                // those to beacons alone. It is one notification and nothing
+                // else.
+                if (
+                    NotificationPolicy.shouldNotifyNudge(
+                        peer = event.peer,
+                        openConversationPeer = _openConversationPeer.value,
+                        muted = MutedChats.isMuted(context, event.peer),
+                    )
+                ) {
+                    val title = event.name?.takeIf { it.isNotBlank() } ?: peerLabel(event.peer)
+                    Notifier.notifyComradeNudge(context, event.peer, title)
+                }
+            }
             is BridgeEvent.MeshStatusChanged -> MeshStatusMonitor.update(
                 ComradeCore.MeshStatus(active = event.v1.active, peerCount = event.v1.peerCount.toInt()),
             )

@@ -225,6 +225,24 @@ void main() {
       expect(event.online, isFalse);
     });
 
+    test('a nudge crosses as itself, carrying nothing about the draft', () {
+      final BridgeEvent? mapped = mapBridgeEvent(
+        const rust.BridgeEvent.comradeNudge(peer: 'npub1peer', name: 'amma'),
+      );
+      final IncomingComradeNudge event = mapped! as IncomingComradeNudge;
+      expect(event.peer, 'npub1peer');
+      expect(event.name, 'amma');
+      // Not presence: nothing here can move a dot or advance a "last seen".
+      expect(mapped, isNot(isA<ComradePresenceChanged>()));
+    });
+
+    test('a nudge with no cached name is still delivered', () {
+      final BridgeEvent? mapped = mapBridgeEvent(
+        const rust.BridgeEvent.comradeNudge(peer: 'npub1peer'),
+      );
+      expect((mapped! as IncomingComradeNudge).name, isNull);
+    });
+
     test('a receipt is parsed into the ranked MessageStatus', () {
       final BridgeEvent? mapped = mapBridgeEvent(
         const rust.BridgeEvent.messageStatus(

@@ -45,6 +45,24 @@ object NotificationPolicy {
         return peer != openConversationPeer
     }
 
+    /**
+     * A comrade who wrote something and never sent it (`comrade_core::nudge`).
+     *
+     * Same two suppressors as everything else about a person — mute, and having
+     * their conversation on screen. The on-screen case is worth being explicit
+     * about: a nudge is *actionable in that thread*, so someone already looking
+     * at it has already arrived where the notification would have sent them.
+     *
+     * There is no "edge" parameter to match [shouldNotifyPresence]'s
+     * `becameOnline`. A nudge is not state that can repeat: the sender emits one
+     * per hesitation and holds a cooldown, and the core drops replays, so every
+     * event that reaches here is news by construction.
+     */
+    fun shouldNotifyNudge(peer: String, openConversationPeer: String?, muted: Boolean): Boolean {
+        if (muted) return false
+        return peer != openConversationPeer
+    }
+
     // Incoming calls deliberately have no rule here: mute never silences a
     // ringing call. A muted conversation is a preference about chatter, and
     // dropping a call would lose the user something they cannot get back —
