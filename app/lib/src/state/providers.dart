@@ -116,8 +116,9 @@ final Provider<Profile?> profileProvider = Provider<Profile?>((Ref ref) {
 /// Live off-grid mesh status, seeded from a snapshot then driven by events.
 ///
 /// This is the one signal that still works with zero cellular or relay
-/// reachability, so the banner stays visible rather than being a one-off
-/// toast — exactly what to check when navigating somewhere with no signal.
+/// reachability, so it is a persistent affordance rather than a one-off toast:
+/// `TransportPrecedenceAction` keeps it in the app bar as a live peer count,
+/// which is exactly what to check when navigating somewhere with no signal.
 class MeshStatusController extends AsyncNotifier<MeshStatus> {
   @override
   Future<MeshStatus> build() async {

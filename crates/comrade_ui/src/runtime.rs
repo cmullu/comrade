@@ -862,7 +862,9 @@ pub struct MessageDto {
 /// with zero cellular or relay reachability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct MeshStatusDto {
-    /// Whether the mesh engine is running at all (the workspace is `OffGridTravel`).
+    /// Whether the mesh engine is running at all — which, since local delivery
+    /// landed, is whenever the vault is unlocked, not only in `OffGridTravel`
+    /// (see [`ComradeRuntime::sync_saathi_lifecycle`]).
     pub active: bool,
     /// Peers currently reachable over the local network via mDNS. `u64`, not
     /// `SaathiEngine::peer_count`'s native `usize` — uniffi has no FFI-safe
@@ -3178,8 +3180,8 @@ impl ComradeRuntime {
         }
     }
 
-    /// Ensure the Saathi engine is running iff the current workspace is
-    /// `OffGridTravel`. Centralised here (rather than duplicated in
+    /// Ensure the Saathi engine is running whenever anything needs it.
+    /// Centralised here (rather than duplicated in
     /// `toggle_workspace`/`back`) so every path that can change the workspace —
     /// a voice command, a future UI toggle, stepping back — drives the same
     /// real engine the persistent mesh-status indicator reads from.
@@ -3460,6 +3462,7 @@ impl ComradeRuntime {
             outbox: self.outbox.clone(),
             events: self.events.clone(),
             mesh: self.mesh_link(),
+            prefer_local: self.ui.current_workspace().mesh_active,
             draft_watch: self.draft_watch.clone(),
         }
     }
@@ -3506,6 +3509,9 @@ pub struct RuntimeHandles {
     /// The local-network mesh, when it is running — the transport that carries
     /// a DM when no relay will.
     mesh: Option<MeshLink>,
+    /// Whether the user has put the local network ahead of relays (the
+    /// `OffGridTravel` workspace, switched from the app bar).
+    prefer_local: bool,
     /// The composer watch, shared with the runtime the frontends call into —
     /// see [`ComradeRuntime::draft_watch`] and [`Self::nudge_abandoned_drafts`].
     draft_watch: Arc<DraftWatch>,
@@ -3530,46 +3536,44 @@ impl RuntimeHandles {
         let peer_npub = to_npub(target);
         let created_at = now_secs();
 
+        // Which radio goes first is the user's call, made from the app bar.
+        let plan = SendPlan::for_attempt(self.prefer_local, 0);
+        let local_id = local_message_id(&peer_npub, content, created_at);
+
+        // Local-first: seal it onto this WiFi before spending the internet. A
+        // frame nobody took is not delivery, so a `false` here falls straight
+        // through to a relay — precedence orders the transports, it does not
+        // switch one off.
+        let on_mesh = plan.local_first
+            && self
+                .try_mesh(&peer, &local_id, content, reply_to, created_at)
+                .await;
+
         // A relay that will not take the message is not the end of the road:
         // queue it, persist it as `queued`, and let the flush loop retry
         // (bitchat whitepaper §6.1). Before this, a publish failure lost the
         // text entirely — the worst failure mode an app about staying in touch
         // can have.
-        let (id, status) = match vault.send_dm_reply(&peer, content, reply_to).await {
-            Ok(id) => (id.to_hex(), "sent"),
-            Err(e) => {
-                let local_id = local_message_id(&peer_npub, content, created_at);
-                tracing::info!(error = %e, "DM could not be published — queued for retry");
-                // No relay took it, but the recipient may be on this WiFi. Seal
-                // it and flood the local mesh. It stays queued either way: a
-                // mesh publish reaching *a* peer is not proof the recipient got
-                // it, so only their receipt clears the outbox.
-                if let Some(mesh) = &self.mesh {
-                    mesh.send(
-                        &peer,
-                        &local_id,
-                        content,
-                        reply_to.map(str::to_string),
-                        created_at,
-                    )
-                    .await;
+        let (id, status) = if on_mesh && !plan.force_both {
+            // It is on the local network but not acknowledged — a mesh publish
+            // reaching *a* peer is not proof the recipient got it, so it stays
+            // queued until their receipt clears it.
+            self.enqueue(&local_id, &peer_npub, content, reply_to, created_at);
+            (local_id, STATUS_QUEUED)
+        } else {
+            match vault.send_dm_reply(&peer, content, reply_to).await {
+                Ok(id) => (id.to_hex(), "sent"),
+                Err(e) => {
+                    tracing::info!(error = %e, "DM could not be published — queued for retry");
+                    // No relay took it, but the recipient may be on this WiFi.
+                    // (Under local precedence that attempt already happened.)
+                    if !plan.local_first {
+                        self.try_mesh(&peer, &local_id, content, reply_to, created_at)
+                            .await;
+                    }
+                    self.enqueue(&local_id, &peer_npub, content, reply_to, created_at);
+                    (local_id, STATUS_QUEUED)
                 }
-                let queued = QueuedMessage::new(
-                    local_id.clone(),
-                    peer_npub.clone(),
-                    content,
-                    reply_to.map(str::to_string),
-                    created_at,
-                );
-                if let QueueOutcome::Displaced(dropped) = self.outbox.queue(queued) {
-                    // The peer's queue was full; the oldest message is gone and
-                    // must not keep showing as pending.
-                    self.mark_status(&peer_npub, &[dropped], STATUS_FAILED);
-                }
-                if let Some(store) = &self.store {
-                    persist_outbox(store, &self.outbox);
-                }
-                (local_id, STATUS_QUEUED)
             }
         };
 
@@ -3615,6 +3619,74 @@ impl RuntimeHandles {
             );
         }
         Ok(dto)
+    }
+
+    /// Seal a message onto the local network, if the mesh is up at all.
+    ///
+    /// `false` means nothing on this WiFi took the frame — no mesh running, no
+    /// peers, or a payload too big to seal. Never an error: the caller falls
+    /// back to a relay and the outbox keeps the message either way.
+    async fn try_mesh(
+        &self,
+        peer: &PublicKey,
+        message_id: &str,
+        content: &str,
+        reply_to: Option<&str>,
+        created_at: u64,
+    ) -> bool {
+        let Some(mesh) = &self.mesh else {
+            return false;
+        };
+        mesh.send(
+            peer,
+            message_id,
+            content,
+            reply_to.map(str::to_string),
+            created_at,
+        )
+        .await
+    }
+
+    /// Park a message in the sender outbox under a locally minted id and
+    /// persist the queue, failing the oldest entry if the peer's queue was
+    /// full (it is gone, and must stop showing as pending).
+    fn enqueue(
+        &self,
+        message_id: &str,
+        peer_npub: &str,
+        content: &str,
+        reply_to: Option<&str>,
+        created_at: u64,
+    ) {
+        let queued = QueuedMessage::new(
+            message_id,
+            peer_npub,
+            content,
+            reply_to.map(str::to_string),
+            created_at,
+        );
+        if let QueueOutcome::Displaced(dropped) = self.outbox.queue(queued) {
+            self.mark_status(peer_npub, &[dropped], STATUS_FAILED);
+        }
+        if let Some(store) = &self.store {
+            persist_outbox(store, &self.outbox);
+        }
+    }
+
+    /// Count a delivery round against a queued message, and mark it failed once
+    /// it has run out of them.
+    fn record_attempt(&self, queued: &QueuedMessage) {
+        if matches!(
+            self.outbox
+                .record_attempt(&queued.peer_npub, &queued.message_id),
+            AttemptOutcome::Exhausted
+        ) {
+            self.mark_status(
+                &queued.peer_npub,
+                std::slice::from_ref(&queued.message_id),
+                STATUS_FAILED,
+            );
+        }
     }
 
     /// Retry every queued message that is still worth retrying, and reap the
@@ -3668,6 +3740,27 @@ impl RuntimeHandles {
                     .ack(&queued.peer_npub, std::slice::from_ref(&queued.message_id));
                 continue;
             };
+
+            let plan = SendPlan::for_attempt(self.prefer_local, queued.attempts);
+            // Under local precedence, retry the WiFi first every round — a peer
+            // may have joined the network since the last flush, and reaching
+            // them there costs nothing. `force_both` is what stops that from
+            // becoming an indefinite wait.
+            let on_mesh = plan.local_first
+                && self
+                    .try_mesh(
+                        &peer_pk,
+                        &queued.message_id,
+                        &queued.content,
+                        queued.reply_to.as_deref(),
+                        queued.queued_at,
+                    )
+                    .await;
+            if on_mesh && !plan.force_both {
+                self.record_attempt(&queued);
+                continue;
+            }
+
             match vault
                 .send_dm_reply(&peer_pk, &queued.content, queued.reply_to.as_deref())
                 .await
@@ -3707,28 +3800,19 @@ impl RuntimeHandles {
                     tracing::debug!(error = %e, "queued DM still undeliverable by relay");
                     // Still no relay — try the local network again on every
                     // flush, since a peer may have joined the WiFi since the
-                    // last attempt.
-                    if let Some(mesh) = &self.mesh {
-                        mesh.send(
+                    // last attempt. (Under local precedence that already
+                    // happened above.)
+                    if !plan.local_first {
+                        self.try_mesh(
                             &peer_pk,
                             &queued.message_id,
                             &queued.content,
-                            queued.reply_to.clone(),
+                            queued.reply_to.as_deref(),
                             queued.queued_at,
                         )
                         .await;
                     }
-                    if matches!(
-                        self.outbox
-                            .record_attempt(&queued.peer_npub, &queued.message_id),
-                        AttemptOutcome::Exhausted
-                    ) {
-                        self.mark_status(
-                            &queued.peer_npub,
-                            std::slice::from_ref(&queued.message_id),
-                            STATUS_FAILED,
-                        );
-                    }
+                    self.record_attempt(&queued);
                 }
             }
         }
@@ -5018,6 +5102,44 @@ impl MeshLink {
                 tracing::debug!("mesh: nobody to deliver to: {e}");
                 false
             }
+        }
+    }
+}
+
+/// Which transport a send should try first, and whether the other is still
+/// worth trying afterwards.
+///
+/// The user picks the *precedence* from the app bar (it is the `OffGridTravel`
+/// workspace under the hood, whose documented meaning has always been "the mesh
+/// replaces relays"); this turns that choice into routing. Precedence is an
+/// order, not an exclusion — a message that the preferred route cannot carry
+/// still takes the other one, because the product's promise is that the message
+/// arrives, not that it arrives by a particular radio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SendPlan {
+    /// Try this first.
+    local_first: bool,
+    /// Try the *other* transport even if the first one accepted the message.
+    ///
+    /// Only ever true for a local-first retry. A relay `OK` means a relay has
+    /// stored the message, so there is nothing to chase; a mesh publish only
+    /// means *some* peer on the network took the frame, which may not be the
+    /// recipient. After a couple of unacknowledged rounds the message stops
+    /// waiting on the local network and also goes out over a relay.
+    force_both: bool,
+}
+
+/// Mesh-only rounds a local-first message gets before a relay is tried too.
+///
+/// The outbox retries roughly once a minute, so this is about two minutes of
+/// "they might still walk back into WiFi range" before spending the internet.
+const LOCAL_FIRST_PATIENCE: u8 = 2;
+
+impl SendPlan {
+    fn for_attempt(prefer_local: bool, attempts: u8) -> Self {
+        Self {
+            local_first: prefer_local,
+            force_both: prefer_local && attempts >= LOCAL_FIRST_PATIENCE,
         }
     }
 }
@@ -8841,6 +8963,63 @@ mod tests {
             rt.messages_with(&peer).unwrap()[0].content,
             "i'm outside, no signal"
         );
+    }
+
+    /// The precedence policy behind the app-bar switch, as a table.
+    #[test]
+    fn precedence_orders_the_transports_and_stops_waiting_after_two_rounds() {
+        // Relays lead by default, and a message a relay has *stored* is not
+        // worth also flooding onto the WiFi — so relay precedence never sends
+        // twice, however many rounds it takes.
+        assert_eq!(
+            SendPlan::for_attempt(false, 0),
+            SendPlan {
+                local_first: false,
+                force_both: false
+            }
+        );
+        assert!(!SendPlan::for_attempt(false, LOCAL_FIRST_PATIENCE + 5).force_both);
+
+        // Local precedence: the mesh goes first, alone at first…
+        assert_eq!(
+            SendPlan::for_attempt(true, 0),
+            SendPlan {
+                local_first: true,
+                force_both: false
+            }
+        );
+        // …but a mesh publish only means *someone* took the frame, so a message
+        // still unacknowledged after a couple of rounds stops waiting for the
+        // recipient to walk into range and goes out over a relay too.
+        assert!(SendPlan::for_attempt(true, LOCAL_FIRST_PATIENCE).force_both);
+        assert!(SendPlan::for_attempt(true, LOCAL_FIRST_PATIENCE + 1).force_both);
+    }
+
+    /// The switch has to reach the router, or the app-bar icons are decoration.
+    #[tokio::test]
+    async fn switching_precedence_changes_the_route_a_send_takes() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(!rt.handles().prefer_local, "relays lead by default");
+
+        rt.toggle_workspace("OffGridTravel").await.unwrap();
+        assert!(rt.handles().prefer_local);
+
+        // Precedence is an order, not an exclusion: with the preferred route
+        // carrying nothing (no peers on this network) *and* no relay, the
+        // message is still queued rather than dropped on the floor.
+        let (_hex, peer) = stranger();
+        let dto = rt.send_dm(&peer, "still going out").await.unwrap();
+        assert_eq!(dto.status.as_deref(), Some("queued"));
+        assert_eq!(rt.outbox_pending(), 1);
+        assert_eq!(
+            rt.messages_with(&peer).unwrap()[0].content,
+            "still going out"
+        );
+
+        rt.toggle_workspace("Base").await.unwrap();
+        assert!(!rt.handles().prefer_local);
     }
 
     /// The cross-transport case: the same message arrives sealed over the mesh
