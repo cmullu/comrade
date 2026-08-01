@@ -754,6 +754,40 @@ async fn comrades_see_each_other_come_online_and_go_offline() {
         "alice must answer bob's arrival with a beacon of her own"
     );
 
+    // Backgrounding is a real goodbye, and it sticks: the heartbeat refreshes
+    // presence only while the app is open, so a phone in a pocket — process
+    // alive, connection service running, still receiving messages — stops
+    // claiming to be online instead of re-announcing itself a heartbeat later.
+    assert_eq!(
+        bob.announce_presence(false).await,
+        1,
+        "the goodbye goes out"
+    );
+    assert!(
+        wait_for(&mut alice_events, RECV_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::ComradePresence { online: false, .. }
+        ))
+        .await
+        .is_some(),
+        "alice must see bob go offline when he backgrounds the app"
+    );
+    assert_eq!(
+        bob.handles().refresh_presence().await,
+        0,
+        "the heartbeat must not resurrect a backgrounded app"
+    );
+    assert!(
+        wait_for(&mut alice_events, ABSENCE_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::ComradePresence { online: true, .. }
+        ))
+        .await
+        .is_none(),
+        "…so alice never sees him come back until he actually opens the app"
+    );
+    assert!(!alice.comrades().unwrap()[0].online);
+
     relay.stop().await;
 }
 
