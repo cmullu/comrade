@@ -117,12 +117,18 @@ map 1:1 onto `ComradeCore.kt`'s methods and `commands.rs`'s commands.
   camera shows a plain Send button rather than one that fails on tap.
 - **Item**: optional `DaySeparator` (inside the item, so indices still match
   the merged list) then either a `MediaAttachmentBubble` or a `MessageBubble`
-  (quoted preview · text · `clockTime` · status ticks when outgoing).
+  (quoted preview · text · `clockTime` · status ticks when outgoing). Both are
+  wrapped in the same `ReplyAffordance`, so an attachment is repliable exactly
+  the way a message is; a tap on a photo or a video opens `MediaViewerPage`.
 - **State**: `conversationProvider(peer)` → `{messages, media, items,
-  replyingTo, sending, attaching, error}`; local `_loadedOnce`,
+  replyingTo, sending, attaching, error}`, where `replyingTo` is a `ChatItem`
+  (text *or* media — the `e` tag does not care which kind of event it names);
+  local `_loadedOnce`,
   `_knownItemCount`, `_newMessagesBelow`, `_atBottom`.
-- **Interactions**: send; long-press or hover → reply; cancel reply; attach;
-  jump to latest; scroll.
+- **Interactions**: send; long-press or hover → reply (to a message or to an
+  attachment); cancel reply; attach, captioned with whatever is in the composer
+  (`util/attachment_caption.dart`); tap a photo/video → full screen; jump to
+  latest; scroll.
 - **Backend**: `messages`, `media`, `sendDm`, `sendMedia`,
   `markConversationRead`.
 - **Load-bearing detail — the scroll rule.** Commit `a76bacf` ("stop yanking
@@ -279,6 +285,7 @@ divergence that gets re-litigated.
 | D15 | UPI `/pay` preview | none (voice command only) | live debounced `extract_payments` in the composer + chips under bubbles | **Desktop — carried but not yet wired** | `extractPayments` is on the repository interface; the composer preview is **not** re-implemented in this pass. An honest gap, not a decision. |
 | D16 | Feed length cap | none | 2,000 chars + live counter | **Desktop** | Without it a post is silently rejected by the relay. |
 | D17 | Feed "is this mine?" | compares `author == "you"` — a sentinel it invents when optimistically prepending, which never matches a real npub | compares against `state.identity.npub` | **Desktop** | Android's comparison cannot match a real event; it only ever works on the optimistic local copy. |
+| D18b | **Reply to an attachment · caption an attachment · full-screen viewer** | none — media bubbles had no reply, sends were captioned with the *file name*, and a tap did nothing | none — same three gaps | **New, in all three** | Three gaps neither frontend had closed, fixed the same way everywhere rather than only in the migration target. A reply target is any chat item, because a nostr `e` tag names an event and a NIP-94 attachment is one — no core or DTO change was needed. The caption is whatever is in the composer when you attach (Telegram's rule), except while a reply is pending, when those words are a half-written reply and taking them would lose it. Photos and videos open full screen on tap, against black, from the bytes the bubble already holds. The rules are pure and tested three times over: `util/attachment_caption.dart`, `ui/AttachmentCaption.kt`, `ui/attachment_caption.mjs`. |
 | D18 | Feed reply marker | ignored | `↳ reply to abc123…` | **Desktop** | The DTO carries `reply_to`; dropping it loses real information. |
 | D19 | TURN card | status + Edit + **Test relay connectivity** diagnostic | modal only, no status, no test | **Android** | Strict superset, and the diagnostic is the difference between "calls fail" and "calls fail *because the relay is unreachable*". |
 | D20 | Vault lock | "Lock vault now" | none | **Android** | The deliberate, user-initiated version of what process death does by accident. |
