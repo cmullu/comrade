@@ -1401,10 +1401,14 @@ private fun TransportPrecedenceAction() {
 
     val meshState = TransportPrecedence.meshStateOf(mesh.active, mesh.peerCount)
     val order = TransportPrecedence.orderOf(workspaceKey)
+    val lead = order.first()
+    val fallback = order.last()
 
-    fun choose(lead: TransportRoute) {
+    // Named `route`, not `lead`: it is the order the user is *asking* for, and
+    // shadowing the one currently in force would make the guard below unreadable.
+    fun choose(route: TransportRoute) {
         menuOpen = false
-        val target = TransportPrecedence.workspaceFor(lead)
+        val target = TransportPrecedence.workspaceFor(route)
         // The core's state machine rejects a self-transition, so re-picking the
         // order already in force must be a no-op rather than an error the user
         // caused by confirming what they already had.
@@ -1434,13 +1438,13 @@ private fun TransportPrecedenceAction() {
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     Icon(
-                        transportGlyph(order.first),
-                        contentDescription = transportDescription(order.first, meshState),
-                        tint = leadTint(order.first, meshState),
+                        transportGlyph(lead),
+                        contentDescription = transportDescription(lead, meshState),
+                        tint = leadTint(lead, meshState),
                         modifier = Modifier.size(22.dp),
                     )
                     Icon(
-                        transportGlyph(order.last),
+                        transportGlyph(fallback),
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
                         modifier = Modifier.size(14.dp),
@@ -1462,7 +1466,7 @@ private fun TransportPrecedenceAction() {
             HorizontalDivider()
             PrecedenceChoice(
                 route = TransportRoute.Relay,
-                selected = order.first == TransportRoute.Relay,
+                selected = lead == TransportRoute.Relay,
                 label = "Internet first",
                 detail = "Relays, then nearby devices",
                 testTag = "precedence-relay",
@@ -1470,7 +1474,7 @@ private fun TransportPrecedenceAction() {
             )
             PrecedenceChoice(
                 route = TransportRoute.LocalNetwork,
-                selected = order.first == TransportRoute.LocalNetwork,
+                selected = lead == TransportRoute.LocalNetwork,
                 label = "This network first",
                 detail = "Nearby devices, then relays",
                 testTag = "precedence-local",
