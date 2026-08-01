@@ -85,6 +85,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.ui.ArticleIcon
 import mullu.comrade.ui.BookIcon
+import mullu.comrade.ui.BreathingScreen
 import mullu.comrade.ui.CallHistoryScreen
 import mullu.comrade.ui.ChatBubbleIcon
 import mullu.comrade.ui.ChatMenuAction
@@ -94,6 +95,7 @@ import mullu.comrade.ui.ConversationScreen
 import mullu.comrade.ui.CopyIcon
 import mullu.comrade.ui.conversationMenu
 import mullu.comrade.ui.FeedScreen
+import mullu.comrade.ui.FocusScreen
 import mullu.comrade.ui.HeartIcon
 import mullu.comrade.ui.JournalScreen
 import mullu.comrade.ui.NewChatScreen
@@ -103,11 +105,13 @@ import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
 import mullu.comrade.ui.presenceText
+import mullu.comrade.ui.ReaderScreen
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
+import mullu.comrade.ui.TimerIcon
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.purgeDecryptedMedia
 import mullu.comrade.ui.shortNpub
@@ -258,6 +262,23 @@ class MainActivity : ComponentActivity() {
 internal fun vaultPath(context: Context): File = File(context.filesDir, "comrade-vault")
 
 /**
+ * Keep a line from a focus session or a finished read as a journal entry.
+ *
+ * Saves the *prompt* rather than opening a pre-filled composer, deliberately:
+ * the reflection is the invitation, and the user's own answer belongs in their
+ * own words on the Journal tab whenever they get to it. Failure is silent —
+ * missing a suggested note is not worth an error dialog after a session someone
+ * just finished.
+ */
+private fun seedJournalNote(scope: kotlinx.coroutines.CoroutineScope, line: String) {
+    if (line.isBlank()) return
+    scope.launch(Dispatchers.IO) {
+        runCatching { ComradeCore.addJournalEntryTyped(line, null) }
+            .onFailure { Log.w("ComradeApp", "could not save the session note", it) }
+    }
+}
+
+/**
  * Show (or stop showing) the whole activity over the lock screen and wake the
  * display — an incoming call rings and is answerable without first unlocking
  * the device, exactly like the platform dialer. `FLAG_SHOW_WHEN_LOCKED`/
@@ -368,13 +389,23 @@ fun ComradeApp() {
 /**
  * Bottom-navigation destinations, in on-screen order. Tara sits **last**
  * (rightmost) deliberately: the messaging/journal/feed tabs are the daily
- * surfaces, and the companion is the one you reach for on purpose.
+ * surfaces, and the companion is the one you reach for on purpose. Focus sits
+ * next to it for the same reason — both are things you go to deliberately,
+ * never things that should be competing for a glance.
  */
 private enum class MainTab(val label: String, val icon: ImageVector) {
     Chats("Chats", ChatBubbleIcon),
     Journal("Journal", BookIcon),
     Feed("Feed", ArticleIcon),
+    Focus("Focus", TimerIcon),
     Tara("Tara", HeartIcon),
+}
+
+/** Sub-navigation inside the Focus tab. */
+private sealed interface FocusNav {
+    data object Sessions : FocusNav
+    data object Reader : FocusNav
+    data object Breathing : FocusNav
 }
 
 /** Sub-navigation inside the Chats tab. */
@@ -404,6 +435,7 @@ private fun MainShell(
     val activity = context as? Activity
     var tab by rememberSaveable { mutableStateOf(MainTab.Chats) }
     var chatNav by remember { mutableStateOf<ChatNav>(ChatNav.List) }
+    var focusNav by remember { mutableStateOf<FocusNav>(FocusNav.Sessions) }
     // Settings is a pushed screen (Telegram-style), reached from the drawer,
     // not a bottom-nav tab. The drawer is the app-wide navigation menu.
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
@@ -585,11 +617,13 @@ private fun MainShell(
     BackHandler(
         enabled = drawerState.isOpen ||
             settingsOpen ||
-            (tab == MainTab.Chats && chatNav != ChatNav.List),
+            (tab == MainTab.Chats && chatNav != ChatNav.List) ||
+            (tab == MainTab.Focus && focusNav != FocusNav.Sessions),
     ) {
         when {
             drawerState.isOpen -> scope.launch { drawerState.close() }
             settingsOpen -> settingsOpen = false
+            tab == MainTab.Focus -> focusNav = FocusNav.Sessions
             else -> chatNav = ChatNav.List
         }
     }
@@ -836,6 +870,29 @@ private fun MainShell(
                                 },
                                 title = { Text("Comrade") },
                             )
+                            // A Focus sub-screen gets a back arrow to the
+                            // session list, like the Chats sub-screens do.
+                            tab == MainTab.Focus && focusNav != FocusNav.Sessions -> TopAppBar(
+                                navigationIcon = {
+                                    IconButton(onClick = { focusNav = FocusNav.Sessions }) {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.ArrowBack,
+                                            contentDescription = "Back",
+                                        )
+                                    }
+                                },
+                                title = {
+                                    Text(
+                                        stringResource(
+                                            if (focusNav == FocusNav.Reader) {
+                                                R.string.reader_title
+                                            } else {
+                                                R.string.breathe_title
+                                            },
+                                        ),
+                                    )
+                                },
+                            )
                             else -> CenterAlignedTopAppBar(
                                 title = {
                                     Text(
@@ -844,6 +901,7 @@ private fun MainShell(
                                             MainTab.Journal -> "Journal"
                                             MainTab.Tara -> "Tara"
                                             MainTab.Feed -> "Feed"
+                                            MainTab.Focus -> stringResource(R.string.attention_tab)
                                         },
                                     )
                                 },
@@ -927,9 +985,30 @@ private fun MainShell(
                         }
                         MainTab.Journal -> JournalScreen(modifier = content)
                         MainTab.Tara -> TaraScreen(modifier = content)
+                        MainTab.Focus -> when (focusNav) {
+                            FocusNav.Sessions -> FocusScreen(
+                                onOpenReader = { focusNav = FocusNav.Reader },
+                                onOpenBreathing = { focusNav = FocusNav.Breathing },
+                                onJournalNote = { seedJournalNote(scope, it) },
+                                modifier = content,
+                            )
+                            FocusNav.Reader -> ReaderScreen(
+                                onJournalNote = { seedJournalNote(scope, it) },
+                                modifier = content,
+                            )
+                            FocusNav.Breathing -> BreathingScreen(
+                                onDone = { focusNav = FocusNav.Sessions },
+                                modifier = content,
+                            )
+                        }
                         MainTab.Feed -> FeedScreen(
                             feedItems = feedItems,
                             onPosted = { ChatEventRouter.addChitthi(it, front = true) },
+                            onOpenJournal = { tab = MainTab.Journal },
+                            onOpenBreathing = {
+                                tab = MainTab.Focus
+                                focusNav = FocusNav.Breathing
+                            },
                             modifier = content,
                         )
                     }

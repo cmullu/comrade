@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Network access for Nostr relay connections -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -70,6 +71,25 @@
          absent too, and NotificationManagerCompat.notify throws
          IllegalArgumentException instead of posting. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- The attention mirror (docs/ATTENTION.md phase 1): reads how long the
+         screen was on, how often it was picked up, and time in the apps the
+         *user themself* tagged as scroll traps — reduced to three integers a
+         day and stored in the encrypted vault (see UsageMirror, which is where
+         the raw events are dropped).
+
+         This is a special-access grant, not a runtime permission: declaring it
+         here grants nothing at all. The user must visit a system settings
+         screen, which the app only sends them to from an explainer that states
+         what is read and that it never leaves the device. Everything else in
+         the attention pillar — focus sessions, the reader, quiet hours, the
+         gentle stop — works with this never granted. `tools:ignore` because
+         lint flags the permission as not-for-third-party-apps; it is
+         nonetheless the only documented API for showing someone their own
+         screen time, and it is user-granted per app. -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />

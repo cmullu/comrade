@@ -33,11 +33,12 @@ uniffi::setup_scaffolding!("comrade_ui");
 pub mod runtime;
 
 pub use runtime::{
-    BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto,
-    ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto,
-    FoundProfileDto, IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, RuntimeHandles,
-    SakhaStatusDto, TaraMessageDto, TurnServerStatusDto,
+    AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
+    CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
+    CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto, IceServerDto,
+    JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
+    MetricDto, PresenceDto, ProfileDto, ReadingDto, RuntimeHandles, SakhaStatusDto, TaraMessageDto,
+    TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

@@ -43,4 +43,12 @@ class ComradeCoreBackend : ComradeBackend {
 
     override fun generateIdentity(): Result<String> =
         runCatching { ComradeCore.generateKeypairTyped().npub }
+
+    override fun startFocus(minutes: Int?): Result<Int> = runCatching {
+        // A spoken request carries no intention text — the session is started
+        // without one rather than inventing a label the user never said. The
+        // duration falls back to the engine's own progressive suggestion.
+        val length = minutes ?: ComradeCore.suggestedFocusMinutesTyped()
+        ComradeCore.startFocusSessionTyped(intent = "", plannedMinutes = length).plannedMinutes
+    }
 }

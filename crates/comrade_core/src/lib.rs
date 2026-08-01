@@ -12,6 +12,7 @@
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
  *   tara    — reflective-companion engine (deterministic, on-device, not therapy)
+ *   attention — attention-restoration engine (usage mirror, focus sessions, long-read chunking)
  *   relay   — NIP-65 relay-list metadata + outbox-model routing
  *   media   — NIP-94/96 encrypted media staging + pluggable uploaders
  *
@@ -35,6 +36,7 @@
 uniffi::setup_scaffolding!("comrade_core");
 
 pub mod anon;
+pub mod attention;
 pub mod call;
 pub mod crypto;
 pub mod dak;

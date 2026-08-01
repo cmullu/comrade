@@ -259,4 +259,83 @@
     <string name="update_refused_signer">That download is signed by a different key than your copy of Comrade — refusing to install it</string>
     <string name="update_refused_unreadable">That download is not a readable APK</string>
     <string name="update_refused_size">The download did not match the size the release published</string>
+
+    <!-- Attention: the gentle stop on the feed (docs/ATTENTION.md phase 0).
+         Deliberately quotes no duration and no count: a number here would
+         invite a score, and this card is an offer, not a verdict. -->
+    <string name="gentle_stop_title">Still here with you</string>
+    <string name="gentle_stop_body">You\'ve been reading a while. Nothing wrong with that — but if you came here to feel better rather than to catch up, there might be a kinder way to spend the next ten minutes.</string>
+    <string name="gentle_stop_write">Write instead</string>
+    <string name="gentle_stop_breathe">Take a breath</string>
+    <string name="gentle_stop_keep_reading">Keep reading</string>
+
+    <!-- Attention: quiet hours -->
+    <string name="settings_quiet_hours_title">Quiet hours</string>
+    <string name="settings_quiet_hours_summary">Silences Comrade\'s notifications overnight — messages, requests, comrades coming online, update notices. A ringing call always comes through: someone calling at 3am may be exactly who this app is for. Nothing is lost, only delayed until morning.</string>
+    <string name="settings_quiet_hours_window">Quiet from %1$s to %2$s</string>
+    <string name="settings_quiet_hours_start">Start</string>
+    <string name="settings_quiet_hours_end">End</string>
+    <string name="settings_quiet_hours_device_only">Set on this device only — Comrade has no server to sync it through.</string>
+
+    <!-- Attention: the usage mirror (phase 1). Opt-in, and the explainer says
+         exactly what is read and where it goes. -->
+    <string name="mirror_title">Your day so far</string>
+    <string name="mirror_enable_title">See your own screen time</string>
+    <string name="mirror_enable_body">Android can tell Comrade how long your screen was on, how often you picked the phone up, and how long you spent in apps you choose to mark. Comrade keeps three numbers a day — that\'s all — sealed in the same encrypted store as your journal. It never leaves this phone; there is no server to send it to. You can turn the permission off again whenever you like.</string>
+    <string name="mirror_enable_action">Choose in system settings</string>
+    <string name="mirror_enable_not_now">Not now</string>
+    <string name="mirror_screen_time">%1$s on screen</string>
+    <string name="mirror_pickups">%1$d pickups</string>
+    <string name="mirror_doom_time">%1$s in apps you marked</string>
+    <string name="mirror_vs_median">Your usual is about %1$s.</string>
+    <string name="mirror_no_baseline">No usual yet — a few more days and this can compare you only to yourself.</string>
+    <string name="mirror_pick_apps">Choose which apps to count</string>
+    <string name="mirror_pick_apps_title">Which apps pull you in?</string>
+    <string name="mirror_pick_apps_body">Your call entirely — Comrade ships no list of “bad apps”, because which ones are a problem is yours to say and nobody else\'s. Marked apps get their own line in the mirror.</string>
+    <string name="mirror_pick_apps_none">Nothing marked yet.</string>
+    <string name="mirror_not_a_score">These are your own numbers next to your own recent days. Not a score, not a target, and not compared to anyone else.</string>
+    <string name="mirror_trend_title">The last few weeks</string>
+
+    <!-- Attention: focus sessions (phase 2) -->
+    <string name="focus_title">Focus session</string>
+    <string name="focus_intent_label">What will you give this time to?</string>
+    <string name="focus_start">Start %1$d minutes</string>
+    <string name="focus_running">%1$s left</string>
+    <string name="focus_done">I finished</string>
+    <string name="focus_stop">Stop early</string>
+    <string name="focus_dnd_offer">Silence notifications while this runs</string>
+    <string name="focus_dnd_explainer">Uses Android\'s Do Not Disturb, which needs a one-time permission. Calls still ring.</string>
+    <string name="focus_history_title">Recent sessions</string>
+    <string name="focus_practice_note">This is practice, not a test: attention gets easier to hold by holding it. Stopping early is information, not failure — nothing here keeps a streak to break.</string>
+    <string name="focus_empty">No sessions yet. Twenty-five minutes on one thing is a good place to begin.</string>
+    <string name="focus_outcome_completed">Completed</string>
+    <string name="focus_outcome_abandoned">Stopped early</string>
+    <string name="focus_outcome_lapsed">Lapsed</string>
+    <string name="focus_save_note">Save as a journal note</string>
+
+    <!-- Attention: the long-form reader (phase 2) -->
+    <string name="reader_title">Long read</string>
+    <string name="reader_paste_label">Paste something worth your attention</string>
+    <string name="reader_paste_hint">An article, a chapter, a letter — whatever you\'ve been meaning to read properly. It stays on this phone, encrypted like your journal. Comrade never fetches it from the web for you.</string>
+    <string name="reader_save">Start reading</string>
+    <string name="reader_next">Next</string>
+    <string name="reader_previous">Back</string>
+    <string name="reader_progress">%1$d of %2$d</string>
+    <string name="reader_finished">That\'s the end. Worth a line about it?</string>
+    <string name="reader_clear">Close this read</string>
+    <string name="reader_title_label">Title (optional)</string>
+
+    <!-- Attention: breathing (phase 2) -->
+    <string name="breathe_title">One minute</string>
+    <string name="breathe_in">Breathe in</string>
+    <string name="breathe_hold">Hold</string>
+    <string name="breathe_out">Breathe out</string>
+    <string name="breathe_done">Done</string>
+    <string name="breathe_note">Four counts in, four held, four out. No account of this is kept.</string>
+
+    <!-- Attention: the tab and its honesty gate -->
+    <string name="attention_tab">Focus</string>
+    <string name="attention_explainer_title">About Focus</string>
+    <string name="attention_explainer_body">These tools are for practising attention, not for fixing it, and Comrade will not pretend otherwise. There is decent evidence that using your phone more deliberately, reading longer things, and sleeping better all help you concentrate — and no good evidence that any app “restores” anyone\'s brain. So you\'ll find no scores here, no levels, and nothing telling you that you failed. Everything stays on this phone.</string>
+    <string name="attention_explainer_ok">Got it</string>
 </resources>

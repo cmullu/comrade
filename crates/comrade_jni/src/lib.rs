@@ -72,11 +72,11 @@ use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
 use comrade_state::AppWorkspace;
 use comrade_ui::{
-    BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
-    ConversationDto, CrisisResourceDto, FoundProfileDto, IceServerDto, IdentityDto,
-    JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto,
-    WorkspaceDto,
+    AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto,
+    ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
+    FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
+    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReadingDto,
+    TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -778,6 +778,101 @@ impl Comrade {
         self.inner.blocking_read().tara_crisis_resources()
     }
 
+    // ── Attention (usage mirror · focus sessions · long read) ────────────────
+    //
+    // Strictly local, like the journal and Tara: nothing here is ever
+    // networked. `date`/`today` are `YYYY-MM-DD` in the *device's* timezone —
+    // Kotlin owns the calendar, because only it knows what that is.
+
+    pub fn record_attention_day(
+        &self,
+        date: String,
+        screen_minutes: u32,
+        pickups: u32,
+        doom_minutes: u32,
+    ) -> Result<AttentionDayDto, UiError> {
+        self.inner.blocking_read().record_attention_day(
+            &date,
+            screen_minutes,
+            pickups,
+            doom_minutes,
+        )
+    }
+
+    pub fn attention_days(&self) -> Result<Vec<AttentionDayDto>, UiError> {
+        self.inner.blocking_read().attention_days()
+    }
+
+    /// Today's rollup against the user's own recent medians.
+    pub fn attention_summary(&self, today: String) -> Result<AttentionSummaryDto, UiError> {
+        self.inner.blocking_read().attention_summary(&today)
+    }
+
+    /// The package names the user tagged as their own scroll traps. Comrade
+    /// ships no built-in blacklist — see `ComradeRuntime::doom_apps`.
+    pub fn doom_apps(&self) -> Result<Vec<String>, UiError> {
+        self.inner.blocking_read().doom_apps()
+    }
+
+    pub fn set_doom_apps(&self, packages: Vec<String>) -> Result<Vec<String>, UiError> {
+        self.inner.blocking_read().set_doom_apps(packages)
+    }
+
+    pub fn start_focus_session(
+        &self,
+        intent: String,
+        planned_minutes: u32,
+    ) -> Result<FocusSessionDto, UiError> {
+        self.inner
+            .blocking_read()
+            .start_focus_session(&intent, planned_minutes)
+    }
+
+    /// Finish the running session; `None` if none was running. A session past
+    /// its grace window is recorded as lapsed whatever `completed` says.
+    pub fn finish_focus_session(
+        &self,
+        completed: bool,
+    ) -> Result<Option<FocusSessionDto>, UiError> {
+        self.inner.blocking_read().finish_focus_session(completed)
+    }
+
+    pub fn active_focus_session(&self) -> Result<Option<FocusSessionDto>, UiError> {
+        self.inner.blocking_read().active_focus_session()
+    }
+
+    pub fn focus_sessions(&self) -> Result<Vec<FocusSessionDto>, UiError> {
+        self.inner.blocking_read().focus_sessions()
+    }
+
+    pub fn suggested_focus_minutes(&self) -> Result<u32, UiError> {
+        self.inner.blocking_read().suggested_focus_minutes()
+    }
+
+    pub fn focus_prompt(&self) -> Result<String, UiError> {
+        self.inner.blocking_read().focus_prompt()
+    }
+
+    pub fn focus_reflection(&self, outcome: String) -> Result<String, UiError> {
+        self.inner.blocking_read().focus_reflection(&outcome)
+    }
+
+    pub fn save_reading(&self, title: String, text: String) -> Result<ReadingDto, UiError> {
+        self.inner.blocking_read().save_reading(&title, &text)
+    }
+
+    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
+        self.inner.blocking_read().reading()
+    }
+
+    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
+        self.inner.blocking_read().set_reading_position(position)
+    }
+
+    pub fn clear_reading(&self) -> Result<bool, UiError> {
+        self.inner.blocking_read().clear_reading()
+    }
+
     // ── Calls (voice/video signaling) ───────────────────────────────────────
 
     pub fn call_ice_servers(&self) -> Vec<IceServerDto> {
@@ -1033,6 +1128,91 @@ mod tests {
             c.peer_presence("npub1x".to_string()),
             Err(UiError::VaultLocked)
         ));
+    }
+
+    #[test]
+    fn attention_calls_reject_gracefully_before_unlock() {
+        // Same contract as `sync_calls_reject_gracefully_before_unlock`: the
+        // Kotlin shell reads these from screens that can render before the
+        // vault is open, so they must fail closed rather than panic.
+        let c = isolated();
+        assert!(matches!(c.attention_days(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            c.attention_summary("2026-07-31".to_string()),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(c.doom_apps(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            c.active_focus_session(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(c.focus_sessions(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            c.suggested_focus_minutes(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(c.reading(), Err(UiError::VaultLocked)));
+    }
+
+    #[test]
+    fn attention_lifecycle_is_reachable_through_the_ffi_object() {
+        // The FFI surface is thin, but "thin" has been wrong before — drive
+        // one full record → summarise → focus → read round trip through the
+        // exported methods, on a plain thread with no ambient reactor (exactly
+        // how JNA calls them).
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let c = isolated();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(c.unlock_vault(path, "pin".to_string()))
+            .unwrap();
+
+        let day = c
+            .record_attention_day("2026-07-31".to_string(), 120, 55, 40)
+            .unwrap();
+        assert_eq!(day.screen_minutes, 120);
+        assert_eq!(c.attention_days().unwrap().len(), 1);
+        let summary = c.attention_summary("2026-07-31".to_string()).unwrap();
+        assert_eq!(summary.today.unwrap().doom_minutes, 40);
+
+        assert_eq!(
+            c.set_doom_apps(vec!["com.example.feed".to_string()])
+                .unwrap(),
+            vec!["com.example.feed".to_string()]
+        );
+        assert_eq!(c.doom_apps().unwrap().len(), 1);
+
+        assert_eq!(c.suggested_focus_minutes().unwrap(), 25);
+        assert!(!c.focus_prompt().unwrap().is_empty());
+        let started = c
+            .start_focus_session("write the thing".to_string(), 25)
+            .unwrap();
+        assert_eq!(
+            c.active_focus_session().unwrap().map(|s| s.id),
+            Some(started.id)
+        );
+        let done = c.finish_focus_session(true).unwrap().unwrap();
+        assert_eq!(done.outcome.as_deref(), Some("completed"));
+        // Which of the rotating completion lines comes back depends on how
+        // many sessions are stored (pinned in `comrade_core::attention`); what
+        // matters here is that the outcome reaches the engine and an unknown
+        // one is refused rather than guessed at.
+        assert!(!c
+            .focus_reflection("completed".to_string())
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            c.focus_reflection("finished-ish".to_string()),
+            Err(UiError::Engine(_))
+        ));
+
+        let saved = c
+            .save_reading("Essay".to_string(), "A line worth reading.".to_string())
+            .unwrap();
+        assert_eq!(saved.chunks.concat(), "A line worth reading.");
+        assert_eq!(c.set_reading_position(0).unwrap().unwrap().position, 0);
+        assert!(c.clear_reading().unwrap());
+        assert!(c.reading().unwrap().is_none());
     }
 
     #[tokio::test]

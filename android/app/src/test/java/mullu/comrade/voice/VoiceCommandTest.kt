@@ -141,4 +141,49 @@ class VoiceCommandTest {
     fun `punctuation and casing are normalised away`() {
         assertEquals("post hello", VoiceCommand.normalise("  Post, HELLO!! "))
     }
+
+    @Test
+    fun `focus phrases resolve with no duration`() {
+        for (phrase in listOf(
+            "start a focus session",
+            "start focus session",
+            "focus session",
+            "let's focus",
+            "hey comrade start a focus session",
+        )) {
+            assertEquals(
+                "should parse: $phrase",
+                VoiceCommand.StartFocus(null),
+                VoiceCommand.parse(phrase),
+            )
+        }
+    }
+
+    @Test
+    fun `a spoken digit duration is honoured`() {
+        assertEquals(VoiceCommand.StartFocus(45), VoiceCommand.parse("focus for 45 minutes"))
+        assertEquals(
+            VoiceCommand.StartFocus(90),
+            VoiceCommand.parse("start a focus session for 90 minutes"),
+        )
+    }
+
+    @Test
+    fun `a number word falls back to the suggested length`() {
+        // Vosk emits number words as often as digits, and half-parsing "forty
+        // five" into 40 would start a session nobody asked for. Falling back to
+        // the engine's own suggestion is the safe reading.
+        assertEquals(
+            VoiceCommand.StartFocus(null),
+            VoiceCommand.parse("focus for forty five minutes"),
+        )
+    }
+
+    @Test
+    fun `a focus request is never mistaken for a public post`() {
+        // "share"/"say"/"post" prefixes must not swallow this: broadcasting
+        // "a focus session" to open relays would be a privacy surprise.
+        val parsed = VoiceCommand.parse("start a focus session")
+        assertTrue(parsed is VoiceCommand.StartFocus)
+    }
 }

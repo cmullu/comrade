@@ -31,6 +31,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use comrade_core::anon;
+use comrade_core::attention::{
+    self, FocusOutcome, UsageSignal, FOCUS_MAX_MINUTES, FOCUS_MIN_MINUTES,
+};
 use comrade_core::call::{
     derive_sas, ice_servers_for, new_call_id, parse_call_envelope, validate_turn_url, CallEnvelope,
     CallMediaKind, CallSignal, HangupReason, IceServer, IceStrategy,
@@ -761,6 +764,73 @@ impl From<comrade_storage::TaraMessage> for TaraMessageDto {
             created_at: m.created_at,
         }
     }
+}
+
+/// One day's usage rollup as the frontend sees it (wellbeing pillar #5).
+/// **Strictly local**, exactly like [`JournalEntryDto`] — and only ever a
+/// rollup: no app names, no per-app timings, no event stream. See
+/// `docs/ATTENTION.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AttentionDayDto {
+    /// Local calendar date, `YYYY-MM-DD`.
+    pub date: String,
+    pub screen_minutes: u32,
+    pub pickups: u32,
+    /// Minutes in the apps the *user* tagged as their own scroll traps.
+    pub doom_minutes: u32,
+}
+
+impl From<comrade_storage::AttentionDay> for AttentionDayDto {
+    fn from(d: comrade_storage::AttentionDay) -> Self {
+        Self {
+            date: d.date,
+            screen_minutes: d.screen_minutes,
+            pickups: d.pickups,
+            doom_minutes: d.doom_minutes,
+        }
+    }
+}
+
+/// Today's usage against the user's **own** recent medians — the only
+/// comparison this app makes. Never a normative target, never another user
+/// (`docs/ATTENTION.md` gate 1); `sample_days` lets the UI say how thin the
+/// baseline is instead of calling one prior day "your usual".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AttentionSummaryDto {
+    /// Today's rollup, or `None` if nothing has been recorded today.
+    pub today: Option<AttentionDayDto>,
+    pub median_screen_minutes: u32,
+    pub median_doom_minutes: u32,
+    pub median_pickups: u32,
+    /// How many prior days (0–7) the medians are drawn from.
+    pub sample_days: u32,
+}
+
+/// One focus session as the frontend sees it. Strictly local.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct FocusSessionDto {
+    pub id: String,
+    /// What the user said they'd give the time to (may be empty).
+    pub intent: String,
+    pub planned_minutes: u32,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+    /// `completed` / `abandoned` / `lapsed`; `None` while still running.
+    pub outcome: Option<String>,
+    /// Seconds left against the plan — 0 for a finished session.
+    pub remaining_secs: u64,
+}
+
+/// The saved long-read, already split into chapter-sized chunks, plus where
+/// the reader had got to. Chunking is lossless by test
+/// (`comrade_core::attention::chunk_reading`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ReadingDto {
+    pub title: String,
+    pub chunks: Vec<String>,
+    /// Index into `chunks`, always in range (a stored position past the end
+    /// after an edit is clamped rather than trusted).
+    pub position: u32,
 }
 
 /// A crisis helpline surfaced when a Tara message carries distress cues.
@@ -2582,7 +2652,13 @@ impl ComradeRuntime {
     }
 
     /// The opener shown when the Tara thread is empty — shaped by recent
-    /// journal *mood markers* only (never entry text; data minimisation).
+    /// journal *mood markers* only (never entry text; data minimisation), and
+    /// by yesterday's usage **rollup numbers** only (never app names).
+    ///
+    /// Mood outranks usage; the precedence lives in
+    /// `ReflectiveCompanion::opener_with_usage` so no frontend can decide it
+    /// differently. With no usage recorded this is exactly the opener it always
+    /// was.
     pub fn tara_opener(&self) -> Result<String, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let now = now_secs();
@@ -2595,7 +2671,20 @@ impl ComradeRuntime {
                 age_days: now.saturating_sub(e.created_at) / 86_400,
             })
             .collect();
-        Ok(ReflectiveCompanion.opener(&signals))
+        // The newest recorded day is "yesterday" for nudging purposes only
+        // once it is no longer today's still-growing row — commenting on a
+        // day the user is still living would be both premature and preachy.
+        let days = store
+            .attention_days()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let today = iso_date(now);
+        let mut prior = days.iter().filter(|d| d.date != today);
+        let yesterday = prior.next().map(usage_signal);
+        let mut medians: Vec<u32> = prior.take(7).map(|d| d.doom_minutes).collect();
+        medians.sort_unstable();
+        let median_doom = (!medians.is_empty()).then(|| medians[medians.len() / 2]);
+        let nudge = attention::usage_opener(yesterday, median_doom);
+        Ok(ReflectiveCompanion.opener_with_usage(&signals, nudge))
     }
 
     /// The crisis helplines Tara hands off to, for any frontend to render.
@@ -2608,6 +2697,372 @@ impl ComradeRuntime {
                 note: r.note.to_string(),
             })
             .collect()
+    }
+
+    // ── Attention (wellbeing pillar #5 — strictly local, never networked) ─────
+    //
+    // The same locality guarantee as the journal and Tara: no relay, no
+    // network, nothing uploaded. Usage data is behavioural data of the most
+    // sensitive kind, so only *rollups* reach this layer at all — the raw
+    // per-app event stream is reduced on the frontend and dropped there. See
+    // `docs/ATTENTION.md` for the honesty gates these commands must keep.
+
+    /// Record (or update) one day's usage rollup. `date` is the local calendar
+    /// date as `YYYY-MM-DD`; the frontend owns the calendar, because only it
+    /// knows the device's timezone.
+    ///
+    /// Called repeatedly through the day as the numbers grow — the row is
+    /// keyed by date, so this upserts rather than accumulating duplicates.
+    pub fn record_attention_day(
+        &self,
+        date: &str,
+        screen_minutes: u32,
+        pickups: u32,
+        doom_minutes: u32,
+    ) -> Result<AttentionDayDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let date = date.trim();
+        if !is_iso_date(date) {
+            return Err(UiError::Engine(format!(
+                "attention day needs a YYYY-MM-DD date, got {date:?}"
+            )));
+        }
+        let day = comrade_storage::AttentionDay {
+            date: date.to_string(),
+            screen_minutes,
+            pickups,
+            doom_minutes,
+            updated_at: now_secs(),
+        };
+        store
+            .save_attention_day(&day)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(day.into())
+    }
+
+    /// Every recorded usage day, newest first — for the local trend view.
+    pub fn attention_days(&self) -> Result<Vec<AttentionDayDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .attention_days()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(AttentionDayDto::from)
+            .collect())
+    }
+
+    /// `today`'s rollup against the user's own medians over the previous days.
+    /// `today` is passed in (rather than derived here) for the same reason
+    /// [`Self::record_attention_day`] takes a date: the timezone lives in the
+    /// frontend.
+    pub fn attention_summary(&self, today: &str) -> Result<AttentionSummaryDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let days = store
+            .attention_days()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let today_row = days.iter().find(|d| d.date == today).cloned();
+        let prior: Vec<UsageSignal> = days
+            .iter()
+            .filter(|d| d.date != today)
+            .take(7)
+            .map(usage_signal)
+            .collect();
+        let signal = today_row.as_ref().map(usage_signal).unwrap_or(UsageSignal {
+            screen_minutes: 0,
+            doom_minutes: 0,
+            pickups: 0,
+        });
+        let cmp = attention::compare_today(signal, &prior);
+        Ok(AttentionSummaryDto {
+            today: today_row.map(AttentionDayDto::from),
+            median_screen_minutes: cmp.median_screen_minutes,
+            median_doom_minutes: cmp.median_doom_minutes,
+            median_pickups: cmp.median_pickups,
+            sample_days: cmp.sample_days,
+        })
+    }
+
+    /// The package names the user tagged as their own scroll traps.
+    ///
+    /// Comrade ships **no** built-in blacklist of apps: which apps someone is
+    /// compulsive about is their judgement, not ours, and a hard-coded list
+    /// would also be a claim about other products we have no standing to make.
+    pub fn doom_apps(&self) -> Result<Vec<String>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .load_attention_prefs()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .doom_packages)
+    }
+
+    /// Replace the user's doom-app list. Blanks are dropped and duplicates
+    /// collapsed, so the frontend can pass a raw selection.
+    pub fn set_doom_apps(&self, packages: Vec<String>) -> Result<Vec<String>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let mut cleaned: Vec<String> = Vec::new();
+        for p in packages {
+            let p = p.trim().to_string();
+            if !p.is_empty() && !cleaned.contains(&p) {
+                cleaned.push(p);
+            }
+        }
+        cleaned.sort();
+        let prefs = comrade_storage::AttentionPrefs {
+            doom_packages: cleaned.clone(),
+        };
+        store
+            .save_attention_prefs(&prefs)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(cleaned)
+    }
+
+    /// Start a focus session, persisted immediately so an app kill can't make
+    /// the history lie about a session that really ran.
+    ///
+    /// At most one session runs at a time: an earlier one still open is
+    /// resolved first — completed-in-spirit sessions past their grace window
+    /// become `lapsed`, and one genuinely still running is `abandoned`,
+    /// because the user has visibly moved on to a new intention.
+    pub fn start_focus_session(
+        &self,
+        intent: &str,
+        planned_minutes: u32,
+    ) -> Result<FocusSessionDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        if !(FOCUS_MIN_MINUTES..=FOCUS_MAX_MINUTES).contains(&planned_minutes) {
+            return Err(UiError::Engine(format!(
+                "focus session must be between {FOCUS_MIN_MINUTES} and {FOCUS_MAX_MINUTES} minutes"
+            )));
+        }
+        let now = now_secs();
+        // Close out whatever was open before starting something new.
+        if let Some(open) = self.open_focus_session(store, now)? {
+            let outcome = attention::resolve_stale(open.planned_minutes, open.started_at, now)
+                .unwrap_or(FocusOutcome::Abandoned);
+            self.finish_stored_session(store, open, outcome, now)?;
+        }
+        let session = comrade_storage::FocusSession {
+            id: timestamped_store_id(now),
+            intent: intent.trim().to_string(),
+            planned_minutes,
+            started_at: now,
+            ended_at: None,
+            outcome: None,
+        };
+        store
+            .save_focus_session(&session)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(focus_dto(session, now))
+    }
+
+    /// Finish the running session. `completed` is the user's own verdict —
+    /// `false` records it as abandoned, deliberately without ceremony (no
+    /// streak to break, `docs/ATTENTION.md` gate 3).
+    ///
+    /// A session whose planned end plus grace window has already passed is
+    /// recorded as `lapsed` whatever the caller says: claiming a completion
+    /// for a session nobody was present for would make the history a lie, and
+    /// the history is the only thing the progressive-duration rule reads.
+    /// Returns `None` when no session was running.
+    pub fn finish_focus_session(
+        &self,
+        completed: bool,
+    ) -> Result<Option<FocusSessionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        let Some(open) = self.open_focus_session(store, now)? else {
+            return Ok(None);
+        };
+        let claimed = if completed {
+            FocusOutcome::Completed
+        } else {
+            FocusOutcome::Abandoned
+        };
+        let outcome =
+            attention::resolve_stale(open.planned_minutes, open.started_at, now).unwrap_or(claimed);
+        let finished = self.finish_stored_session(store, open, outcome, now)?;
+        Ok(Some(focus_dto(finished, now)))
+    }
+
+    /// The session currently running, if any. Resolving is a *read* that can
+    /// write: a session found past its grace window is recorded as `lapsed`
+    /// here and reported as gone, so every caller sees one consistent answer
+    /// rather than each frontend inventing its own staleness rule.
+    pub fn active_focus_session(&self) -> Result<Option<FocusSessionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        Ok(self
+            .open_focus_session(store, now)?
+            .map(|s| focus_dto(s, now)))
+    }
+
+    /// Focus-session history, newest first.
+    pub fn focus_sessions(&self) -> Result<Vec<FocusSessionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        Ok(store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|s| focus_dto(s, now))
+            .collect())
+    }
+
+    /// The duration to suggest next, from this user's own completion history —
+    /// the "rebuild the span" rule (`attention::suggest_focus_minutes`).
+    pub fn suggested_focus_minutes(&self) -> Result<u32, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let history: Vec<(u32, FocusOutcome)> = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .filter_map(|s| {
+                s.outcome
+                    .as_deref()
+                    .and_then(FocusOutcome::from_key)
+                    .map(|o| (s.planned_minutes, o))
+            })
+            .collect();
+        Ok(attention::suggest_focus_minutes(&history))
+    }
+
+    /// The intention nudge to show before starting a session, rotated by how
+    /// many sessions came before it.
+    pub fn focus_prompt(&self) -> Result<String, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let prior = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .len() as u64;
+        Ok(attention::focus_prompt(prior).to_string())
+    }
+
+    /// The line to show when a session ends — a reflection prompt for a
+    /// completion, plain acknowledgement for anything else.
+    pub fn focus_reflection(&self, outcome: &str) -> Result<String, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let parsed = FocusOutcome::from_key(outcome)
+            .ok_or_else(|| UiError::Engine(format!("unknown focus outcome {outcome:?}")))?;
+        let prior = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .len() as u64;
+        Ok(attention::focus_reflection(parsed, prior))
+    }
+
+    /// Save text for the distraction-free reader, replacing whatever was
+    /// there, and return it chunked. The user brings the text (paste, share);
+    /// nothing here fetches a URL — a reader that went to the network would
+    /// put an arbitrary-fetch path into the one app that promises not to.
+    pub fn save_reading(&self, title: &str, text: &str) -> Result<ReadingDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(UiError::Engine("nothing to read".into()));
+        }
+        let state = comrade_storage::ReadingState {
+            title: title.trim().to_string(),
+            text: text.to_string(),
+            position: 0,
+            updated_at: now_secs(),
+        };
+        store
+            .save_reading_state(&state)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(reading_dto(state))
+    }
+
+    /// The saved long-read, chunked, or `None` if nothing is saved.
+    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .load_reading_state()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .map(reading_dto))
+    }
+
+    /// Remember which chunk the reader is on. Clamped to the real chunk count,
+    /// so a stored position can never point past the end of the text.
+    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let Some(mut state) = store
+            .load_reading_state()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let chunks = attention::chunk_reading(&state.text).len() as u32;
+        state.position = position.min(chunks.saturating_sub(1));
+        state.updated_at = now_secs();
+        store
+            .save_reading_state(&state)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(Some(reading_dto(state)))
+    }
+
+    /// Forget the saved long-read. Returns whether one existed.
+    pub fn clear_reading(&self) -> Result<bool, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let removed = store
+            .clear_reading_state()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(removed)
+    }
+
+    /// The session still open, resolving (and persisting) a lapse first so
+    /// every caller agrees on what "running" means. Shared by
+    /// [`Self::active_focus_session`], [`Self::start_focus_session`] and
+    /// [`Self::finish_focus_session`].
+    fn open_focus_session(
+        &self,
+        store: &comrade_storage::EncryptedStore,
+        now: u64,
+    ) -> Result<Option<comrade_storage::FocusSession>, UiError> {
+        let sessions = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let Some(open) = sessions.into_iter().find(|s| s.outcome.is_none()) else {
+            return Ok(None);
+        };
+        match attention::resolve_stale(open.planned_minutes, open.started_at, now) {
+            Some(outcome) => {
+                self.finish_stored_session(store, open, outcome, now)?;
+                Ok(None)
+            }
+            None => Ok(Some(open)),
+        }
+    }
+
+    /// Stamp `outcome` on a session and persist it.
+    fn finish_stored_session(
+        &self,
+        store: &comrade_storage::EncryptedStore,
+        session: comrade_storage::FocusSession,
+        outcome: FocusOutcome,
+        now: u64,
+    ) -> Result<comrade_storage::FocusSession, UiError> {
+        // A lapsed session ended when its plan did, not when someone finally
+        // looked: stamping "now" would credit hours nobody was present for.
+        let ended_at = match outcome {
+            FocusOutcome::Lapsed => session.started_at + u64::from(session.planned_minutes) * 60,
+            _ => now,
+        };
+        let finished = comrade_storage::FocusSession {
+            ended_at: Some(ended_at),
+            outcome: Some(outcome.as_str().to_string()),
+            ..session
+        };
+        store
+            .save_focus_session(&finished)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(finished)
     }
 
     // ── Encrypted media pipeline (NIP-94/96 · Blossom) ───────────────────────
@@ -3879,6 +4334,83 @@ async fn persist_ledger_snapshot(store: &comrade_storage::EncryptedStore, sakha:
     if let Err(e) = store.save_ledger_state(&state).and_then(|()| store.flush()) {
         warn!("failed to persist Sakha ledger snapshot: {e}");
     }
+}
+
+/// A stored usage day as the attention engine reads it (rollup numbers only).
+fn usage_signal(day: &comrade_storage::AttentionDay) -> UsageSignal {
+    UsageSignal {
+        screen_minutes: day.screen_minutes,
+        doom_minutes: day.doom_minutes,
+        pickups: day.pickups,
+    }
+}
+
+/// A stored focus session as a frontend sees it, with the live countdown
+/// filled in (0 once it has ended).
+fn focus_dto(session: comrade_storage::FocusSession, now: u64) -> FocusSessionDto {
+    let remaining = if session.outcome.is_some() {
+        0
+    } else {
+        attention::remaining_secs(session.planned_minutes, session.started_at, now)
+    };
+    FocusSessionDto {
+        id: session.id,
+        intent: session.intent,
+        planned_minutes: session.planned_minutes,
+        started_at: session.started_at,
+        ended_at: session.ended_at,
+        outcome: session.outcome,
+        remaining_secs: remaining,
+    }
+}
+
+/// The saved long-read, chunked, with its position clamped into range — a
+/// stored position must never be able to point past the end of the text.
+fn reading_dto(state: comrade_storage::ReadingState) -> ReadingDto {
+    let chunks = attention::chunk_reading(&state.text);
+    let last = chunks.len().saturating_sub(1) as u32;
+    ReadingDto {
+        title: state.title,
+        chunks,
+        position: state.position.min(last),
+    }
+}
+
+/// Whether `s` looks like `YYYY-MM-DD`. Deliberately a shape check, not a
+/// calendar check: the frontend owns the timezone and the calendar, and this
+/// crate only needs keys that sort chronologically.
+fn is_iso_date(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| matches!(i, 4 | 7) || b.is_ascii_digit())
+}
+
+/// `YYYY-MM-DD` for a unix timestamp in **UTC**.
+///
+/// Used only to answer "is the newest recorded row still today's?" for the
+/// Tara nudge. Every stored date comes from the frontend, which knows the
+/// device's real timezone; the worst this approximation can do is delay (or
+/// briefly advance) one journaling nudge by hours near midnight, which is why
+/// a timezone database is not pulled in for it.
+fn iso_date(unix_secs: u64) -> String {
+    // Days since the Unix epoch → civil date (Howard Hinnant's algorithm).
+    let days = (unix_secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Store key for a local-only record (journal entry, Tara turn): a zero-padded
@@ -5727,6 +6259,332 @@ mod tests {
         rt.add_journal_entry("rough monday", Some("😞")).unwrap();
         rt.add_journal_entry("rough tuesday", Some("😕")).unwrap();
         assert!(rt.tara_opener().unwrap().contains("felt low"));
+    }
+
+    // ── Attention (wellbeing pillar #5) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn attention_commands_reject_gracefully_when_vault_locked() {
+        // Every store-backed command must fail closed rather than panic or
+        // silently succeed — same contract the journal and Tara hold.
+        let rt = ComradeRuntime::new();
+        assert!(matches!(
+            rt.record_attention_day("2026-07-31", 100, 40, 20),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.attention_days(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.attention_summary("2026-07-31"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.doom_apps(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.set_doom_apps(vec![]),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.start_focus_session("x", 25),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.finish_focus_session(true),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.active_focus_session(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.focus_sessions(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.suggested_focus_minutes(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.focus_prompt(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.focus_reflection("completed"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.save_reading("t", "x"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.reading(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.set_reading_position(0),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.clear_reading(), Err(UiError::VaultLocked)));
+    }
+
+    #[tokio::test]
+    async fn attention_days_upsert_and_summarise_against_the_users_own_median() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        // A malformed date is refused rather than stored under a key that
+        // would not sort chronologically.
+        assert!(matches!(
+            rt.record_attention_day("31-07-2026", 10, 1, 1),
+            Err(UiError::Engine(_))
+        ));
+
+        for (date, screen, doom) in [
+            ("2026-07-28", 100u32, 20u32),
+            ("2026-07-29", 300, 90),
+            ("2026-07-30", 200, 60),
+            ("2026-07-31", 90, 15),
+        ] {
+            rt.record_attention_day(date, screen, 40, doom).unwrap();
+        }
+        // Same-date re-record updates in place as today's numbers grow.
+        let today = rt.record_attention_day("2026-07-31", 120, 55, 25).unwrap();
+        assert_eq!(today.screen_minutes, 120);
+        assert_eq!(rt.attention_days().unwrap().len(), 4);
+        assert_eq!(rt.attention_days().unwrap()[0].date, "2026-07-31");
+
+        let summary = rt.attention_summary("2026-07-31").unwrap();
+        assert_eq!(summary.today.as_ref().unwrap().screen_minutes, 120);
+        assert_eq!(
+            summary.sample_days, 3,
+            "today is excluded from its baseline"
+        );
+        assert_eq!(summary.median_screen_minutes, 200);
+        assert_eq!(summary.median_doom_minutes, 60);
+
+        // A day with nothing recorded reports honestly rather than zeroes
+        // masquerading as a measurement.
+        let empty = rt.attention_summary("2026-08-05").unwrap();
+        assert!(empty.today.is_none());
+        assert_eq!(empty.sample_days, 4);
+    }
+
+    #[tokio::test]
+    async fn doom_apps_are_the_users_own_list_cleaned_but_never_prefilled() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        // Comrade ships no built-in blacklist — the list starts empty.
+        assert!(rt.doom_apps().unwrap().is_empty());
+        let saved = rt
+            .set_doom_apps(vec![
+                "com.b".into(),
+                "  ".into(),
+                "com.a".into(),
+                "com.b".into(),
+            ])
+            .unwrap();
+        assert_eq!(saved, vec!["com.a".to_string(), "com.b".to_string()]);
+        assert_eq!(rt.doom_apps().unwrap(), saved);
+        // And it can be emptied again.
+        assert!(rt.set_doom_apps(vec![]).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn focus_session_lifecycle_start_finish_and_history() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        assert!(rt.active_focus_session().unwrap().is_none());
+        assert_eq!(rt.suggested_focus_minutes().unwrap(), 25, "starts small");
+        assert!(!rt.focus_prompt().unwrap().is_empty());
+
+        // Out-of-range durations are refused with a message, not clamped
+        // silently — a five-hour "focus session" is not the practice.
+        assert!(matches!(
+            rt.start_focus_session("marathon", 600),
+            Err(UiError::Engine(_))
+        ));
+        assert!(matches!(
+            rt.start_focus_session("blink", 1),
+            Err(UiError::Engine(_))
+        ));
+
+        let started = rt.start_focus_session("  draft the essay  ", 25).unwrap();
+        assert_eq!(started.intent, "draft the essay");
+        assert_eq!(started.outcome, None);
+        assert!(started.remaining_secs > 24 * 60);
+        assert_eq!(
+            rt.active_focus_session().unwrap().map(|s| s.id),
+            Some(started.id.clone())
+        );
+
+        let finished = rt.finish_focus_session(true).unwrap().unwrap();
+        assert_eq!(finished.outcome.as_deref(), Some("completed"));
+        assert_eq!(
+            finished.remaining_secs, 0,
+            "a finished session has no clock"
+        );
+        assert!(finished.ended_at.is_some());
+        assert!(rt.active_focus_session().unwrap().is_none());
+        // Finishing again is a clean None, not an error.
+        assert!(rt.finish_focus_session(true).unwrap().is_none());
+        assert_eq!(rt.focus_sessions().unwrap().len(), 1);
+
+        // Abandoning is recorded plainly.
+        rt.start_focus_session("second go", 25).unwrap();
+        let abandoned = rt.finish_focus_session(false).unwrap().unwrap();
+        assert_eq!(abandoned.outcome.as_deref(), Some("abandoned"));
+        assert!(rt
+            .focus_reflection("abandoned")
+            .unwrap()
+            .contains("not failure"));
+
+        // Two completions unlock the next rung; the abandon costs nothing.
+        rt.start_focus_session("third", 25).unwrap();
+        rt.finish_focus_session(true).unwrap();
+        assert_eq!(rt.suggested_focus_minutes().unwrap(), 45);
+    }
+
+    #[tokio::test]
+    async fn starting_a_new_session_closes_the_one_left_running() {
+        // Only one session runs at a time: the user has visibly moved on, so
+        // the old one is closed rather than left dangling forever (which would
+        // block every future start).
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let first = rt.start_focus_session("one", 25).unwrap();
+        let second = rt.start_focus_session("two", 45).unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(
+            rt.active_focus_session().unwrap().map(|s| s.id),
+            Some(second.id)
+        );
+        let history = rt.focus_sessions().unwrap();
+        assert_eq!(history.len(), 2);
+        let old = history.iter().find(|s| s.id == first.id).unwrap();
+        assert_eq!(old.outcome.as_deref(), Some("abandoned"));
+    }
+
+    #[tokio::test]
+    async fn a_session_nobody_came_back_to_is_lapsed_not_completed() {
+        // The honesty rule the progressive-duration ladder depends on: a
+        // session the user was absent for must not be able to claim a
+        // completion, or the "practice" it measures never happened.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        let long_ago = now_secs() - 6 * 3600;
+        store
+            .save_focus_session(&comrade_storage::FocusSession {
+                id: timestamped_store_id(long_ago),
+                intent: "yesterday's plan".into(),
+                planned_minutes: 25,
+                started_at: long_ago,
+                ended_at: None,
+                outcome: None,
+            })
+            .unwrap();
+
+        // Reading the active session resolves the stale one and reports none.
+        assert!(rt.active_focus_session().unwrap().is_none());
+        let history = rt.focus_sessions().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].outcome.as_deref(), Some("lapsed"));
+        // It ended when its plan did — not hours later when someone looked.
+        assert_eq!(history[0].ended_at, Some(long_ago + 25 * 60));
+        // And it earns no credit toward the next rung.
+        assert_eq!(rt.suggested_focus_minutes().unwrap(), 25);
+        assert!(rt
+            .focus_reflection("lapsed")
+            .unwrap()
+            .contains("Nothing lost"));
+    }
+
+    #[tokio::test]
+    async fn reading_roundtrips_chunked_with_a_clamped_position() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        assert!(rt.reading().unwrap().is_none());
+        assert!(matches!(
+            rt.save_reading("t", "   "),
+            Err(UiError::Engine(_))
+        ));
+
+        let text = "A paragraph worth a couple of minutes of attention.\n\n".repeat(80);
+        let saved = rt.save_reading("  Walden  ", &text).unwrap();
+        assert_eq!(saved.title, "Walden");
+        assert!(saved.chunks.len() > 1);
+        assert_eq!(saved.position, 0);
+        // Losslessness carries through the DTO: the reader shows exactly what
+        // was saved (the trailing trim is the only edit, and it is announced).
+        assert_eq!(saved.chunks.concat(), text.trim());
+
+        let moved = rt.set_reading_position(2).unwrap().unwrap();
+        assert_eq!(moved.position, 2);
+        assert_eq!(rt.reading().unwrap().unwrap().position, 2);
+        // A position past the end is clamped, never trusted.
+        let clamped = rt.set_reading_position(9_999).unwrap().unwrap();
+        assert_eq!(clamped.position as usize, clamped.chunks.len() - 1);
+
+        assert!(rt.clear_reading().unwrap());
+        assert!(!rt.clear_reading().unwrap());
+        assert!(rt.reading().unwrap().is_none());
+        // With nothing saved, moving the position is a clean None.
+        assert!(rt.set_reading_position(0).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn tara_opener_nudges_on_a_heavy_scroll_day_but_mood_still_wins() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        // Baseline days plus a heavy "yesterday". Dates are chosen relative to
+        // the real clock so the today/yesterday split is what the code sees.
+        let today = iso_date(now_secs());
+        let yesterday = iso_date(now_secs() - 86_400);
+        for (date, doom) in [
+            (iso_date(now_secs() - 4 * 86_400), 30u32),
+            (iso_date(now_secs() - 3 * 86_400), 30),
+            (iso_date(now_secs() - 2 * 86_400), 30),
+        ] {
+            rt.record_attention_day(&date, 200, 40, doom).unwrap();
+        }
+        rt.record_attention_day(&yesterday, 400, 120, 150).unwrap();
+        rt.record_attention_day(&today, 10, 2, 0).unwrap();
+
+        let opener = rt.tara_opener().unwrap();
+        assert!(opener.contains("150 minutes"), "got: {opener}");
+        assert!(opener.contains("No judgement"), "got: {opener}");
+
+        // …but two low journal days outrank it: the heavier signal wins.
+        rt.add_journal_entry("rough monday", Some("😞")).unwrap();
+        rt.add_journal_entry("rough tuesday", Some("😕")).unwrap();
+        assert!(rt.tara_opener().unwrap().contains("felt low"));
+    }
+
+    #[tokio::test]
+    async fn tara_opener_is_unchanged_when_no_usage_is_recorded() {
+        // The mirror is opt-in; someone who never grants usage access must see
+        // exactly the opener that shipped before this pillar existed.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(rt.tara_opener().unwrap().contains("not a therapist"));
+    }
+
+    #[test]
+    fn iso_date_matches_known_epochs_and_shape_check_agrees() {
+        assert_eq!(iso_date(0), "1970-01-01");
+        assert_eq!(iso_date(1_700_000_000), "2023-11-14");
+        // A leap day, and the day after.
+        assert_eq!(iso_date(1_709_164_800), "2024-02-29");
+        assert_eq!(iso_date(1_709_251_200), "2024-03-01");
+        for s in ["1970-01-01", "2026-07-31"] {
+            assert!(is_iso_date(s), "{s} should be accepted");
+        }
+        for s in ["2026-7-31", "31-07-2026", "2026/07/31", "2026-07-3x", ""] {
+            assert!(!is_iso_date(s), "{s} should be rejected");
+        }
     }
 
     #[test]
