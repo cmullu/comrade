@@ -269,10 +269,17 @@ const BRAINSTORM_PROMPTS: &[&str] = &[
     "If the decision were already made, which outcome would you quietly hope for?",
 ];
 
+/// The hand-off spoken or shown when [`detect_distress`] fires.
+///
+/// Deliberately **modality-neutral**: it must not point at "the helplines
+/// below", because the same sentence is read aloud by the voice assistant where
+/// there is no screen and no "below". Each surface adds its own affordance on
+/// top — the app renders [`CRISIS_RESOURCES`] as a card, the voice layer reads
+/// a number out. Keep it that way if you reword this.
 const CRISIS_REPLY: &str = "I'm really glad you told me, and I'm taking it seriously. \
 I'm a reflective companion, not a therapist or crisis service — what you're carrying \
-deserves a trained human. Please reach out to one of the helplines shown below, or to \
-someone you trust, right now. I'll still be here afterwards.";
+deserves a trained human. Please reach out to a crisis helpline, or to someone you \
+trust, right now. I'll still be here afterwards.";
 
 fn contains_word(haystack_norm: &str, cue: &str) -> bool {
     format!(" {haystack_norm} ").contains(&format!(" {cue} "))

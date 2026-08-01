@@ -548,6 +548,31 @@ pub async fn announce_presence(
     Ok(handles.announce_presence(online).await)
 }
 
+// ── The nudge (abandoned drafts — see `comrade_core::nudge`) ──────────────────
+
+/// There is unsent text in `peer`'s composer, as of now.
+///
+/// Discloses nothing by itself — it starts a local clock. If that draft is
+/// later abandoned and `peer` is a comrade, their device is told *that it
+/// happened*: never the text, its length, or how the writing ended.
+///
+/// `Result` only because Tauri requires it of a borrowing async command (see
+/// [`announce_presence`]); there is no failure to report.
+#[tauri::command]
+pub async fn note_draft(state: tauri::State<'_, Runtime>, peer: String) -> Result<(), String> {
+    state.read().await.note_draft(&peer);
+    Ok(())
+}
+
+/// That draft is gone — cleared, or left behind when the conversation was
+/// switched away from. Safe to call unconditionally; an empty composer does
+/// nothing.
+#[tauri::command]
+pub async fn abandon_draft(state: tauri::State<'_, Runtime>, peer: String) -> Result<(), String> {
+    state.read().await.abandon_draft(&peer);
+    Ok(())
+}
+
 /// Best-effort people search by handle over NIP-50-capable relays.
 ///
 /// See [`sync_ledger`]'s doc comment for the lock discipline.

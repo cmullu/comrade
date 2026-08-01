@@ -150,6 +150,10 @@ they choose us back. And the *timestamp* is only ever advanced by a sighting —
 never by a claim lapsing, which happens up to a TTL after the peer was
 actually there — so "last seen" never overstates.
 
+In the conversation header that line sits directly under the name, with
+nothing else on it: the peer's key moved to the ⋮ menu (*Copy key*,
+*Encryption info*), so presence never has to compete with it for room.
+
 The rules live in `lastSeenOf`/`presenceLabelOf`
 (`android/.../ui/DisplayName.kt`, pure and unit-tested); the wording lives in
 `strings.xml` (with a plural for the minutes case), and the clock follows the
@@ -168,23 +172,130 @@ stopped believing it.
 | Layer | What it owns |
 |---|---|
 | `comrade_core::presence` | Wire protocol + freshness arithmetic. Pure; 10 unit tests. |
+| `comrade_core::nudge` | The nudge envelope, its freshness arithmetic, every timing rule (`draft_verdict`) and the per-session composer watch (`DraftWatch`). Pure; 23 unit tests. See §6a. |
 | `comrade_storage` | Opt-in `Contact.comrade` flag (defaulted for rows written before the feature; preserved across alias edits) and a `peer_presence` tree per peer. |
-| `comrade_ui::runtime` | `set_comrade` / `comrades` / `peer_presence` / `announce_presence`, the heartbeat + expiry loop, the farewell beacon on lock, the receive path in `dispatch_incoming_dm`, and the `ComradePresence` bridge event. |
-| `comrade_jni`, `desktop/src-tauri` | The same four calls over uniffi / Tauri commands. |
-| Android | `PresenceMonitor` (live dots + last-seen), `ComradesScreen` (choose + see), dots on chat-list rows, a presence line in the conversation header, the ⋮-menu toggle, and a `comrade_presence` notification channel. |
-| Desktop SPA | ★ toggle + presence line in the conversation header, dots in the conversation list, a toast on the online edge. |
+| `comrade_ui::runtime` | `set_comrade` / `comrades` / `peer_presence` / `announce_presence`, the heartbeat + expiry loop, the farewell beacon on lock, the receive path in `dispatch_incoming_dm`, and the `ComradePresence` bridge event. Plus the nudge's half: `note_draft` / `abandon_draft`, the send sweep (`nudge_abandoned_drafts`, on the same tick), `handle_nudge`, and the `ComradeNudge` event. |
+| `comrade_jni`, `desktop/src-tauri` | The same calls over uniffi / Tauri commands — `note_draft` / `abandon_draft` are the only two that are *synchronous*, because a composer calls them on a keystroke. |
+| Android | `PresenceMonitor` (live dots + last-seen), `ComradesScreen` (choose + see), dots on chat-list rows, a presence line in the conversation header, the ⋮-menu toggle, and a `comrade_presence` notification channel. The composer reports drafts from `ConversationScreen`'s `editDraft` and its `DisposableEffect(peer)`. |
+| Desktop SPA | ★ toggle + presence line in the conversation header, dots in the conversation list, a toast on the online edge (and one for a nudge). Drafts are reported from the `#dm-input` listener and on switching conversations, with the decision itself in the tested `draft_reports.mjs`. |
+| Flutter `app/` | Reports drafts from `ConversationScreen`'s controller listener and `dispose`; maps the event to `IncomingComradeNudge`. The notification itself comes from the preserved native `ChatEventRouter`, the same path presence uses. |
 
 Tests worth knowing about: `crates/comrade_ui/tests/two_peer_integration.rs`
 drives two real runtimes over one in-process relay and proves both halves of
 the claim — comrades seeing each other come and go (including the
 answer-on-the-spot path), and a beacon reaching *only* the chosen peer while
-another accepted contact learns nothing.
+another accepted contact learns nothing. Two more do the same for the nudge: a
+message Bob writes and never sends reaches Alice, and one he *does* send never
+also arrives as a nudge.
+
+## 6a. The nudge — "they nearly wrote to you"
+
+_Added 2026-07-31, on an owner request: tell Alice when Bob opens her chat,
+types something, and leaves it unsent._
+
+Someone opens your chat, types a few words, then clears the box or walks away
+without sending. Nothing about that reached you before: the message was never
+sent, so there was nothing to deliver, and the moment passed silently. It is
+often the moment that mattered most.
+
+A **nudge** is the smallest honest signal for it — `comrade_core::nudge`, a
+sibling of `presence` riding the same gift-wrapped DM channel:
+
+```json
+{ "comrade_nudge": 1, "ttl_secs": 480 }
+```
+
+A marker and a deadline. That is the entire payload, and the wire shape is
+[asserted by a test](../crates/comrade_core/src/nudge.rs) rather than promised
+in a comment: there is no field for the draft, its length, how long it was
+typed for, how many times it was rewritten, or which of "cleared it" and
+"walked away" happened. None of that is ours to send.
+
+**Why this is not the typing indicator §7 rules out.** The objection to a
+typing indicator is that it is a keystroke-resolution feed of a person's
+hesitation, on for every chat, disclosed continuously. A nudge inverts every
+axis of that:
+
+| | typing indicator | nudge |
+|---|---|---|
+| when | continuously, while typing | once, after the draft is gone |
+| how often | every keystroke burst | at most once per 30 min per comrade |
+| to whom | whoever you are chatting with | a comrade you chose, one at a time |
+| payload | that you are typing, live | one bit: something was written, and not sent |
+
+**The timing rules, and the case each one exists for.** All five live in
+`draft_verdict`, pure and unit-tested, so every frontend inherits one answer:
+
+| Constant | Value | The case it exists for |
+|---|---|---|
+| `NUDGE_MIN_DWELL_SECS` | 3 s | A chat opened by accident and a thumb on the screen. Not a hesitation; never worth a notification on someone else's phone. |
+| `NUDGE_SETTLE_SECS` | 10 s | Clearing the box to rewrite the same sentence — the most common way to abandon a draft, and not what this is about. Nothing is sent until the draft has stayed gone, so the ordinary clear-retype-send discloses nothing at all. |
+| `NUDGE_COOLDOWN_SECS` | 1800 s | Someone writing and deleting six times in ten minutes is having a hard time, not sending six signals. A channel that fires on all of them stops being read. |
+| `NUDGE_TTL_SECS` | 480 s | Equal to `PRESENCE_TTL_SECS`, deliberately: the notification says they are *around* as well as that they nearly wrote, so it must not outlive the window in which an "online" claim would still be believed. |
+| `NUDGE_MAX_TTL_SECS` | 1800 s | The clamp on anything a peer claims, exactly as for a beacon. |
+
+Two more rules that are easy to miss and both load-bearing:
+
+- **Sending anything cancels it.** A delivered message — or an attachment, or
+  one queued in the outbox for retry — says everything the nudge would have.
+  This is enforced in `RuntimeHandles::send_dm_reply`, not in three frontends,
+  so no UI can forget it.
+- **A nudge is never sent about something old.** A phone that slept for an hour
+  with a pending nudge drops it instead of sending it late. Sending stamps the
+  envelope with *now*, so a late nudge would present an hour-old moment as this
+  one — and the receiver has no way to catch that.
+
+**What the receiver does.** Gated exactly like a beacon: accepted
+conversations only, so a stranger cannot page you before you accept them. Then
+three more rules, all in `handle_nudge`: an expired nudge raises nothing
+(measured from send time, so the two-day inbox backfill cannot re-announce
+Tuesday's hesitation); a redelivered wrapper raises nothing (the same dedup set
+the call-signal path uses); and only a comrade *we* chose is announced.
+
+Unlike a beacon, a nudge **writes no presence state** — no dot, no "last seen",
+no `peer_marked_us`. A beacon's arrival is *how* the mutual model becomes
+discoverable, and that job is already done; letting a second envelope advance a
+"last seen" would give those fields two sources of truth for no gain.
+
+The wrinkle that buys, stated rather than hidden: the notification's title
+claims they are online, and nothing updates the dot to agree. A fresh nudge is
+the same class of evidence as a beacon — it proves the sender was at their device
+inside the same window an `online` claim would be believed for, which is why the
+TTLs are pinned equal — so the title is honest on its own. But a device that has
+somehow received a nudge and no recent beacon will show "Bhaskar is online" in
+the shade next to a grey dot. In practice that needs a nudge to overtake a
+3-minute heartbeat and the two-day backfill behind it. If it ever shows up in the
+field, the fix is to give the dot a second source, not to soften the title into
+something less useful.
+
+**How it reads on screen.** On Android, **"Bhaskar is online" / "Your comrade
+might need you"**, on the same `comrade_presence` channel (someone who silenced
+that did not mean "except when it's urgent") and under the *same notification
+id* as the online notice — so it replaces that line rather than stacking a
+second one about one person. It cannot silently downgrade back to "Your comrade
+is around" either: the online notice only fires on a transition *into* online,
+and the only way a peer stops being online routes through `clearComradeOnline`
+first. Tapping opens their conversation; mute silences it; it self-expires after
+the TTL like everything else here. The desktop SPA shows one toast.
+
+**In memory only, and cleared on lock.** The watch of which composers hold
+unsent text is per-session (`DraftWatch`): a draft abandoned before the app was
+last killed is a question for whoever opens the app next, not a promise still
+owed. Locking the vault clears it, because the goodbye beacon has just said we
+are gone and a nudge after it would claim the opposite. The honest consequence:
+**typing, clearing, and immediately force-killing the app sends nothing.**
+Backgrounding is fine — the connection service keeps the process alive, which is
+the common "put the phone down and walk off" case.
 
 ## 7. Deliberately out of scope
 
-- **Typing indicators and "last active" timelines.** Same channel would work;
-  both leak considerably more about a person's day than "around / not
-  around", and neither was asked for.
+- **Typing indicators and "last active" timelines.** A live "typing…" is a
+  keystroke-resolution feed of a person's hesitation, on for every chat; a
+  last-active timeline is a log of their day. Both leak considerably more than
+  "around / not around", and neither was asked for. What *was* asked for, and
+  shipped instead, is §6a's nudge — one signal after the fact, to one chosen
+  comrade, carrying no more than a beacon does. If that line ever needs
+  redrawing again, redraw it here rather than quietly widening the envelope.
 - **Presence for anyone but a chosen comrade.** No "everyone in your chat
   list" mode. The disclosure has to stay something a user picked, one person
   at a time.

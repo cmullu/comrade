@@ -54,6 +54,19 @@
     callDecisions = m;
   }).catch(() => {});
 
+  // ── Draft reports (desktop/ui/draft_reports.mjs) ───────────────────────────
+  // Which of "there is unsent text here" / "it is gone" a composer edit or a
+  // conversation switch has to report, for `comrade_core::nudge`. Pure and
+  // tested there; loaded through the same cached dynamic import as the two
+  // modules above — see the note on `callDecisionsReady` for why this file
+  // cannot use a static `import`.
+  let draftReports = null;
+  import("./draft_reports.mjs")
+    .then((m) => {
+      draftReports = m;
+    })
+    .catch(() => {});
+
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
 
@@ -561,6 +574,14 @@
   }
 
   function selectContact(key) {
+    // Leaving a conversation with text still in the box abandons that draft,
+    // and the text left behind belongs to whoever is on screen next — both
+    // decided in draft_reports.mjs, where the re-attribution is tested.
+    if (draftReports) {
+      performDraftReports(
+        draftReports.switchReports(state.activeContact, key, $("#dm-input").value),
+      );
+    }
     state.activeContact = key;
     clearReply();
     $("#dm-input").disabled = false;
@@ -906,6 +927,43 @@
       "info",
     );
     await loadComrades();
+  }
+
+  /**
+   * Perform draft reports decided by `draft_reports.mjs`. Silent and
+   * fire-and-forget: the core treats a missed report as "no nudge", which is
+   * the harmless direction, and nothing here is worth a toast.
+   */
+  function performDraftReports(reports) {
+    for (const { command, peer } of reports) {
+      safeInvoke(command, { peer }, { silent: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * Tell the core whether this composer holds unsent text — the only input the
+   * nudge feature takes (`comrade_core::nudge`). Never the text itself, and
+   * nothing at all until the draft is abandoned *and* the peer is a comrade.
+   *
+   * Deliberately outside the debounced UPI preview below: what the core needs
+   * is the edge, and a trailing debounce would swallow "the box is empty again"
+   * behind the next keystroke.
+   */
+  function reportDraftEdit() {
+    if (!draftReports) return;
+    performDraftReports(
+      draftReports.editReports(state.activeContact, $("#dm-input").value),
+    );
+  }
+
+  /**
+   * A comrade wrote something for us and gave up on it. One toast, and no
+   * record kept: a nudge is not presence, so it moves no dot and advances no
+   * "last seen" — the core keeps those to beacons.
+   */
+  function onComradeNudge(p) {
+    if (!p.peer) return;
+    showToast(`${p.name || displayName(p.peer)} is online — they might need you`, "info");
   }
 
   /** A comrade came online, went offline, or their claim aged out. */
@@ -2684,6 +2742,8 @@
           onPeerProfileUpdated(p);
         } else if (p.type === "comrade_presence") {
           onComradePresence(p);
+        } else if (p.type === "comrade_nudge") {
+          onComradeNudge(p);
         } else if (p.type === "ledger_updated") {
           onLedgerUpdated(p);
         }
@@ -2718,7 +2778,10 @@
 
     $("#chitthi-input").addEventListener("input", updateCount);
     $("#broadcast-btn").addEventListener("click", handleBroadcast);
-    $("#dm-input").addEventListener("input", handleDmInput);
+    $("#dm-input").addEventListener("input", (e) => {
+      reportDraftEdit();
+      handleDmInput(e);
+    });
     $("#dm-send").addEventListener("click", handleDmSend);
     $("#dm-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {

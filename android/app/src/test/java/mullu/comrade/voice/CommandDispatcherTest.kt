@@ -14,9 +14,13 @@ class CommandDispatcherTest {
         var identityResult: Result<String> = Result.success("npub1abc"),
         /** The length the backend reports actually starting. */
         var focusResult: Result<Int> = Result.success(25),
+        var taraResult: Result<TaraReply> = Result.success(
+            TaraReply("What feels most important about that to you?", crisis = false),
+        ),
     ) : ComradeBackend {
         var lastPost: String? = null
         var lastJournal: String? = null
+        var lastTara: String? = null
         var lastSwitchKey: String? = null
         var lastFocusMinutes: Int? = null
         var focusCalled = false
@@ -24,6 +28,7 @@ class CommandDispatcherTest {
         override fun journal(text: String): Result<String> {
             lastJournal = text; return journalResult
         }
+        override fun tara(text: String): Result<TaraReply> { lastTara = text; return taraResult }
         override fun timeline(): Result<List<String>> = timelineResult
         override fun switchWorkspace(key: String): Result<String> {
             lastSwitchKey = key; return switchResult
@@ -94,6 +99,82 @@ class CommandDispatcherTest {
         val reply = CommandDispatcher(backend).handle(VoiceCommand.Journal("hello"))
         assertTrue(reply.contains("couldn't save", ignoreCase = true))
         assertTrue(reply.contains("vault locked"))
+    }
+
+    // ── Tara ─────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `tara forwards the message and speaks her reply verbatim`() {
+        val backend = FakeBackend(
+            taraResult = Result.success(TaraReply("That sounds anxious.", crisis = false)),
+        )
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.Tara("work is a lot"))
+        assertEquals("work is a lot", backend.lastTara)
+        assertEquals("a reflective reply is spoken as-is", "That sounds anxious.", reply)
+        assertEquals("talking to Tara must never hit the public feed", null, backend.lastPost)
+    }
+
+    @Test
+    fun `a spoken crisis hand-off reads out a real number`() {
+        // Over voice there is no helpline card to point at, so the number has to
+        // be in the sentence — and spaced out, or TTS says "fourteen thousand
+        // four hundred and sixteen" for 14416.
+        val backend = FakeBackend(
+            taraResult = Result.success(
+                TaraReply(
+                    "I'm a reflective companion, not a therapist or crisis service.",
+                    crisis = true,
+                    helplines = listOf(
+                        Helpline("Tele-MANAS", "14416"),
+                        Helpline("KIRAN", "1800-599-0019"),
+                    ),
+                ),
+            ),
+        )
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.Tara("i want to end it all"))
+
+        assertTrue("must keep the not-a-therapist framing", reply.contains("not a therapist"))
+        assertTrue("must name the helpline", reply.contains("Tele-MANAS"))
+        assertTrue("digits must be spoken one by one", reply.contains("1 4 4 1 6"))
+    }
+
+    @Test
+    fun `a crisis reply with no helplines still speaks the hand-off`() {
+        val backend = FakeBackend(
+            taraResult = Result.success(TaraReply("Please reach out.", crisis = true)),
+        )
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.Tara("i want to die"))
+        assertEquals("Please reach out.", reply)
+    }
+
+    @Test
+    fun `a hyphenated helpline number is spelled out digit by digit`() {
+        val backend = FakeBackend(
+            taraResult = Result.success(
+                TaraReply(
+                    "Reaching out matters.",
+                    crisis = true,
+                    helplines = listOf(Helpline("KIRAN", "1800-599-0019")),
+                ),
+            ),
+        )
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.Tara("self harm"))
+        assertTrue(reply.contains("1 8 0 0 5 9 9 0 0 1 9"))
+    }
+
+    @Test
+    fun `tara failure is spoken back`() {
+        val backend = FakeBackend(taraResult = Result.failure(RuntimeException("vault locked")))
+        val reply = CommandDispatcher(backend).handle(VoiceCommand.Tara("hello"))
+        assertTrue(reply.contains("couldn't reach Tara", ignoreCase = true))
+        assertTrue(reply.contains("vault locked"))
+    }
+
+    @Test
+    fun `help and the listening prompt both mention Tara`() {
+        val dispatcher = CommandDispatcher(FakeBackend())
+        assertTrue(dispatcher.handle(VoiceCommand.Help).contains("tara", ignoreCase = true))
+        assertTrue(dispatcher.handle(VoiceCommand.Empty).contains("tara", ignoreCase = true))
     }
 
     @Test

@@ -8,6 +8,7 @@
  *   dm      — DM control envelopes (profile-share on accept, read/delivered receipts)
  *   call    — voice/video call signaling (WebRTC over the Vault DM channel)
  *   presence— comrade presence beacons (online/offline, to chosen peers only)
+ *   nudge   — "they nearly wrote to you": one signal for an abandoned draft
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
  *   tara    — reflective-companion engine (deterministic, on-device, not therapy)
@@ -45,6 +46,7 @@ pub mod gcs;
 pub mod geo;
 pub mod media;
 pub mod metrics;
+pub mod nudge;
 pub mod pad;
 pub mod presence;
 pub mod relay;

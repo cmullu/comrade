@@ -485,6 +485,24 @@ object ComradeCore {
      */
     fun announcePresenceTyped(online: Boolean): Long = runBlocking { ffi.announcePresence(online) }.toLong()
 
+    /**
+     * There is unsent text in [npub]'s composer, as of now.
+     *
+     * Called from the composer's `onValueChange`, so it has to be cheap: the
+     * native side takes a lock for one map insert and returns — no store, no
+     * relay, no coroutine. It discloses nothing by itself. If that draft is
+     * later abandoned *and* [npub] is a comrade, their device is told that it
+     * happened and nothing more (`comrade_core::nudge`).
+     */
+    fun noteDraft(npub: String) = ffi.noteDraft(npub)
+
+    /**
+     * That draft is gone — the box was emptied, or the conversation closed with
+     * it still unsent. Safe to call whenever a thread closes: a composer that
+     * never held text does nothing.
+     */
+    fun abandonDraft(npub: String) = ffi.abandonDraft(npub)
+
     // ── Journal (strictly local) ──────────────────────────────────────────────
 
     data class JournalEntryInfo(val id: String, val text: String, val mood: String?, val createdAt: Long)
@@ -891,6 +909,12 @@ class EventBus internal constructor() {
         // makes an online-then-offline flap resolve to one correct dot (and
         // no stale "they're online" notification) rather than two events.
         is BridgeEvent.ComradePresence -> Placement.Coalesced("presence:${event.peer}")
+        // A nudge is *not* coalesced with presence, and not with itself: each
+        // one is a distinct moment someone gave up on a message, and dropping
+        // the older of two would silently discard one of them. The sender's
+        // cooldown is what bounds the volume, so there is nothing here to
+        // protect against.
+        is BridgeEvent.ComradeNudge -> Placement.Critical
         // DMs, media, message requests, call signals (offer/answer/ICE/hangup).
         else -> Placement.Critical
     }

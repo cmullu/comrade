@@ -47,13 +47,14 @@ double contrastRatio(Color a, Color b) {
 /// AA for body text. Everything the UI renders words in must clear this.
 const double kAaBodyText = 4.5;
 
-/// AA for large text and non-text UI. Only [ColorScheme.outline] is held to
-/// this lower bar: it is Material's designated *quiet* role — the off pill's
-/// label, the `core vX` build stamp — and the palette puts it at 3.9:1 (dark)
-/// and 4.1:1 (light), recessive on purpose rather than merely unchecked.
-/// Raising it is a design call, not a bug fix; pinning a floor here at least
-/// stops it drifting further down.
-const double kAaLargeText = 3.0;
+/// `outline` used to be exempted down to 3:1 here, on the grounds that it is
+/// Material's designated *quiet* role. That exemption is gone: every one of the
+/// fifteen places the app reads `outline` renders text or a status tick with it
+/// — a message's clock time, delivery ticks, the "mDNS off" pill, the `core vX`
+/// stamp — so "quiet" was never a licence to be unreadable, and a single shared
+/// `#6B7894` could not clear the bar on a near-black surface and a white one at
+/// once. It is per-brightness now, and held to [kAaBodyText] like everything
+/// else.
 
 ThemeData themeFor(Brightness brightness, WorkspaceSkin skin) =>
     brightness == Brightness.dark
@@ -157,6 +158,7 @@ void main() {
           final Map<String, Color> textRoles = <String, Color>{
             'onSurface': c.onSurface,
             'onSurfaceVariant': c.onSurfaceVariant,
+            'outline': c.outline,
             'primary': c.primary,
             'secondary': c.secondary,
             'tertiary': c.tertiary,
@@ -174,12 +176,15 @@ void main() {
                 reason: '$where: $fgName on $bgName',
               );
             });
-            expect(
-              contrastRatio(c.outline, bg),
-              greaterThanOrEqualTo(kAaLargeText),
-              reason: '$where: outline on $bgName',
-            );
           });
+
+          // `outline` is the quiet role and must stay quieter than
+          // `onSurfaceVariant` — legible is the floor, not a licence to shout.
+          expect(
+            contrastRatio(c.outline, c.surface),
+            lessThan(contrastRatio(c.onSurfaceVariant, c.surface)),
+            reason: '$where: outline should read quieter than onSurfaceVariant',
+          );
 
           // A filled surface against its own foreground: a FilledButton, a
           // crisis card, an error container.

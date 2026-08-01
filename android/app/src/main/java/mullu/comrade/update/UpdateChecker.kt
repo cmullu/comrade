@@ -43,13 +43,16 @@ sealed class UpdateStatus {
  * ## What this does and does not do
  *
  * It reads one public GitHub endpoint, compares versions ([UpdateCheck]), and
- * — at most once per version — posts a notification. It **never** downloads or
- * installs anything: "Get the update" opens the release page, so the APK is
- * fetched and installed by the browser, which is already the install source
- * these users have granted (`RELEASING.md` §4). A one-tap in-app upgrade would
- * mean holding `REQUEST_INSTALL_PACKAGES` — the permission that lets an app
- * install other apps — and that is a deliberate, reversible product decision
- * for the owner to take, not a side effect of adding an update check.
+ * — at most once per version — posts a notification.
+ *
+ * The APK itself is fetched by [UpdateDownloadService] (a foreground service, so
+ * the transfer survives backgrounding and shows progress in the shade) and
+ * handed to the system installer by [UpdateInstaller]. That needs
+ * `REQUEST_INSTALL_PACKAGES`, which the owner asked for after using the
+ * link-out version: the browser round trip meant leaving the app, finding the
+ * file in Downloads, and granting *the browser* the same permission anyway.
+ * [openRelease] remains as the fallback for a release with no single APK asset,
+ * and for anyone who would rather not grant the install permission at all.
  *
  * ## The privacy cost, stated
  *
@@ -164,11 +167,28 @@ object UpdateChecker {
         if (!UpdateCheck.isNewer(currentVersion, release.versionName)) {
             _status.value = UpdateStatus.UpToDate(now)
             // An update that was pending and has now been installed should not
-            // leave its notice sitting in the shade.
+            // leave its notice sitting in the shade — nor its APK in the cache,
+            // nor an "Install" button offering to install what is running.
             Notifier.clearUpdate(context)
+            UpdateInstaller.clearReady(context)
+            UpdateDownloads.update(UpdateDownloadState.Idle)
+            UpdateDownloadService.purgeOtherApks(context)
             return
         }
         _status.value = UpdateStatus.Available(release, now)
+        // A finding that supersedes what was downloaded invalidates it: an
+        // "Install 0.0.50" button next to "0.0.51 is available" is a trap.
+        val downloaded = UpdateDownloads.state.value
+        val staleVersion = when (downloaded) {
+            is UpdateDownloadState.Ready -> downloaded.version
+            is UpdateDownloadState.Installing -> downloaded.version
+            else -> null
+        }
+        if (staleVersion != null && staleVersion != release.versionName) {
+            UpdateDownloads.update(UpdateDownloadState.Idle)
+            UpdateInstaller.clearReady(context)
+            UpdateDownloadService.purgeOtherApks(context)
+        }
         if (!notify) return
         val store = prefs(context)
         if (UpdateCheck.shouldNotify(release, skippedVersion(context), store.getString(KEY_NOTIFIED, null))) {
@@ -235,12 +255,58 @@ object UpdateChecker {
         }
     }
 
+    // ── Downloading and installing ───────────────────────────────────────────
+
     /**
-     * Open the release page in the browser — where the APK is downloaded and,
-     * with the permission the user has already granted their browser,
-     * installed. Android's installer refuses an APK signed with a different
-     * key than the installed app, so a substituted build cannot land as an
-     * update; that guarantee is the platform's, not ours.
+     * Fetch the update APK in the background. The service reads the release from
+     * [status] itself, so nothing here (or in either frontend) can name a URL
+     * for it to download.
+     *
+     * Safe to call twice: a second request while one is in flight is a no-op on
+     * the running transfer.
+     */
+    fun download(context: Context) {
+        val app = context.applicationContext
+        if (status.value !is UpdateStatus.Available) return
+        UpdateDownloadService.start(app)
+    }
+
+    /** Abort an in-flight download; the partial file is deleted. */
+    fun cancelDownload() = UpdateDownloadService.cancel()
+
+    /**
+     * Install what has been downloaded. Verifies package, version and signer
+     * again first — this can be tapped days after the download, from a
+     * notification, against a file that has sat in the cache since.
+     */
+    fun install(context: Context) {
+        val app = context.applicationContext
+        val ready = UpdateDownloads.state.value as? UpdateDownloadState.Ready ?: return
+        UpdateInstaller.install(app, java.io.File(ready.path), ready.version)
+    }
+
+    /** Whether the OS will let this app install an APK (the per-source grant). */
+    fun canInstall(context: Context): Boolean = UpdateInstaller.canInstall(context)
+
+    /** Take the user to the system screen that grants it. */
+    fun openInstallPermissionSettings(context: Context) {
+        runCatching { context.startActivity(UpdateInstaller.installPermissionSettingsIntent(context)) }
+            .onFailure { Log.w(TAG, "no screen to grant the install permission", it) }
+    }
+
+    /**
+     * Drop a "ready to install" that no longer has a file behind it (the OS
+     * reaped the cache, or the install went through and the APK was deleted).
+     */
+    fun refreshDownloadState() {
+        UpdateDownloads.forgetIfGone { path -> java.io.File(path).exists() }
+    }
+
+    /**
+     * Open the release page in the browser — the fallback path. Used when a
+     * release carries no single identifiable APK, and offered alongside the
+     * in-app download for anyone who would rather install from their browser
+     * than grant this app the install permission.
      */
     fun openRelease(context: Context, release: UpdateCheck.ReleaseInfo?) {
         val url = release?.pageUrl ?: UpdateCheck.RELEASES_PAGE_URL

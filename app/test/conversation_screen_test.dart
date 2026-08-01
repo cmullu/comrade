@@ -154,6 +154,85 @@ void main() {
         isEmpty,
       );
     });
+
+    testWidgets('a half-written message reports itself, then reports going',
+        (WidgetTester tester) async {
+      // The composer's half of `comrade_core::nudge`: the core cannot tell a
+      // comrade that a message was written and abandoned unless the screen
+      // says both things happened. Only the edges are reported — a call per
+      // keystroke would cross the bridge for nothing.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+      expect(repo.draftReports, isEmpty);
+
+      await tester.enterText(find.byKey(const Key('dm-input')), 'I wanted to');
+      await tester.pumpAndSettle();
+      expect(repo.draftReports, <(String, String)>[
+        ('note', FakePeers.bhaskar),
+      ]);
+
+      await tester.enterText(
+          find.byKey(const Key('dm-input')), 'I wanted to s');
+      await tester.pumpAndSettle();
+      expect(
+        repo.draftReports,
+        hasLength(1),
+        reason: 'still the same unsent draft — nothing new to say',
+      );
+
+      // Clearing the box is giving up on it.
+      await tester.enterText(find.byKey(const Key('dm-input')), '');
+      await tester.pumpAndSettle();
+      expect(repo.draftReports, <(String, String)>[
+        ('note', FakePeers.bhaskar),
+        ('abandon', FakePeers.bhaskar),
+      ]);
+    });
+
+    testWidgets('walking away from a draft reports it against that peer',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), 'are you ok');
+      await tester.pumpAndSettle();
+
+      // The screen goes with the text still in it — the case a person is least
+      // likely to come back from, and the one this feature exists for.
+      await tester.pumpWidget(harness(const SizedBox(), repo: repo));
+      await tester.pumpAndSettle();
+
+      expect(repo.draftReports, <(String, String)>[
+        ('note', FakePeers.bhaskar),
+        ('abandon', FakePeers.bhaskar),
+      ]);
+    });
+
+    testWidgets('a whitespace-only composer is not a half-written message',
+        (WidgetTester tester) async {
+      // `_send` would not send it either, so it must not look like something
+      // that was nearly sent.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), '   ');
+      await tester.pumpAndSettle();
+
+      expect(repo.draftReports, isEmpty);
+    });
   });
 
   group('receipt handling', () {

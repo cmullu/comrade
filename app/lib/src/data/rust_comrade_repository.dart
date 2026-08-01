@@ -215,6 +215,14 @@ class RustComradeRepository implements ComradeRepository {
   Future<int> announcePresence(bool online) async =>
       (await _guard(() => rust.announcePresence(online: online))).toInt();
 
+  @override
+  Future<void> noteDraft(String npub) =>
+      _guard(() => rust.noteDraft(peer: npub));
+
+  @override
+  Future<void> abandonDraft(String npub) =>
+      _guard(() => rust.abandonDraft(peer: npub));
+
   // ── Conversations ──────────────────────────────────────────────────────────
 
   @override
@@ -700,6 +708,8 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
           online: online,
           at: at.toInt(),
         ),
+      rust.BridgeEvent_ComradeNudge(:final String peer, :final String? name) =>
+        IncomingComradeNudge(peer: peer, name: name),
       rust.BridgeEvent_MeshStatusChanged(:final rust.MeshStatusDto field0) =>
         MeshStatusChanged(_meshStatus(field0)),
       rust.BridgeEvent_LedgerUpdated(:final String ledger) =>

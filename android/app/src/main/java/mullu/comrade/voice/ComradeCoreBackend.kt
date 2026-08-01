@@ -16,6 +16,21 @@ class ComradeCoreBackend : ComradeBackend {
     override fun journal(text: String): Result<String> =
         runCatching { ComradeCore.addJournalEntryTyped(text, null).id }
 
+    override fun tara(text: String): Result<TaraReply> = runCatching {
+        val reply = ComradeCore.taraSendTyped(text)
+        TaraReply(
+            text = reply.text,
+            crisis = reply.crisis,
+            // Only fetched for a crisis reply — the dispatcher reads one out
+            // because a spoken hand-off has no card to point at.
+            helplines = if (reply.crisis) {
+                ComradeCore.taraCrisisResources().map { Helpline(it.name, it.contact) }
+            } else {
+                emptyList()
+            },
+        )
+    }
+
     override fun timeline(): Result<List<String>> =
         runCatching { ComradeCore.sabhaTimeline().map { it.content } }
 

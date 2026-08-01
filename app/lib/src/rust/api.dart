@@ -241,6 +241,34 @@ Future<PresenceDto?> peerPresence({required String npub}) =>
 Future<BigInt> announcePresence({required bool online}) =>
     RustLib.instance.api.crateApiAnnouncePresence(online: online);
 
+/// There is unsent text in `peer`'s composer, as of now.
+///
+/// What this discloses, stated plainly: nothing, yet. It starts a local clock.
+/// If the draft is later abandoned — cleared, or left behind when the thread
+/// closes — and `peer` is a comrade, their device is told *that it happened*
+/// and nothing else: never the text, its length, or how the writing ended.
+/// See `comrade_core::nudge` for every rule that has to agree first.
+///
+/// Cheap enough to call on a keystroke, and infallible: a courtesy signal has
+/// no business raising an error into a text field. Synchronous for the same
+/// reason — the work is a hash-map insert, so an async hop would cost more than
+/// the thing it was scheduling.
+///
+/// `try_read` rather than a blocking acquire: nothing about watching a composer
+/// is worth waiting behind a slow `lock_vault`/`unlock_vault` for, and a skipped
+/// report costs at most one nudge (the next keystroke reports again).
+Future<void> noteDraft({required String peer}) =>
+    RustLib.instance.api.crateApiNoteDraft(peer: peer);
+
+/// That draft is gone — cleared, or left behind when the thread closed. Call it
+/// whenever a conversation closes; a composer that never held text does
+/// nothing.
+///
+/// Skipped under contention like [`note_draft`], which fails in the harmless
+/// direction: locking the vault clears the watch regardless.
+Future<void> abandonDraft({required String peer}) =>
+    RustLib.instance.api.crateApiAbandonDraft(peer: peer);
+
 Future<JournalEntryDto> addJournalEntry({required String text, String? mood}) =>
     RustLib.instance.api.crateApiAddJournalEntry(text: text, mood: mood);
 
@@ -420,6 +448,10 @@ sealed class BridgeEvent with _$BridgeEvent {
     required bool online,
     required BigInt at,
   }) = BridgeEvent_ComradePresence;
+  const factory BridgeEvent.comradeNudge({
+    required String peer,
+    String? name,
+  }) = BridgeEvent_ComradeNudge;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;

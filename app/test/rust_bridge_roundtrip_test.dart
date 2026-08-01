@@ -201,6 +201,12 @@ void main() {
       final MeshStatus mesh = await repo.meshStatus();
       expect(mesh.peerCount, greaterThanOrEqualTo(0));
 
+      // Watching a composer crosses the bridge and is infallible even locked —
+      // a courtesy signal has no business raising an error into a text field,
+      // and this is the one lane that proves the real ABI agrees.
+      await repo.noteDraft('npub1nobody');
+      await repo.abandonDraft('npub1nobody');
+
       // And the mapped, fanned-out event stream carries a real event.
       final Completer<BridgeEvent> mapped = Completer<BridgeEvent>();
       final StreamSubscription<BridgeEvent> sub =

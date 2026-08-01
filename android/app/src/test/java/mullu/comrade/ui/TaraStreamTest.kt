@@ -90,4 +90,27 @@ class TaraStreamTest {
     fun `an empty reply streams nothing`() = runBlocking {
         assertEquals(emptyList<String>(), TaraStream.stream("", perChunkDelayMs = 0L).toList())
     }
+
+    // ── pacing rhythm ────────────────────────────────────────────────────────
+
+    @Test
+    fun `pauses breathe at sentence boundaries and lean at clauses`() {
+        val base = TaraStream.DEFAULT_DELAY_MS
+        assertEquals("plain word: base pace", base, TaraStream.delayAfter("sounds "))
+        assertEquals(
+            "full stop: a real breath",
+            base * TaraStream.SENTENCE_PAUSE_FACTOR,
+            TaraStream.delayAfter("way. "),
+        )
+        assertEquals(base * TaraStream.SENTENCE_PAUSE_FACTOR, TaraStream.delayAfter("really? "))
+        assertEquals(base * TaraStream.SENTENCE_PAUSE_FACTOR, TaraStream.delayAfter("lot! "))
+        assertEquals(base * TaraStream.SENTENCE_PAUSE_FACTOR, TaraStream.delayAfter("well… "))
+        assertEquals(
+            "comma: a lean, not a stop",
+            base * TaraStream.CLAUSE_PAUSE_FACTOR,
+            TaraStream.delayAfter("that, "),
+        )
+        assertEquals(base * TaraStream.CLAUSE_PAUSE_FACTOR, TaraStream.delayAfter("carry — "))
+        assertEquals("empty previous chunk: base", base, TaraStream.delayAfter(""))
+    }
 }

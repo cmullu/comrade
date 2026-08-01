@@ -133,6 +133,13 @@
     <string name="comrades_title">Comrades</string>
     <string name="comrade_online_title">%1$s is online</string>
     <string name="comrade_online_text">Your comrade is around</string>
+    <!--
+      Same title as the online notice, deliberately: it replaces that line in
+      the shade rather than stacking a second one about the same person. The
+      body is a nudge, not a report — it never says what they wrote, how much,
+      or whether they cleared it, because none of that is sent.
+    -->
+    <string name="comrade_nudge_text">Your comrade might need you</string>
     <string name="comrades_explainer">Choose the people whose company you want to know about. Your comrades — and nobody else, not even a relay — are told when you\'re online. You see them the same way: once they\'ve chosen you back.</string>
     <string name="comrades_empty">No comrades yet. Pick a contact below, or open any conversation\'s ⋮ menu and choose “Make a comrade”.</string>
     <string name="comrades_no_contacts">Save a contact first — start a chat, and they\'ll show up here.</string>
@@ -166,6 +173,15 @@
     <string name="chat_menu_block">Block this person</string>
     <!-- Boundary line where the reader left off (Telegram's unread divider) -->
     <string name="unread_messages">Unread messages</string>
+
+    <!-- Composer (Telegram-style: emoji + field + clip, then capture/send) -->
+    <string name="composer_emoji">Emoji</string>
+    <string name="composer_attach">Attach a file</string>
+    <string name="composer_send">Send</string>
+    <string name="composer_record_voice">Record a voice note</string>
+    <string name="composer_take_photo">Take a photo</string>
+    <string name="composer_record_video">Record a video</string>
+    <string name="composer_swap_capture">Switch to: %1$s</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->
@@ -212,7 +228,37 @@
     <string name="settings_updates_skipped">Skipped %1$s — you\'ll be told about anything newer.</string>
     <string name="settings_updates_unskip">Stop skipping</string>
     <string name="settings_updates_never_checked">Not checked yet</string>
-    <string name="settings_updates_sideload_note">Comrade is installed by sideload, so updates arrive from the release page: the download opens in your browser, and Android only installs it if it is signed with the same key as the copy you already have.</string>
+    <string name="settings_updates_sideload_note">Comrade is installed by sideload, so the update is fetched here rather than from a store. Android still shows its own install confirmation, and still refuses an APK signed with a different key than the copy you already have.</string>
+
+    <!-- Downloading and installing an update in-app -->
+    <string name="settings_updates_download">Download update</string>
+    <string name="settings_updates_download_sized">Download update (%1$s)</string>
+    <string name="settings_updates_downloading">Downloading %1$s of %2$s…</string>
+    <string name="settings_updates_verifying">Checking the download…</string>
+    <string name="settings_updates_install">Install %1$s</string>
+    <string name="settings_updates_installing">Waiting for Android to install it…</string>
+    <string name="settings_updates_cancel_download">Cancel download</string>
+    <string name="settings_updates_open_page">Open the release page instead</string>
+    <string name="settings_updates_install_permission_title">Allow Comrade to install updates</string>
+    <string name="settings_updates_install_permission_body">Android asks once, per app, before an app may install another. Without it the update can still be downloaded here and installed from the release page in your browser.</string>
+    <string name="settings_updates_install_permission_open">Allow installing</string>
+    <string name="update_downloading_title">Downloading Comrade %1$s</string>
+    <string name="update_downloading_title_generic">Downloading an update</string>
+    <string name="update_downloading_text">%1$s of %2$s</string>
+    <string name="update_verifying_text">Checking the download…</string>
+    <string name="update_ready_title">Comrade %1$s is ready to install</string>
+    <string name="update_ready_text">Tap to install it now</string>
+    <string name="update_download_failed_title">Update download failed</string>
+    <string name="update_no_apk_to_download">This release has no single APK to download — open the release page instead</string>
+    <string name="update_gone_before_install">The downloaded update is no longer there — download it again</string>
+    <string name="update_install_permission_needed">Comrade needs your permission to install apps — grant it in Settings, then tap Install again</string>
+    <string name="update_install_failed_generic">Android could not install the update</string>
+    <string name="update_install_cancelled">Install cancelled</string>
+    <string name="update_refused_wrong_package">That download is not Comrade — refusing to install it</string>
+    <string name="update_refused_not_newer">That download is not newer than the version you are running</string>
+    <string name="update_refused_signer">That download is signed by a different key than your copy of Comrade — refusing to install it</string>
+    <string name="update_refused_unreadable">That download is not a readable APK</string>
+    <string name="update_refused_size">The download did not match the size the release published</string>
 
     <!-- Attention: the gentle stop on the feed (docs/ATTENTION.md phase 0).
          Deliberately quotes no duration and no count: a number here would

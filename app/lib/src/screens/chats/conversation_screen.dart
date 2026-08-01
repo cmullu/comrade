@@ -12,8 +12,10 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../data/comrade_repository.dart';
 import '../../data/models.dart';
 import '../../state/chat_providers.dart';
+import '../../state/providers.dart';
 import '../../util/chat_thread.dart';
 import '../../widgets/app_chrome.dart';
 import '../../widgets/composer.dart';
@@ -40,10 +42,41 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   bool _newMessagesBelow = false;
   bool _atBottom = true;
 
+  /// Whether the core has been told this composer holds unsent text. Only the
+  /// edges are worth a call — the core is idempotent, but a bridge hop per
+  /// keystroke is not free.
+  bool _draftReported = false;
+
+  /// Read once, so [dispose] never has to reach for a provider on its way out.
+  late final ComradeRepository _repo;
+
   @override
   void initState() {
     super.initState();
+    _repo = ref.read(comradeRepositoryProvider);
     _scroll.addListener(_onScroll);
+    _draft.addListener(_onDraftChanged);
+  }
+
+  /// Report whether there is unsent text here, so the core can tell a comrade
+  /// if it is later given up on (`comrade_core::nudge`). What the composer
+  /// holds never leaves the device — only the fact that it holds something.
+  void _onDraftChanged() {
+    final bool hasText = _draft.text.trim().isNotEmpty;
+    if (hasText == _draftReported) return;
+    _draftReported = hasText;
+    fireAndForget(
+      hasText ? _repo.noteDraft(widget.peer) : _repo.abandonDraft(widget.peer),
+    );
+  }
+
+  /// The draft for [peer] is gone because the screen is — leaving a thread with
+  /// a half-written message in it is the same signal as clearing the box, and
+  /// the one people are least likely to come back from.
+  void _abandonDraft(String peer) {
+    if (!_draftReported) return;
+    _draftReported = false;
+    fireAndForget(_repo.abandonDraft(peer));
   }
 
   @override
@@ -53,16 +86,22 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
       _loadedOnce = false;
       _knownItemCount = 0;
       _newMessagesBelow = false;
+      // Against the peer being left, before the clear below — by now
+      // `widget.peer` is the one arriving, and the draft was never theirs.
+      _abandonDraft(oldWidget.peer);
       _draft.clear();
     }
   }
 
   @override
   void dispose() {
+    _abandonDraft(widget.peer);
     _scroll
       ..removeListener(_onScroll)
       ..dispose();
-    _draft.dispose();
+    _draft
+      ..removeListener(_onDraftChanged)
+      ..dispose();
     _composerFocus.dispose();
     super.dispose();
   }

@@ -784,32 +784,57 @@ untouched by this phase and Dart has no way to create a channel.
 
 | Method | Arguments | Returns |
 |---|---|---|
-| `settings` | — | `{currentVersion, autoCheck, lastCheckedAt, skippedVersion}` |
+| `settings` | — | `{currentVersion, autoCheck, lastCheckedAt, skippedVersion, canInstall}` |
 | `check` | `{force}` | `null` (the answer arrives on the state channel) |
 | `setAutoCheck` | `{enabled}` | `null` |
 | `skip` | `{version}` | `null` |
 | `unskip` | — | `null` |
+| `download` | — | `null` (the service owns the transfer from here) |
+| `cancelDownload` | — | `null` |
+| `install` | — | `null` |
+| `refreshDownloadState` | — | `null` |
+| `openInstallPermissionSettings` | — | `null` |
 | `openRelease` | — | `null` |
 
-`mullu.comrade/updates/state` carries `{status}` plus the fields that status has:
-`unknown` / `checking` / `upToDate {checkedAt}` / `failed {message, checkedAt}` /
-`available {version, tag, notes, pageUrl, apkBytes, checkedAt}`. Snapshot-based like every
-other state channel (the source is `UpdateChecker.status`, a `StateFlow`), so a UI attaching
-after a check still sees the finding.
+`mullu.comrade/updates/state` carries both halves in one snapshot —
+`{check: {...}, download: {...}}` — because a UI attaching after the fact needs
+both, and combining two `StateFlow`s natively is cheaper than two channels.
 
-**Nothing here takes a URL.** `check` hits the endpoint compiled into
-`UpdateCheck.LATEST_RELEASE_URL`, and `openRelease` opens the page that endpoint itself
-reported — never one named by the caller. An update path is code execution; a settable source
-would be a way to point someone's upgrade at another APK.
+`check` is `unknown` / `checking` / `upToDate {checkedAt}` /
+`failed {message, checkedAt}` / `available {version, tag, notes, pageUrl,
+apkBytes, checkedAt}`. `download` is `idle` / `downloading {bytesRead,
+totalBytes}` / `verifying` / `ready {version}` / `installing {version}` /
+`failed {message}`. Snapshot-based like every other state channel, so a finding —
+or a download that finished while the engine was detached — is the first event.
 
-**Nothing here downloads or installs.** `openRelease` hands the release page to a browser,
-which is the install source these users have already granted (`RELEASING.md` §4). One-tap
-in-app installation would mean holding `REQUEST_INSTALL_PACKAGES` — the permission that lets
-an app install other apps — which is an owner decision, not a side effect of adding a check.
+**Nothing here takes a URL or a path.** `check` hits the endpoint compiled into
+`UpdateCheck.LATEST_RELEASE_URL`; `download` fetches the APK asset that endpoint
+reported, read by the service out of `UpdateChecker.status` rather than from an
+intent extra; `install` installs the file the service itself wrote; `openRelease`
+opens that release's page. An update path is code execution, so every one of
+those is a place a caller-supplied string would be a way to run someone else's
+APK — and none of them accept one.
 
-The rule (what counts as newer, when to look again, when a finding is worth a notification)
-is `mullu.comrade.update.UpdateCheck` in the preserved tree, shared verbatim with the Compose
-app and unit-tested on the host JVM by `UpdateCheckTest`.
+**The install is gated twice, and the app owns only one of the gates.**
+`UpdateInstall.verify` (pure, host-tested) refuses a download whose package name,
+version code or signing certificate disagrees with the running app, deleting it
+with a reason rather than handing it to a system dialog that says only "app not
+installed"; `canInstall` reports the per-source "install unknown apps" grant,
+which cannot be requested in-app — `openInstallPermissionSettings` is the whole
+of that flow. Android then shows its own confirmation for every install and
+applies its own same-signature rule, and that enforcement, not ours, is what
+finally protects the upgrade.
+
+**Where the certificates cannot be read**, `UpdateInstall` allows the install and
+records that the signature was *not* checked (`Ok(signatureChecked = false)`)
+rather than refusing every update on that device — `getPackageArchiveInfo` does
+not surface signers everywhere. The platform's enforcement is what remains, and
+the log says so instead of implying a check that did not happen.
+
+The rule (what counts as newer, when to look again, when a finding is worth a
+notification, what may be installed) lives in `mullu.comrade.update` in the
+preserved tree, shared verbatim with the Compose app and unit-tested on the host
+JVM by `UpdateCheckTest`, `UpdateInstallTest` and `UpdateDownloadsTest`.
 
 ---
 

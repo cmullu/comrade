@@ -99,6 +99,25 @@ class NotificationPolicyTest {
     }
 
     @Test
+    fun aNudgeFollowsTheSameTwoSuppressorsAsEverythingElseAboutAPerson() {
+        assertTrue(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = null, muted = false))
+        assertTrue(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = bo, muted = false))
+        // Muting a conversation means the person, not one class of event.
+        assertFalse(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = null, muted = true))
+        // Already looking at the thread the nudge would send them to.
+        assertFalse(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = ana, muted = false))
+        // …and the nightly quiet window, like every other non-call notice.
+        assertFalse(
+            NotificationPolicy.shouldNotifyNudge(
+                ana,
+                openConversationPeer = null,
+                muted = false,
+                quietHours = true,
+            ),
+        )
+    }
+
+    @Test
     fun theMessageSummaryGoesWhenItsLastChildDoes() {
         assertTrue(NotificationPolicy.summaryStale(0))
         assertFalse(NotificationPolicy.summaryStale(1))

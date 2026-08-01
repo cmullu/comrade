@@ -14,7 +14,7 @@ purpose, in writing, rather than by whichever file the porter happened to read
 first. §3 is the divergence ledger; it is the part worth arguing with.
 
 > **Status.** `flutter analyze --fatal-infos` is clean and `flutter test` is
-> green (169 tests, 4 skipped) against the in-memory fake. The media seams now
+> green (240 tests, 4 skipped) against the in-memory fake. The media seams now
 > have a real Android implementation behind them (picker, camera, in-memory
 > playback, `FLAG_SECURE`), and `flutter build apk --debug` **completes** —
 > so that Kotlin is compiled and packaged, with both ABI slices of the Rust core
@@ -209,9 +209,12 @@ map 1:1 onto `ComradeCore.kt`'s methods and `commands.rs`'s commands.
   background connectivity switch → block-screenshots switch → TURN relay → lock
   vault → "In the lab" + `core vX`.
 - **The screenshots card is absent where the platform cannot honour it**, and it
-  is the one preference here that *does* survive a restart — it is stored
-  natively, because `FLAG_SECURE` has to be right before the first frame, long
-  before there is a vault to read a setting out of. See §5.8.
+  is the one preference here stored *natively* rather than through
+  `AppPreferences` — `FLAG_SECURE` has to be right before the first frame,
+  earlier than even the preference store is open, and the Compose app reads the
+  same key. Every other card on this screen persists too, through
+  `PersistentPreferences` (D26b); the screenshots switch is no longer the only
+  one that survives a restart, only the only one the system stores. See §5.8.
 - **Backend**: `setUsername`, `turnServerStatus`, `setTurnServer`,
   `testTurnConnectivity`, `lockVault`, `version`.
 - **Load-bearing detail — the TURN card is write-only** (AUDIT COMMS-02). The
@@ -284,8 +287,10 @@ divergence that gets re-litigated.
 | D23 | **Couple sandbox** | ✗ ("engine level only, not usable from the app yet") | ✅ working against real commands | **Ported** | Both statements were true *of their own platform*. Desktop proves the engine works end to end, so Android's "in the lab" copy is the stale half — and has been updated. |
 | D24 | **Onboarding** | username + passcode + **confirm**, validated | one passphrase field, "any passphrase forges a brand-new vault" | **Android + desktop's reveal toggle** | On desktop a typo'd passphrase silently creates a *second empty vault* rather than reporting a wrong password. Confirm-on-create is the fix. The reveal toggle is desktop's and worth keeping: a long passphrase typed blind on a desktop keyboard is not otherwise verifiable. |
 | D25 | **Colour source** | Material You dynamic colour on Android 12+, brand palette as fallback | brand palette always | **Brand palette everywhere** | Otherwise the two platforms render visibly different products. The call, crisis and status colours are load-bearing — a wallpaper-derived "error" container is not guaranteed to read as alarming. Dynamic colour can return later as an explicit opt-in. |
-| D26 | Light theme | full light + dark schemes | dark only | **Both: system by default, overridable in Settings → Appearance** | Desktop's dark-only look is a stylistic default, not a requirement; a phone in daylight is a real use case. Following the OS cannot be the *only* rule, though — a Linux/Windows session that reports no preference resolves to **light**, which is how a dark-first product ends up bright with no way back — so the choice is explicit and the override outranks the OS. Stored through `AppPreferences`, so it shares that seam's not-yet-persisted gap with every other client preference. |
+| D26 | Light theme | full light + dark schemes | dark only | **Both: system by default, overridable in Settings → Appearance** | Desktop's dark-only look is a stylistic default, not a requirement; a phone in daylight is a real use case. Following the OS cannot be the *only* rule, though — a Linux/Windows session that reports no preference resolves to **light**, which is how a dark-first product ends up bright with no way back — so the choice is explicit and the override outranks the OS. Stored through `AppPreferences`, which now **persists** (`PersistentPreferences`, `shared_preferences`) — see D26b. |
 | D26a | **Light-mode accents** | — | `--accent` (`#6366f1`, `#f59e0b`, `#38bdf8`, `#fb7185`) | **Darker steps of the same hues** | `styles.css` has no `prefers-color-scheme` block, so every value in it was tuned against near-black, and there `--accent` is a *fill* carrying dark `--accent-contrast` text — never text itself. The first port reused it as light-mode `primary`, which `SectionCard` renders titles in: Travel measured **2.1:1** on white against AA's 4.5:1, and white-on-amber in a `FilledButton` was 2.15:1. Same for `ComradeSurfaces.light`'s good/warn/bad, which the sidebar pills use as *label* colours. `theme_test.dart` now asserts 4.5:1 across every text role × every background × all four skins × both brightnesses, so a palette edit cannot quietly reintroduce it. |
+| D26b | **Where client preferences live** | Android `SharedPreferences` | nowhere — re-asked every launch | **`shared_preferences`, not the encrypted store** | The `AppPreferences` docstring used to point at the vault as the better home. It cannot be: every setting here has to be readable *before* the vault is unlocked — the theme has to be right for the onboarding screen's first frame, and background connectivity decides whether to connect at all — and none of it is secret. Opened once in `main.dart` (`SharedPreferencesWithCache`, allowlisted to `PrefKeys.all`) so the seam's getters can stay synchronous and a provider's `build()` can read one without a loading state. A store that fails to open **throws** rather than falling back to in-memory, on the same grounds `main.dart` refuses to fall back to the fake repository: settings that silently do not stick, under a UI that says they do, is the failure this seam's history warns about. |
+| D26c | **`ColorScheme.outline`** | — | — | **Per-brightness, held to 4.5:1** | One shared `#6B7894` cannot be legible on a near-black surface and a white one at once; it reached **3.5:1** over `panelAlt`, under AA even for large text. All fifteen readers of `outline` render text or a status tick with it (clock times, delivery ticks, the "mDNS off" pill, the `core vX` stamp), so Material's "quiet role" was never a licence to be unreadable. Each scheme gets its own step, still measurably quieter than `onSurfaceVariant` — `theme_test.dart` asserts both the floor and the hierarchy. |
 | D27 | **Navigation model** | bottom nav (Chats · Journal · Feed · Tara) + drawer (Call history, Settings) | sidebar (Sabha · Vault) + Modes group + status footer | **Both, by width** | Below 840 px (the width `styles.css:1668` already folds at) the Android chrome; at or above it, the desktop sidebar. Same widget tree, same state. |
 | D28 | Section naming | Chats / Feed | Vault / Sabha | **Chats / Feed** | Plain-language labels for navigation; the product's own vocabulary ("Chitthi", "Sabha", "Hisab-Kitab") stays in body copy where it teaches rather than gatekeeps. |
 | D29 | **Call controls** | mute · audio route menu · camera · flip · PiP swap · SAS · quality · proximity blank | mute · hangup · SAS | **Android's UI** | Desktop's is a subset because a webview has no audio-route API, not because anyone decided a call shouldn't have one. |
@@ -373,7 +378,7 @@ kind of wrong.
    Blocking is now a Settings switch (off by default, shared with the Compose
    frontend through `ScreenSecurity`), plus a screen-scoped `SecureScreen` hold —
    used in one place, the passphrase field while it is revealed.
-9. **Never run.** `flutter analyze --fatal-infos` is clean, 169 tests pass
+9. **Never run.** `flutter analyze --fatal-infos` is clean, 240 tests pass
    (4 skipped) in the Flutter test harness, and a debug APK builds with the
    media and screen-security Kotlin compiled into it. No device, no emulator, no
    desktop window, no golden tests, no real relay — so "it builds" is the whole
