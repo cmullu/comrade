@@ -30,6 +30,16 @@
  * "walked away" happened. Those are all things a person did not choose to
  * send, and none of them are needed to say "your comrade might need you".
  *
+ * ## Two triggers, one envelope
+ * A nudge is also sent when someone deliberately reaches for the breathing
+ * screen (`docs/ATTENTION.md`) — a different moment with the same meaning.
+ *
+ * That the envelope is *the same one bit* is the point, not an economy: a
+ * comrade learns "they might need you" and **cannot tell which trigger fired**,
+ * so adding this second reason added nothing to what anyone learns about
+ * anyone. A `reason` field would have — and is exactly why there isn't one.
+ * The two share the cooldown for the same reason ([`nudged_recently`]).
+ *
  * ## The rules, stated honestly
  * - **A nudge is a claim about now.** It expires [`NUDGE_TTL_SECS`] after it
  *   was *sent*, the same arithmetic (and for the same reasons) as a presence
@@ -218,12 +228,25 @@ pub fn draft_verdict(draft: AbandonedDraft, now: u64) -> DraftVerdict {
     if waited > NUDGE_TTL_SECS {
         return DraftVerdict::Forget;
     }
-    let nudged_recently =
-        draft.last_nudge_at != 0 && now.saturating_sub(draft.last_nudge_at) < NUDGE_COOLDOWN_SECS;
-    if nudged_recently {
+    if nudged_recently(draft.last_nudge_at, now) {
         return DraftVerdict::Forget;
     }
     DraftVerdict::Nudge
+}
+
+/// Whether this comrade was nudged recently enough to be left alone —
+/// [`NUDGE_COOLDOWN_SECS`] measured from `last_nudge_at`, where `0` means
+/// "never nudged".
+///
+/// Shared by both triggers on purpose. An abandoned draft and a deliberate
+/// "I might need you" are two ways of reaching the same person, and a comrade
+/// who gets one must not get the other minutes later — the cooldown is a floor
+/// on *notifications*, not on any one reason for them. The `0` case is checked
+/// explicitly rather than subtracted, because on a device whose clock is badly
+/// wrong `now - 0` would otherwise read as "nudged long ago" or "nudged in the
+/// future" depending on which way it is wrong.
+pub fn nudged_recently(last_nudge_at: u64, now: u64) -> bool {
+    last_nudge_at != 0 && now.saturating_sub(last_nudge_at) < NUDGE_COOLDOWN_SECS
 }
 
 /// One watched composer.
@@ -244,8 +267,14 @@ impl WatchedDraft {
     }
 }
 
-/// Which composers have unsent text in them, and which of them were walked
-/// away from — the sending side's whole memory of this feature.
+/// Which composers have unsent text in them, which of them were walked away
+/// from, and when each comrade was last nudged — the sending side's whole
+/// memory of this feature.
+///
+/// The last of those is why this is a `NudgeWatch` rather than a
+/// `DraftWatch`: the cooldown is shared by every trigger ([`Self::due`] for an
+/// abandoned draft, [`Self::due_among`] for a deliberate one), so it cannot
+/// live inside whichever one happens to have fired.
 ///
 /// **In memory only, deliberately.** A draft abandoned before the app was last
 /// killed is a question for whoever opens the app next, not a promise still
@@ -258,11 +287,11 @@ impl WatchedDraft {
 /// send without holding anything (this codebase has shipped two deadlocks from
 /// a lock held across an `await`).
 #[derive(Debug, Default)]
-pub struct DraftWatch {
+pub struct NudgeWatch {
     drafts: std::sync::Mutex<std::collections::HashMap<String, WatchedDraft>>,
 }
 
-impl DraftWatch {
+impl NudgeWatch {
     pub fn new() -> Self {
         Self::default()
     }
@@ -317,6 +346,37 @@ impl DraftWatch {
     /// session that owed the nudge is over.
     pub fn clear(&self) {
         self.lock().clear();
+    }
+
+    /// Which of `peers` to nudge for a reason that is **not** a draft — the
+    /// user deliberately reaching for something (today, the breathing screen),
+    /// where the trigger is one tap rather than a timer. Records the nudge
+    /// against each returned peer, exactly like [`Self::due`].
+    ///
+    /// No dwell, no settle window and no staleness check, because none of them
+    /// have anything to answer here: there is no draft that might come back,
+    /// and the tap is happening *now*. The one rule that does carry over is the
+    /// cooldown ([`nudged_recently`]) — a comrade who was told twenty minutes
+    /// ago that you might need them learns nothing from being told again, and
+    /// two triggers must not add up to two notifications.
+    ///
+    /// Whatever draft was pending for a returned peer is cleared with it: they
+    /// have just been told, and the pending one would be a second notification
+    /// for the same stretch of time.
+    pub fn due_among(&self, peers: &[String], now: u64) -> Vec<String> {
+        let mut drafts = self.lock();
+        let mut due = Vec::new();
+        for peer in peers {
+            let row = drafts.entry(peer.clone()).or_default();
+            if nudged_recently(row.last_nudge_at, now) {
+                continue;
+            }
+            row.last_nudge_at = now;
+            row.started_at = None;
+            row.abandoned_at = None;
+            due.push(peer.clone());
+        }
+        due
     }
 
     /// The peers whose abandoned draft is due a nudge at `now`, in no
@@ -535,7 +595,7 @@ mod tests {
         assert_eq!(draft_verdict(draft, now), DraftVerdict::Nudge);
     }
 
-    // ── DraftWatch ───────────────────────────────────────────────────────────
+    // ── NudgeWatch ───────────────────────────────────────────────────────────
 
     /// `T0` plus enough dwell that abandoning at `T0 + DWELL` is a hesitation.
     const T0: u64 = 1_000_000;
@@ -543,7 +603,7 @@ mod tests {
 
     #[test]
     fn a_draft_left_behind_comes_due_once_it_has_settled() {
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.abandoned("alice", T0 + DWELL);
         assert!(
@@ -560,7 +620,7 @@ mod tests {
     fn a_rewritten_draft_never_comes_due() {
         // Clear the box, start typing again inside the settle window, send.
         // Nothing should ever have left the device.
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.abandoned("alice", T0 + DWELL);
         watch.writing("alice", T0 + DWELL + 1);
@@ -571,7 +631,7 @@ mod tests {
 
     #[test]
     fn sending_the_message_cancels_the_nudge_it_would_have_replaced() {
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.abandoned("alice", T0 + DWELL);
         watch.sent("alice");
@@ -583,7 +643,7 @@ mod tests {
 
     #[test]
     fn one_hesitation_is_nudged_once_however_often_the_sweep_runs() {
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.abandoned("alice", T0 + DWELL);
         let due_at = T0 + DWELL + NUDGE_SETTLE_SECS;
@@ -596,7 +656,7 @@ mod tests {
 
     #[test]
     fn the_cooldown_outlives_the_draft_it_was_earned_by() {
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.abandoned("alice", T0 + DWELL);
         let first = T0 + DWELL + NUDGE_SETTLE_SECS;
@@ -621,7 +681,7 @@ mod tests {
 
     #[test]
     fn an_empty_composer_that_is_closed_is_not_a_hesitation() {
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         // A frontend calls this unconditionally when a thread closes; a box
         // that never had text in it must produce nothing.
         watch.abandoned("alice", T0);
@@ -633,7 +693,7 @@ mod tests {
         // Cleared at T0+DWELL, then the thread closed 5 minutes later. The
         // hesitation happened at the clearing, and dating it from the close
         // would both delay the nudge and overstate when they were there.
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.abandoned("alice", T0 + DWELL);
         watch.abandoned("alice", T0 + DWELL + 300);
@@ -646,7 +706,7 @@ mod tests {
 
     #[test]
     fn locking_the_vault_forgets_every_composer_and_every_cooldown() {
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.abandoned("alice", T0 + DWELL);
         watch.clear();
@@ -655,7 +715,7 @@ mod tests {
 
     #[test]
     fn each_comrade_is_watched_separately() {
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         watch.writing("bhaskar", T0);
         watch.abandoned("alice", T0 + DWELL);
@@ -666,11 +726,83 @@ mod tests {
         );
     }
 
+    // ── The deliberate trigger (due_among) ───────────────────────────────────
+
+    fn peers(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn reaching_for_a_pause_tells_every_comrade_once() {
+        let watch = NudgeWatch::new();
+        let comrades = peers(&["alice", "bhaskar"]);
+        assert_eq!(watch.due_among(&comrades, T0), comrades);
+        assert!(
+            watch.due_among(&comrades, T0 + 1).is_empty(),
+            "tapping twice is one moment, not two"
+        );
+        assert_eq!(
+            watch.due_among(&comrades, T0 + NUDGE_COOLDOWN_SECS),
+            comrades,
+            "half an hour on, it is worth telling them again"
+        );
+    }
+
+    #[test]
+    fn the_two_triggers_share_one_cooldown() {
+        // The property that keeps a hard afternoon from becoming a pager: a
+        // comrade told by one trigger is not told again by the other.
+        let watch = NudgeWatch::new();
+        let comrades = peers(&["alice"]);
+        assert_eq!(watch.due_among(&comrades, T0).len(), 1);
+
+        watch.writing("alice", T0 + 60);
+        watch.abandoned("alice", T0 + 60 + DWELL);
+        assert!(
+            watch.due(T0 + 60 + DWELL + NUDGE_SETTLE_SECS).is_empty(),
+            "a draft given up on minutes after a pause must not nudge again"
+        );
+    }
+
+    #[test]
+    fn the_cooldown_holds_in_the_other_direction_too() {
+        let watch = NudgeWatch::new();
+        watch.writing("alice", T0);
+        watch.abandoned("alice", T0 + DWELL);
+        let first = T0 + DWELL + NUDGE_SETTLE_SECS;
+        assert_eq!(watch.due(first).len(), 1);
+        assert!(
+            watch.due_among(&peers(&["alice"]), first + 60).is_empty(),
+            "reaching for a pause just after being nudged says nothing new"
+        );
+    }
+
+    #[test]
+    fn a_deliberate_nudge_settles_the_draft_it_overtakes() {
+        // Mid-sentence to Alice, then a pause is taken. She is told once; the
+        // draft that follows must not become a second notification for the
+        // same stretch of time — and the cooldown would refuse it anyway, so
+        // this only makes that explicit.
+        let watch = NudgeWatch::new();
+        watch.writing("alice", T0);
+        assert_eq!(watch.due_among(&peers(&["alice"]), T0 + 1).len(), 1);
+        watch.abandoned("alice", T0 + 1 + DWELL);
+        assert!(watch.due(T0 + 1 + DWELL + NUDGE_SETTLE_SECS).is_empty());
+    }
+
+    #[test]
+    fn with_no_comrades_a_pause_tells_nobody_and_remembers_nothing() {
+        // The feature has to be free for someone who never chose anyone.
+        let watch = NudgeWatch::new();
+        assert!(watch.due_among(&[], T0).is_empty());
+        assert!(watch.lock().is_empty());
+    }
+
     #[test]
     fn a_finished_draft_leaves_nothing_behind_to_accumulate() {
         // The map is swept by the same pass that decides, so watching a
         // composer for a peer who is never nudged costs nothing lasting.
-        let watch = DraftWatch::new();
+        let watch = NudgeWatch::new();
         watch.writing("alice", T0);
         // Too brief to mean anything → Forget, and the row goes with it.
         watch.abandoned("alice", T0);

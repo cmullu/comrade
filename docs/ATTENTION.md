@@ -172,9 +172,28 @@ Attention is trained by doing attention, not by minigames:
   the user brings the text. (Fetching URLs is explicitly out of scope v1:
   it would drag readability-extraction and network policy into a privacy
   app for marginal gain.)
-- **Grounding breaths**: a 60-second box-breathing screen offered before a
-  focus session and inside the gentle-stop card. Deterministic animation,
-  no audio, no cloud — Tara-v1 philosophy.
+- **Grounding breaths** (*"Take a deep breath"*): a 60-second box-breathing
+  screen offered before a focus session and inside the gentle-stop card.
+  Deterministic animation, no audio, no cloud — Tara-v1 philosophy. Two
+  additions since, both owner-requested and both disclosed on the screen
+  itself rather than left to a changelog:
+  - **Haptics** shaped after the Pixel Watch's: the buzz swells through the
+    in-breath, fades through the out-breath, and is silent through the hold, so
+    the pace can be followed with the eyes closed. A single pulse would say
+    "a phase changed" without saying which way it went, which is why the shape
+    (not just the timing) is a tested property — `BreathHaptics`, pure and
+    JVM-tested for the two things a device would otherwise be the first to
+    catch: an amplitude outside the platform's 1..255, and a ramp still
+    running when the next phase starts.
+  - **It nudges your comrades.** Reaching for a pause raises one *"your
+    comrade might need you"* on the phones of the people the user chose —
+    the *same* one-bit envelope an abandoned draft sends
+    (`docs/PRESENCE.md` §6a), sharing the same 30-minute cooldown. Nobody can
+    tell which trigger fired, so this reason disclosed nothing new about
+    anyone; and nothing about having used the screen is stored locally, which
+    is the promise the pillar made and keeps. The screen says both of these in
+    its own note, because a disclosure a person would not expect has to be
+    made where they are.
 - **Tara prompt families** for attention coaching: implementation-plan
   prompts before a session, reflection prompts after, all behind the
   existing `CompanionEngine` seam so a future on-device LLM (OQ9) inherits
@@ -336,7 +355,7 @@ with `VaultLocked`. Three decisions worth naming:
 | **Calm-feed contract** | Documented on `FeedScreen` and now load-bearing: chronological only, no ranking, no autoplay, no counters. Plus the gentle stop — one inline card after 10 unbroken minutes, dismissible for the sitting, quoting **no duration and no count** (a number invites a score). Rule in `attention/ScrollSitting.kt`, 8 tests |
 | **Quiet hours** | `attention/QuietHours.kt` + `NotificationPolicy`: silences messages, requests, presence and update notices in a nightly window — **never a ringing call.** 6 tests on the window arithmetic, where the overnight wrap is the normal case and an empty window (`start == end`) silences nothing rather than the whole day |
 | **Usage mirror** | Opt-in `PACKAGE_USAGE_STATS` behind an explainer that states what is read and that it cannot leave the device. `attention/UsageMirror.kt` reduces the event stream to three integers **in memory** and drops it (8 tests, including that overlapping stretches count once, so a day can never exceed itself, and that Comrade excludes its own screen time). Card lives on the Journal tab, self-relative, no red |
-| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the one-minute breathing screen |
+| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen (haptic-paced, and it tells your comrades you might need them) |
 | **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |
 
 Verified locally against the real CI lanes: `cargo fmt --check`, `clippy

@@ -503,6 +503,22 @@ object ComradeCore {
      */
     fun abandonDraft(npub: String) = ffi.abandonDraft(npub)
 
+    /**
+     * Tell every comrade, once, that this person might need them — the
+     * deliberate trigger behind [mullu.comrade.ui.BreathingScreen]. Returns how
+     * many nudges a relay accepted.
+     *
+     * This is a disclosure, so say what it is: each comrade — nobody else, and
+     * no relay — learns that you might need them, and *nothing else*. It is the
+     * same envelope an abandoned draft sends, so they cannot tell which
+     * happened, and it shares that cooldown so the two never add up to two
+     * notifications. Nothing about it is stored on this device.
+     *
+     * Never throws: like presence, this is a courtesy, not a call worth failing
+     * a screen over. Blocking, so call it off the main thread.
+     */
+    fun nudgeComrades(): Long = runBlocking { ffi.nudgeComrades() }.toLong()
+
     // ── Journal (strictly local) ──────────────────────────────────────────────
 
     data class JournalEntryInfo(val id: String, val text: String, val mood: String?, val createdAt: Long)

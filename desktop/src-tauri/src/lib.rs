@@ -124,6 +124,7 @@ pub fn run() {
             // The nudge: a draft written for a comrade and never sent
             commands::note_draft,
             commands::abandon_draft,
+            commands::nudge_comrades,
             // Message requests + read/delivered receipts
             commands::message_requests,
             commands::accept_request,

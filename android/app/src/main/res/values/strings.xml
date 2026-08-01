@@ -266,7 +266,6 @@
     <string name="gentle_stop_title">Still here with you</string>
     <string name="gentle_stop_body">You\'ve been reading a while. Nothing wrong with that — but if you came here to feel better rather than to catch up, there might be a kinder way to spend the next ten minutes.</string>
     <string name="gentle_stop_write">Write instead</string>
-    <string name="gentle_stop_breathe">Take a breath</string>
     <string name="gentle_stop_keep_reading">Keep reading</string>
 
     <!-- Attention: quiet hours -->
@@ -326,12 +325,18 @@
     <string name="reader_title_label">Title (optional)</string>
 
     <!-- Attention: breathing (phase 2) -->
-    <string name="breathe_title">One minute</string>
+    <string name="breathe_title">Take a deep breath</string>
     <string name="breathe_in">Breathe in</string>
     <string name="breathe_hold">Hold</string>
     <string name="breathe_out">Breathe out</string>
     <string name="breathe_done">Done</string>
-    <string name="breathe_note">Four counts in, four held, four out. No account of this is kept.</string>
+    <!--
+      Two disclosures the screen has to make itself, because both are things a
+      person would reasonably not expect: it buzzes, and it tells the people
+      they chose. The wording of the second matters — comrades learn only that
+      you might need them, never that you were breathing.
+    -->
+    <string name="breathe_note">Four counts in, four held, four out — follow the buzz if you\'d rather close your eyes. No account of this is kept here, and your comrades are told only that you might need them.</string>
 
     <!-- Attention: the tab and its honesty gate -->
     <string name="attention_tab">Focus</string>

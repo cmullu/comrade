@@ -189,9 +189,9 @@ stopped believing it.
 | Layer | What it owns |
 |---|---|
 | `comrade_core::presence` | Wire protocol + freshness arithmetic. Pure; 10 unit tests. |
-| `comrade_core::nudge` | The nudge envelope, its freshness arithmetic, every timing rule (`draft_verdict`) and the per-session composer watch (`DraftWatch`). Pure; 23 unit tests. See §6a. |
+| `comrade_core::nudge` | The nudge envelope, its freshness arithmetic, every timing rule (`draft_verdict`), the shared cooldown (`nudged_recently`) and the per-session watch (`NudgeWatch`). Pure; 29 unit tests. See §6a. |
 | `comrade_storage` | Opt-in `Contact.comrade` flag (defaulted for rows written before the feature; preserved across alias edits) and a `peer_presence` tree per peer. |
-| `comrade_ui::runtime` | `set_comrade` / `comrades` / `peer_presence` / `announce_presence`, the heartbeat + expiry loop, the farewell beacon on lock, the receive path in `dispatch_incoming_dm`, and the `ComradePresence` bridge event. Plus the nudge's half: `note_draft` / `abandon_draft`, the send sweep (`nudge_abandoned_drafts`, on the same tick), `handle_nudge`, and the `ComradeNudge` event. |
+| `comrade_ui::runtime` | `set_comrade` / `comrades` / `peer_presence` / `announce_presence`, the heartbeat + expiry loop, the farewell beacon on lock, the receive path in `dispatch_incoming_dm`, and the `ComradePresence` bridge event. Plus the nudge's half: `note_draft` / `abandon_draft`, the send sweep (`nudge_abandoned_drafts`, on the same tick), `nudge_comrades` for the deliberate trigger, the one send site both share (`deliver_nudges`), `handle_nudge`, and the `ComradeNudge` event. |
 | `comrade_jni`, `desktop/src-tauri` | The same calls over uniffi / Tauri commands — `note_draft` / `abandon_draft` are the only two that are *synchronous*, because a composer calls them on a keystroke. |
 | Android | `PresenceMonitor` (live dots + last-seen), `ComradesScreen` (choose + see), dots on chat-list rows, a presence line in the conversation header, the ⋮-menu toggle, and a `comrade_presence` notification channel. The composer reports drafts from `ConversationScreen`'s `editDraft` and its `DisposableEffect(peer)`. |
 | Desktop SPA | ★ toggle + presence line in the conversation header, dots in the conversation list, a toast on the online edge (and one for a nudge). Drafts are reported from the `#dm-input` listener and on switching conversations, with the decision itself in the tested `draft_reports.mjs`. |
@@ -239,6 +239,23 @@ axis of that:
 | how often | every keystroke burst | at most once per 30 min per comrade |
 | to whom | whoever you are chatting with | a comrade you chose, one at a time |
 | payload | that you are typing, live | one bit: something was written, and not sent |
+
+**A second trigger, and the same envelope.** Since 2026-08-01 a nudge is also
+sent when someone deliberately reaches for the breathing screen — *"Take a deep
+breath"* (`docs/ATTENTION.md`). Different moment, same meaning, and
+deliberately **the same one bit on the wire**: a comrade is told they might be
+needed and *cannot tell which trigger fired*, so adding this reason added
+nothing to what anyone learns about anyone. A `reason` field would have, and is
+exactly why there isn't one. The two share the cooldown (`nudged_recently`) for
+the same reason — a hard half-hour of writing, deleting and then stopping to
+breathe is one notification, not two — and the deliberate trigger skips the
+dwell, settle and staleness rules below, because none of them have anything to
+answer when the trigger is a tap happening now.
+
+That is a bigger disclosure than an abandoned draft on its own, so the
+breathing screen states it in its own note rather than leaving it here. Nothing
+about having used that screen is stored locally either way; what travels is the
+same envelope as ever.
 
 **The timing rules, and the case each one exists for.** All five live in
 `draft_verdict`, pure and unit-tested, so every frontend inherits one answer:
@@ -296,7 +313,7 @@ first. Tapping opens their conversation; mute silences it; it self-expires after
 the TTL like everything else here. The desktop SPA shows one toast.
 
 **In memory only, and cleared on lock.** The watch of which composers hold
-unsent text is per-session (`DraftWatch`): a draft abandoned before the app was
+unsent text is per-session (`NudgeWatch`): a draft abandoned before the app was
 last killed is a question for whoever opens the app next, not a promise still
 owed. Locking the vault clears it, because the goodbye beacon has just said we
 are gone and a nudge after it would claim the opposite. The honest consequence:

@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 2017919070;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1710719079;
 
 // Section: executor
 
@@ -1583,6 +1583,41 @@ fn wire__crate__api__npub_from_nsec_impl(
                 let output_ok = Result::<_, ()>::Ok(crate::api::npub_from_nsec(api_nsec))?;
                 Ok(output_ok)
             })())
+        },
+    )
+}
+fn wire__crate__api__nudge_comrades_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "nudge_comrades",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let output_ok = Result::<_, ()>::Ok(crate::api::nudge_comrades().await)?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
         },
     )
 }
@@ -3852,31 +3887,32 @@ fn pde_ffi_dispatcher_primary_impl(
         42 => wire__crate__api__messages_with_impl(port, ptr, rust_vec_len, data_len),
         43 => wire__crate__api__metrics_snapshot_impl(port, ptr, rust_vec_len, data_len),
         44 => wire__crate__api__note_draft_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__outbox_pending_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__panic_wipe_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__peer_presence_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__place_call_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__profile_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__refresh_peer_profiles_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__remove_contact_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__search_profiles_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__send_call_signal_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__send_dm_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__send_dm_reply_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__set_comrade_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__set_contact_alias_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__set_turn_server_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__set_username_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__sync_ledger_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__tara_crisis_resources_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__nudge_comrades_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__outbox_pending_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__panic_wipe_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__peer_presence_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__place_call_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__profile_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__refresh_peer_profiles_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__remove_contact_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__search_profiles_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__send_call_signal_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__send_dm_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__send_dm_reply_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__set_comrade_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__set_contact_alias_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__set_turn_server_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__set_username_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__sync_ledger_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__tara_crisis_resources_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3892,8 +3928,8 @@ fn pde_ffi_dispatcher_sync_impl(
         5 => wire__crate__api__all_workspaces_impl(ptr, rust_vec_len, data_len),
         27 => wire__crate__api__generate_keypair_impl(ptr, rust_vec_len, data_len),
         45 => wire__crate__api__npub_from_nsec_impl(ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

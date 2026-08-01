@@ -283,7 +283,7 @@ private fun GentleStopCard(
                     OutlinedButton(
                         onClick = { onDismiss(); it() },
                         modifier = Modifier.weight(1f),
-                    ) { Text(stringResource(R.string.gentle_stop_breathe)) }
+                    ) { Text(stringResource(R.string.breathe_title)) }
                 }
             }
             TextButton(
