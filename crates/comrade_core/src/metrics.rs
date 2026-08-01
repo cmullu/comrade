@@ -182,6 +182,13 @@ mod tests {
     /// The counter registry is process-global (one app, one set of tallies),
     /// so the tests that mutate it share a lock and read *relative* deltas
     /// rather than absolute values.
+    ///
+    /// This lock only covers *these* tests. Production code in `dak::mesh` and
+    /// `dak::outbox` records metrics on paths other unit tests drive, and those
+    /// tests take nothing — so any assertion about the registry's absolute
+    /// state is unsound here however careful this module is. The one such
+    /// assertion, that `reset()` empties it, therefore lives in
+    /// `tests/metrics_reset.rs`, where it gets its own process.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -196,19 +203,6 @@ mod tests {
             Some(before + 5),
             "snapshot uses the stable key"
         );
-    }
-
-    #[test]
-    fn reset_clears_every_counter() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        for m in Metric::ALL {
-            record(m);
-        }
-        reset();
-        assert!(snapshot().is_empty(), "panic wipe must leave no tallies");
-        for m in Metric::ALL {
-            assert_eq!(value(m), 0);
-        }
     }
 
     #[test]
