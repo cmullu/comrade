@@ -264,6 +264,112 @@ void main() {
     });
   });
 
+  group('transport precedence', () {
+    /// Which glyph leads — the whole point of the control is that the order is
+    /// readable at a glance without opening anything.
+    IconData leadIcon(WidgetTester tester) =>
+        tester.widget<Icon>(find.byKey(const Key('transport-lead'))).icon!;
+
+    IconData fallbackIcon(WidgetTester tester) =>
+        tester.widget<Icon>(find.byKey(const Key('transport-fallback'))).icon!;
+
+    Future<void> pumpShell(
+      WidgetTester tester,
+      FakeComradeRepository repo, {
+      Size size = const Size(400, 900),
+    }) async {
+      setWindowSize(tester, size);
+      await tester.pumpWidget(_shell(repo));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('sits opposite the hamburger instead of a permanent banner',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await pumpShell(tester, repo);
+
+      expect(find.byKey(const Key('nav-drawer-button')), findsOneWidget);
+      expect(find.byKey(const Key('transport-precedence')), findsOneWidget);
+      // The row it used to occupy on every screen is gone.
+      expect(find.textContaining('Local mesh'), findsNothing);
+    });
+
+    testWidgets('relays lead until the user says otherwise',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await pumpShell(tester, repo);
+
+      expect(leadIcon(tester), Icons.cloud_outlined);
+      // The other route is drawn too — precedence is an order, not a choice of
+      // one transport over none.
+      expect(fallbackIcon(tester), isNot(Icons.cloud_outlined));
+    });
+
+    testWidgets('picking the local network swaps the order and the workspace',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await pumpShell(tester, repo);
+
+      await tester.tap(find.byKey(const Key('transport-precedence')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('precedence-local')));
+      await tester.pumpAndSettle();
+
+      expect((await repo.currentWorkspace()).meshActive, isTrue);
+      expect(leadIcon(tester), isNot(Icons.cloud_outlined));
+      expect(fallbackIcon(tester), Icons.cloud_outlined);
+    });
+
+    testWidgets('re-picking the order already in force changes nothing',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await pumpShell(tester, repo);
+
+      await tester.tap(find.byKey(const Key('transport-precedence')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('precedence-relay')));
+      await tester.pumpAndSettle();
+
+      // The core's state machine rejects a self-transition, so confirming what
+      // is already set must not surface as an error the user caused.
+      expect(find.byType(SnackBar), findsNothing);
+      expect((await repo.currentWorkspace()).meshActive, isFalse);
+      expect(leadIcon(tester), Icons.cloud_outlined);
+    });
+
+    testWidgets('nearby devices are counted on the glyph and named in the menu',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await pumpShell(tester, repo);
+
+      repo.emit(
+        const MeshStatusChanged(MeshStatus(active: true, peerCount: 3)),
+      );
+      await tester.pumpAndSettle();
+
+      // The count the banner used to spell out, without spending a row on it.
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('transport-precedence')),
+          matching: find.text('3'),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('transport-precedence')));
+      await tester.pumpAndSettle();
+      expect(find.text('3 devices nearby'), findsOneWidget);
+    });
+
+    testWidgets('the wide shell puts it on the header, which has no hamburger',
+        (WidgetTester tester) async {
+      final FakeComradeRepository repo = await unlockedFake();
+      await pumpShell(tester, repo, size: const Size(1400, 900));
+
+      expect(find.byKey(const Key('nav-drawer-button')), findsNothing);
+      expect(find.byKey(const Key('transport-precedence')), findsOneWidget);
+    });
+  });
+
   group('conversation ⋮ menu', () {
     Future<void> openMenu(
       WidgetTester tester,

@@ -2,7 +2,7 @@
 
 _Written 2026-07-29, when local-network delivery landed._
 
-Comrade has three ways to get a DM to someone, tried in this order:
+Comrade has three ways to get a DM to someone:
 
 | # | Route | Reaches | Needs |
 |---|---|---|---|
@@ -10,9 +10,11 @@ Comrade has three ways to get a DM to someone, tried in this order:
 | 2 | **Local mesh** (`saathi` + sealed `dak` frame) | someone on the same WiFi | a shared network, no internet |
 | 3 | **Sender outbox** (`dak::outbox`) | later, by route 1 or 2 | nothing — it waits |
 
-Route 1 was all there was until the outbox landed, and route 2 is what this
-document is about. Route 3 is not a transport: it is the reason a message
-survives long enough for 1 or 2 to work.
+Routes 1 and 2 are tried in the order the user chose — see
+[Precedence](#precedence) below; the default is relay first. Route 1 was all
+there was until the outbox landed, and route 2 is what this document is about.
+Route 3 is not a transport: it is the reason a message survives long enough for
+1 or 2 to work.
 
 ## What was broken
 
@@ -76,7 +78,42 @@ Properties, and where each comes from:
 
 The mesh now runs whenever the vault is unlocked, not only in `OffGridTravel`.
 "The person I'm messaging is on this WiFi" is not a mode a user should have to
-select — and `OffGridTravel` keeps its own meaning (the mesh *replaces* relays).
+select.
+
+## Precedence
+
+`OffGridTravel` keeps its own meaning — it is now the **order** the two routes
+are tried in, and the user sets it from the app bar (two glyphs opposite the
+navigation menu: the preferred route at full size, the fallback dimmed behind
+it). Under the hood it is still a workspace switch, because that is the API the
+frontends already have.
+
+| Precedence | Workspace | First | Then |
+|---|---|---|---|
+| Internet first *(default)* | `Base` | relay | mesh, only if no relay took it |
+| This network first | `OffGridTravel` | mesh | relay, once patience runs out |
+
+Two properties matter more than the ordering itself:
+
+- **Precedence is an order, not an exclusion.** Whichever route leads, a message
+  the preferred one cannot carry still takes the other. A dead mesh under local
+  precedence falls straight through to a relay, and vice versa. Nothing the user
+  can pick from the app bar is able to strand a message — which is why the
+  switch needs no warning copy and no confirmation.
+- **Local precedence gives up eventually.** A relay `OK` means a relay has
+  *stored* the message; a mesh publish only means *some* peer on the network
+  took the frame, which may not be the recipient. So after
+  `LOCAL_FIRST_PATIENCE` unacknowledged flush rounds (2, at roughly a minute
+  each) a local-first message goes out over a relay as well, instead of waiting
+  forever for someone to walk back into WiFi range. `SendPlan::for_attempt` is
+  that whole policy, and `runtime::tests::precedence_orders_the_transports_and_stops_waiting_after_two_rounds`
+  is the table.
+
+The ordering itself is duplicated in the two frontends
+(`android/…/ui/TransportPrecedence.kt` and
+`app/lib/src/util/transport_precedence.dart`) with matching tests on both sides,
+so an inverted order fails a build rather than quietly routing a message down
+the wrong radio.
 
 ## Cross-transport duplicates
 

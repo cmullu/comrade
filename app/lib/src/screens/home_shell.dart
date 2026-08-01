@@ -371,12 +371,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
               child: const Icon(Icons.create),
             )
           : null,
-      body: Column(
-        children: <Widget>[
-          const MeshStatusBanner(),
-          Expanded(child: _body(context, openChat, twoPane: false)),
-        ],
-      ),
+      body: _body(context, openChat, twoPane: false),
     );
   }
 
@@ -404,7 +399,6 @@ class _HomeShellState extends ConsumerState<HomeShell> {
             Expanded(
               child: Column(
                 children: <Widget>[
-                  const MeshStatusBanner(),
                   _WideHeader(
                     title: _headerTitle(openChat),
                     subtitle: _headerSubtitle(openChat),
@@ -480,6 +474,10 @@ class _HomeShellState extends ConsumerState<HomeShell> {
         onPressed: () => _scaffoldKey.currentState?.openDrawer(),
       ),
       title: Text(_tab == MainTab.chats ? 'Comrade' : _tab.label),
+      // Exactly opposite the hamburger: which route a message takes is a
+      // property of the app, not of the screen you happen to be on, so it sits
+      // on the one bar every tab shares.
+      actions: const <Widget>[TransportPrecedenceAction()],
     );
   }
 
@@ -523,7 +521,12 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   }
 
   List<Widget> _headerActions(BuildContext context, ChatTarget? openChat) {
-    if (_secondary != null || _tab != MainTab.chats) return const <Widget>[];
+    if (_secondary != null) return const <Widget>[];
+    // The wide shell has a permanent sidebar instead of a hamburger, so the
+    // header's trailing edge is the same slot the narrow bar puts it in.
+    if (_tab != MainTab.chats) {
+      return const <Widget>[TransportPrecedenceAction()];
+    }
     if (openChat != null) {
       final bool isComrade = ref.watch(isComradeProvider(openChat.peer));
       // Watched for the same reason as isComrade: the mute set loads on first
@@ -570,6 +573,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
           icon: const Icon(Icons.create),
           onPressed: () => setState(() => _chatNav = ChatNav.newChat),
         ),
+        const TransportPrecedenceAction(),
       ];
     }
     return const <Widget>[];
