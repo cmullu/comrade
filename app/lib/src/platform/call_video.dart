@@ -163,6 +163,48 @@ enum CallVideoFit {
   /// Fit inside the box, letterboxing — for a thumbnail where cropping a face
   /// out of frame would be worse than black bars.
   contain,
+
+  /// Fill *unless* filling would throw most of the picture away, in which case
+  /// letterbox. See [shouldLetterbox].
+  auto,
+}
+
+/// Above this much of the picture lost to cropping, [CallVideoFit.auto]
+/// letterboxes instead of filling.
+///
+/// A third is the useful line, and the cases either side of it are why:
+///
+///  * a 4:3 camera frame on a tall phone loses **25%** to the crop, and every
+///    call app on earth fills there — bars around a face look broken;
+///  * a 16:9 *screen* on a portrait phone loses **68%**, which is not a crop so
+///    much as a different picture.
+///
+/// This is deliberately a question about geometry, not about what the far end
+/// is doing. "Is the peer sharing a screen" would need a wire-format field, and
+/// guessing it from orientation gets a landscape tablet wrong; "would filling
+/// this box destroy the picture" is answerable from what already arrived, and
+/// is the thing actually worth acting on.
+const double kMaxCroppedFraction = 1 / 3;
+
+/// Whether a frame of [frameAspect] shown in a box of [boxAspect] should be
+/// letterboxed rather than cropped to fill.
+///
+/// Both aspects are width ÷ height. Returns false for nonsense input (a zero or
+/// negative aspect, a frame that has not arrived yet) — filling is the safe
+/// default, and it is what every other surface here does.
+bool shouldLetterbox({
+  required double frameAspect,
+  required double boxAspect,
+  double maxCropped = kMaxCroppedFraction,
+}) {
+  if (frameAspect <= 0 || boxAspect <= 0) return false;
+  if (!frameAspect.isFinite || !boxAspect.isFinite) return false;
+  // Cover scales the frame until it covers the box, so the fraction of the
+  // source still visible is the ratio of the smaller aspect to the larger.
+  final double visible = frameAspect < boxAspect
+      ? frameAspect / boxAspect
+      : boxAspect / frameAspect;
+  return (1 - visible) > maxCropped;
 }
 
 /// Renders a [CallVideoRenderer]'s texture.
@@ -171,10 +213,14 @@ enum CallVideoFit {
 /// while the shared EGL context was null — an honest "no picture yet" rather
 /// than a spinner over a stream that may never start.
 class CallVideoView extends StatelessWidget {
+  /// [fit] defaults to [CallVideoFit.auto], which behaves exactly like
+  /// [CallVideoFit.cover] for camera-shaped video and only letterboxes when
+  /// filling would destroy the picture — a shared screen. Pass an explicit
+  /// value to override.
   const CallVideoView(
     this.renderer, {
     super.key,
-    this.fit = CallVideoFit.cover,
+    this.fit = CallVideoFit.auto,
     this.placeholderColor = const Color(0xFF000000),
   });
 
@@ -212,20 +258,40 @@ class CallVideoView extends StatelessWidget {
         // Size the texture at its true rotated pixel dimensions, then let
         // FittedBox scale it — cover for a full-screen call (crop rather than
         // letterbox, matching SCALE_ASPECT_FILL), contain for a thumbnail where
-        // cropping a face out of frame would be worse than black bars.
-        return ClipRect(
-          child: ColoredBox(
-            color: placeholderColor,
-            child: FittedBox(
-              fit: fit == CallVideoFit.cover ? BoxFit.cover : BoxFit.contain,
-              clipBehavior: Clip.hardEdge,
-              child: SizedBox(
-                width: width.toDouble(),
-                height: height.toDouble(),
-                child: video,
+        // cropping a face out of frame would be worse than black bars, and
+        // `auto` to decide per frame (a shared screen on a phone).
+        return LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints constraints) {
+            BoxFit resolved = switch (fit) {
+              CallVideoFit.cover => BoxFit.cover,
+              CallVideoFit.contain => BoxFit.contain,
+              CallVideoFit.auto => BoxFit.cover,
+            };
+            if (fit == CallVideoFit.auto &&
+                constraints.hasBoundedWidth &&
+                constraints.hasBoundedHeight &&
+                constraints.maxHeight > 0) {
+              final bool letterbox = shouldLetterbox(
+                frameAspect: width / height,
+                boxAspect: constraints.maxWidth / constraints.maxHeight,
+              );
+              if (letterbox) resolved = BoxFit.contain;
+            }
+            return ClipRect(
+              child: ColoredBox(
+                color: placeholderColor,
+                child: FittedBox(
+                  fit: resolved,
+                  clipBehavior: Clip.hardEdge,
+                  child: SizedBox(
+                    width: width.toDouble(),
+                    height: height.toDouble(),
+                    child: video,
+                  ),
+                ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );

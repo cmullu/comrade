@@ -37,6 +37,10 @@
 ///  * **The chat button shrinks the call rather than hiding it.** Native
 ///    picture-in-picture where the OS gives us a window, a draggable in-app
 ///    tile everywhere else.
+///  * **A short bar and a ⋮ dock, in Telegram's order.** Camera, mic, output,
+///    ⋮, End — and everything else behind the ⋮. See `call_controls.dart`: the
+///    bar used to hold every control, which on a video call was six buttons on
+///    a screen that fits five, and the one pushed off the end was End call.
 library;
 
 import 'dart:async';
@@ -51,6 +55,7 @@ import '../util/display_name.dart';
 import '../widgets/peer_avatar.dart';
 import '../widgets/signal_bars.dart';
 import '../widgets/slashed_icon.dart';
+import 'call_controls.dart';
 
 /// How long the controls stay up before a video call fades them out — long
 /// enough to hit "mute" without hunting, short enough that the call is mostly
@@ -60,6 +65,10 @@ const Duration _chromeLinger = Duration(seconds: 4);
 /// Fade duration for the controls. Deliberately unhurried: a fast fade reads
 /// as a glitch, and this one is triggered by doing nothing at all.
 const Duration _chromeFade = Duration(milliseconds: 320);
+
+/// Diameter of a control in the bar. Five of these plus their slots fit the
+/// ~336dp a 360dp-wide phone leaves after padding — see [kMaxPrimaryCallControls].
+const double _barButtonSize = 56;
 
 /// Shows the call overlay when a call is in flight, nothing when idle.
 /// Callers place this last in their layout stack so it covers the app.
@@ -183,6 +192,9 @@ class _InCallContentState extends ConsumerState<_InCallContent>
   /// audio call; self-hiding for video (see [_armAutoHide]).
   bool _chromeVisible = true;
 
+  /// Whether the ⋮ dock — screen share, camera flip, chat — is open.
+  bool _dockOpen = false;
+
   Timer? _hideTimer;
   bool _immersive = false;
 
@@ -246,13 +258,21 @@ class _InCallContentState extends ConsumerState<_InCallContent>
   void _armAutoHide() {
     _hideTimer?.cancel();
     if (!_isVideo) return;
+    // An open dock is someone mid-decision — fading the controls out from
+    // under them would be the rudest possible moment for it.
+    if (_dockOpen) return;
     _hideTimer = Timer(_chromeLinger, () {
       if (mounted) setState(() => _chromeVisible = false);
     });
   }
 
-  /// Tap anywhere on the picture: reveal the controls, or dismiss them early.
+  /// Tap anywhere on the picture: dismiss the dock if it is open, otherwise
+  /// reveal the controls or dismiss them early.
   void _toggleChrome() {
+    if (_dockOpen) {
+      _closeDock();
+      return;
+    }
     if (!_isVideo) return;
     _hideTimer?.cancel();
     setState(() => _chromeVisible = !_chromeVisible);
@@ -263,6 +283,18 @@ class _InCallContentState extends ConsumerState<_InCallContent>
   /// vanish mid-gesture.
   void _keepChromeUp() {
     if (_isVideo && _chromeVisible) _armAutoHide();
+  }
+
+  void _toggleDock() {
+    _hideTimer?.cancel();
+    setState(() => _dockOpen = !_dockOpen);
+    if (!_dockOpen) _armAutoHide();
+  }
+
+  void _closeDock() {
+    if (!_dockOpen) return;
+    setState(() => _dockOpen = false);
+    _armAutoHide();
   }
 
   Future<void> _openChat() async {
@@ -315,20 +347,46 @@ class _InCallContentState extends ConsumerState<_InCallContent>
         _chrome(
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: DecoratedBox(
-              decoration: session.showsVideoStage
-                  ? const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: <Color>[Colors.transparent, Color(0xB3000000)],
+            child: Stack(
+              alignment: Alignment.bottomCenter,
+              children: <Widget>[
+                // The scrim that keeps white icons legible over a bright
+                // frame. Deliberately does not take pointer input: a
+                // `BoxDecoration` hit-tests its whole rectangle, so without
+                // this the dark band silently swallowed every tap that missed
+                // a button — including the one meant to dismiss the dock.
+                if (session.showsVideoStage)
+                  const Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: <Color>[
+                              Colors.transparent,
+                              Color(0xB3000000)
+                            ],
+                          ),
+                        ),
                       ),
-                    )
-                  : const BoxDecoration(),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 28, 20, 36),
-                child: _controls(session),
-              ),
+                    ),
+                  ),
+                // The controls' own band *does* absorb, so the gaps between
+                // buttons are not a way to accidentally dismiss the chrome
+                // you are currently using.
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    _closeDock();
+                    _keepChromeUp();
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 28, 12, 36),
+                    child: _controlsArea(session),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -336,22 +394,89 @@ class _InCallContentState extends ConsumerState<_InCallContent>
     );
   }
 
-  /// The controls, in the order the hand expects them: the two mutes first,
-  /// then the chat button that shrinks the call, then output, then the one
-  /// button nobody wants to hit by accident.
-  Widget _controls(CallSession session) {
-    final CallController controller = ref.read(callProvider.notifier);
-    final CallUiState state = session.state;
-    return Wrap(
-      alignment: WrapAlignment.center,
-      spacing: 20,
-      runSpacing: 16,
+  /// The bar, with the ⋮ dock stacked above it when open.
+  Widget _controlsArea(CallSession session) {
+    final CallControlLayout layout = layoutCallControls(
+      video: session.state.video,
+      cameraOn: session.cameraOn,
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
       children: <Widget>[
-        CallActionButton(
+        if (_dockOpen)
+          Padding(
+            padding: const EdgeInsets.only(right: 8, bottom: 14),
+            child: _CallOptionsDock(
+              items: layout.dock,
+              session: session,
+              onScreenShare: () {
+                _closeDock();
+                unawaited(
+                  ref.read(callProvider.notifier).toggleScreenShare(),
+                );
+              },
+              onSwitchCamera: () {
+                _closeDock();
+                unawaited(ref.read(callProvider.notifier).switchCamera());
+              },
+              onChat: () {
+                _closeDock();
+                unawaited(_openChat());
+              },
+            ),
+          ),
+        _controls(session, layout.primary),
+      ],
+    );
+  }
+
+  /// The bar itself: [CallControl]s laid out one per equal-width slot.
+  ///
+  /// Equal slots rather than a centred row with fixed gaps, so the bar is
+  /// exactly as wide as the screen and a button physically cannot be pushed off
+  /// the end of it — which is the failure this whole arrangement replaces.
+  Widget _controls(CallSession session, List<CallControl> primary) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          for (final CallControl control in primary)
+            Expanded(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: _controlButton(control, session),
+              ),
+            ),
+        ],
+      );
+
+  Widget _controlButton(CallControl control, CallSession session) {
+    final CallController controller = ref.read(callProvider.notifier);
+    switch (control) {
+      case CallControl.camera:
+        return CallActionButton(
+          key: const Key('call-camera'),
+          icon: Icons.videocam,
+          slashed: !session.cameraOn,
+          label: session.cameraOn ? 'Camera' : 'Camera off',
+          size: _barButtonSize,
+          background: session.cameraOn
+              ? CallPalette.controlIdle
+              : CallPalette.controlActive,
+          tint: session.cameraOn ? Colors.white : CallPalette.background,
+          onPressed: () {
+            _keepChromeUp();
+            unawaited(controller.toggleCamera());
+          },
+        );
+      case CallControl.mic:
+        // The mic slashes itself rather than swapping glyph — a struck-through
+        // mic is "your mic is off"; a different picture is "the icon changed".
+        return CallActionButton(
           key: const Key('call-mute'),
           icon: Icons.mic,
           slashed: session.muted,
           label: session.muted ? 'Unmute' : 'Mute',
+          size: _barButtonSize,
           background: session.muted
               ? CallPalette.controlActive
               : CallPalette.controlIdle,
@@ -360,59 +485,42 @@ class _InCallContentState extends ConsumerState<_InCallContent>
             _keepChromeUp();
             unawaited(controller.toggleMute());
           },
-        ),
-        if (state.video)
-          CallActionButton(
-            key: const Key('call-camera'),
-            icon: Icons.videocam,
-            slashed: !session.cameraOn,
-            label: session.cameraOn ? 'Camera' : 'Camera off',
-            background: session.cameraOn
-                ? CallPalette.controlIdle
-                : CallPalette.controlActive,
-            tint: session.cameraOn ? Colors.white : CallPalette.background,
-            onPressed: () {
-              _keepChromeUp();
-              unawaited(controller.toggleCamera());
-            },
-          ),
-        // Screen share sits on **voice calls too** — that is the whole point of
-        // it, and it is why the stage below can appear on a call that started
-        // without video.
-        CallActionButton(
-          key: const Key('call-screen-share'),
-          icon: Icons.screen_share_outlined,
-          slashed: session.screenSharing,
-          label: session.screenSharing ? 'Stop sharing' : 'Share screen',
+        );
+      case CallControl.speaker:
+        return AudioRouteButton(
+          session: session,
+          onInteract: _keepChromeUp,
+          size: _barButtonSize,
+        );
+      case CallControl.more:
+        // Lit while something behind it is running, so "you are sharing your
+        // screen" is legible with the dock shut.
+        return CallActionButton(
+          key: const Key('call-more'),
+          icon: Icons.more_vert,
+          label: 'More',
+          size: _barButtonSize,
           background: session.screenSharing
               ? CallPalette.controlActive
               : CallPalette.controlIdle,
           tint: session.screenSharing ? CallPalette.background : Colors.white,
-          onPressed: () {
-            _keepChromeUp();
-            unawaited(controller.toggleScreenShare());
-          },
-        ),
-        CallActionButton(
-          key: const Key('call-chat'),
-          icon: Icons.chat_bubble_outline,
-          label: 'Chat',
-          background: CallPalette.controlIdle,
-          onPressed: () {
-            _keepChromeUp();
-            unawaited(_openChat());
-          },
-        ),
-        AudioRouteButton(session: session, onInteract: _keepChromeUp),
-        CallActionButton(
+          onPressed: _toggleDock,
+        );
+      case CallControl.hangup:
+        return CallActionButton(
           key: const Key('call-hangup'),
           icon: Icons.call_end,
           label: 'End',
+          size: _barButtonSize,
           background: CallPalette.hangup,
           onPressed: controller.hangup,
-        ),
-      ],
-    );
+        );
+      // Dock-only controls; `layoutCallControls` never puts them in the bar.
+      case CallControl.screenShare:
+      case CallControl.switchCamera:
+      case CallControl.chat:
+        return const SizedBox.shrink();
+    }
   }
 
   /// Wraps the self-hiding parts of the UI. Fades rather than unmounts, and
@@ -999,16 +1107,133 @@ class _CallTimerState extends State<_CallTimer> {
       );
 }
 
+/// The panel the ⋮ opens: everything the bar deliberately does not hold.
+///
+/// A panel anchored to the bar rather than a modal sheet, because the call is
+/// an overlay in a [Stack] and not a route — a modal route would push itself in
+/// front of the picture, and dismissing it would be a second thing that can go
+/// wrong while a call is running.
+class _CallOptionsDock extends StatelessWidget {
+  const _CallOptionsDock({
+    required this.items,
+    required this.session,
+    required this.onScreenShare,
+    required this.onSwitchCamera,
+    required this.onChat,
+  });
+
+  final List<CallControl> items;
+  final CallSession session;
+  final VoidCallback onScreenShare;
+  final VoidCallback onSwitchCamera;
+  final VoidCallback onChat;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        key: const Key('call-dock'),
+        color: CallPalette.pipBackground,
+        elevation: 10,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 216),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              for (final CallControl item in items) _item(item),
+            ],
+          ),
+        ),
+      );
+
+  Widget _item(CallControl item) => switch (item) {
+        // Screen share is offered on **voice calls too** — that is the point of
+        // it, and it is why the stage can appear on a call that started without
+        // video.
+        CallControl.screenShare => _DockItem(
+            key: const Key('call-screen-share'),
+            icon: Icons.screen_share_outlined,
+            label: session.screenSharing ? 'Stop sharing' : 'Share screen',
+            active: session.screenSharing,
+            onPressed: onScreenShare,
+          ),
+        CallControl.switchCamera => _DockItem(
+            key: const Key('call-switch-camera'),
+            icon: Icons.flip_camera_ios,
+            label: 'Switch camera',
+            onPressed: onSwitchCamera,
+          ),
+        CallControl.chat => _DockItem(
+            key: const Key('call-chat'),
+            icon: Icons.chat_bubble_outline,
+            label: 'Chat',
+            onPressed: onChat,
+          ),
+        // The bar's own controls never appear here.
+        _ => const SizedBox.shrink(),
+      };
+}
+
+class _DockItem extends StatelessWidget {
+  const _DockItem({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.active = false,
+    super.key,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+
+  /// Lit while the thing this row toggles is running.
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color tint = active ? CallPalette.controlActive : Colors.white;
+    return InkWell(
+      onTap: onPressed,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: <Widget>[
+            Icon(icon, size: 22, color: tint),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: tint, fontSize: 15),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// The audio-output control: a button showing the current route that opens a
 /// menu of every currently-present route.
 class AudioRouteButton extends ConsumerWidget {
-  const AudioRouteButton({required this.session, this.onInteract, super.key});
+  const AudioRouteButton({
+    required this.session,
+    this.onInteract,
+    this.size = 60,
+    super.key,
+  });
 
   final CallSession session;
 
   /// Lets the call screen keep its self-hiding controls up while this menu is
   /// being used.
   final VoidCallback? onInteract;
+
+  final double size;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1025,8 +1250,10 @@ class AudioRouteButton extends ConsumerWidget {
           PopupMenuItem<AudioRoute>(value: route, child: Text(route.label)),
       ],
       child: CallActionButton(
+        key: const Key('call-speaker'),
         icon: Icons.volume_up,
         label: session.audioRoute.label,
+        size: size,
         background:
             active ? CallPalette.controlActive : CallPalette.controlIdle,
         tint: active ? CallPalette.background : Colors.white,
@@ -1092,9 +1319,14 @@ class CallActionButton extends StatelessWidget {
           ),
           if (label != null) ...<Widget>[
             const SizedBox(height: 6),
+            // Ellipsised, not clipped: the bar gives each control an equal
+            // slice of the screen, and "Wired headset" is wider than a fifth
+            // of a phone.
             Text(
               label!,
               maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
               style: const TextStyle(color: Color(0xB3FFFFFF), fontSize: 12),
             ),
           ],

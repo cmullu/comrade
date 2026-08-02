@@ -285,3 +285,70 @@ Flutter-host Kotlin (`app/android/…/mullu/comrade/`):
 - **`CallPipMode.native` is set only from the OS callback**, never at request
   time — the OS can refuse, and the user can drag the window back.
 - **Unknown quality = empty bars, no label.** Never map unknown to poor.
+
+## Post-merge fixes (round 3): the bar could not hold what was in it
+
+Reported: **"end call button is missing after answering video call"**, plus a
+request for Telegram's shape — a ⋮ that opens a dock, and the bar reordered.
+
+### The bug
+
+The in-call bar was a single non-wrapping row of *every* control. On a video
+call that was six 60dp buttons — mute, camera, screen share, chat, audio route,
+End — needing ~450dp before padding, on a phone that gives ~360dp. Compose's
+`Row` does not wrap: it lays children out in order and the ones that no longer
+fit simply run off the right edge. The last child was **End call**, so a video
+call could not be hung up from the call screen. (Flutter used a `Wrap`, which
+does not clip but reflows into a second row that shoves the bar up over the
+picture and moves every button.)
+
+Each of the three rounds of features added one more control to that row, which
+is why this appeared now and why the fix is structural rather than a width
+tweak.
+
+### The fix
+
+`layoutCallControls` — pure, in all three frontends, with the same vectors:
+
+| | `app/lib/src/screens/call_controls.dart` | `android/.../call/CallControls.kt` | `desktop/ui/call_decisions.mjs` |
+|---|---|---|---|
+| tests | `call_screen_test.dart` | `CallControlsTest.kt` | `call_decisions.test.mjs` |
+
+Bar (Telegram's order, left to right): **camera, mic, output, ⋮, End**. A voice
+call drops the camera and nothing else moves, so mute does not shift under your
+thumb when a call gains video. Dock: screen share, switch camera, chat.
+
+Two invariants are asserted on every combination, in all three suites:
+`primary.last == HANGUP`, and `primary.length <= MAX_PRIMARY_CALL_CONTROLS` (5).
+A Flutter widget test additionally pumps a 360×640 phone and asserts End call's
+rect is inside the screen — the assertion that would have caught the original.
+
+Capability flags (`hasAudioRoutes`, `hasCameraSwitch`) let one function serve a
+desktop honestly: no earpiece to route to, no second camera to flip to, so it
+gets a four-control bar rather than two dead buttons.
+
+### Things worth not reversing
+
+- **The bar uses equal-width slots** (`Expanded` / `Modifier.weight(1f)`), not a
+  centred row with fixed gaps. That is what makes overflow structurally
+  impossible rather than merely unlikely at today's control count.
+- **Adding a control means adding it to the dock**, not the bar. If a bar entry
+  is genuinely warranted, something else has to leave — the tests will say so.
+- **The Flutter scrim no longer takes pointer input.** A `BoxDecoration`
+  hit-tests its whole rectangle, so the gradient behind the controls was
+  silently swallowing every tap that missed a button; it is now inside an
+  `IgnorePointer` with the controls' own band absorbing separately. Re-merging
+  them brings back a dock you cannot dismiss by tapping the picture.
+- **An open dock suspends the FaceTime auto-hide** and the first stage tap
+  closes the dock rather than the whole chrome.
+- **The screen-share activity launcher is `remember`ed by the screen, not the
+  dock.** A launcher created inside the dock is disposed when the dock closes,
+  which for the *stop* direction is the very next frame.
+
+### Still unverified on hardware
+
+Unchanged from round 2: the screen-share media path has never run on a real
+device. CI proves it compiles. The two open risks are whether the Tauri webview
+implements `getDisplayMedia` at all, and the **voice-call renegotiation** —
+adding an m-line mid-call is novel versus the ICE restart that path was built
+for.

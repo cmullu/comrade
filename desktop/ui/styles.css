@@ -1271,9 +1271,14 @@ code {
 }
 
 /* At that size only the picture and two controls fit. */
+/* At tile size only mute and End fit — the ⋮ dock would be bigger than the
+   tile it hangs off, so the whole overflow goes away until the call is
+   restored (main.js's `closeCallDock` is what stops it being *open* when the
+   call shrinks; this only stops it being reachable). */
 .call-active.is-minimized .call-info,
 .call-active.is-minimized #call-camera,
-.call-active.is-minimized #call-chat,
+.call-active.is-minimized #call-more,
+.call-active.is-minimized .call-dock,
 .call-active.is-minimized .call-local {
   display: none;
 }
@@ -1307,6 +1312,12 @@ code {
   height: 100%;
   object-fit: cover;
   background: #05070f;
+}
+
+/* Filling would crop most of the picture away — a shared 16:9 screen in a
+   narrow window — so fit it inside instead. Toggled by applyRemoteFit(). */
+.call-remote.is-letterboxed {
+  object-fit: contain;
 }
 
 .call-avatar {
@@ -1472,11 +1483,65 @@ code {
 }
 
 .call-controls {
+  position: relative; /* the ⋮ dock is anchored to this */
   display: flex;
   gap: 18px;
   justify-content: center;
   padding: 18px;
   background: linear-gradient(to top, rgba(0, 0, 0, 0.55), transparent);
+}
+
+/* The overflow dock the ⋮ opens: everything the bar deliberately does not
+   hold. Rises out of the bar rather than floating loose, and is `hidden`
+   rather than merely transparent so its buttons are not tabbable while shut. */
+.call-dock {
+  position: absolute;
+  right: 18px;
+  bottom: calc(100% - 6px);
+  z-index: 2;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  animation: call-dock-in 140ms ease-out;
+}
+
+@keyframes call-dock-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.call-dock-item {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.call-dock-item:hover {
+  background: var(--panel-2);
+}
+
+/* Lit the same way the bar lights an active toggle, so "you are sharing" reads
+   the same whether the dock is open or shut. */
+.call-dock-item.is-on {
+  background: var(--panel-2);
+  color: var(--accent-2);
+}
+
+.call-dock-glyph {
+  font-size: 18px;
+  line-height: 1;
 }
 
 .call-btn {

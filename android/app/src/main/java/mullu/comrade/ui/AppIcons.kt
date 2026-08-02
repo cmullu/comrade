@@ -690,3 +690,33 @@ val StopIcon: ImageVector = materialIcon(name = "Filled.Stop") {
         close()
     }
 }
+
+/**
+ * Material "more_vert" (filled) — the ⋮ that opens the in-call options dock.
+ *
+ * Three dots rather than a word, because the bar gives each control about a
+ * fifth of a phone's width and every alternative label ("Options", "More") is
+ * wider than the glyph it would replace.
+ */
+val MoreVertIcon: ImageVector = materialIcon(name = "Filled.MoreVert") {
+    materialPath {
+        moveTo(12.0f, 8.0f)
+        curveToRelative(1.1f, 0.0f, 2.0f, -0.9f, 2.0f, -2.0f)
+        reflectiveCurveToRelative(-0.9f, -2.0f, -2.0f, -2.0f)
+        reflectiveCurveToRelative(-2.0f, 0.9f, -2.0f, 2.0f)
+        reflectiveCurveToRelative(0.9f, 2.0f, 2.0f, 2.0f)
+        close()
+        moveTo(12.0f, 10.0f)
+        curveToRelative(-1.1f, 0.0f, -2.0f, 0.9f, -2.0f, 2.0f)
+        reflectiveCurveToRelative(0.9f, 2.0f, 2.0f, 2.0f)
+        reflectiveCurveToRelative(2.0f, -0.9f, 2.0f, -2.0f)
+        reflectiveCurveToRelative(-0.9f, -2.0f, -2.0f, -2.0f)
+        close()
+        moveTo(12.0f, 16.0f)
+        curveToRelative(-1.1f, 0.0f, -2.0f, 0.9f, -2.0f, 2.0f)
+        reflectiveCurveToRelative(0.9f, 2.0f, 2.0f, 2.0f)
+        reflectiveCurveToRelative(2.0f, -0.9f, 2.0f, -2.0f)
+        reflectiveCurveToRelative(-0.9f, -2.0f, -2.0f, -2.0f)
+        close()
+    }
+}

@@ -33,10 +33,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -44,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -73,6 +76,7 @@ import mullu.comrade.ui.CallIcon
 import mullu.comrade.ui.ChatBubbleIcon
 import mullu.comrade.ui.FlipCameraIcon
 import mullu.comrade.ui.MicIcon
+import mullu.comrade.ui.MoreVertIcon
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.SpeakerIcon
 import mullu.comrade.ui.VideocamIcon
@@ -101,9 +105,14 @@ import org.webrtc.VideoTrack
  *    than swapping to a different icon;
  *  * a side that stopped sending shows "Video paused" over the avatar — never
  *    a frozen frame ([CallManager.remoteVideoPaused], camera-off, suspension);
- *  * the chat button opens the conversation and shrinks the call into the OS
- *    picture-in-picture window ([PipController]); while in PiP only the remote
- *    picture renders.
+ *  * the chat button opens the conversation and shrinks the call into a corner
+ *    tile in our own window ([MinimizedCallTile]) — only one window can show
+ *    the call *and* the thread, and it has to be ours;
+ *  * the bar holds camera, mic, output, ⋮ and End, in that order, and
+ *    everything else lives behind the ⋮ ([layoutCallControls] in
+ *    CallControls.kt). It used to hold every control, which on a video call was
+ *    six buttons on a screen that fits five — and a `Row` does not wrap, it
+ *    just runs off the right edge, taking End call with it.
  */
 
 private val CallBackground = Color(0xFF0E1621)
@@ -118,6 +127,12 @@ private val ControlActive = Color(0xFFFFFFFF)
  * person's face. Matches `_chromeLinger` in the Flutter port.
  */
 private const val CHROME_LINGER_MS = 4_000L
+
+/**
+ * Diameter of a control in the bar. Five of these in equal slots fit the ~336dp
+ * a 360dp-wide phone leaves after padding — see [MAX_PRIMARY_CALL_CONTROLS].
+ */
+private val BAR_BUTTON_SIZE = 56.dp
 
 /**
  * Host entry point: shows the call overlay when a call is in flight, nothing
@@ -263,16 +278,22 @@ private fun CallVideoSurface(
 }
 
 /**
- * Start or stop sharing the screen.
+ * A callback that starts or stops sharing the screen.
  *
  * Starting needs the system's own capture-consent dialog, which only an
  * Activity result can deliver — hence the launcher rather than a direct
- * `CallManager` call. Dismissing that dialog returns `RESULT_CANCELED` and
- * nothing happens, which is why the button's lit state follows
+ * [CallManager] call. Dismissing that dialog returns `RESULT_CANCELED` and
+ * nothing happens, which is why the row's lit state follows
  * [CallManager.screenSharing] and never the tap.
+ *
+ * Returned as a lambda rather than drawn as a button because the control moved
+ * into the ⋮ dock, and `rememberLauncherForActivityResult` has to be created by
+ * a composable that stays composed — a launcher created inside the dock would
+ * be disposed the moment the dock closed, which for the *stop* direction is the
+ * very next frame.
  */
 @Composable
-private fun ScreenShareButton(sharing: Boolean) {
+private fun rememberScreenShareToggle(sharing: Boolean): () -> Unit {
     val context = LocalContext.current
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -282,25 +303,87 @@ private fun ScreenShareButton(sharing: Boolean) {
             CallManager.startScreenShare(context, data)
         }
     }
-    CallActionButton(
-        icon = ScreenShareIcon,
-        desc = stringOf(
-            if (sharing) R.string.call_screen_share_stop else R.string.call_screen_share,
-        ),
-        bg = if (sharing) ControlActive else ControlIdle,
-        tint = if (sharing) CallBackground else Color.White,
-        size = 60.dp,
-        label = stringOf(
-            if (sharing) R.string.call_screen_share_stop else R.string.call_screen_share,
-        ),
-        slashed = sharing,
-    ) {
+    return {
         if (sharing) {
             CallManager.stopScreenShare()
         } else {
             val manager = context.getSystemService(MediaProjectionManager::class.java)
             if (manager != null) launcher.launch(manager.createScreenCaptureIntent())
         }
+    }
+}
+
+/**
+ * The panel the ⋮ opens: everything the bar deliberately does not hold.
+ *
+ * A panel anchored above the bar rather than a `ModalBottomSheet`, so it
+ * matches the Flutter and desktop docks exactly and adds no second dismissable
+ * surface on top of a running call.
+ */
+@Composable
+private fun CallOptionsDock(
+    items: List<CallControl>,
+    sharing: Boolean,
+    onScreenShare: () -> Unit,
+    onSwitchCamera: () -> Unit,
+    onChat: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .widthIn(min = 216.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xF217212B))
+            .padding(vertical = 6.dp),
+    ) {
+        items.forEach { item ->
+            when (item) {
+                // Screen share is offered on **voice calls too** — that is the
+                // point of it, and it is why the stage can appear on a call
+                // that started without video.
+                CallControl.SCREEN_SHARE -> DockItem(
+                    icon = ScreenShareIcon,
+                    label = stringOf(
+                        if (sharing) R.string.call_screen_share_stop else R.string.call_screen_share,
+                    ),
+                    active = sharing,
+                    onClick = onScreenShare,
+                )
+                CallControl.SWITCH_CAMERA -> DockItem(
+                    icon = FlipCameraIcon,
+                    label = stringOf(R.string.call_switch_camera),
+                    onClick = onSwitchCamera,
+                )
+                CallControl.CHAT -> DockItem(
+                    icon = ChatBubbleIcon,
+                    label = stringOf(R.string.call_chat),
+                    onClick = onChat,
+                )
+                // The bar's own controls never appear here.
+                else -> Unit
+            }
+        }
+    }
+}
+
+@Composable
+private fun DockItem(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    active: Boolean = false,
+) {
+    val tint = if (active) ControlActive else Color.White
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+        Text(label, color = tint, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -525,15 +608,27 @@ private fun InCallContent(
     // displaying it. From the peer's side they are the same thing.
     val localVideoPaused = !cameraOn || videoSuspended
 
+    // Which controls are in the bar and which are behind the ⋮ (CallControls.kt).
+    val layout = layoutCallControls(video = video, cameraOn = cameraOn)
+    var dockOpen by remember { mutableStateOf(false) }
+    val toggleScreenShare = rememberScreenShareToggle(screenSharing)
+
     // FaceTime-style chrome: on a video call the controls and the name pill
     // linger for a few seconds, then fade; a tap anywhere toggles them back.
     // Audio calls keep their controls permanently.
     var chromeVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(video, status, chromeVisible) {
-        if (video && status == null && chromeVisible) {
+    LaunchedEffect(video, status, chromeVisible, dockOpen) {
+        // An open dock is someone mid-decision — fading the controls out from
+        // under them would be the rudest possible moment for it.
+        if (video && status == null && chromeVisible && !dockOpen) {
             delay(CHROME_LINGER_MS)
             chromeVisible = false
         }
+    }
+    // Chrome that went away for any reason takes the dock with it, so it never
+    // reappears already open on the next tap.
+    LaunchedEffect(chromeVisible) {
+        if (!chromeVisible) dockOpen = false
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -574,7 +669,11 @@ private fun InCallContent(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                    ) { chromeVisible = !chromeVisible },
+                    ) {
+                        // An open dock is what the first tap dismisses; only
+                        // once it is shut does a tap toggle the whole chrome.
+                        if (dockOpen) dockOpen = false else chromeVisible = !chromeVisible
+                    },
             )
 
             // Self-preview tile: swaps on tap; hosts the camera-flip control so
@@ -670,9 +769,14 @@ private fun InCallContent(
             }
         }
 
-        // Controls: mute, (camera), chat, audio route, hang up — uniform sizes
-        // with labels beneath; over video they sit on a scrim so they stay
-        // legible on top of bright frames, and they fade with the chrome.
+        // The bar — camera, mic, output, ⋮, End — with the dock stacked above
+        // it when open. Over video the pair sit on a scrim so they stay legible
+        // on top of bright frames, and they fade with the chrome.
+        //
+        // Which controls are in the bar and which are behind the ⋮ is
+        // `layoutCallControls` (CallControls.kt), not a list written out here:
+        // the bar used to be every control in a Row, six of them on a video
+        // call, and the sixth — End call — ran off the right edge of a phone.
         androidx.compose.animation.AnimatedVisibility(
             visible = chromeVisible || !video,
             enter = fadeIn(),
@@ -691,60 +795,89 @@ private fun InCallContent(
                             Modifier
                         },
                     ),
+                horizontalAlignment = Alignment.End,
             ) {
+                if (dockOpen) {
+                    CallOptionsDock(
+                        items = layout.dock,
+                        sharing = screenSharing,
+                        onScreenShare = {
+                            dockOpen = false
+                            toggleScreenShare()
+                        },
+                        onSwitchCamera = {
+                            dockOpen = false
+                            CallManager.switchCamera()
+                        },
+                        onChat = {
+                            dockOpen = false
+                            onOpenChat(peer, peerLabel)
+                        },
+                        modifier = Modifier.padding(end = 20.dp, top = 20.dp, bottom = 14.dp),
+                    )
+                }
+                // Equal-width slots rather than a centred row with fixed gaps,
+                // so the bar is exactly as wide as the screen and a control
+                // physically cannot be pushed off the end of it.
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp)
-                        .padding(top = 28.dp, bottom = 36.dp),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
+                        .padding(horizontal = 12.dp)
+                        .padding(top = if (dockOpen) 0.dp else 28.dp, bottom = 36.dp),
                     verticalAlignment = Alignment.Top,
                 ) {
-                    // The mic slashes itself rather than swapping glyph — a
-                    // struck-through mic is "your mic is off"; a different
-                    // picture is just "the icon changed".
-                    CallActionButton(
-                        icon = MicIcon,
-                        desc = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
-                        bg = if (muted) ControlActive else ControlIdle,
-                        tint = if (muted) CallBackground else Color.White,
-                        size = 60.dp,
-                        label = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
-                        slashed = muted,
-                    ) { CallManager.toggleMute() }
-                    if (video) {
-                        CallActionButton(
-                            icon = VideocamIcon,
-                            desc = stringOf(if (cameraOn) R.string.call_camera_off else R.string.call_camera_on),
-                            bg = if (!cameraOn) ControlActive else ControlIdle,
-                            tint = if (!cameraOn) CallBackground else Color.White,
-                            size = 60.dp,
-                            label = stringOf(R.string.call_camera),
-                            slashed = !cameraOn,
-                        ) { CallManager.toggleCamera() }
+                    layout.primary.forEach { control ->
+                        Box(Modifier.weight(1f), contentAlignment = Alignment.TopCenter) {
+                            when (control) {
+                                CallControl.CAMERA -> CallActionButton(
+                                    icon = VideocamIcon,
+                                    desc = stringOf(
+                                        if (cameraOn) R.string.call_camera_off else R.string.call_camera_on,
+                                    ),
+                                    bg = if (!cameraOn) ControlActive else ControlIdle,
+                                    tint = if (!cameraOn) CallBackground else Color.White,
+                                    size = BAR_BUTTON_SIZE,
+                                    label = stringOf(R.string.call_camera),
+                                    slashed = !cameraOn,
+                                ) { CallManager.toggleCamera() }
+                                // The mic slashes itself rather than swapping
+                                // glyph — a struck-through mic is "your mic is
+                                // off"; a different picture is just "the icon
+                                // changed".
+                                CallControl.MIC -> CallActionButton(
+                                    icon = MicIcon,
+                                    desc = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
+                                    bg = if (muted) ControlActive else ControlIdle,
+                                    tint = if (muted) CallBackground else Color.White,
+                                    size = BAR_BUTTON_SIZE,
+                                    label = stringOf(if (muted) R.string.call_unmute else R.string.call_mute),
+                                    slashed = muted,
+                                ) { CallManager.toggleMute() }
+                                CallControl.SPEAKER -> AudioRouteButton(audioRoute, availableRoutes)
+                                // Lit while something behind it is running, so
+                                // "you are sharing your screen" is legible with
+                                // the dock shut.
+                                CallControl.MORE -> CallActionButton(
+                                    icon = MoreVertIcon,
+                                    desc = stringOf(R.string.call_more_options),
+                                    bg = if (screenSharing) ControlActive else ControlIdle,
+                                    tint = if (screenSharing) CallBackground else Color.White,
+                                    size = BAR_BUTTON_SIZE,
+                                    label = stringOf(R.string.call_more),
+                                ) { dockOpen = !dockOpen }
+                                CallControl.HANGUP -> CallActionButton(
+                                    icon = CallEndIcon,
+                                    desc = stringOf(R.string.call_hang_up),
+                                    bg = HangupRed,
+                                    size = BAR_BUTTON_SIZE,
+                                    label = stringOf(R.string.call_end_label),
+                                ) { CallManager.hangup() }
+                                // Dock-only; layoutCallControls never puts
+                                // these in the bar.
+                                else -> Unit
+                            }
+                        }
                     }
-                    // Screen share — on voice calls as well as video ones,
-                    // which is the point of it: a voice call that starts
-                    // sharing grows a picture it did not have.
-                    ScreenShareButton(sharing = screenSharing)
-                    // Chat: open the conversation and shrink the call into
-                    // picture-in-picture — the call keeps running, it only
-                    // changes where it is drawn.
-                    CallActionButton(
-                        icon = ChatBubbleIcon,
-                        desc = stringOf(R.string.call_open_chat),
-                        bg = ControlIdle,
-                        size = 60.dp,
-                        label = stringOf(R.string.call_chat),
-                    ) { onOpenChat(peer, peerLabel) }
-                    AudioRouteButton(audioRoute, availableRoutes)
-                    CallActionButton(
-                        icon = CallEndIcon,
-                        desc = stringOf(R.string.call_hang_up),
-                        bg = HangupRed,
-                        size = 60.dp,
-                        label = stringOf(R.string.call_end_label),
-                    ) { CallManager.hangup() }
                 }
             }
         }
@@ -847,7 +980,17 @@ private fun CallActionButton(
         }
         if (label != null) {
             Spacer(Modifier.height(6.dp))
-            Text(label, color = Color(0xB3FFFFFF), fontSize = 12.sp, maxLines = 1)
+            // Ellipsised, not clipped: the bar gives each control an equal
+            // slice of the screen, and "Wired headset" is wider than a fifth
+            // of a phone.
+            Text(
+                label,
+                color = Color(0xB3FFFFFF),
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
@@ -895,7 +1038,7 @@ private fun AudioRouteButton(current: AudioRoute, availableRoutes: List<AudioRou
             desc = stringOf(R.string.call_speaker) + ": " + audioRouteLabel(current),
             bg = if (active) ControlActive else ControlIdle,
             tint = if (active) CallBackground else Color.White,
-            size = 60.dp,
+            size = BAR_BUTTON_SIZE,
             label = audioRouteLabel(current),
         ) { expanded = true }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
@@ -938,9 +1081,32 @@ private fun VideoRenderer(
         return
     }
     val context = LocalContext.current
+    // The frame's own dimensions, reported by WebRTC as they change (the peer
+    // rotating, or starting a screen share). Drives the fill-vs-letterbox
+    // decision below; 0×0 until the first frame, which reads as "fill".
+    var frameWidth by remember { mutableIntStateOf(0) }
+    var frameHeight by remember { mutableIntStateOf(0) }
     val renderer = remember {
         SurfaceViewRenderer(context).apply {
-            init(egl, null)
+            init(
+                egl,
+                object : RendererCommon.RendererEvents {
+                    override fun onFirstFrameRendered() = Unit
+
+                    // Fired on a WebRTC thread; Compose state writes are safe
+                    // from any thread, and the recomposition it schedules lands
+                    // on the main one.
+                    override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) {
+                        // Report the frame the way it will be *drawn*: at 90°
+                        // or 270° the sides swap, and comparing an un-rotated
+                        // frame against the box would letterbox exactly the
+                        // portrait video that should fill.
+                        val rotated = rotation == 90 || rotation == 270
+                        frameWidth = if (rotated) height else width
+                        frameHeight = if (rotated) width else height
+                    }
+                },
+            )
             setEnableHardwareScaler(true)
             setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
             // Must be set before the view attaches: the picture-in-picture
@@ -956,9 +1122,30 @@ private fun VideoRenderer(
         track?.addSink(renderer)
         onDispose { track?.removeSink(renderer) }
     }
-    // Mirror is applied in update (not just at creation): it flips whenever the
-    // user swaps which tile shows the front-camera preview.
-    AndroidView(factory = { renderer }, update = { it.setMirror(mirror) }, modifier = modifier)
+    // Mirror and scaling are applied in update (not just at creation): mirror
+    // flips whenever the user swaps which tile shows the front camera, and the
+    // scaling type changes the moment a peer starts sharing a 16:9 screen onto
+    // this portrait surface.
+    AndroidView(
+        factory = { renderer },
+        update = { view ->
+            view.setMirror(mirror)
+            val letterbox = shouldLetterbox(
+                frameWidth = frameWidth,
+                frameHeight = frameHeight,
+                boxWidth = view.width,
+                boxHeight = view.height,
+            )
+            view.setScalingType(
+                if (letterbox) {
+                    RendererCommon.ScalingType.SCALE_ASPECT_FIT
+                } else {
+                    RendererCommon.ScalingType.SCALE_ASPECT_FILL
+                },
+            )
+        },
+        modifier = modifier,
+    )
 }
 
 /**

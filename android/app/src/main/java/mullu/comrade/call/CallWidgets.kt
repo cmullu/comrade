@@ -168,3 +168,45 @@ fun ConnectionStrengthIndicator(quality: CallQuality, modifier: Modifier = Modif
         }
     }
 }
+
+/**
+ * Above this much of the picture lost to cropping, a renderer letterboxes
+ * (`SCALE_ASPECT_FIT`) instead of filling (`SCALE_ASPECT_FILL`).
+ *
+ * A third is the useful line, and the cases either side of it are why: a 4:3
+ * camera frame on a tall phone loses 25% to the crop, and every call app fills
+ * there — bars around a face look broken; a 16:9 *screen* on a portrait phone
+ * loses 68%, which is not a crop so much as a different picture.
+ *
+ * Kept in step with `kMaxCroppedFraction` (Dart) and `MAX_CROPPED_FRACTION`
+ * (desktop).
+ */
+const val MAX_CROPPED_FRACTION = 1.0 / 3.0
+
+/**
+ * Whether a frame should be letterboxed rather than cropped to fill its box.
+ *
+ * Deliberately a question about geometry, not about what the far end is doing:
+ * "is the peer sharing a screen" would need a wire-format field the protocol
+ * does not have, and guessing it from orientation gets a landscape tablet
+ * wrong. "Would filling this box destroy the picture" is answerable from the
+ * frame that already arrived.
+ *
+ * Answers false for anything it cannot judge — no frame yet, a box not laid out
+ * — because filling is the safe default and what every other surface does.
+ */
+fun shouldLetterbox(
+    frameWidth: Int,
+    frameHeight: Int,
+    boxWidth: Int,
+    boxHeight: Int,
+    maxCropped: Double = MAX_CROPPED_FRACTION,
+): Boolean {
+    if (frameWidth <= 0 || frameHeight <= 0 || boxWidth <= 0 || boxHeight <= 0) return false
+    val frameAspect = frameWidth.toDouble() / frameHeight.toDouble()
+    val boxAspect = boxWidth.toDouble() / boxHeight.toDouble()
+    // Cover scales until the box is covered, so the fraction of the source
+    // still visible is the ratio of the smaller aspect to the larger.
+    val visible = if (frameAspect < boxAspect) frameAspect / boxAspect else boxAspect / frameAspect
+    return (1.0 - visible) > maxCropped
+}
