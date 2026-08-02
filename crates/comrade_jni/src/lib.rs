@@ -863,6 +863,12 @@ impl Comrade {
         self.inner.blocking_read().suggested_focus_minutes()
     }
 
+    /// The session lengths to offer. Infallible and vault-free — see
+    /// `ComradeRuntime::focus_presets`.
+    pub fn focus_presets(&self) -> Vec<u32> {
+        self.inner.blocking_read().focus_presets()
+    }
+
     pub fn focus_prompt(&self) -> Result<String, UiError> {
         self.inner.blocking_read().focus_prompt()
     }
@@ -1166,6 +1172,9 @@ mod tests {
             Err(UiError::VaultLocked)
         ));
         assert!(matches!(c.reading(), Err(UiError::VaultLocked)));
+        // …except the preset list, which a locked frontend still needs in
+        // order to draw its own duration chips.
+        assert!(!c.focus_presets().is_empty());
     }
 
     #[test]

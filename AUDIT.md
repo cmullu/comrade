@@ -481,9 +481,24 @@ user has)? Owner call required before any companion code.
 > session nobody was present for is recorded as *lapsed* rather than allowed to
 > flatter the ladder that reads it. OQ12 answered "on by default" (the gentle
 > stop costs nothing and needs no permission); OQ14 answered "Android-first",
-> matching every pillar so far — the desktop's 17 Tauri commands are registered
-> and compile-checked, its web UI still pending like the journal's. Design doc
-> and as-built record: [`docs/ATTENTION.md`](docs/ATTENTION.md).
+> matching every pillar so far.
+>
+> **Update (2026-08-02, desktop Focus tab).** OQ14 is now partly closed: the
+> vanilla-JS UI has a **Focus tab** carrying the two halves of phase 2 that
+> need nothing from Android — focus sessions and the long read
+> (`desktop/ui/index.html`, `desktop/ui/main.js`, decisions in
+> `desktop/ui/focus_view.mjs` with 12 `node --test` cases). The usage mirror is
+> deliberately absent there: its rollups come from Android's
+> `UsageStatsManager` and the store is per-device, so the panel could only ever
+> read zero. The clock re-reads `active_focus_session` each second instead of
+> counting down locally, because that call is also what resolves a lapse. And
+> the preset ladder now has **one** source — `ComradeRuntime::focus_presets`
+> (`crates/comrade_ui/src/runtime.rs`), the single attention command that needs
+> no vault, since the rungs are a constant of the design rather than the user's
+> data. Android's hardcoded `listOf(25, 45, 90)` is gone; a `comrade_core`
+> test pins that every offered rung is one `suggest_focus_minutes` can suggest
+> back. Design doc and as-built record:
+> [`docs/ATTENTION.md`](docs/ATTENTION.md).
 
 ### 8.1 Calls — voice & video (owner request, 2026-07-12)
 

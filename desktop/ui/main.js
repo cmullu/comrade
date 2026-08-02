@@ -91,6 +91,20 @@
   const opensFullScreen = (mime) =>
     attachmentCaption ? attachmentCaption.opensFullScreen(mime) : false;
 
+  // ── Focus view decisions (desktop/ui/focus_view.mjs) ───────────────────────
+  // Countdown formatting, which duration chip is selected, and where the
+  // reader is. Loaded the same way as the modules above. Every call site here
+  // is inside a click handler or a render that runs after unlock, so the
+  // module has long since resolved; `focusReady` is awaited once before the
+  // first paint of the tab so there is no null window at all.
+  let focusView = null;
+  const focusReady = import("./focus_view.mjs");
+  focusReady
+    .then((m) => {
+      focusView = m;
+    })
+    .catch(() => {});
+
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
 
@@ -227,6 +241,20 @@
     // rememberEndedCall) — mirrors Android's CallManager.endedCallIds, so a
     // redelivered Offer for a call we already tore down doesn't ring again.
     endedCallIds: [],
+    // Attention practice (docs/ATTENTION.md phase 2). `presets`/`suggested`
+    // are the engine's, never this file's; `chosen` is only what the user
+    // clicked, resolved against the presets by focus_view.chosenPreset.
+    focus: {
+      presets: [],
+      suggested: 0,
+      chosen: null,
+      prompt: "",
+      active: null,
+      history: [],
+      reflection: null,
+      reading: null,
+      tick: null,
+    },
   };
 
   // Prefer a peer's published handle over the raw npub when we have one.
@@ -454,6 +482,15 @@
       // A fresh unlock may be a different identity in the same window: nothing
       // decrypted for the previous one may still be renderable.
       await revokeAllMediaUrls();
+      // A different identity has a different practice: drop the previous
+      // one's session, history and half-read text rather than leaving them on
+      // screen under the new npub.
+      stopFocusTick();
+      state.focus.active = null;
+      state.focus.history = [];
+      state.focus.reading = null;
+      state.focus.reflection = null;
+      state.focus.chosen = null;
       showToast(`Vault unlocked · ${shortNpub(id.npub)}`, "success");
 
       const ws = await safeInvoke("current_workspace", undefined, {
@@ -470,6 +507,10 @@
       await loadConversations();
       await loadRequests();
       await loadComrades();
+      // Cheap, and it means a session left running in a previous launch is
+      // resolved (completed or lapsed) the moment the vault opens, not
+      // whenever the user happens to visit the tab.
+      await loadFocus();
     } catch {
       /* error already toasted */
     } finally {
@@ -587,6 +628,12 @@
     }
     $("#view-sabha").hidden = name !== "sabha";
     $("#view-vault").hidden = name !== "vault";
+    $("#view-focus").hidden = name !== "focus";
+    // The countdown only has to tick while it is being looked at; a session
+    // left running behind another tab is still authoritative in the engine,
+    // which is where the remaining time comes from on the next paint.
+    if (name === "focus") loadFocus();
+    else stopFocusTick();
   }
 
   // ── Milestone 2/3: Vault DMs ──────────────────────────────────────────────
@@ -2845,6 +2892,263 @@
     }
   }
 
+  // ── Focus: attention practice (docs/ATTENTION.md phase 2) ─────────────────
+  //
+  // Sessions and the long read, both strictly local — nothing on this tab
+  // touches a relay or the mesh. The engine owns every judgement: which
+  // durations exist, which one to suggest, whether a session that outlived its
+  // plan completed or lapsed, and how the text is chunked. This file draws the
+  // answers and reports the clicks.
+  //
+  // There is no usage mirror here. It is fed by Android's UsageStatsManager
+  // and the store is per-device, so a desktop panel could only ever read zero
+  // — and a panel that always says zero is a worse answer than no panel.
+
+  async function loadFocus() {
+    if (!state.identity) return; // vault still locked; the tab paints on unlock
+    if (!focusView) await focusReady.catch(() => {});
+    try {
+      const [presets, suggested, prompt, active, history, reading] = await Promise.all([
+        safeInvoke("focus_presets", undefined, { silent: true }).catch(() => []),
+        safeInvoke("suggested_focus_minutes"),
+        safeInvoke("focus_prompt"),
+        safeInvoke("active_focus_session"),
+        safeInvoke("focus_sessions"),
+        safeInvoke("reading"),
+      ]);
+      state.focus.presets = Array.isArray(presets) ? presets : [];
+      state.focus.suggested = suggested;
+      state.focus.prompt = prompt || "";
+      state.focus.active = active || null;
+      // Only finished sessions are history; the running one has its own card.
+      state.focus.history = (Array.isArray(history) ? history : []).filter((s) => s.outcome);
+      state.focus.reading = reading || null;
+      renderFocus();
+      renderReader();
+    } catch {
+      /* toasted */
+    }
+  }
+
+  function renderFocus() {
+    if (!focusView) return;
+    const f = state.focus;
+    const running = f.active;
+
+    $("#focus-idle").hidden = !!running;
+    $("#focus-running").hidden = !running;
+
+    if (running) {
+      $("#focus-running-intent").textContent =
+        (running.intent || "").trim() || "This block, on one thing.";
+      $("#focus-clock").textContent = focusView.formatCountdown(running.remaining_secs);
+      startFocusTick();
+    } else {
+      stopFocusTick();
+      $("#focus-prompt").textContent = f.prompt;
+      const selected = focusView.chosenPreset(f.presets, f.suggested, f.chosen);
+      const row = $("#focus-presets");
+      row.replaceChildren(
+        ...f.presets.map((m) =>
+          el("button", {
+            class: "chip",
+            type: "button",
+            text: `${m}m`,
+            "aria-pressed": m === selected ? "true" : "false",
+            onClick: () => {
+              state.focus.chosen = m;
+              renderFocus();
+            },
+          }),
+        ),
+      );
+      // "From your own sessions" is only true once there are some. On a first
+      // run the suggestion is the ladder's floor, and saying otherwise would
+      // credit the user with a history they do not have.
+      $("#focus-suggestion").textContent = !selected
+        ? ""
+        : f.history.length === 0
+          ? `Starting at ${f.suggested}m. Longer blocks open up as you use them.`
+          : `Suggested: ${f.suggested}m, from your own sessions.`;
+      $("#focus-start").disabled = selected == null;
+    }
+
+    const reflection = $("#focus-reflection");
+    reflection.textContent = f.reflection || "";
+    reflection.hidden = !f.reflection;
+
+    const list = $("#focus-history");
+    list.replaceChildren(
+      ...f.history.slice(0, 10).map((s) => el("li", { text: focusView.historyLine(s) })),
+    );
+    $("#focus-history-empty").hidden = f.history.length > 0;
+  }
+
+  /**
+   * Re-read the running session once a second.
+   *
+   * The remaining time is not counted down locally: the engine is the
+   * authority, and it is also what decides that a session which outlived its
+   * plan plus the grace window has *lapsed* rather than completed. Asking it
+   * every second is how that resolution reaches the screen at all — a local
+   * timer would happily count into the negatives on a machine that slept.
+   */
+  function startFocusTick() {
+    if (state.focus.tick) return;
+    state.focus.tick = setInterval(async () => {
+      // Nothing to repaint while the tab is off screen — behind another tab,
+      // behind the Couple overlay, or behind a relocked vault door. The
+      // session keeps running in the engine either way; this is only the clock.
+      if (document.body.dataset.screen !== "app" || $("#view-focus").hidden) return;
+      let active = null;
+      try {
+        active = await safeInvoke("active_focus_session", undefined, { silent: true });
+      } catch {
+        return; // transient; the next tick tries again
+      }
+      if (!active) {
+        // It ended on its own — reload so the outcome shows up in the history
+        // instead of the session simply vanishing.
+        state.focus.active = null;
+        await loadFocus();
+        return;
+      }
+      state.focus.active = active;
+      if (focusView) $("#focus-clock").textContent = focusView.formatCountdown(active.remaining_secs);
+    }, 1000);
+  }
+
+  function stopFocusTick() {
+    if (!state.focus.tick) return;
+    clearInterval(state.focus.tick);
+    state.focus.tick = null;
+  }
+
+  async function handleFocusStart() {
+    if (!focusView) return;
+    const minutes = focusView.chosenPreset(
+      state.focus.presets,
+      state.focus.suggested,
+      state.focus.chosen,
+    );
+    if (minutes == null) return;
+    const btn = $("#focus-start");
+    setBusy(btn, true);
+    try {
+      const started = await safeInvoke("start_focus_session", {
+        intent: $("#focus-intent").value.trim(),
+        plannedMinutes: minutes,
+      });
+      state.focus.active = started;
+      state.focus.reflection = null;
+      $("#focus-intent").value = "";
+      renderFocus();
+    } catch {
+      /* toasted */
+    } finally {
+      setBusy(btn, false);
+    }
+  }
+
+  /**
+   * End the running session.
+   *
+   * `completed` is what the *user* claims; the engine may still record a lapse
+   * if nobody was present for the block, and the reflection line is asked for
+   * by the outcome it actually stored rather than the one requested. Letting
+   * the claim win would flatter the ladder that reads this history, which
+   * would make the practice it measures fictional.
+   */
+  async function handleFocusFinish(completed) {
+    stopFocusTick();
+    try {
+      const finished = await safeInvoke("finish_focus_session", { completed });
+      state.focus.active = null;
+      state.focus.reflection = finished?.outcome
+        ? await safeInvoke("focus_reflection", { outcome: finished.outcome }, { silent: true }).catch(
+            () => null,
+          )
+        : null;
+      await loadFocus();
+    } catch {
+      await loadFocus();
+    }
+  }
+
+  // ── Long read ─────────────────────────────────────────────────────────────
+
+  function renderReader() {
+    if (!focusView) return;
+    const r = state.focus.reading;
+    $("#reader-compose").hidden = !!r;
+    $("#reader-open").hidden = !r;
+    if (!r) return;
+
+    const nav = focusView.readerNav(r.position, r.chunks.length);
+    $("#reader-open-title").textContent = r.title || "Long read";
+    $("#reader-chunk").textContent = r.chunks[nav.position] || "";
+    $("#reader-progress").textContent = nav.label;
+    $("#reader-prev").disabled = !nav.canPrev;
+    $("#reader-next").disabled = !nav.canNext;
+    $("#reader-finished").hidden = !nav.atEnd;
+  }
+
+  async function handleReaderSave() {
+    const text = $("#reader-text").value;
+    if (!text.trim()) {
+      showToast("Paste something to read first", "warn");
+      return;
+    }
+    const btn = $("#reader-save");
+    setBusy(btn, true);
+    try {
+      state.focus.reading = await safeInvoke("save_reading", {
+        title: $("#reader-title").value.trim(),
+        text,
+      });
+      $("#reader-title").value = "";
+      $("#reader-text").value = "";
+      renderReader();
+    } catch {
+      /* toasted */
+    } finally {
+      setBusy(btn, false);
+    }
+  }
+
+  async function handleReaderStep(delta) {
+    if (!focusView) return;
+    const r = state.focus.reading;
+    if (!r) return;
+    const to = focusView.stepReader(r.position, r.chunks.length, delta);
+    // null means the position did not change — every step is a write into the
+    // encrypted store, so a click at either end must not become one.
+    if (to == null) return;
+    // Paint immediately and let the engine's clamped answer overwrite it; the
+    // reader should not wait on a disk write to turn the page.
+    state.focus.reading = { ...r, position: to };
+    renderReader();
+    try {
+      const updated = await safeInvoke("set_reading_position", { position: to });
+      if (updated) {
+        state.focus.reading = updated;
+        renderReader();
+      }
+    } catch {
+      /* toasted; the optimistic position stands until the next load */
+    }
+  }
+
+  async function handleReaderClear() {
+    try {
+      await safeInvoke("clear_reading");
+      state.focus.reading = null;
+      renderReader();
+    } catch {
+      /* toasted */
+    }
+  }
+
   // ── Milestone 3: real-time event wiring ───────────────────────────────────
   async function wireEvents() {
     try {
@@ -2912,6 +3216,15 @@
 
     $("#chitthi-input").addEventListener("input", updateCount);
     $("#broadcast-btn").addEventListener("click", handleBroadcast);
+
+    // Focus (attention practice — all local)
+    $("#focus-start").addEventListener("click", handleFocusStart);
+    $("#focus-done").addEventListener("click", () => handleFocusFinish(true));
+    $("#focus-stop").addEventListener("click", () => handleFocusFinish(false));
+    $("#reader-save").addEventListener("click", handleReaderSave);
+    $("#reader-next").addEventListener("click", () => handleReaderStep(1));
+    $("#reader-prev").addEventListener("click", () => handleReaderStep(-1));
+    $("#reader-clear").addEventListener("click", handleReaderClear);
     $("#dm-input").addEventListener("input", (e) => {
       reportDraftEdit();
       handleDmInput(e);
@@ -3035,6 +3348,8 @@
     // Local Sakha/Sakhi pairing + ledger state, so the pairing modal and the
     // Couple Sandbox behave believably in browser preview.
     let mockSakha = { paired: false, partnerNpub: null, role: null, ledger: "" };
+    // Focus practice state for browser preview (see the `focus_*` cases below).
+    const mockFocus = { active: null, sessions: [], reading: null };
 
     const invoke = async (cmd, args = {}) => {
       await delay(120);
@@ -3184,6 +3499,79 @@
           };
         case "call_history":
           return [];
+
+        // ── Focus (attention practice) ──────────────────────────────────────
+        // Enough state to exercise the tab in browser preview: the mock keeps
+        // one session and one read, so start → countdown → finish and
+        // paste → page → close both behave. The ladder is not modelled — the
+        // engine owns it, and a mock that guessed at it would be a second
+        // opinion about the one thing this UI must not have an opinion on.
+        case "focus_presets":
+          return [25, 45, 90];
+        case "suggested_focus_minutes":
+          return 25;
+        case "focus_prompt":
+          return "Name one thing. The rest can wait. (mock)";
+        case "focus_reflection":
+          return args.outcome === "completed"
+            ? "You gave it the whole block. What came of it? (mock)"
+            : "Noted, and that's all. (mock)";
+        case "active_focus_session":
+          if (!mockFocus.active) return null;
+          mockFocus.active.remaining_secs = Math.max(
+            0,
+            mockFocus.active.planned_minutes * 60 - (nowSecs() - mockFocus.active.started_at),
+          );
+          return mockFocus.active;
+        case "start_focus_session":
+          mockFocus.active = {
+            id: "mockfocus_" + Date.now(),
+            intent: args.intent || "",
+            planned_minutes: args.plannedMinutes,
+            started_at: nowSecs(),
+            ended_at: null,
+            outcome: null,
+            remaining_secs: args.plannedMinutes * 60,
+          };
+          return mockFocus.active;
+        case "finish_focus_session": {
+          const done = mockFocus.active;
+          if (!done) return null;
+          done.outcome = args.completed ? "completed" : "abandoned";
+          done.ended_at = nowSecs();
+          done.remaining_secs = 0;
+          mockFocus.sessions.unshift(done);
+          mockFocus.active = null;
+          return done;
+        }
+        case "focus_sessions":
+          return mockFocus.sessions.slice();
+        case "save_reading":
+          mockFocus.reading = {
+            title: args.title || "",
+            // A stand-in for `attention::chunk_reading`, which splits on
+            // paragraph boundaries. Same shape, not the same algorithm.
+            chunks: String(args.text)
+              .split(/\n{2,}/)
+              .filter((c) => c.trim()),
+            position: 0,
+          };
+          return mockFocus.reading;
+        case "reading":
+          return mockFocus.reading;
+        case "set_reading_position":
+          if (!mockFocus.reading) return null;
+          mockFocus.reading.position = Math.min(
+            Math.max(0, args.position),
+            mockFocus.reading.chunks.length - 1,
+          );
+          return mockFocus.reading;
+        case "clear_reading": {
+          const had = !!mockFocus.reading;
+          mockFocus.reading = null;
+          return had;
+        }
+
         default:
           throw `mock backend: unknown command '${cmd}'`;
       }

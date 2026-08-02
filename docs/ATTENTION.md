@@ -358,9 +358,40 @@ with `VaultLocked`. Three decisions worth naming:
 | **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen (haptic-paced, and it tells your comrades you might need them) |
 | **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |
 
+### Desktop
+
+The Focus tab (`desktop/ui/index.html` · `main.js` · `focus_view.mjs`) — a
+third nav slot beside Sabha and Vault, carrying the two halves of phase 2 that
+need nothing from Android: focus sessions and the long read. The decisions are
+in `focus_view.mjs` with 12 `node --test` cases, following the
+`call_decisions.mjs` / `media_cache.mjs` split, because `main.js` is DOM glue
+and cannot be tested.
+
+Three things it deliberately does not do:
+
+- **No usage mirror.** The rollups come from Android's `UsageStatsManager` and
+  the store is per-device, so a desktop panel could only ever read zero. A
+  panel that always says zero is a worse answer than no panel.
+- **No local countdown.** The clock re-reads `active_focus_session` once a
+  second rather than counting down in JS, because that call is also what
+  resolves a session which outlived its plan into a *lapse*. A local timer
+  would count into the negatives on a machine that slept.
+- **No opinion about the ladder.** Which durations exist is now
+  `ComradeRuntime::focus_presets`, the one attention command that needs no
+  vault (the rungs are a constant of the design, not the user's data). Android
+  and desktop both read it; neither keeps a list. `chosenPreset` refuses to
+  select a length outside it, and an engine test pins that every offered rung
+  is one `suggest_focus_minutes` can actually suggest back — the previous
+  hardcoded `listOf(25, 45, 90)` on Android was a second copy waiting to drift.
+
 Verified locally against the real CI lanes: `cargo fmt --check`, `clippy
---workspace --all-targets -D warnings`, `cargo test --workspace` (449 tests),
-the desktop Tauri clippy lane, and `./gradlew test` (188 Android tests).
+--workspace --all-targets -D warnings`, `cargo test --workspace` (490 tests),
+the desktop Tauri clippy lane, `node --test desktop/ui/*.test.mjs` (90 tests),
+and `./gradlew test` (247 Android JVM tests) — which also regenerates the
+uniffi bindings, so it is what proves `focusPresets()` actually crosses the
+FFI. Still unverified anywhere: nobody has *used* the desktop tab against a
+real vault; it is exercised only by its unit tests and the browser-preview
+mock.
 
 ### Open, and honestly so
 
@@ -371,9 +402,10 @@ the desktop Tauri clippy lane, and `./gradlew test` (188 Android tests).
   with usage access refused — only the mirror card is absent.
 - **OQ12** answered as "on by default": the gentle stop needs no permission and
   costs nothing, so a calm product is calm out of the box.
-- **OQ14** answered as Android-first, matching every pillar so far. The desktop
-  Tauri commands are registered and compile-checked in CI, but the vanilla-JS
-  web UI renders neither these nor the journal nor Tara.
+- **OQ14** answered as Android-first, then partly closed: the desktop web UI
+  now has a **Focus tab** — sessions and the long read, the two halves that are
+  platform-neutral. See "Desktop" below. The journal and Tara are still absent
+  there, and so is the usage mirror.
 - **No on-device trend chart yet.** Phase 4's *storage and API* shipped
   (`attention_days` keeps the full history and `attention_days()` returns it),
   and the monthly self-check-in did not — it is a small addition on top of the

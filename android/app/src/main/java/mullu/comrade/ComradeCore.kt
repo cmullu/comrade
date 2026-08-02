@@ -689,6 +689,14 @@ object ComradeCore {
     fun suggestedFocusMinutesTyped(): Int =
         rethrowing("Focus suggestion") { ffi.suggestedFocusMinutes().toInt() }
 
+    /**
+     * The session lengths to offer, ascending. Comes from the engine rather
+     * than a list in the UI so the chips can never offer a rung
+     * [suggestedFocusMinutesTyped] would not suggest back.
+     */
+    fun focusPresets(): List<Int> =
+        rethrowing("Focus presets") { ffi.focusPresets().map { it.toInt() } }
+
     fun focusPrompt(): String = rethrowing("Focus prompt") { ffi.focusPrompt() }
 
     fun focusReflectionTyped(outcome: String): String =

@@ -73,6 +73,10 @@
             <span class="tab-icon" aria-hidden="true">🔐</span>
             <span class="tab-text">Vault <span class="tab-sub">Encrypted DMs</span></span>
           </button>
+          <button class="tab" data-tab="focus" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">⏳</span>
+            <span class="tab-text">Focus <span class="tab-sub">Sessions · Long read</span></span>
+          </button>
         </nav>
 
         <div class="sidebar-section" aria-label="Modes">
@@ -191,6 +195,105 @@
                 detection is active, and the 📎 attaches an encrypted photo/audio
                 (max 10 MB).
               </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Focus — attention practice (docs/ATTENTION.md phase 2). Strictly
+             local: no relay, no network, nothing leaves this machine. There is
+             no usage mirror here on purpose; it is fed by Android's usage
+             stats and the store is per-device, so a desktop panel could only
+             ever read zero. -->
+        <section id="view-focus" class="view view-focus" role="tabpanel" hidden>
+          <div class="focus-col">
+            <div class="composer focus-card">
+              <div class="focus-head">
+                <h3>Focus session</h3>
+                <span class="muted">One thing, for as long as you chose. Stays on this machine.</span>
+              </div>
+
+              <!-- Idle: name the thing, pick a length -->
+              <div id="focus-idle">
+                <p id="focus-prompt" class="focus-prompt"></p>
+                <input
+                  id="focus-intent"
+                  class="input"
+                  maxlength="200"
+                  placeholder="What will you give this time to?"
+                />
+                <div id="focus-presets" class="chip-row" role="group" aria-label="Session length">
+                  <!-- chips injected from the engine's preset list -->
+                </div>
+                <div class="composer-foot">
+                  <span id="focus-suggestion" class="muted"></span>
+                  <button id="focus-start" class="btn btn-primary">Start</button>
+                </div>
+              </div>
+
+              <!-- Running: the clock, and two honest ways out -->
+              <div id="focus-running" hidden>
+                <p id="focus-running-intent" class="focus-running-intent"></p>
+                <p id="focus-clock" class="focus-clock" aria-live="off">0:00</p>
+                <div class="focus-actions">
+                  <button id="focus-done" class="btn btn-primary">Done</button>
+                  <button id="focus-stop" class="btn btn-ghost">Stop early</button>
+                </div>
+                <p class="hint sm">
+                  Stopping early is recorded as stopping early. It is information,
+                  not a failure — nothing here keeps a score.
+                </p>
+              </div>
+
+              <p id="focus-reflection" class="focus-reflection" hidden></p>
+            </div>
+
+            <div class="composer focus-card">
+              <div class="focus-head">
+                <h3>Recent sessions</h3>
+              </div>
+              <ul id="focus-history" class="focus-history"></ul>
+              <div id="focus-history-empty" class="empty sm">
+                <p>No sessions yet.</p>
+              </div>
+            </div>
+
+            <div class="composer focus-card">
+              <div class="focus-head">
+                <h3>Long read</h3>
+              </div>
+
+              <!-- Nothing loaded: paste something -->
+              <div id="reader-compose">
+                <input id="reader-title" class="input" maxlength="200" placeholder="Title (optional)" />
+                <textarea
+                  id="reader-text"
+                  class="textarea"
+                  rows="5"
+                  placeholder="Paste something worth your attention…"
+                ></textarea>
+                <div class="composer-foot">
+                  <span class="muted">
+                    Stored encrypted, like your journal. Comrade never fetches it
+                    from the web for you.
+                  </span>
+                  <button id="reader-save" class="btn btn-primary">Start reading</button>
+                </div>
+              </div>
+
+              <!-- Loaded: one chunk at a time -->
+              <div id="reader-open" hidden>
+                <h4 id="reader-open-title" class="reader-open-title"></h4>
+                <p id="reader-chunk" class="reader-chunk"></p>
+                <p id="reader-finished" class="hint sm" hidden>
+                  That's the end. Worth a line about it?
+                </p>
+                <div class="reader-foot">
+                  <button id="reader-prev" class="btn btn-ghost">Back</button>
+                  <span id="reader-progress" class="muted"></span>
+                  <button id="reader-next" class="btn btn-primary">Next</button>
+                </div>
+                <button id="reader-clear" class="btn btn-ghost btn-block">Close this read</button>
+              </div>
             </div>
           </div>
         </section>

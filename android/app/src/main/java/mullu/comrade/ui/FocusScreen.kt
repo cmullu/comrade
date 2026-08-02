@@ -75,6 +75,10 @@ fun FocusScreen(
     var active by remember { mutableStateOf<ComradeCore.FocusSessionInfo?>(null) }
     var history by remember { mutableStateOf<List<ComradeCore.FocusSessionInfo>>(emptyList()) }
     var suggested by remember { mutableIntStateOf(25) }
+    // Empty until the engine answers, deliberately: a placeholder row would be
+    // this screen's own opinion about the ladder, and the ladder is the
+    // engine's (`comrade_core::attention::FOCUS_PRESETS`).
+    var presets by remember { mutableStateOf<List<Int>>(emptyList()) }
     var prompt by remember { mutableStateOf("") }
     var intent by remember { mutableStateOf("") }
     var chosenMinutes by remember { mutableIntStateOf(0) }
@@ -91,6 +95,7 @@ fun FocusScreen(
                 active = ComradeCore.activeFocusSessionTyped()
                 history = ComradeCore.focusSessions().filter { it.outcome != null }
                 suggested = ComradeCore.suggestedFocusMinutesTyped()
+                presets = ComradeCore.focusPresets()
                 prompt = ComradeCore.focusPrompt()
             }.onFailure { error = it.message }
         }
@@ -178,7 +183,7 @@ fun FocusScreen(
                                 .testTag("focus-intent"),
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            FocusPresets.forEach { minutes ->
+                            presets.forEach { minutes ->
                                 FilterChip(
                                     selected = chosenMinutes == minutes,
                                     onClick = { chosenMinutes = minutes },
@@ -338,13 +343,6 @@ fun FocusScreen(
         )
     }
 }
-
-/**
- * The offered durations. Mirrors `comrade_core::attention::FOCUS_PRESETS` —
- * the engine is the authority on what the ladder means, this is only the chip
- * row, and the engine still validates whatever is sent.
- */
-private val FocusPresets = listOf(25, 45, 90)
 
 private fun outcomeLabel(outcome: String?): Int = when (outcome) {
     "completed" -> R.string.focus_outcome_completed
