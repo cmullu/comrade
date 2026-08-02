@@ -419,21 +419,35 @@
         </div>
         <div id="call-video-paused" class="call-video-paused" hidden>Video paused</div>
       </div>
+      <!-- The bar holds only what must always be reachable, in Telegram's
+           order: camera, mic, ⋮, End. Everything else lives behind the ⋮ (see
+           `layoutCallControls` in call_decisions.mjs) — a bar that grows with
+           every new feature is a bar that eventually pushes End call off the
+           edge, which is exactly what happened on Android. -->
       <div class="call-controls">
-        <button id="call-mute" class="call-btn" title="Mute microphone" aria-label="Mute microphone">
-          <span class="call-btn-glyph">🎙</span>
-        </button>
+        <!-- The dock the ⋮ opens. Anchored to the bar so it rises out of the
+             button rather than appearing somewhere unrelated. -->
+        <div id="call-dock" class="call-dock" role="menu" aria-label="More call options" hidden>
+          <!-- Screen share: on voice calls as well as video ones. -->
+          <button id="call-screen-share" class="call-dock-item" role="menuitem" title="Share your screen">
+            <span class="call-dock-glyph" aria-hidden="true">🖥</span>
+            <span id="call-screen-share-label">Share screen</span>
+          </button>
+          <!-- Chat: opens the conversation and shrinks the call into a corner
+               tile inside this window, so both are on screen at once. -->
+          <button id="call-chat" class="call-dock-item" role="menuitem" title="Open chat (the call shrinks into a corner)">
+            <span class="call-dock-glyph" aria-hidden="true">💬</span>
+            <span>Chat</span>
+          </button>
+        </div>
         <button id="call-camera" class="call-btn" title="Turn camera off" aria-label="Turn camera off" hidden>
           <span class="call-btn-glyph">🎥</span>
         </button>
-        <!-- Screen share: on voice calls as well as video ones. -->
-        <button id="call-screen-share" class="call-btn" title="Share your screen" aria-label="Share your screen">
-          <span class="call-btn-glyph">🖥</span>
+        <button id="call-mute" class="call-btn" title="Mute microphone" aria-label="Mute microphone">
+          <span class="call-btn-glyph">🎙</span>
         </button>
-        <!-- Chat: opens the conversation and shrinks the call into a corner
-             tile inside this window, so both are on screen at once. -->
-        <button id="call-chat" class="call-btn" title="Open chat (the call shrinks into a corner)" aria-label="Open chat, the call shrinks into a corner">
-          <span class="call-btn-glyph">💬</span>
+        <button id="call-more" class="call-btn" title="More options" aria-label="More options" aria-haspopup="true" aria-expanded="false" aria-controls="call-dock">
+          <span class="call-btn-glyph">⋮</span>
         </button>
         <button id="call-hangup" class="call-btn call-btn-end" title="Hang up" aria-label="Hang up">
           <span class="call-btn-glyph">📵</span>

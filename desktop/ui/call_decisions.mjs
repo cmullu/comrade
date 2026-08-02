@@ -604,3 +604,78 @@ export function shouldLetterbox({
     frameAspect < boxAspect ? frameAspect / boxAspect : boxAspect / frameAspect;
   return 1 - visible > maxCropped;
 }
+
+// ── Which controls sit in the bar, and which behind the ⋮ ────────────────────
+//
+// This exists because the bar could not hold what was being put in it. Six
+// 60dp buttons plus their gaps need ~490dp of width; a phone gives ~360dp, and
+// a Row does not wrap — it just runs off the right edge, taking the last
+// children with it. The last child was **End call**, so answering a video call
+// produced a call you could not hang up from the call screen.
+//
+// The fix is a cap rather than a wrap: a fixed, small primary bar with the
+// overflow behind a ⋮, which is also what Telegram does. Keeping the split in
+// a pure function (mirrored by Dart's `layoutCallControls` and Kotlin's) makes
+// "End call is always in the bar, and the bar always fits" a test rather than
+// a thing you have to notice in a screenshot.
+
+/**
+ * Every control a call screen can offer. The values are the shared vocabulary
+ * across the three frontends; each one renders them with its own widgets.
+ * @type {Readonly<Record<string, string>>}
+ */
+export const CALL_CONTROL = Object.freeze({
+  CAMERA: "camera",
+  MIC: "mic",
+  SPEAKER: "speaker",
+  MORE: "more",
+  HANGUP: "hangup",
+  SCREEN_SHARE: "screenShare",
+  SWITCH_CAMERA: "switchCamera",
+  CHAT: "chat",
+});
+
+/**
+ * How many controls the bar may hold. Five 56dp buttons with their gaps fit the
+ * ~336dp a 360dp-wide phone leaves after padding; six do not, which is the
+ * whole reason this module has a layout function.
+ */
+export const MAX_PRIMARY_CALL_CONTROLS = 5;
+
+/**
+ * Split the call controls into the bar and the ⋮ dock behind it.
+ *
+ * Ordering follows Telegram: the two things you toggle constantly (camera,
+ * mic) first, then output, then the overflow, and **End call last** — on the
+ * right, alone, where a thumb reaching for mute cannot find it by accident.
+ *
+ * The capability flags are how one function serves three frontends without
+ * lying about any of them: a desktop has no earpiece to route audio to and no
+ * second camera to flip to, so it asks for neither and gets a four-control bar
+ * rather than two dead buttons.
+ *
+ * @param {object} input
+ * @param {boolean} input.video Whether this is a video call (a voice call has no camera control).
+ * @param {boolean} [input.cameraOn] The user's camera choice — flipping a camera that is off is meaningless, so the dock drops that entry.
+ * @param {boolean} [input.hasAudioRoutes] Whether the platform offers an audio-output picker.
+ * @param {boolean} [input.hasCameraSwitch] Whether the platform can switch between cameras.
+ * @returns {{primary: string[], dock: string[]}} `primary` in bar order (always ending in `HANGUP`), `dock` in menu order.
+ */
+export function layoutCallControls({
+  video,
+  cameraOn = true,
+  hasAudioRoutes = true,
+  hasCameraSwitch = true,
+}) {
+  const dock = [CALL_CONTROL.SCREEN_SHARE];
+  if (video && cameraOn && hasCameraSwitch) dock.push(CALL_CONTROL.SWITCH_CAMERA);
+  dock.push(CALL_CONTROL.CHAT);
+
+  const primary = [];
+  if (video) primary.push(CALL_CONTROL.CAMERA);
+  primary.push(CALL_CONTROL.MIC);
+  if (hasAudioRoutes) primary.push(CALL_CONTROL.SPEAKER);
+  if (dock.length > 0) primary.push(CALL_CONTROL.MORE);
+  primary.push(CALL_CONTROL.HANGUP);
+  return { primary, dock };
+}

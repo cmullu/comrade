@@ -11,6 +11,7 @@ import 'package:comrade/src/data/comrade_repository.dart';
 import 'package:comrade/src/data/models.dart';
 import 'package:comrade/src/platform/call_video.dart' show shouldLetterbox;
 import 'package:comrade/src/platform/pip_channel.dart';
+import 'package:comrade/src/screens/call_controls.dart';
 import 'package:comrade/src/screens/call_screen.dart';
 import 'package:comrade/src/state/call_providers.dart';
 import 'package:comrade/src/theme/comrade_theme.dart';
@@ -164,6 +165,13 @@ Future<
   controller.onConnected(atMs: DateTime.now().millisecondsSinceEpoch);
   await tester.pump();
   return (container: container, engine: engine, pip: pip);
+}
+
+/// Open the ⋮ dock. Screen share, camera flip and chat live behind it — the bar
+/// itself holds only camera, mic, output, ⋮ and End (see `call_controls.dart`).
+Future<void> openCallDock(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('call-more')));
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -432,6 +440,7 @@ void main() {
         onOpenChat: (String peer, String _) => openedPeer = peer,
       );
 
+      await openCallDock(tester);
       await tester.tap(find.byKey(const Key('call-chat')));
       await tester.pumpAndSettle();
 
@@ -467,6 +476,7 @@ void main() {
         onOpenChat: (String peer, String _) => openedPeer = peer,
       );
 
+      await openCallDock(tester);
       await tester.tap(find.byKey(const Key('call-chat')));
       await tester.pumpAndSettle();
 
@@ -504,9 +514,11 @@ void main() {
         FakePipChannel pip
       }) t = await pumpConnectedCall(tester, video: false);
 
-      // The button is there on a call that started without any video at all.
-      expect(find.byKey(const Key('call-screen-share')), findsOneWidget);
       expect(t.container.read(callProvider).showsVideoStage, isFalse);
+
+      // The option is there on a call that started without any video at all.
+      await openCallDock(tester);
+      expect(find.byKey(const Key('call-screen-share')), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('call-screen-share')));
       await tester.pumpAndSettle();
@@ -515,7 +527,10 @@ void main() {
       expect(t.container.read(callProvider).screenSharing, isTrue);
       expect(t.container.read(callProvider).showsVideoStage, isTrue,
           reason: 'a shared screen is a picture, so the stage appears');
+      // Reopening it, the row now offers the way out rather than the way in.
+      await openCallDock(tester);
       expect(find.text('Stop sharing'), findsOneWidget);
+      expect(find.text('Share screen'), findsNothing);
     });
 
     testWidgets('follows the platform, not the tap, when consent is refused',
@@ -528,13 +543,16 @@ void main() {
       // The user dismisses the system dialog.
       t.engine.screenShareAllowed = false;
 
+      await openCallDock(tester);
       await tester.tap(find.byKey(const Key('call-screen-share')));
       await tester.pumpAndSettle();
 
       expect(t.engine.screenShareRequests, <bool>[true]);
       expect(t.container.read(callProvider).screenSharing, isFalse,
           reason: 'a dismissed dialog must not leave the button lit');
+      await openCallDock(tester);
       expect(find.text('Share screen'), findsOneWidget);
+      expect(find.text('Stop sharing'), findsNothing);
     });
 
     testWidgets('the platform can stop it without being asked',
@@ -575,6 +593,7 @@ void main() {
     testWidgets('can be dragged anywhere and snaps to the nearer edge',
         (WidgetTester tester) async {
       await pumpConnectedCall(tester, video: true);
+      await openCallDock(tester);
       await tester.tap(find.byKey(const Key('call-chat')));
       await tester.pumpAndSettle();
 
@@ -604,6 +623,7 @@ void main() {
     testWidgets('never leaves the screen, however hard it is thrown',
         (WidgetTester tester) async {
       await pumpConnectedCall(tester, video: true);
+      await openCallDock(tester);
       await tester.tap(find.byKey(const Key('call-chat')));
       await tester.pumpAndSettle();
 
@@ -621,6 +641,193 @@ void main() {
       expect(tile.top, greaterThanOrEqualTo(0));
       expect(tile.right, lessThanOrEqualTo(screen.width));
       expect(tile.bottom, lessThanOrEqualTo(screen.height));
+    });
+  });
+
+  group('the control bar', () {
+    // The regression: the bar used to be every control in a row, which on a
+    // video call was six 60dp buttons on a screen that fits five. The overflow
+    // ran off the right edge and took the last child with it — End call — so a
+    // video call could not be hung up from the call screen.
+    for (final bool video in <bool>[true, false]) {
+      testWidgets(
+          'keeps End call on screen on a small phone — '
+          '${video ? 'video' : 'voice'}', (WidgetTester tester) async {
+        // A 360×640 phone: the narrowest shape worth supporting, and the one
+        // the old bar overflowed on.
+        tester.view.physicalSize = const Size(1080, 1920);
+        tester.view.devicePixelRatio = 3;
+        addTearDown(tester.view.reset);
+
+        await pumpConnectedCall(tester, video: video);
+
+        final Rect end = tester.getRect(find.byKey(const Key('call-hangup')));
+        expect(end.left, greaterThanOrEqualTo(0));
+        expect(end.right, lessThanOrEqualTo(360),
+            reason: 'End call must be inside the screen, not past its edge');
+        // And it is genuinely the rightmost control, as Telegram has it.
+        final Rect mic = tester.getRect(find.byKey(const Key('call-mute')));
+        expect(end.left, greaterThan(mic.left));
+      });
+    }
+
+    testWidgets('holds only what fits, with the rest behind the ⋮',
+        (WidgetTester tester) async {
+      await pumpConnectedCall(tester, video: true);
+
+      // In the bar.
+      for (final String key in <String>[
+        'call-camera',
+        'call-mute',
+        'call-speaker',
+        'call-more',
+        'call-hangup',
+      ]) {
+        expect(find.byKey(Key(key)), findsOneWidget, reason: '$key in the bar');
+      }
+      // Not in the bar until the ⋮ is opened.
+      expect(find.byKey(const Key('call-dock')), findsNothing);
+      expect(find.byKey(const Key('call-chat')), findsNothing);
+      expect(find.byKey(const Key('call-screen-share')), findsNothing);
+
+      await openCallDock(tester);
+      expect(find.byKey(const Key('call-dock')), findsOneWidget);
+      expect(find.byKey(const Key('call-chat')), findsOneWidget);
+      expect(find.byKey(const Key('call-screen-share')), findsOneWidget);
+      expect(find.byKey(const Key('call-switch-camera')), findsOneWidget);
+      // Ending the call is still one tap away with the dock open.
+      expect(find.byKey(const Key('call-hangup')), findsOneWidget);
+    });
+
+    testWidgets('a voice call has no camera control and no camera flip',
+        (WidgetTester tester) async {
+      await pumpConnectedCall(tester, video: false);
+
+      expect(find.byKey(const Key('call-camera')), findsNothing);
+      await openCallDock(tester);
+      expect(find.byKey(const Key('call-switch-camera')), findsNothing,
+          reason: 'nothing to flip on a call with no camera');
+      expect(find.byKey(const Key('call-screen-share')), findsOneWidget,
+          reason: 'but sharing a screen is exactly what a voice call may want');
+    });
+
+    testWidgets('tapping the picture shuts the dock rather than the controls',
+        (WidgetTester tester) async {
+      await pumpConnectedCall(tester, video: true);
+      await openCallDock(tester);
+
+      // Somewhere unambiguously on the picture: clear of the name pill, the
+      // self-view tile, and the control band an open dock grows into.
+      expect(find.byKey(const Key('call-stage')), findsOneWidget);
+      await tester.tapAt(const Offset(200, 220));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('call-dock')), findsNothing);
+      expect(find.byKey(const Key('call-hangup')), findsOneWidget,
+          reason: 'the first tap dismisses the dock, not the whole chrome');
+    });
+
+    testWidgets('an open dock holds the FaceTime fade off',
+        (WidgetTester tester) async {
+      await pumpConnectedCall(tester, video: true);
+      await openCallDock(tester);
+
+      // Well past the linger the controls would otherwise have faded after.
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pumpAndSettle();
+
+      final AnimatedOpacity chrome = tester.widget<AnimatedOpacity>(
+        find.ancestor(
+          of: find.byKey(const Key('call-hangup')),
+          matching: find.byType(AnimatedOpacity),
+        ),
+      );
+      expect(chrome.opacity, 1,
+          reason: 'fading out from under an open menu is the rudest moment');
+    });
+
+    testWidgets('the camera flip goes away when the camera is off',
+        (WidgetTester tester) async {
+      final ({
+        ProviderContainer container,
+        RecordingEngine engine,
+        FakePipChannel pip
+      }) t = await pumpConnectedCall(tester, video: true);
+
+      await t.container.read(callProvider.notifier).toggleCamera();
+      await tester.pumpAndSettle();
+
+      await openCallDock(tester);
+      expect(find.byKey(const Key('call-switch-camera')), findsNothing);
+    });
+  });
+
+  group('layoutCallControls', () {
+    // Mirrors the vectors in desktop/ui/call_decisions.test.mjs and
+    // CallControlsTest.kt — the three frontends must not drift on which
+    // controls the bar holds.
+    const List<({String name, bool video, bool cameraOn})> cases =
+        <({String name, bool video, bool cameraOn})>[
+      (name: 'video, camera on', video: true, cameraOn: true),
+      (name: 'video, camera off', video: true, cameraOn: false),
+      (name: 'voice', video: false, cameraOn: true),
+    ];
+
+    for (final ({String name, bool video, bool cameraOn}) c in cases) {
+      test('End call is in a bar that fits — ${c.name}', () {
+        final CallControlLayout layout =
+            layoutCallControls(video: c.video, cameraOn: c.cameraOn);
+        expect(layout.primary.last, CallControl.hangup);
+        expect(
+            layout.primary.length, lessThanOrEqualTo(kMaxPrimaryCallControls));
+        expect(layout.primary.toSet().length, layout.primary.length);
+        for (final CallControl control in layout.primary) {
+          expect(layout.dock.contains(control), isFalse,
+              reason: '$control is in both the bar and the dock');
+        }
+      });
+    }
+
+    test('the bar is ordered the way Telegram orders it', () {
+      expect(layoutCallControls(video: true).primary, <CallControl>[
+        CallControl.camera,
+        CallControl.mic,
+        CallControl.speaker,
+        CallControl.more,
+        CallControl.hangup,
+      ]);
+      expect(layoutCallControls(video: false).primary, <CallControl>[
+        CallControl.mic,
+        CallControl.speaker,
+        CallControl.more,
+        CallControl.hangup,
+      ]);
+    });
+
+    test('a platform with no routes and no second camera drops both', () {
+      final CallControlLayout desktop = layoutCallControls(
+        video: true,
+        hasAudioRoutes: false,
+        hasCameraSwitch: false,
+      );
+      expect(desktop.primary, <CallControl>[
+        CallControl.camera,
+        CallControl.mic,
+        CallControl.more,
+        CallControl.hangup,
+      ]);
+      expect(desktop.dock,
+          <CallControl>[CallControl.screenShare, CallControl.chat]);
+    });
+
+    test('the ⋮ appears exactly when there is something behind it', () {
+      for (final ({String name, bool video, bool cameraOn}) c in cases) {
+        final CallControlLayout layout =
+            layoutCallControls(video: c.video, cameraOn: c.cameraOn);
+        expect(
+            layout.primary.contains(CallControl.more), layout.dock.isNotEmpty,
+            reason: 'a ⋮ that opens nothing, or a dock nothing opens');
+      }
     });
   });
 

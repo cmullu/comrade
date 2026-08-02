@@ -85,6 +85,8 @@
     <string name="call_restore">Back to the call</string>
     <string name="call_screen_share">Share screen</string>
     <string name="call_screen_share_stop">Stop sharing</string>
+    <string name="call_more">More</string>
+    <string name="call_more_options">More call options</string>
 
     <!-- Call history -->
     <string name="call_history_title">Call history</string>
