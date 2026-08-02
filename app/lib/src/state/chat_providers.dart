@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/comrade_repository.dart';
 import '../data/models.dart';
+import '../util/attachment_caption.dart';
 import '../util/chat_thread.dart';
 import 'providers.dart';
 
@@ -167,6 +168,18 @@ sealed class ChatItem {
   /// Stable list key. Media ids are namespaced so a media event id can never
   /// collide with a message id.
   String get key;
+
+  /// The nostr event id a reply points at.
+  ///
+  /// **Not** [key]: the namespacing that keeps the list keys apart would make a
+  /// reply address `media:abc…`, which is not an event and would never resolve
+  /// on the other side. A text message and a media attachment are both ordinary
+  /// events here, which is the whole reason replying to media needs no core
+  /// change — `send_dm_reply` tags whatever id it is given.
+  String get id;
+
+  /// One line naming this item, for a reply chip or a quoted preview.
+  String get preview;
 }
 
 class TextChatItem extends ChatItem {
@@ -181,6 +194,12 @@ class TextChatItem extends ChatItem {
 
   @override
   String get key => message.id;
+
+  @override
+  String get id => message.id;
+
+  @override
+  String get preview => message.content;
 }
 
 class MediaChatItem extends ChatItem {
@@ -195,6 +214,13 @@ class MediaChatItem extends ChatItem {
 
   @override
   String get key => 'media:${media.eventId}';
+
+  @override
+  String get id => media.eventId;
+
+  @override
+  String get preview =>
+      mediaQuoteLabel(mimeType: media.mimeType, caption: media.caption);
 }
 
 /// Merge text + media into one time-ordered thread, like a real chat.
@@ -235,16 +261,25 @@ class ConversationState {
   /// visit: Telegram leaves the line where you found it for the rest of the
   /// visit, which is what makes it useful to read down to.
   final String? unreadBoundaryKey;
-  final MessageInfo? replyingTo;
+
+  /// What the next text send will be a reply to — a message *or* an
+  /// attachment. Typed as [ChatItem] rather than [MessageInfo] precisely so
+  /// "reply to that photo" is expressible: the nostr `e` tag does not care
+  /// which kind of event it points at.
+  final ChatItem? replyingTo;
   final bool sending;
   final bool attaching;
   final String? error;
 
   /// Quick lookup so a bubble carrying `replyTo` can show a quoted preview.
-  MessageInfo? quoted(String? id) {
+  ///
+  /// Searches media as well as text: an id that resolves to neither (history
+  /// not loaded, or the original was deleted) yields null and the bubble simply
+  /// renders without a quote, which is what it did before too.
+  ChatItem? quoted(String? id) {
     if (id == null) return null;
-    for (final MessageInfo m in messages) {
-      if (m.id == id) return m;
+    for (final ChatItem item in items) {
+      if (item.id == id) return item;
     }
     return null;
   }
@@ -252,7 +287,7 @@ class ConversationState {
   ConversationState copyWith({
     List<MessageInfo>? messages,
     List<MediaMessageInfo>? media,
-    MessageInfo? replyingTo,
+    ChatItem? replyingTo,
     bool clearReplyingTo = false,
     bool? sending,
     bool? attaching,
@@ -407,8 +442,9 @@ class ConversationController
     }
   }
 
-  void startReply(MessageInfo message) => state =
-      AsyncData<ConversationState>(_state.copyWith(replyingTo: message));
+  /// Aim the composer at [item] — a text message or an attachment.
+  void startReply(ChatItem item) =>
+      state = AsyncData<ConversationState>(_state.copyWith(replyingTo: item));
 
   void cancelReply() => state =
       AsyncData<ConversationState>(_state.copyWith(clearReplyingTo: true));

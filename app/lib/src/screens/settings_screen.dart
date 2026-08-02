@@ -27,8 +27,15 @@ import '../data/models.dart';
 // `TurnServerStatus`/`TurnDiagnostic`, which would collide with `models.dart`.
 import '../platform/platform.dart'
     show
+        DownloadFailed,
+        DownloadIdle,
+        DownloadInstalling,
+        DownloadReady,
+        DownloadRunning,
+        DownloadVerifying,
         UpdateAvailable,
         UpdateChecking,
+        UpdateDownload,
         UpdateFailed,
         UpdateSettings,
         UpdateStatus,
@@ -309,9 +316,7 @@ class _AppearanceCard extends ConsumerWidget {
           const SizedBox(height: 4),
           Text(
             'A call is always dark, in every mode — a bright screen held to '
-            'your face at 3am is a bug, not a preference. This choice is not '
-            'remembered across restarts yet: like every client preference it '
-            'lives in memory until the app gets a persisted store.',
+            'your face at 3am is a bug, not a preference.',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Theme.of(context).colorScheme.outline,
                 ),
@@ -409,15 +414,17 @@ class _ScreenshotCard extends ConsumerWidget {
                         ),
                   ),
                   const SizedBox(height: 4),
-                  // Said out loud because the card above it (Appearance) has to
-                  // admit the opposite: unlike every other client preference,
-                  // this one survives a restart. It has to — the window flag is
-                  // set before the first frame, long before there is a vault to
-                  // read a setting out of — so it lives on the platform side and
-                  // is shared with the Compose app.
+                  // This line used to have to say that *this* setting survives a
+                  // restart, because the Appearance card above it admitted that
+                  // it did not. Every client preference persists now, so the
+                  // only thing still worth saying is the part that is still only
+                  // true here: the value lives on the platform side (the window
+                  // flag has to be applied before the first frame, earlier than
+                  // even the preference store is open), which is why the older
+                  // Compose app reads the very same setting.
                   Text(
-                    'Remembered across restarts, and shared with the older '
-                    'Android app on the same device.',
+                    'Shared with the older Android app on the same device — '
+                    'this one is stored by the system, not by Comrade.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: Theme.of(context).colorScheme.outline,
                         ),
@@ -515,20 +522,50 @@ class _NotificationsCard extends ConsumerWidget {
 /// Whether a newer Comrade exists, and how to get it.
 ///
 /// Comrade is installed by sideload, so nothing otherwise tells anyone that a
-/// release — including a security fix — has shipped. "Get the update" opens the
-/// release page in a browser: the app never downloads or installs an APK
-/// itself, which would mean holding the permission that lets an app install
-/// other apps.
-class _UpdatesCard extends ConsumerWidget {
+/// release — including a security fix — has shipped. The APK is downloaded by a
+/// native foreground service: leaving this screen, or the app, does not stop it,
+/// the shade carries the progress, and it finishes with a tappable "ready to
+/// install". The release page stays as a fallback for a release with no single
+/// APK, and for anyone who would rather not let Comrade install apps.
+class _UpdatesCard extends ConsumerStatefulWidget {
   const _UpdatesCard();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_UpdatesCard> createState() => _UpdatesCardState();
+}
+
+class _UpdatesCardState extends ConsumerState<_UpdatesCard>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// The install permission is granted on a *system* screen, and a downloaded
+  /// APK can be reaped with the cache — both happen while this app is away, so
+  /// coming back has to re-ask rather than trust what was true when we left.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.read(updateSettingsProvider.notifier).refresh();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final UpdateSettings settings = ref.watch(updateSettingsProvider).value ??
         const UpdateSettings.unknown();
-    final UpdateStatus status =
-        ref.watch(updateStatusProvider).value ?? const UpdateUnknown();
+    final UpdateStatus status = ref.watch(updateStatusProvider);
+    final UpdateDownload download =
+        ref.watch(updateStateProvider).value?.download ?? const DownloadIdle();
 
     return SectionCard(
       title: 'App updates',
@@ -540,7 +577,7 @@ class _UpdatesCard extends ConsumerWidget {
             style: theme.textTheme.bodySmall,
           ),
           const SizedBox(height: 8),
-          ..._statusRows(context, ref, status, settings),
+          ..._statusRows(context, status, settings, download),
           if (settings.skippedVersion != null) ...<Widget>[
             const SizedBox(height: 8),
             Text(
@@ -601,13 +638,117 @@ class _UpdatesCard extends ConsumerWidget {
     );
   }
 
+  /// The download → verify → install run of controls, driven by the native
+  /// download state. One control at a time, always naming what the next tap
+  /// does: **Download update** → a progress bar with **Cancel download** →
+  /// **Install 0.0.51**.
+  List<Widget> _downloadControls(
+    BuildContext context,
+    UpdateDownload download,
+    UpdateSettings settings,
+  ) {
+    final ThemeData theme = Theme.of(context);
+    final UpdateSettingsController controller =
+        ref.read(updateSettingsProvider.notifier);
+
+    List<Widget> permissionNote() => settings.canInstall
+        ? const <Widget>[]
+        : <Widget>[
+            const SizedBox(height: 8),
+            Text(
+              'Allow Comrade to install updates',
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Android asks once, per app, before an app may install another. '
+              'Without it the update can still be downloaded here and installed '
+              'from the release page in your browser.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 4),
+            OutlinedButton(
+              onPressed: controller.openInstallPermissionSettings,
+              child: const Text('Allow installing'),
+            ),
+          ];
+
+    switch (download) {
+      case DownloadRunning(:final int bytesRead, :final int? percent):
+        return <Widget>[
+          Text(
+            percent != null
+                ? 'Downloading… $percent%'
+                : 'Downloading… ${(bytesRead / 1024 / 1024).toStringAsFixed(1)} MB',
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 4),
+          LinearProgressIndicator(
+            value: percent == null ? null : percent / 100,
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: controller.cancelDownload,
+            child: const Text('Cancel download'),
+          ),
+        ];
+      case DownloadVerifying():
+        return <Widget>[
+          Text('Checking the download…', style: theme.textTheme.bodySmall),
+          const SizedBox(height: 4),
+          const LinearProgressIndicator(),
+        ];
+      case DownloadReady(:final String version):
+        return <Widget>[
+          FilledButton(
+            onPressed: settings.canInstall
+                ? controller.install
+                : controller.openInstallPermissionSettings,
+            child: Text('Install $version'),
+          ),
+          ...permissionNote(),
+        ];
+      case DownloadInstalling():
+        return <Widget>[
+          Text(
+            'Waiting for Android to install it…',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ];
+      case DownloadFailed(:final String message):
+        return <Widget>[
+          Text(
+            message,
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.error),
+          ),
+          const SizedBox(height: 4),
+          FilledButton(
+            onPressed: controller.download,
+            child: const Text('Download update'),
+          ),
+          ...permissionNote(),
+        ];
+      case DownloadIdle():
+        return <Widget>[
+          FilledButton(
+            onPressed: controller.download,
+            child: const Text('Download update'),
+          ),
+          ...permissionNote(),
+        ];
+    }
+  }
+
   /// The status half of the card: one of checking / available / up to date /
   /// failed / never looked.
   List<Widget> _statusRows(
     BuildContext context,
-    WidgetRef ref,
     UpdateStatus status,
     UpdateSettings settings,
+    UpdateDownload download,
   ) {
     final ThemeData theme = Theme.of(context);
     switch (status) {
@@ -637,22 +778,28 @@ class _UpdatesCard extends ConsumerWidget {
             ),
           ],
           const SizedBox(height: 8),
-          FilledButton(
-            onPressed: () =>
-                ref.read(updateSettingsProvider.notifier).openRelease(),
-            child: const Text('Get the update'),
-          ),
+          ..._downloadControls(context, download, settings),
           const SizedBox(height: 4),
           OutlinedButton(
             onPressed: () =>
                 ref.read(updateSettingsProvider.notifier).skip(version),
             child: const Text('Skip this version'),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
+          // A text button, not a filled one: the release page is the fallback
+          // now (a release with no single APK, or someone who would rather not
+          // let Comrade install apps), not the recommended path.
+          TextButton(
+            onPressed: () =>
+                ref.read(updateSettingsProvider.notifier).openRelease(),
+            child: const Text('Open the release page instead'),
+          ),
+          const SizedBox(height: 4),
           Text(
-            'Comrade is installed by sideload, so the download opens in your '
-            'browser. Android only installs it if it is signed with the same '
-            'key as the copy you already have.',
+            'The download keeps going if you leave this screen, and the shade '
+            'tells you when it is ready to install. Android still shows its own '
+            'confirmation, and still refuses an APK signed with a different key '
+            'than the copy you already have.',
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: theme.colorScheme.outline),
           ),

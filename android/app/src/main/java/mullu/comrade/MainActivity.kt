@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -36,6 +35,8 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
@@ -70,16 +71,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -88,15 +87,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.ui.ArticleIcon
 import mullu.comrade.ui.BookIcon
+import mullu.comrade.ui.BreathingScreen
 import mullu.comrade.ui.CallHistoryScreen
 import mullu.comrade.ui.ChatBubbleIcon
 import mullu.comrade.ui.ChatMenuAction
 import mullu.comrade.ui.ChatsScreen
 import mullu.comrade.ui.ComradesScreen
 import mullu.comrade.ui.ConversationScreen
+import mullu.comrade.ui.CloudIcon
 import mullu.comrade.ui.CopyIcon
 import mullu.comrade.ui.conversationMenu
 import mullu.comrade.ui.FeedScreen
+import mullu.comrade.ui.FocusScreen
 import mullu.comrade.ui.HeartIcon
 import mullu.comrade.ui.JournalScreen
 import mullu.comrade.ui.NewChatScreen
@@ -105,17 +107,23 @@ import mullu.comrade.ui.NotificationsOffIcon
 import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
-import mullu.comrade.ui.presenceHeaderText
+import mullu.comrade.ui.presenceText
+import mullu.comrade.ui.ReaderScreen
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
+import mullu.comrade.ui.TimerIcon
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.purgeDecryptedMedia
 import mullu.comrade.ui.shortNpub
 import mullu.comrade.ui.CallIcon
+import mullu.comrade.ui.LocalMeshState
+import mullu.comrade.ui.TransportPrecedence
+import mullu.comrade.ui.TransportRoute
 import mullu.comrade.ui.VideocamIcon
+import mullu.comrade.ui.WifiTetheringIcon
 import mullu.comrade.ui.theme.ComradeTheme
 import mullu.comrade.update.UpdateChecker
 import mullu.comrade.call.CallManager
@@ -204,16 +212,16 @@ class MainActivity : ComponentActivity() {
      * rather than after unlock is safe: with a locked vault nothing produces
      * events, so the loop is an idle tick.
      *
-     * **It re-announces our presence to the comrades.**
+     * **It tells the comrades we are online**, and [onStop] tells them we are
+     * not. That pairing is the whole definition: *online means the app is
+     * open*. A phone in a pocket with the connection service running is still
+     * receiving messages, but its owner is not at it — showing a green dot
+     * for that is precisely the small lie this feature exists to avoid, and
+     * it is what a user reported seeing.
      *
-     * The native side already beacons on unlock and heartbeats every few
-     * minutes, so this is a freshness nicety rather than the mechanism: it
-     * means someone who picks their phone up shows as around to the people
-     * they chose immediately, instead of up to a heartbeat later. Deliberately
-     * *not* paired with an "offline" on backgrounding — the connection service
-     * keeps delivering while backgrounded, so the app really is still
-     * reachable; the honest "offline" moments are a vault lock (which the Rust
-     * side announces) and process death (which the beacon's own TTL covers).
+     * The native heartbeat refreshes the claim only while this flag holds
+     * (see `ComradeRuntime::presence_active`), so a backgrounded app goes
+     * quiet rather than re-announcing itself a few minutes later.
      *
      * Runs on the application scope, off the main thread: the beacon send is a
      * relay round-trip per comrade.
@@ -228,10 +236,21 @@ class MainActivity : ComponentActivity() {
         // The video surface is back: resume capture if a video call had it
         // suspended (a no-op otherwise, and idempotent — see PipController).
         PipController.onWindowVisibilityChanged(visible = true)
+        announcePresence(online = true)
+    }
+
+    /**
+     * Tell the comrades whether this device is at the user's attention right
+     * now. Fire-and-forget on the application scope so a relay round-trip
+     * never runs on a lifecycle callback, and silent on failure — presence is
+     * a courtesy, and the beacon's own TTL covers a goodbye that never
+     * lands.
+     */
+    private fun announcePresence(online: Boolean) {
         val app = application as? ComradeApplication ?: return
         app.appScope.launch(Dispatchers.IO) {
             if (ComradeCore.isVaultUnlocked()) {
-                runCatching { ComradeCore.announcePresenceTyped(online = true) }
+                runCatching { ComradeCore.announcePresenceTyped(online = online) }
                     .onFailure { Log.w("ComradeApp", "presence announce failed", it) }
             }
         }
@@ -250,6 +269,12 @@ class MainActivity : ComponentActivity() {
         // Nothing visible any more: the service keeps the drain loop alive if
         // the user wants background delivery, and the pump stops it if not.
         EventPump.release(PumpHolder.FOREGROUND)
+        // …and the comrades are told, because "online" means the app is open.
+        // Delivery continues (that is the service's job); what stops is the
+        // claim that anyone is at the phone. A PiP video call does not reach
+        // here — the Activity stays started — so a call still reads as online,
+        // which is true.
+        announcePresence(online = false)
         // Nothing is displaying the local video any more — stop capturing it
         // (unless a PiP window is showing the call). See PipController.
         PipController.onWindowVisibilityChanged(visible = false)
@@ -259,6 +284,23 @@ class MainActivity : ComponentActivity() {
 
 /** Where the encrypted vault lives on this device. */
 internal fun vaultPath(context: Context): File = File(context.filesDir, "comrade-vault")
+
+/**
+ * Keep a line from a focus session or a finished read as a journal entry.
+ *
+ * Saves the *prompt* rather than opening a pre-filled composer, deliberately:
+ * the reflection is the invitation, and the user's own answer belongs in their
+ * own words on the Journal tab whenever they get to it. Failure is silent —
+ * missing a suggested note is not worth an error dialog after a session someone
+ * just finished.
+ */
+private fun seedJournalNote(scope: kotlinx.coroutines.CoroutineScope, line: String) {
+    if (line.isBlank()) return
+    scope.launch(Dispatchers.IO) {
+        runCatching { ComradeCore.addJournalEntryTyped(line, null) }
+            .onFailure { Log.w("ComradeApp", "could not save the session note", it) }
+    }
+}
 
 /**
  * Show (or stop showing) the whole activity over the lock screen and wake the
@@ -371,13 +413,23 @@ fun ComradeApp() {
 /**
  * Bottom-navigation destinations, in on-screen order. Tara sits **last**
  * (rightmost) deliberately: the messaging/journal/feed tabs are the daily
- * surfaces, and the companion is the one you reach for on purpose.
+ * surfaces, and the companion is the one you reach for on purpose. Focus sits
+ * next to it for the same reason — both are things you go to deliberately,
+ * never things that should be competing for a glance.
  */
 private enum class MainTab(val label: String, val icon: ImageVector) {
     Chats("Chats", ChatBubbleIcon),
     Journal("Journal", BookIcon),
     Feed("Feed", ArticleIcon),
+    Focus("Focus", TimerIcon),
     Tara("Tara", HeartIcon),
+}
+
+/** Sub-navigation inside the Focus tab. */
+private sealed interface FocusNav {
+    data object Sessions : FocusNav
+    data object Reader : FocusNav
+    data object Breathing : FocusNav
 }
 
 /** Sub-navigation inside the Chats tab. */
@@ -407,6 +459,7 @@ private fun MainShell(
     val activity = context as? Activity
     var tab by rememberSaveable { mutableStateOf(MainTab.Chats) }
     var chatNav by remember { mutableStateOf<ChatNav>(ChatNav.List) }
+    var focusNav by remember { mutableStateOf<FocusNav>(FocusNav.Sessions) }
     // Settings is a pushed screen (Telegram-style), reached from the drawer,
     // not a bottom-nav tab. The drawer is the app-wide navigation menu.
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
@@ -588,11 +641,13 @@ private fun MainShell(
     BackHandler(
         enabled = drawerState.isOpen ||
             settingsOpen ||
-            (tab == MainTab.Chats && chatNav != ChatNav.List),
+            (tab == MainTab.Chats && chatNav != ChatNav.List) ||
+            (tab == MainTab.Focus && focusNav != FocusNav.Sessions),
     ) {
         when {
             drawerState.isOpen -> scope.launch { drawerState.close() }
             settingsOpen -> settingsOpen = false
+            tab == MainTab.Focus -> focusNav = FocusNav.Sessions
             else -> chatNav = ChatNav.List
         }
     }
@@ -629,7 +684,6 @@ private fun MainShell(
                 },
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                MeshStatusBanner()
                 Scaffold(
                     modifier = Modifier.weight(1f),
                     topBar = {
@@ -652,39 +706,36 @@ private fun MainShell(
                                         }
                                         Column {
                                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            // The npub tail always stays visible (handles are
-                                            // claims, keys are identity); presence, when we have
-                                            // it, rides alongside rather than replacing it —
+                                            // Presence is the only thing under the name —
                                             // "online" while they are, a Telegram-style
-                                            // "last seen …" once they aren't.
-                                            val presenceLine = if (isComrade) {
-                                                presenceHeaderText(
-                                                    online = comradeOnline,
-                                                    lastSeenAt = peerPresence?.lastSeenAt ?: 0L,
-                                                    peerMarkedUs = peerPresence?.peerMarkedUs ?: false,
+                                            // "last seen …" once they aren't, and nothing
+                                            // at all for someone who isn't a comrade.
+                                            //
+                                            // The key used to live here too, on the grounds
+                                            // that handles are claims and keys are identity.
+                                            // It now lives one tap away in the ⋮ menu (Copy
+                                            // key, and Encryption info shows it in full),
+                                            // which is a better home for it: the header
+                                            // reads like a conversation instead of a key
+                                            // dump, and the line no longer has to choose
+                                            // between the key and what presence has to say.
+                                            if (isComrade) {
+                                                Text(
+                                                    presenceText(
+                                                        online = comradeOnline,
+                                                        lastSeenAt = peerPresence?.lastSeenAt ?: 0L,
+                                                        peerMarkedUs = peerPresence?.peerMarkedUs ?: false,
+                                                    ),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    color = if (comradeOnline) {
+                                                        MaterialTheme.colorScheme.primary
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                                    },
                                                 )
-                                            } else {
-                                                null
                                             }
-                                            // Prose in the UI font, the key in
-                                            // monospace — one line, two jobs.
-                                            val subtitle = buildAnnotatedString {
-                                                presenceLine?.let { append("$it · ") }
-                                                withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) {
-                                                    append(shortNpub(openChat.peer))
-                                                }
-                                            }
-                                            Text(
-                                                subtitle,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                color = if (comradeOnline) {
-                                                    MaterialTheme.colorScheme.primary
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                                },
-                                            )
                                         }
                                     }
                                 },
@@ -841,6 +892,33 @@ private fun MainShell(
                                     }
                                 },
                                 title = { Text("Comrade") },
+                                // Exactly opposite the hamburger: which route a
+                                // message takes is a property of the app, not of
+                                // the screen you happen to be on.
+                                actions = { TransportPrecedenceAction() },
+                            )
+                            // A Focus sub-screen gets a back arrow to the
+                            // session list, like the Chats sub-screens do.
+                            tab == MainTab.Focus && focusNav != FocusNav.Sessions -> TopAppBar(
+                                navigationIcon = {
+                                    IconButton(onClick = { focusNav = FocusNav.Sessions }) {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.ArrowBack,
+                                            contentDescription = "Back",
+                                        )
+                                    }
+                                },
+                                title = {
+                                    Text(
+                                        stringResource(
+                                            if (focusNav == FocusNav.Reader) {
+                                                R.string.reader_title
+                                            } else {
+                                                R.string.breathe_title
+                                            },
+                                        ),
+                                    )
+                                },
                             )
                             else -> CenterAlignedTopAppBar(
                                 title = {
@@ -850,9 +928,11 @@ private fun MainShell(
                                             MainTab.Journal -> "Journal"
                                             MainTab.Tara -> "Tara"
                                             MainTab.Feed -> "Feed"
+                                            MainTab.Focus -> stringResource(R.string.attention_tab)
                                         },
                                     )
                                 },
+                                actions = { TransportPrecedenceAction() },
                             )
                         }
                     },
@@ -933,9 +1013,30 @@ private fun MainShell(
                         }
                         MainTab.Journal -> JournalScreen(modifier = content)
                         MainTab.Tara -> TaraScreen(modifier = content)
+                        MainTab.Focus -> when (focusNav) {
+                            FocusNav.Sessions -> FocusScreen(
+                                onOpenReader = { focusNav = FocusNav.Reader },
+                                onOpenBreathing = { focusNav = FocusNav.Breathing },
+                                onJournalNote = { seedJournalNote(scope, it) },
+                                modifier = content,
+                            )
+                            FocusNav.Reader -> ReaderScreen(
+                                onJournalNote = { seedJournalNote(scope, it) },
+                                modifier = content,
+                            )
+                            FocusNav.Breathing -> BreathingScreen(
+                                onDone = { focusNav = FocusNav.Sessions },
+                                modifier = content,
+                            )
+                        }
                         MainTab.Feed -> FeedScreen(
                             feedItems = feedItems,
                             onPosted = { ChatEventRouter.addChitthi(it, front = true) },
+                            onOpenJournal = { tab = MainTab.Journal },
+                            onOpenBreathing = {
+                                tab = MainTab.Focus
+                                focusNav = FocusNav.Breathing
+                            },
                             modifier = content,
                         )
                     }
@@ -1230,7 +1331,6 @@ private fun SettingsPushedScreen(
     onBack: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
-        MeshStatusBanner()
         Scaffold(
             modifier = Modifier.weight(1f),
             topBar = {
@@ -1260,58 +1360,204 @@ private fun SettingsPushedScreen(
 }
 
 /**
- * Persistent off-grid mesh connectivity indicator, shown directly under the
- * top bar on every screen while the Saathi mDNS mesh is running. This is the
- * one signal that still works with zero cellular or relay reachability, so it
- * stays visible rather than a one-off toast — exactly what to check when
- * navigating somewhere with no signal at all.
+ * Which transport a message tries first, as two glyphs in the top bar's
+ * trailing slot — directly opposite the navigation menu.
+ *
+ * This replaces the always-on "Local mesh" banner. That banner spent a full row
+ * of every screen on a line the user could read but not act on, and it only
+ * ever appeared in the one workspace — so the signal that matters most with no
+ * signal at all was both intrusive and, most of the time, absent.
+ *
+ * Here the two routes are drawn in the order they are tried: the preferred one
+ * leads at full size, the fallback follows, smaller and dimmed, with a badge
+ * for how many devices are actually nearby. That ordering *is* the setting;
+ * tapping opens a menu that swaps it.
+ *
+ * Precedence is an order, not an exclusion — whichever route leads, a message
+ * the preferred one cannot carry still takes the other (see
+ * `docs/OFFLINE_DELIVERY.md`). Nothing here can strand a message. The ordering
+ * itself lives in [TransportPrecedence], shared with the Flutter frontend and
+ * tested on both.
+ *
+ * The workspace is read once on composition and thereafter tracked locally,
+ * because the core exposes no workspace flow to collect — a change made
+ * somewhere other than this control (a voice command, say) is picked up on the
+ * next recomposition of the shell rather than live.
  */
 @Composable
-private fun MeshStatusBanner() {
-    val status by MeshStatusMonitor.status.collectAsState()
-    if (!status.active) return
+private fun TransportPrecedenceAction() {
+    val scope = rememberCoroutineScope()
+    val mesh by MeshStatusMonitor.status.collectAsState()
+    var workspaceKey by remember { mutableStateOf(TransportPrecedence.RELAY_FIRST_WORKSPACE) }
+    var menuOpen by remember { mutableStateOf(false) }
 
-    val connected = status.peerCount > 0
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = if (connected) {
-            MaterialTheme.colorScheme.primaryContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant
-        },
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+    LaunchedEffect(Unit) {
+        workspaceKey = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.currentWorkspaceTyped().key }
+                .getOrDefault(TransportPrecedence.RELAY_FIRST_WORKSPACE)
+        }
+    }
+    if (!TransportPrecedence.isSwitchable(workspaceKey)) return
+
+    val meshState = TransportPrecedence.meshStateOf(mesh.active, mesh.peerCount)
+    val order = TransportPrecedence.orderOf(workspaceKey)
+    val lead = order.first()
+    val fallback = order.last()
+
+    // Named `route`, not `lead`: it is the order the user is *asking* for, and
+    // shadowing the one currently in force would make the guard below unreadable.
+    fun choose(route: TransportRoute) {
+        menuOpen = false
+        val target = TransportPrecedence.workspaceFor(route)
+        // The core's state machine rejects a self-transition, so re-picking the
+        // order already in force must be a no-op rather than an error the user
+        // caused by confirming what they already had.
+        if (target == workspaceKey) return
+        scope.launch {
+            val applied = withContext(Dispatchers.IO) {
+                runCatching { ComradeCore.toggleWorkspaceTyped(target).key }.getOrNull()
+            }
+            if (applied != null) workspaceKey = applied
+        }
+    }
+
+    Box {
+        IconButton(
+            onClick = { menuOpen = true },
+            modifier = Modifier.testTag("transport-precedence"),
         ) {
-            Box(
-                Modifier
-                    .size(8.dp)
-                    .background(
-                        color = if (connected) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        shape = CircleShape,
-                    ),
+            BadgedBox(
+                badge = {
+                    if (meshState == LocalMeshState.Reaching) {
+                        Badge { Text("${mesh.peerCount}") }
+                    }
+                },
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Icon(
+                        transportGlyph(lead),
+                        contentDescription = transportDescription(lead, meshState),
+                        tint = leadTint(lead, meshState),
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Icon(
+                        transportGlyph(fallback),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                enabled = false,
+                text = {
+                    Text(
+                        nearbyLabel(meshState, mesh.peerCount),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                },
+                onClick = {},
             )
-            Text(
-                if (connected) {
-                    "Local mesh · ${status.peerCount} nearby"
-                } else {
-                    "Local mesh · searching for nearby devices…"
-                },
-                style = MaterialTheme.typography.labelMedium,
-                color = if (connected) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
+            HorizontalDivider()
+            PrecedenceChoice(
+                route = TransportRoute.Relay,
+                selected = lead == TransportRoute.Relay,
+                label = "Internet first",
+                detail = "Relays, then nearby devices",
+                testTag = "precedence-relay",
+                onClick = { choose(it) },
+            )
+            PrecedenceChoice(
+                route = TransportRoute.LocalNetwork,
+                selected = lead == TransportRoute.LocalNetwork,
+                label = "This network first",
+                detail = "Nearby devices, then relays",
+                testTag = "precedence-local",
+                onClick = { choose(it) },
             )
         }
     }
+}
+
+/** One row of the precedence menu; the chosen order is carried by colour. */
+@Composable
+private fun PrecedenceChoice(
+    route: TransportRoute,
+    selected: Boolean,
+    label: String,
+    detail: String,
+    testTag: String,
+    onClick: (TransportRoute) -> Unit,
+) {
+    val accent = if (selected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    DropdownMenuItem(
+        modifier = Modifier.testTag(testTag),
+        leadingIcon = {
+            Icon(transportGlyph(route), contentDescription = null, tint = accent)
+        },
+        text = {
+            Column {
+                Text(label, color = accent)
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        onClick = { onClick(route) },
+    )
+}
+
+/**
+ * Only the local-network route carries live state, and it carries it in colour
+ * and a badge rather than a third silhouette (see [WifiTetheringIcon]). The
+ * relay glyph is deliberately constant: the workspace's `relayConnected` flag
+ * is a label, not a reachability probe, and drawing it as one would be a lie.
+ */
+private fun transportGlyph(route: TransportRoute): ImageVector = when (route) {
+    TransportRoute.Relay -> CloudIcon
+    TransportRoute.LocalNetwork -> WifiTetheringIcon
+}
+
+/**
+ * The leading glyph's colour, which is where the local network's live state
+ * goes now that it has only one silhouette: the accent while it is actually
+ * reaching someone, the ordinary foreground while it is looking, and dimmed
+ * when the engine is not running at all. The relay glyph never changes.
+ */
+@Composable
+private fun leadTint(route: TransportRoute, mesh: LocalMeshState): Color = when {
+    route == TransportRoute.Relay -> MaterialTheme.colorScheme.onSurface
+    mesh == LocalMeshState.Reaching -> MaterialTheme.colorScheme.primary
+    mesh == LocalMeshState.Searching -> MaterialTheme.colorScheme.onSurface
+    else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+}
+
+private fun transportDescription(route: TransportRoute, mesh: LocalMeshState): String =
+    when (route) {
+        TransportRoute.Relay -> "Sending over the internet first"
+        TransportRoute.LocalNetwork -> when (mesh) {
+            LocalMeshState.Reaching -> "Sending over this network first, devices nearby"
+            LocalMeshState.Searching -> "Sending over this network first, looking for devices"
+            LocalMeshState.Off -> "Sending over this network first, network off"
+        }
+    }
+
+private fun nearbyLabel(mesh: LocalMeshState, peerCount: Int): String = when (mesh) {
+    LocalMeshState.Off -> "Local network off"
+    LocalMeshState.Searching -> "Looking for nearby devices…"
+    LocalMeshState.Reaching ->
+        if (peerCount == 1) "1 device nearby" else "$peerCount devices nearby"
 }
 
 /**

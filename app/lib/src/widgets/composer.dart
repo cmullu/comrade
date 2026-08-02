@@ -30,16 +30,14 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../util/composer_mode.dart';
 import 'emoji_picker.dart';
 import 'media_attachment.dart';
 
-/// What the round button does when there is no text to send.
-///
-/// Three, not two, because a device that can take a photo can usually also
-/// record video, and a two-way mic/camera toggle leaves video unreachable.
-enum ComposerCaptureMode { voice, photo, video }
+export '../util/composer_mode.dart' show ComposerCaptureMode;
 
 class MessageComposer extends ConsumerStatefulWidget {
   const MessageComposer({
@@ -213,21 +211,18 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   /// app runs — it comes from one probe at startup.
   List<ComposerCaptureMode> _availableModes() {
     final MediaCaptureDelegate capture = ref.read(mediaCaptureProvider);
-    return <ComposerCaptureMode>[
-      if (ref.read(voiceNoteRecorderProvider).available)
-        ComposerCaptureMode.voice,
-      if (capture.canCapturePhoto) ComposerCaptureMode.photo,
-      if (capture.canCaptureVideo) ComposerCaptureMode.video,
-    ];
+    return availableCaptureModes(
+      canRecordAudio: ref.read(voiceNoteRecorderProvider).available,
+      canTakePhoto: capture.canCapturePhoto,
+      canRecordVideo: capture.canCaptureVideo,
+    );
   }
 
   /// The current mode, corrected to something this device has. A stale `_mode`
   /// (a camera that vanished, or a default that never applied) must never leave
   /// the button doing nothing.
-  ComposerCaptureMode? _effectiveMode(List<ComposerCaptureMode> available) {
-    if (available.isEmpty) return null;
-    return available.contains(_mode) ? _mode : available.first;
-  }
+  ComposerCaptureMode? _effectiveMode(List<ComposerCaptureMode> available) =>
+      effectiveCaptureMode(_mode, available);
 
   /// Move to the next available mode.
   ///
@@ -235,12 +230,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   /// a mouse *and* with a finger, and the one thing worse than a hidden gesture
   /// is a hidden gesture that shares a target with a tap that records.
   void _cycleMode() {
-    final List<ComposerCaptureMode> available = _availableModes();
-    if (available.length < 2) return;
-    final ComposerCaptureMode current =
-        _effectiveMode(available) ?? available.first;
-    final int next = (available.indexOf(current) + 1) % available.length;
-    setState(() => _mode = available[next]);
+    final ComposerCaptureMode? next = nextCaptureMode(_mode, _availableModes());
+    if (next == null) return;
+    setState(() => _mode = next);
   }
 
   static IconData _iconFor(ComposerCaptureMode mode) => switch (mode) {
@@ -293,100 +285,99 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                   onPressed: _openEmoji,
                   icon: const Icon(Icons.emoji_emotions_outlined),
                 ),
-                suffixIcon: IconButton(
-                  key: const Key('dm-attach'),
-                  tooltip: 'Attach a file (max 10 MB, encrypted)',
-                  onPressed: (widget.attaching || _busy) ? null : _attach,
-                  icon: (widget.attaching || _busy)
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.attach_file),
+                suffixIcon: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    IconButton(
+                      key: const Key('dm-attach'),
+                      tooltip: 'Attach a file (max 10 MB, encrypted)',
+                      onPressed: (widget.attaching || _busy) ? null : _attach,
+                      icon: (widget.attaching || _busy)
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.attach_file),
+                    ),
+                    _actionControl(context),
+                  ],
                 ),
               ),
             ),
           ),
-          ..._trailing(context),
         ],
       ),
     );
   }
 
-  /// The swap control (when there is more than one way to capture) and the round
-  /// action button.
-  List<Widget> _trailing(BuildContext context) {
+  /// The one action control, inside the field.
+  ///
+  /// Send while there is text; otherwise the current capture mode, which a
+  /// right-swipe on this same icon cycles. Mirrors `ComposerActionIcon` in
+  /// `ChatsScreen.kt` — one control, same gesture, same order.
+  ///
+  /// Swiping is neither discoverable on its own nor available to a screen
+  /// reader, so the cycle is also a semantics action and the tooltip names it.
+  Widget _actionControl(BuildContext context) {
     final List<ComposerCaptureMode> available = _availableModes();
     final ComposerCaptureMode? mode = _effectiveMode(available);
-    return <Widget>[
-      if (!_hasText && mode != null && available.length > 1)
-        IconButton(
-          key: const Key('dm-swap-capture'),
-          tooltip: 'Switch to '
-              '${_labelFor(available[(available.indexOf(mode) + 1) % available.length]).toLowerCase()}',
-          onPressed: _busy ? null : _cycleMode,
-          // The glyph is the mode you would move *to*, so the control shows
-          // what tapping it gets you rather than what you already have.
-          icon: Icon(
-            _iconFor(
-                available[(available.indexOf(mode) + 1) % available.length]),
-            size: 20,
-          ),
-        ),
-      const SizedBox(width: 6),
-      _actionButton(context, mode),
-    ];
-  }
+    final ComposerCaptureMode? swapTo = nextCaptureMode(mode, available);
+    final bool canSwipe = !_hasText && swapTo != null && !_recording;
 
-  /// Send when there is text; otherwise the current capture control — and a
-  /// plain (disabled) Send where the platform has neither.
-  Widget _actionButton(BuildContext context, ComposerCaptureMode? mode) {
-    if (_hasText || mode == null) {
-      // `mode == null` means nothing to capture here: keep Send in the same
-      // place so the layout does not jump, disabled when there is nothing to
-      // send.
-      final bool canSend = _hasText && !widget.sending;
-      return IconButton.filled(
-        key: const Key('dm-send'),
-        tooltip: 'Send',
-        onPressed: canSend ? () => widget.onSend() : null,
-        icon: widget.sending
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Icons.send),
-      );
-    }
+    final IconData icon = _hasText || mode == null
+        ? Icons.send
+        : (_recording ? Icons.stop : _iconFor(mode));
+    final String label = _hasText || mode == null
+        ? 'Send'
+        : (_recording ? 'Stop and send' : _labelFor(mode));
+    final bool enabled = _hasText ? !widget.sending : (mode != null && !_busy);
 
-    return IconButton.filled(
-      key: Key(switch (mode) {
-        ComposerCaptureMode.voice => 'dm-record',
-        ComposerCaptureMode.photo => 'dm-camera',
-        ComposerCaptureMode.video => 'dm-video',
-      }),
-      tooltip: _labelFor(mode),
-      onPressed: _busy
-          ? null
-          : switch (mode) {
-              ComposerCaptureMode.voice => _startRecording,
-              ComposerCaptureMode.photo => _capturePhoto,
-              ComposerCaptureMode.video => _captureVideo,
-            },
-      icon: _busy
+    final Widget button = IconButton(
+      key: const Key('dm-action'),
+      tooltip: canSwipe ? '$label — swipe right to switch mode' : label,
+      onPressed: enabled
+          ? () {
+              if (_hasText) {
+                widget.onSend();
+                return;
+              }
+              switch (mode!) {
+                case ComposerCaptureMode.voice:
+                  _recording ? _finishRecording(send: true) : _startRecording();
+                case ComposerCaptureMode.photo:
+                  _capturePhoto();
+                case ComposerCaptureMode.video:
+                  _captureVideo();
+              }
+            }
+          : null,
+      icon: (_busy && !_recording)
           ? const SizedBox(
               width: 18,
               height: 18,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : Icon(_iconFor(mode)),
+          : Icon(icon),
+    );
+
+    if (!canSwipe) return button;
+    return Semantics(
+      customSemanticsActions: <CustomSemanticsAction, VoidCallback>{
+        CustomSemanticsAction(
+            label: 'Switch to ${_labelFor(swapTo).toLowerCase()}'): _cycleMode,
+      },
+      child: GestureDetector(
+        // Rightwards only, and far enough to be deliberate rather than a slip
+        // while reaching for the icon.
+        onHorizontalDragEnd: (DragEndDetails d) {
+          if (d.primaryVelocity != null && d.primaryVelocity! > 0) _cycleMode();
+        },
+        child: button,
+      ),
     );
   }
 
-  /// While recording, the whole row becomes the recorder: discard · elapsed ·
-  /// send. Nothing else is reachable, because nothing else should be.
   Widget _recordingStrip(BuildContext context) {
     final ColorScheme colors = Theme.of(context).colorScheme;
     final String elapsed =

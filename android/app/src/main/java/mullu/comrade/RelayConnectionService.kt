@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import mullu.comrade.attention.QuietHours
 import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallUiState
 import mullu.comrade.ui.peerTitle
@@ -308,15 +309,32 @@ object ChatEventRouter {
 
     /**
      * Whether a message from [peer] may raise a notification — the thread on
-     * screen and the per-conversation mute, in one place so DMs and attachments
-     * cannot drift apart. The rule itself is [NotificationPolicy.shouldNotifyMessage].
+     * screen, the per-conversation mute, and the nightly quiet window, in one
+     * place so DMs and attachments cannot drift apart. The rule itself is
+     * [NotificationPolicy.shouldNotifyMessage].
      */
     private fun mayNotify(context: Context, peer: String): Boolean =
         NotificationPolicy.shouldNotifyMessage(
             peer = peer,
             openConversationPeer = _openConversationPeer.value,
             muted = MutedChats.isMuted(context, peer),
+            quietHours = inQuietHours(context),
         )
+
+    /**
+     * Whether Comrade's own nightly quiet window is open right now.
+     *
+     * Read from the local wall clock at the moment of the decision, not cached:
+     * this process can outlive a whole night (the connection service is
+     * deliberately long-lived), so a value resolved at startup would have the
+     * window permanently wrong. See [mullu.comrade.attention.QuietHours].
+     */
+    private fun inQuietHours(context: Context): Boolean {
+        val now = java.util.Calendar.getInstance()
+        val minute = now.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+            now.get(java.util.Calendar.MINUTE)
+        return QuietHours.isQuietNow(context, minute)
+    }
 
     private fun uniffi.comrade_ui.ChitthiDto.toInfo() = ComradeCore.ChitthiInfo(
         id = id,
@@ -344,7 +362,15 @@ object ChatEventRouter {
             }
             is BridgeEvent.IncomingMessageRequest -> {
                 _requestTick.update { it + 1 }
-                Notifier.notifyRequest(context, event.v1.peer, event.v1.lastMessage.ifBlank { "New message request" })
+                // The requests bucket still fills during quiet hours — only the
+                // buzz waits for morning.
+                if (NotificationPolicy.shouldNotifyRequest(inQuietHours(context))) {
+                    Notifier.notifyRequest(
+                        context,
+                        event.v1.peer,
+                        event.v1.lastMessage.ifBlank { "New message request" },
+                    )
+                }
             }
             is BridgeEvent.IncomingMedia -> {
                 _chatTick.update { it + 1 }
@@ -385,6 +411,7 @@ object ChatEventRouter {
                         openConversationPeer = _openConversationPeer.value,
                         muted = MutedChats.isMuted(context, event.peer),
                         becameOnline = becameOnline,
+                        quietHours = inQuietHours(context),
                     )
                 ) {
                     // Don't tell someone their comrade is around while they
@@ -395,6 +422,23 @@ object ChatEventRouter {
                     // exists at all.
                     val title = event.name?.takeIf { it.isNotBlank() } ?: peerLabel(event.peer)
                     Notifier.notifyComradeOnline(context, event.peer, title)
+                }
+            }
+            is BridgeEvent.ComradeNudge -> {
+                // Nothing to record: a nudge is not presence state, so it
+                // moves no dot and advances no "last seen" — the core keeps
+                // those to beacons alone. It is one notification and nothing
+                // else.
+                if (
+                    NotificationPolicy.shouldNotifyNudge(
+                        peer = event.peer,
+                        openConversationPeer = _openConversationPeer.value,
+                        muted = MutedChats.isMuted(context, event.peer),
+                        quietHours = inQuietHours(context),
+                    )
+                ) {
+                    val title = event.name?.takeIf { it.isNotBlank() } ?: peerLabel(event.peer)
+                    Notifier.notifyComradeNudge(context, event.peer, title)
                 }
             }
             is BridgeEvent.MeshStatusChanged -> MeshStatusMonitor.update(

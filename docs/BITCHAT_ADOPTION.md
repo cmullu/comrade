@@ -142,6 +142,14 @@ the interesting part.
 
 ## 6. Examined and deliberately not taken
 
+**Update (2026-07-29): the LAN half of the mesh is now wired.** The §1 table's
+courier row said the sealed envelope had no transport driving it. It has one now
+— `saathi` carries `dak` frames over mDNS + Gossipsub, so two devices on one
+WiFi exchange DMs with no relay and no internet. `docs/OFFLINE_DELIVERY.md` is
+the design. This does *not* change the verdict below on the BLE radio itself:
+what landed reuses Gossipsub for flooding on an IP network, and phone-to-phone
+Bluetooth with no router remains unbuilt.
+
 **BLE mesh transport, and its flood-control tuning** (TTL 7 with degree-based
 clamping, 10–220 ms relay jitter, message-ID-seeded fanout subsetting, split
 horizon, source routing with confirmed-edge BFS, ~469-byte fragmentation).

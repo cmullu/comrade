@@ -8,9 +8,11 @@
  *   dm      — DM control envelopes (profile-share on accept, read/delivered receipts)
  *   call    — voice/video call signaling (WebRTC over the Vault DM channel)
  *   presence— comrade presence beacons (online/offline, to chosen peers only)
+ *   nudge   — "they nearly wrote to you": one signal for an abandoned draft
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
  *   tara    — reflective-companion engine (deterministic, on-device, not therapy)
+ *   attention — attention-restoration engine (usage mirror, focus sessions, long-read chunking)
  *   relay   — NIP-65 relay-list metadata + outbox-model routing
  *   media   — NIP-94/96 encrypted media staging + pluggable uploaders
  *
@@ -34,6 +36,7 @@
 uniffi::setup_scaffolding!("comrade_core");
 
 pub mod anon;
+pub mod attention;
 pub mod call;
 pub mod crypto;
 pub mod dak;
@@ -43,6 +46,7 @@ pub mod gcs;
 pub mod geo;
 pub mod media;
 pub mod metrics;
+pub mod nudge;
 pub mod pad;
 pub mod presence;
 pub mod relay;

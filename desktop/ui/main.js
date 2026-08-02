@@ -54,6 +54,43 @@
     callDecisions = m;
   }).catch(() => {});
 
+  // ── Draft reports (desktop/ui/draft_reports.mjs) ───────────────────────────
+  // Which of "there is unsent text here" / "it is gone" a composer edit or a
+  // conversation switch has to report, for `comrade_core::nudge`. Pure and
+  // tested there; loaded through the same cached dynamic import as the two
+  // modules above — see the note on `callDecisionsReady` for why this file
+  // cannot use a static `import`.
+  let draftReports = null;
+  import("./draft_reports.mjs")
+    .then((m) => {
+      draftReports = m;
+    })
+    .catch(() => {});
+
+  // ── Attachment rules (desktop/ui/attachment_caption.mjs) ───────────────────
+  // What a new attachment is captioned with, and how one reads when something
+  // quotes it. Mirrored in the Flutter app and on Android — same cases, same
+  // answers, pinned by three copies of one test. Loaded the same way as the
+  // modules above; `attachmentCaptionReady` is for the call sites that can
+  // await (sending), the handle for the ones that cannot (rendering a bubble).
+  let attachmentCaption = null;
+  const attachmentCaptionReady = import("./attachment_caption.mjs");
+  attachmentCaptionReady
+    .then((m) => {
+      attachmentCaption = m;
+    })
+    .catch(() => {});
+
+  // Degraded, not wrong: the window where the handle is still null closes long
+  // before a vault is unlocked and a thread is on screen, and a bubble drawn in
+  // it says "Attachment" rather than naming the kind. Nothing is mislabelled.
+  const mediaQuoteLabel = (mime, caption) =>
+    attachmentCaption ? attachmentCaption.mediaQuoteLabel(mime, caption) : "Attachment";
+  const mediaKindLabel = (mime) =>
+    attachmentCaption ? attachmentCaption.mediaKindLabel(mime) : "Attachment";
+  const opensFullScreen = (mime) =>
+    attachmentCaption ? attachmentCaption.opensFullScreen(mime) : false;
+
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
 
@@ -261,11 +298,85 @@
     (await mediaCacheReady).clear();
   }
 
-  function renderMediaEl(mime, url) {
-    if (mime.startsWith("image/")) return el("img", { class: "media-img", src: url, alt: "media" });
+  function renderMediaEl(mime, url, caption = "") {
+    if (mime.startsWith("image/")) {
+      return el("img", {
+        class: "media-img media-zoomable",
+        src: url,
+        alt: caption || "Photo attachment",
+        title: "Click to view full screen",
+        onClick: () => openLightbox(mime, url, caption),
+      });
+    }
     if (mime.startsWith("audio/")) return el("audio", { controls: "", src: url });
-    if (mime.startsWith("video/")) return el("video", { class: "media-img", controls: "", src: url });
+    if (mime.startsWith("video/")) {
+      const wrap = el("div", { class: "media-video" });
+      wrap.append(el("video", { class: "media-img", controls: "", src: url }));
+      wrap.append(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "⛶ Full screen",
+          onClick: () => openLightbox(mime, url, caption),
+        }),
+      );
+      return wrap;
+    }
     return el("a", { href: url, download: "comrade-media", text: "Download file" });
+  }
+
+  // A photo or a video, full screen: black backdrop, the caption if there is
+  // one, and a way out (the ✕, a click on the backdrop, or Escape). Same
+  // decision as `MediaViewerDialog` on Android and `media_viewer.dart` in the
+  // Flutter app — including the black backdrop, which is not decoration: a
+  // photo is judged against black and the chrome must not tint it.
+  //
+  // The object URL is the one the bubble already holds, so opening this costs
+  // no second fetch and `revokeAllMediaUrls` still drops exactly one copy.
+  function openLightbox(mime, url, caption) {
+    if (!opensFullScreen(mime)) return;
+    const existing = $("#media-lightbox");
+    if (existing) existing.remove();
+
+    const close = () => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") close();
+    };
+
+    const inner = mime.startsWith("image/")
+      ? el("img", { class: "lightbox-media", src: url, alt: caption || "Photo attachment" })
+      : el("video", { class: "lightbox-media", controls: "", autoplay: "", src: url });
+
+    const overlay = el(
+      "div",
+      {
+        id: "media-lightbox",
+        class: "lightbox",
+        // Only a click on the backdrop itself closes — one on the photo must
+        // not, or zooming in on a detail becomes a game of not missing.
+        onClick: (e) => {
+          if (e.target === overlay) close();
+        },
+      },
+      el(
+        "div",
+        { class: "lightbox-bar" },
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          id: "lightbox-close",
+          text: "✕",
+          title: "Close",
+          onClick: close,
+        }),
+        el("span", { class: "lightbox-kind", text: mediaKindLabel(mime) }),
+      ),
+      inner,
+      caption ? el("div", { class: "lightbox-caption", text: caption }) : null,
+    );
+    document.addEventListener("keydown", onKey);
+    document.body.append(overlay);
   }
 
   // ── Screen + theme management (progressive disclosure) ────────────────────
@@ -561,6 +672,14 @@
   }
 
   function selectContact(key) {
+    // Leaving a conversation with text still in the box abandons that draft,
+    // and the text left behind belongs to whoever is on screen next — both
+    // decided in draft_reports.mjs, where the re-attribution is tested.
+    if (draftReports) {
+      performDraftReports(
+        draftReports.switchReports(state.activeContact, key, $("#dm-input").value),
+      );
+    }
     state.activeContact = key;
     clearReply();
     $("#dm-input").disabled = false;
@@ -587,6 +706,10 @@
         .map((m) => ({
           created_at: m.created_at,
           outgoing: !!m.outgoing,
+          // `id` is the NIP-94 event id: what a reply's `e` tag names, and
+          // what quotePreview looks an original up by. Without it an
+          // attachment is unrepliable and unquotable — it was, until now.
+          id: m.event_id,
           media: { eventId: m.event_id, mime: m.mime_type, caption: m.caption },
         }));
       if (!texts.length && !liveMedia.length && !persistedMedia.length) return;
@@ -744,7 +867,8 @@
     const msgs = state.dms.get(state.activeContact) || [];
     const q = msgs.find((x) => x.id && x.id === replyToId);
     const text = q
-      ? q.content || (q.media ? `📎 ${q.media.caption || "media"}` : "message")
+      ? q.content ||
+        (q.media ? mediaQuoteLabel(q.media.mime, q.media.caption) : "message")
       : "Original message";
     return el(
       "div",
@@ -778,7 +902,8 @@
 
   function setReply(m) {
     if (!m || !m.id) return;
-    const content = m.content || (m.media ? `📎 ${m.media.caption || "media"}` : "message");
+    const content =
+      m.content || (m.media ? mediaQuoteLabel(m.media.mime, m.media.caption) : "message");
     state.replyTo = { id: m.id, content, outgoing: !!m.outgoing };
     $("#dm-reply-text").textContent = content;
     $("#dm-reply-chip").hidden = false;
@@ -906,6 +1031,43 @@
       "info",
     );
     await loadComrades();
+  }
+
+  /**
+   * Perform draft reports decided by `draft_reports.mjs`. Silent and
+   * fire-and-forget: the core treats a missed report as "no nudge", which is
+   * the harmless direction, and nothing here is worth a toast.
+   */
+  function performDraftReports(reports) {
+    for (const { command, peer } of reports) {
+      safeInvoke(command, { peer }, { silent: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * Tell the core whether this composer holds unsent text — the only input the
+   * nudge feature takes (`comrade_core::nudge`). Never the text itself, and
+   * nothing at all until the draft is abandoned *and* the peer is a comrade.
+   *
+   * Deliberately outside the debounced UPI preview below: what the core needs
+   * is the edge, and a trailing debounce would swallow "the box is empty again"
+   * behind the next keystroke.
+   */
+  function reportDraftEdit() {
+    if (!draftReports) return;
+    performDraftReports(
+      draftReports.editReports(state.activeContact, $("#dm-input").value),
+    );
+  }
+
+  /**
+   * A comrade wrote something for us and gave up on it. One toast, and no
+   * record kept: a nudge is not presence, so it moves no dot and advances no
+   * "last seen" — the core keeps those to beacons.
+   */
+  function onComradeNudge(p) {
+    if (!p.peer) return;
+    showToast(`${p.name || displayName(p.peer)} is online — they might need you`, "info");
   }
 
   /** A comrade came online, went offline, or their claim aged out. */
@@ -2367,12 +2529,14 @@
 
   // A media bubble: renders inline if we already hold an object URL (our own
   // sent media), otherwise a Download button that fetches + decrypts on click.
-  function mediaBubble(m) {
+  // `repliable` is false in the couple panel: that view has no composer and no
+  // reply chip, so a button there would set a reply target nothing can show.
+  function mediaBubble(m, { repliable = true } = {}) {
     const wrap = el("div", { class: "bubble " + (m.outgoing ? "out" : "in") });
     if (m.media.caption) wrap.append(el("div", { class: "media-caption", text: m.media.caption }));
 
     if (m.media.objectUrl) {
-      wrap.append(renderMediaEl(m.media.mime, m.media.objectUrl));
+      wrap.append(renderMediaEl(m.media.mime, m.media.objectUrl, m.media.caption));
     } else {
       const btn = el("button", { class: "btn btn-ghost btn-sm", text: "⬇ Download & view" });
       btn.addEventListener("click", async () => {
@@ -2410,6 +2574,9 @@
       wrap.append(btn);
     }
     wrap.append(el("span", { class: "bubble-time", text: relTime(m.created_at) }));
+    // An attachment is an event like any other, so it is repliable like any
+    // other. It was not, only because media rows carried no `id`.
+    if (m.id && repliable) wrap.append(replyButton(m));
     return wrap;
   }
 
@@ -2419,6 +2586,7 @@
     list.push({
       created_at: p.created_at,
       outgoing: false,
+      id: p.event_id,
       media: { eventId: p.event_id, mime: p.mime_type, caption: p.caption },
     });
     state.dms.set(key, list);
@@ -2431,7 +2599,17 @@
   }
 
   // Encrypt + upload a selected file to `targetPubkey`, then render it locally.
-  async function handleAttach(file, targetPubkey) {
+  //
+  // The caption ("tag") is whatever is in the composer when the file is picked,
+  // per `attachment_caption.mjs` — Telegram's rule, minus the case where those
+  // words are a half-written reply. It used to be the *file's name*, which is
+  // noise in the recipient's thread at best and at worst the one piece of local
+  // filesystem vocabulary the sender never chose to share.
+  //
+  // `composer` is the input whose text becomes that caption — the DM box in the
+  // conversation, and nothing at all in the couple panel, which has no composer
+  // of its own and must not reach across screens for the DM one's draft.
+  async function handleAttach(file, targetPubkey, { composer = null } = {}) {
     if (!file) return;
     if (!targetPubkey) {
       showToast("No recipient selected", "warn");
@@ -2452,21 +2630,35 @@
       showToast("Could not read the file", "error");
       return;
     }
+    const replyPending = !!state.replyTo;
+    const { captionForAttachment, captionConsumesDraft } = await attachmentCaptionReady;
+    const draft = composer ? composer.value : "";
+    const caption = captionForAttachment(draft, replyPending);
+    const consumed = captionConsumesDraft(draft, replyPending);
     showToast("Encrypting & uploading…", "info");
     try {
       const dto = await safeInvoke("send_media_bytes", {
         targetPubkey,
         mimeType: mime,
-        caption: file.name,
+        caption,
         base64,
       });
+      // Cleared only now, and only if its text went along: a failed upload must
+      // leave what the person typed where they typed it.
+      if (consumed && composer) {
+        composer.value = "";
+        // The box is empty again, and the core is told so — the same edge a
+        // manual clear reports (`comrade_core::nudge`).
+        reportDraftEdit();
+      }
       // Optimistic local render straight from the picked file — no round-trip.
       const objectUrl = URL.createObjectURL(file);
       const list = state.dms.get(targetPubkey) || [];
       list.push({
         created_at: dto.created_at || nowSecs(),
         outgoing: true,
-        media: { eventId: dto.event_id, mime, caption: file.name, objectUrl },
+        id: dto.event_id,
+        media: { eventId: dto.event_id, mime, caption, objectUrl },
       });
       state.dms.set(targetPubkey, list);
       if (state.activeContact === targetPubkey) {
@@ -2487,7 +2679,7 @@
     if (!box || !state.partnerNpub) return;
     box.innerHTML = "";
     const msgs = state.dms.get(state.partnerNpub) || [];
-    for (const m of msgs) if (m.media) box.append(mediaBubble(m));
+    for (const m of msgs) if (m.media) box.append(mediaBubble(m, { repliable: false }));
     box.scrollTop = box.scrollHeight;
   }
 
@@ -2750,6 +2942,8 @@
           onPeerProfileUpdated(p);
         } else if (p.type === "comrade_presence") {
           onComradePresence(p);
+        } else if (p.type === "comrade_nudge") {
+          onComradeNudge(p);
         } else if (p.type === "ledger_updated") {
           onLedgerUpdated(p);
         }
@@ -2784,7 +2978,10 @@
 
     $("#chitthi-input").addEventListener("input", updateCount);
     $("#broadcast-btn").addEventListener("click", handleBroadcast);
-    $("#dm-input").addEventListener("input", handleDmInput);
+    $("#dm-input").addEventListener("input", (e) => {
+      reportDraftEdit();
+      handleDmInput(e);
+    });
     $("#dm-send").addEventListener("click", handleDmSend);
     $("#dm-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -2797,7 +2994,7 @@
     $("#dm-attach").addEventListener("click", () => $("#dm-file").click());
     $("#dm-file").addEventListener("change", (e) => {
       const file = e.target.files && e.target.files[0];
-      handleAttach(file, state.activeContact);
+      handleAttach(file, state.activeContact, { composer: $("#dm-input") });
       e.target.value = "";
     });
     $("#couple-attach").addEventListener("click", () => $("#couple-file").click());
@@ -3003,7 +3200,11 @@
         case "send_media_bytes":
           return {
             event_id: "mockmedia_" + Date.now(),
-            url: "https://cdn.hackers.town/mock",
+            // `example.invalid` on purpose: this is the dev mock, so the URL is
+            // never fetched, and naming a *real* host here is how a dead one
+            // ends up looking load-bearing. (It did: the previous value was the
+            // media host that broke every attachment.)
+            url: "https://blob.example.invalid/mock",
             mime_type: args.mimeType,
             caption: args.caption || "",
             sender: "npub1mockdev0identity00000000000000000000000000000000",

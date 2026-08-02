@@ -144,6 +144,15 @@ void main() {
     await tester.pump();
   }
 
+  /// Which glyph the single action control is showing — its mode, now that
+  /// there is one key rather than one per mode.
+  IconData actionIcon(WidgetTester tester) => tester
+      .widget<Icon>(find.descendant(
+        of: find.byKey(const Key('dm-action')),
+        matching: find.byType(Icon),
+      ))
+      .icon!;
+
   group('layout', () {
     testWidgets('emoji sits left of the field and the paper clip right of it',
         (WidgetTester tester) async {
@@ -152,25 +161,25 @@ void main() {
       final Offset emoji = tester.getCenter(find.byKey(const Key('dm-emoji')));
       final Offset field = tester.getCenter(find.byKey(const Key('dm-input')));
       final Offset clip = tester.getCenter(find.byKey(const Key('dm-attach')));
-      final Offset action = tester.getCenter(find.byKey(const Key('dm-send')));
+      final Offset action =
+          tester.getCenter(find.byKey(const Key('dm-action')));
 
       expect(emoji.dx, lessThan(field.dx), reason: 'emoji is the left icon');
       expect(clip.dx, greaterThan(field.dx),
           reason: 'paper clip is on the right');
       expect(action.dx, greaterThan(clip.dx),
-          reason: 'the round button is outside the field, furthest right');
+          reason: 'the action control is the right-most thing in the field');
     });
 
     testWidgets('with no recorder and no camera the round button is Send',
         (WidgetTester tester) async {
       await pumpComposer(tester);
-      expect(find.byKey(const Key('dm-send')), findsOneWidget);
-      expect(find.byKey(const Key('dm-record')), findsNothing);
-      expect(find.byKey(const Key('dm-camera')), findsNothing);
+      expect(find.byKey(const Key('dm-action')), findsOneWidget);
+      expect(actionIcon(tester), Icons.send);
       // Nothing to send yet, so it is disabled rather than absent — the layout
       // must not jump when the first character is typed.
       expect(
-        tester.widget<IconButton>(find.byKey(const Key('dm-send'))).onPressed,
+        tester.widget<IconButton>(find.byKey(const Key('dm-action'))).onPressed,
         isNull,
       );
     });
@@ -178,26 +187,26 @@ void main() {
     testWidgets('typing swaps the capture button for Send, and back',
         (WidgetTester tester) async {
       await pumpComposer(tester, recorder: _FakeRecorder());
-      expect(find.byKey(const Key('dm-record')), findsOneWidget);
+      expect(actionIcon(tester), Icons.mic_none);
+      // One way to capture is not a choice, so the control offers no swipe —
+      // and says so by not advertising one.
       expect(
-        find.byKey(const Key('dm-swap-capture')),
-        findsNothing,
-        reason: 'one way to capture is not a choice',
+        tester.widget<IconButton>(find.byKey(const Key('dm-action'))).tooltip,
+        isNot(contains('swipe')),
       );
 
       await tester.enterText(find.byKey(const Key('dm-input')), 'hello');
       await tester.pump();
-      expect(find.byKey(const Key('dm-record')), findsNothing);
-      expect(find.byKey(const Key('dm-send')), findsOneWidget);
+      expect(actionIcon(tester), Icons.send);
 
-      await tester.tap(find.byKey(const Key('dm-send')));
+      await tester.tap(find.byKey(const Key('dm-action')));
       await tester.pump();
       expect(sends, 1);
 
       // Whitespace is not a message.
       await tester.enterText(find.byKey(const Key('dm-input')), '   ');
       await tester.pump();
-      expect(find.byKey(const Key('dm-record')), findsOneWidget);
+      expect(actionIcon(tester), Icons.mic_none);
     });
 
     testWidgets('a device with a camera but no mic shows the camera only',
@@ -207,8 +216,7 @@ void main() {
         capture: _FakeCapture(),
         recorder: _FakeRecorder(available: false),
       );
-      expect(find.byKey(const Key('dm-camera')), findsOneWidget);
-      expect(find.byKey(const Key('dm-record')), findsNothing);
+      expect(actionIcon(tester), Icons.photo_camera_outlined);
     });
   });
 
@@ -260,8 +268,8 @@ void main() {
         recorder: _FakeRecorder(available: false),
       );
 
-      expect(find.byKey(const Key('dm-camera')), findsNothing);
-      await tester.tap(find.byKey(const Key('dm-video')));
+      expect(actionIcon(tester), Icons.videocam_outlined);
+      await tester.tap(find.byKey(const Key('dm-action')));
       await tester.pumpAndSettle();
 
       expect(capture.photos, 0);
@@ -278,14 +286,14 @@ void main() {
         recorder: _FakeRecorder(available: false),
       );
 
-      await tester.tap(find.byKey(const Key('dm-camera')));
+      await tester.tap(find.byKey(const Key('dm-action')));
       await tester.pumpAndSettle();
 
       expect(capture.photos, 1);
       expect(sentAttachments.single.mimeType, 'image/jpeg');
     });
 
-    testWidgets('the swap control cycles voice → photo → video → voice',
+    testWidgets('a right-swipe cycles voice → photo → video → voice',
         (WidgetTester tester) async {
       // Three modes, not two: a device that can photograph can usually also
       // record video, and a mic/camera toggle would leave video unreachable.
@@ -294,36 +302,37 @@ void main() {
         capture: _FakeCapture(),
         recorder: _FakeRecorder(),
       );
-      final Finder swap = find.byKey(const Key('dm-swap-capture'));
+      final Finder action = find.byKey(const Key('dm-action'));
+      Future<void> swipeRight() async {
+        await tester.fling(action, const Offset(120, 0), 800);
+        await tester.pumpAndSettle();
+      }
 
-      expect(find.byKey(const Key('dm-record')), findsOneWidget);
-      await tester.tap(swap);
-      await tester.pump();
-      expect(find.byKey(const Key('dm-camera')), findsOneWidget);
+      expect(actionIcon(tester), Icons.mic_none);
+      await swipeRight();
+      expect(actionIcon(tester), Icons.photo_camera_outlined);
 
-      await tester.tap(swap);
-      await tester.pump();
-      expect(find.byKey(const Key('dm-video')), findsOneWidget);
+      await swipeRight();
+      expect(actionIcon(tester), Icons.videocam_outlined);
 
-      await tester.tap(swap);
-      await tester.pump();
-      expect(find.byKey(const Key('dm-record')), findsOneWidget);
+      // Wraps, so the cycle never dead-ends on the last mode.
+      await swipeRight();
+      expect(actionIcon(tester), Icons.mic_none);
     });
 
-    testWidgets('the swap control disappears once there is text to send',
+    testWidgets('the control becomes Send once there is text to send',
         (WidgetTester tester) async {
       await pumpComposer(
         tester,
         capture: _FakeCapture(),
         recorder: _FakeRecorder(),
       );
-      expect(find.byKey(const Key('dm-swap-capture')), findsOneWidget);
+      expect(actionIcon(tester), Icons.mic_none);
 
       await tester.enterText(find.byKey(const Key('dm-input')), 'hi');
       await tester.pump();
 
-      expect(find.byKey(const Key('dm-swap-capture')), findsNothing);
-      expect(find.byKey(const Key('dm-send')), findsOneWidget);
+      expect(actionIcon(tester), Icons.send);
     });
   });
 
@@ -332,7 +341,7 @@ void main() {
     // counter, so these use explicit `pump`s: `pumpAndSettle` never settles
     // against a periodic timer and would fail on a timeout instead.
     Future<void> startRecording(WidgetTester tester) async {
-      await tester.tap(find.byKey(const Key('dm-record')));
+      await tester.tap(find.byKey(const Key('dm-action')));
       await tester.pump(); // `start()` resolves
       await tester.pump(); // the strip is laid out
     }

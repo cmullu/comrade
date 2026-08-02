@@ -2,15 +2,29 @@
 /// media interleaved in time order, and receipts that never regress.
 library;
 
+import 'dart:typed_data';
+
 import 'package:comrade/src/data/fake_comrade_repository.dart';
 import 'package:comrade/src/data/models.dart';
 import 'package:comrade/src/screens/chats/conversation_screen.dart';
 import 'package:comrade/src/state/chat_providers.dart';
+import 'package:comrade/src/widgets/media_attachment.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers.dart';
+
+/// Yields one small attachment, so a test can drive the paper clip without a
+/// platform picker.
+class _OnePicker implements AttachmentPicker {
+  @override
+  Future<PickedAttachment?> pick() async => PickedAttachment(
+        name: 'IMG_20260731_114233.png',
+        mimeType: 'image/png',
+        bytes: Uint8List.fromList(<int>[1, 2, 3]),
+      );
+}
 
 void main() {
   group('mergeChatItems', () {
@@ -142,7 +156,7 @@ void main() {
       // draft (`MessageComposer._actionButton`), so the state it is in is a
       // rendered fact, not an assumption.
       await tester.pump();
-      await tester.tap(find.byKey(const Key('dm-send')));
+      await tester.tap(find.byKey(const Key('dm-action')));
       await tester.pumpAndSettle();
 
       expect(find.text('On my way'), findsOneWidget);
@@ -153,6 +167,207 @@ void main() {
             ?.text,
         isEmpty,
       );
+    });
+
+    testWidgets('a half-written message reports itself, then reports going',
+        (WidgetTester tester) async {
+      // The composer's half of `comrade_core::nudge`: the core cannot tell a
+      // comrade that a message was written and abandoned unless the screen
+      // says both things happened. Only the edges are reported — a call per
+      // keystroke would cross the bridge for nothing.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+      expect(repo.draftReports, isEmpty);
+
+      await tester.enterText(find.byKey(const Key('dm-input')), 'I wanted to');
+      await tester.pumpAndSettle();
+      expect(repo.draftReports, <(String, String)>[
+        ('note', FakePeers.bhaskar),
+      ]);
+
+      await tester.enterText(
+          find.byKey(const Key('dm-input')), 'I wanted to s');
+      await tester.pumpAndSettle();
+      expect(
+        repo.draftReports,
+        hasLength(1),
+        reason: 'still the same unsent draft — nothing new to say',
+      );
+
+      // Clearing the box is giving up on it.
+      await tester.enterText(find.byKey(const Key('dm-input')), '');
+      await tester.pumpAndSettle();
+      expect(repo.draftReports, <(String, String)>[
+        ('note', FakePeers.bhaskar),
+        ('abandon', FakePeers.bhaskar),
+      ]);
+    });
+
+    testWidgets('walking away from a draft reports it against that peer',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), 'are you ok');
+      await tester.pumpAndSettle();
+
+      // The screen goes with the text still in it — the case a person is least
+      // likely to come back from, and the one this feature exists for.
+      await tester.pumpWidget(harness(const SizedBox(), repo: repo));
+      await tester.pumpAndSettle();
+
+      expect(repo.draftReports, <(String, String)>[
+        ('note', FakePeers.bhaskar),
+        ('abandon', FakePeers.bhaskar),
+      ]);
+    });
+
+    testWidgets('a whitespace-only composer is not a half-written message',
+        (WidgetTester tester) async {
+      // `_send` would not send it either, so it must not look like something
+      // that was nearly sent.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.bhaskar), repo: repo),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), '   ');
+      await tester.pumpAndSettle();
+
+      expect(repo.draftReports, isEmpty);
+    });
+  });
+
+  group('replying to an attachment', () {
+    testWidgets('a long press on media aims the composer at it',
+        (WidgetTester tester) async {
+      // The gap this closes: the reply target used to be typed `MessageInfo`,
+      // so a thread's attachments were simply unrepliable. Nothing in the core
+      // required that — an `e` tag does not care what kind of event it names.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.alice), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.byType(MediaAttachmentBubble));
+      await tester.pumpAndSettle();
+
+      // The seeded attachment is a voice note with no caption: the chip has to
+      // say *what* is being replied to, which is why the kind is always named.
+      expect(
+        find.byKey(const Key('dm-reply-chip')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Voice message'), findsWidgets);
+    });
+
+    testWidgets('the reply is sent against the attachment event id',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.alice), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.byType(MediaAttachmentBubble));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), 'heard it');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('dm-action')));
+      await tester.pumpAndSettle();
+
+      final MessageInfo sent = (await repo.messages(FakePeers.alice)).last;
+      expect(sent.content, 'heard it');
+      expect(sent.replyTo, 'media-1');
+      // And the thread can now quote it, which is the other half: a reply whose
+      // target resolves to nothing renders as a bare message.
+      expect(find.textContaining('🎤 Voice message'), findsWidgets);
+      expect(find.byKey(const Key('dm-reply-chip')), findsNothing,
+          reason: 'sending clears the reply');
+    });
+  });
+
+  group('tagging an attachment', () {
+    testWidgets('the composer text becomes the caption, and the box empties',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.bhaskar),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_OnePicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(const Key('dm-input')), 'at the gate');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+
+      final MediaMessageInfo sent = (await repo.media(FakePeers.bhaskar)).last;
+      expect(sent.caption, 'at the gate');
+      // Not the file's name, which is what this used to send: a device-chosen
+      // `IMG_20260731_114233.jpg` is noise the sender never chose to share.
+      expect(sent.caption, isNot(contains('.png')));
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('dm-input')))
+            .controller
+            ?.text,
+        isEmpty,
+      );
+    });
+
+    testWidgets('a pending reply keeps its draft', (WidgetTester tester) async {
+      // An attachment cannot carry `reply_to`, so it is not that reply — and
+      // taking the words typed for the reply would lose them to a caption.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.alice),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_OnePicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.byType(MediaAttachmentBubble));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), 'this one');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+
+      expect((await repo.media(FakePeers.alice)).last.caption, isEmpty);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('dm-input')))
+            .controller
+            ?.text,
+        'this one',
+      );
+      expect(find.byKey(const Key('dm-reply-chip')), findsOneWidget);
     });
   });
 

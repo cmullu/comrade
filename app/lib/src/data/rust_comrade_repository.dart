@@ -46,6 +46,11 @@
 /// * `metricsSnapshot` — device-local delivery counters for a diagnostics
 ///   screen.
 /// * `panicWipe` — the irreversible local-state destroy.
+/// * `nudgeComrades` — the deliberate "I might need you", which on Android is
+///   sent by the breathing screen. This app has no breathing screen yet (the
+///   attention pillar is Android-first, see `docs/ATTENTION.md`), and a
+///   disclosure with no UI to explain it is the one thing this feature must
+///   not be. It is one line here the day that screen exists.
 ///
 /// Each is a one-line addition to the interface plus a fake implementation
 /// when a screen wants it. Nothing here is half-wired: every method the
@@ -214,6 +219,14 @@ class RustComradeRepository implements ComradeRepository {
   @override
   Future<int> announcePresence(bool online) async =>
       (await _guard(() => rust.announcePresence(online: online))).toInt();
+
+  @override
+  Future<void> noteDraft(String npub) =>
+      _guard(() => rust.noteDraft(peer: npub));
+
+  @override
+  Future<void> abandonDraft(String npub) =>
+      _guard(() => rust.abandonDraft(peer: npub));
 
   // ── Conversations ──────────────────────────────────────────────────────────
 
@@ -700,6 +713,8 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
           online: online,
           at: at.toInt(),
         ),
+      rust.BridgeEvent_ComradeNudge(:final String peer, :final String? name) =>
+        IncomingComradeNudge(peer: peer, name: name),
       rust.BridgeEvent_MeshStatusChanged(:final rust.MeshStatusDto field0) =>
         MeshStatusChanged(_meshStatus(field0)),
       rust.BridgeEvent_LedgerUpdated(:final String ledger) =>

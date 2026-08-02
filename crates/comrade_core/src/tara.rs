@@ -269,10 +269,17 @@ const BRAINSTORM_PROMPTS: &[&str] = &[
     "If the decision were already made, which outcome would you quietly hope for?",
 ];
 
+/// The hand-off spoken or shown when [`detect_distress`] fires.
+///
+/// Deliberately **modality-neutral**: it must not point at "the helplines
+/// below", because the same sentence is read aloud by the voice assistant where
+/// there is no screen and no "below". Each surface adds its own affordance on
+/// top — the app renders [`CRISIS_RESOURCES`] as a card, the voice layer reads
+/// a number out. Keep it that way if you reword this.
 const CRISIS_REPLY: &str = "I'm really glad you told me, and I'm taking it seriously. \
 I'm a reflective companion, not a therapist or crisis service — what you're carrying \
-deserves a trained human. Please reach out to one of the helplines shown below, or to \
-someone you trust, right now. I'll still be here afterwards.";
+deserves a trained human. Please reach out to a crisis helpline, or to someone you \
+trust, right now. I'll still be here afterwards.";
 
 fn contains_word(haystack_norm: &str, cue: &str) -> bool {
     format!(" {haystack_norm} ").contains(&format!(" {cue} "))
@@ -320,6 +327,32 @@ impl ReflectiveCompanion {
 
     fn pick(options: &'static [&'static str], turn: u64) -> &'static str {
         options[(turn as usize) % options.len()]
+    }
+}
+
+impl ReflectiveCompanion {
+    /// [`CompanionEngine::opener`], optionally extended with a pre-built
+    /// heavy-scroll-day nudge (`comrade_core::attention::usage_opener`).
+    ///
+    /// Precedence is deliberate and lives here so it can never be decided two
+    /// ways by two frontends: **mood outranks usage** — two low journal days
+    /// this week are a heavier signal than yesterday's screen time, and the
+    /// usage line must never displace the low-mood invitation. The usage
+    /// nudge only ever replaces the generic openers.
+    ///
+    /// Data minimisation still holds: the caller passes a finished sentence
+    /// built from rollup *numbers* (see `attention::usage_opener`), so this
+    /// method learns nothing about the user's apps or words.
+    pub fn opener_with_usage(
+        &self,
+        recent: &[JournalSignal],
+        usage_nudge: Option<String>,
+    ) -> String {
+        let base = self.opener(recent);
+        if base.contains("felt low") {
+            return base;
+        }
+        usage_nudge.unwrap_or(base)
     }
 }
 
@@ -491,6 +524,24 @@ mod tests {
         assert!(ReflectiveCompanion
             .opener(&[neutral])
             .contains("journaling this week"));
+    }
+
+    #[test]
+    fn low_mood_outranks_the_usage_nudge_and_usage_replaces_only_generic_openers() {
+        let low = JournalSignal {
+            mood: Some("😞".into()),
+            age_days: 1,
+        };
+        let nudge = Some("Yesterday had about 120 minutes…".to_string());
+        // Two low days: the mood invitation wins, whatever usage says.
+        let s = ReflectiveCompanion.opener_with_usage(&[low.clone(), low], nudge.clone());
+        assert!(s.contains("felt low"));
+        // No low days: the usage nudge replaces the generic opener.
+        let s = ReflectiveCompanion.opener_with_usage(&[], nudge);
+        assert!(s.contains("120 minutes"));
+        // No nudge: exactly the plain opener.
+        let s = ReflectiveCompanion.opener_with_usage(&[], None);
+        assert_eq!(s, ReflectiveCompanion.opener(&[]));
     }
 
     #[test]

@@ -16,8 +16,21 @@ sealed interface VoiceCommand {
     /** Save [text] as a private journal entry (local-only, never posted). */
     data class Journal(val text: String) : VoiceCommand
 
+    /**
+     * Say [text] to Tara, the reflective companion, and hear her reply.
+     * Local-only like [Journal] — the thread never leaves the device.
+     */
+    data class Tara(val text: String) : VoiceCommand
+
     /** Read the cached Sabha timeline aloud. */
     data object ReadTimeline : VoiceCommand
+
+    /**
+     * Start a focus session (attention pillar). [minutes] of `null` means "use
+     * whatever the progressive-duration rule suggests" — the engine owns that
+     * decision, not the grammar.
+     */
+    data class StartFocus(val minutes: Int?) : VoiceCommand
 
     /** Switch the active workspace to [workspaceKey] (a `ComradeCore` key). */
     data class SwitchWorkspace(val workspaceKey: String) : VoiceCommand
@@ -44,6 +57,11 @@ sealed interface VoiceCommand {
         // through to the public feed because of prefix overlap.
         private val JOURNAL_PREFIXES =
             listOf("journal", "write down", "note down", "dear diary", "note")
+
+        // Also private, also checked before the post prefixes. Longest phrasings
+        // first so "talk to tara" isn't shadowed by the bare "tara".
+        private val TARA_PREFIXES =
+            listOf("talk to tara", "ask tara", "tell tara", "tara")
         private val TIMELINE_PHRASES = listOf(
             "read timeline", "read my timeline", "read feed", "read my feed",
             "show feed", "show timeline", "what's new", "whats new", "catch me up",
@@ -53,6 +71,16 @@ sealed interface VoiceCommand {
             "new identity", "create identity",
         )
         private val HELP_PHRASES = listOf("help", "what can you do", "what can i say", "commands")
+
+        /**
+         * Ways of asking for a focus session. Matched as a *prefix* so an
+         * optional duration can follow ("start a focus session for 45
+         * minutes"); the bare phrase means "the suggested length".
+         */
+        private val FOCUS_PHRASES = listOf(
+            "start a focus session", "start focus session", "start a focus",
+            "start focus", "focus session", "focus for", "let's focus", "lets focus",
+        )
 
         // Spoken workspace names → ComradeCore workspace keys, longest phrase first
         // so "couple sakhi" wins over the bare "couple" prefix.
@@ -105,6 +133,11 @@ sealed interface VoiceCommand {
                 if (text == phrase) return GenerateKeypair
             }
 
+            // Checked before the switch/journal/post prefixes: "focus" would
+            // otherwise be eaten by nothing in particular, and "start a focus
+            // session" must never be mistaken for a public post.
+            parseFocus(text)?.let { return it }
+
             parseSwitch(text)?.let { return it }
 
             for (prefix in JOURNAL_PREFIXES) {
@@ -113,6 +146,17 @@ sealed interface VoiceCommand {
                 if (text.startsWith(withSpace)) {
                     val body = text.removePrefix(withSpace).trim()
                     return if (body.isEmpty()) Empty else Journal(body)
+                }
+            }
+
+            for (prefix in TARA_PREFIXES) {
+                // A bare "tara" is an address with nothing said yet, not a
+                // message — Empty prompts the user rather than sending "".
+                if (text == prefix) return Empty
+                val withSpace = "$prefix "
+                if (text.startsWith(withSpace)) {
+                    val body = text.removePrefix(withSpace).trim()
+                    return if (body.isEmpty()) Empty else Tara(body)
                 }
             }
 
@@ -126,6 +170,24 @@ sealed interface VoiceCommand {
             }
 
             return Unknown(text)
+        }
+
+        /**
+         * A focus request, with an optional spoken duration.
+         *
+         * Only a *digit* count is honoured. Vosk emits number words ("forty
+         * five") as often as digits, and a half-parsed "forty" becoming a
+         * 40-minute session nobody asked for is worse than falling back to the
+         * suggested length — which is the engine's own answer anyway.
+         */
+        private fun parseFocus(text: String): VoiceCommand? {
+            val matched = FOCUS_PHRASES.firstOrNull { text == it || text.startsWith("$it ") }
+                ?: return null
+            val remainder = text.removePrefix(matched).trim()
+            val minutes = Regex("\\b(\\d{1,3})\\b").find(remainder)
+                ?.groupValues?.get(1)
+                ?.toIntOrNull()
+            return StartFocus(minutes)
         }
 
         private fun parseSwitch(text: String): VoiceCommand? {

@@ -12,8 +12,11 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../data/comrade_repository.dart';
 import '../../data/models.dart';
 import '../../state/chat_providers.dart';
+import '../../state/providers.dart';
+import '../../util/attachment_caption.dart';
 import '../../util/chat_thread.dart';
 import '../../widgets/app_chrome.dart';
 import '../../widgets/composer.dart';
@@ -40,10 +43,41 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   bool _newMessagesBelow = false;
   bool _atBottom = true;
 
+  /// Whether the core has been told this composer holds unsent text. Only the
+  /// edges are worth a call — the core is idempotent, but a bridge hop per
+  /// keystroke is not free.
+  bool _draftReported = false;
+
+  /// Read once, so [dispose] never has to reach for a provider on its way out.
+  late final ComradeRepository _repo;
+
   @override
   void initState() {
     super.initState();
+    _repo = ref.read(comradeRepositoryProvider);
     _scroll.addListener(_onScroll);
+    _draft.addListener(_onDraftChanged);
+  }
+
+  /// Report whether there is unsent text here, so the core can tell a comrade
+  /// if it is later given up on (`comrade_core::nudge`). What the composer
+  /// holds never leaves the device — only the fact that it holds something.
+  void _onDraftChanged() {
+    final bool hasText = _draft.text.trim().isNotEmpty;
+    if (hasText == _draftReported) return;
+    _draftReported = hasText;
+    fireAndForget(
+      hasText ? _repo.noteDraft(widget.peer) : _repo.abandonDraft(widget.peer),
+    );
+  }
+
+  /// The draft for [peer] is gone because the screen is — leaving a thread with
+  /// a half-written message in it is the same signal as clearing the box, and
+  /// the one people are least likely to come back from.
+  void _abandonDraft(String peer) {
+    if (!_draftReported) return;
+    _draftReported = false;
+    fireAndForget(_repo.abandonDraft(peer));
   }
 
   @override
@@ -53,16 +87,22 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
       _loadedOnce = false;
       _knownItemCount = 0;
       _newMessagesBelow = false;
+      // Against the peer being left, before the clear below — by now
+      // `widget.peer` is the one arriving, and the draft was never theirs.
+      _abandonDraft(oldWidget.peer);
       _draft.clear();
     }
   }
 
   @override
   void dispose() {
+    _abandonDraft(widget.peer);
     _scroll
       ..removeListener(_onScroll)
       ..dispose();
-    _draft.dispose();
+    _draft
+      ..removeListener(_onDraftChanged)
+      ..dispose();
     _composerFocus.dispose();
     super.dispose();
   }
@@ -186,12 +226,29 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
 
   /// Send one attachment, however it was obtained — picked, photographed, or
   /// recorded. The composer owns *getting* it; this owns sending it.
+  ///
+  /// The caption is whatever is in the composer, per [captionForAttachment] —
+  /// not the file's name, which is what this used to send. A device-chosen name
+  /// (`IMG_20260731_114233.jpg`, `document.pdf`) is noise in the recipient's
+  /// thread at best, and at worst it is the one piece of local filesystem
+  /// vocabulary the sender never chose to share.
   Future<void> _sendAttachment(PickedAttachment picked) async {
-    await ref.read(conversationProvider(widget.peer).notifier).attach(
-          mimeType: picked.mimeType,
-          bytes: picked.bytes,
-          caption: picked.name,
-        );
+    final bool replyPending =
+        ref.read(conversationProvider(widget.peer)).value?.replyingTo != null;
+    final String draft = _draft.text;
+    final String caption =
+        captionForAttachment(draft: draft, replyPending: replyPending);
+    final bool consumed =
+        captionConsumesDraft(draft: draft, replyPending: replyPending);
+    final bool ok =
+        await ref.read(conversationProvider(widget.peer).notifier).attach(
+              mimeType: picked.mimeType,
+              bytes: picked.bytes,
+              caption: caption,
+            );
+    // Only clear a draft that actually went with the attachment, and only once
+    // it has: a failed upload must leave the words the person typed in the box.
+    if (ok && consumed) _draft.clear();
     if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToLatest());
     }
@@ -266,18 +323,15 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                   if (item.key == state.unreadBoundaryKey)
                     const UnreadSeparator(),
                   switch (item) {
-                    MediaChatItem(:final MediaMessageInfo media) => Row(
-                        mainAxisAlignment: media.outgoing
-                            ? MainAxisAlignment.end
-                            : MainAxisAlignment.start,
-                        children: <Widget>[MediaAttachmentBubble(media)],
+                    MediaChatItem(:final MediaMessageInfo media) =>
+                      MediaAttachmentBubble(
+                        media,
+                        onReply: () => _startReply(item),
                       ),
                     TextChatItem(:final MessageInfo message) => MessageBubble(
                         message: message,
-                        quotedText: state.quoted(message.replyTo)?.content,
-                        onReply: () => ref
-                            .read(conversationProvider(widget.peer).notifier)
-                            .startReply(message),
+                        quotedText: state.quoted(message.replyTo)?.preview,
+                        onReply: () => _startReply(item),
                       ),
                   },
                 ],
@@ -309,7 +363,14 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     );
   }
 
-  Widget _replyChip(BuildContext context, MessageInfo replying) => Padding(
+  /// Aim the composer at [item] and put the cursor where the reply goes. The
+  /// chip appearing with the keyboard still down reads as "nothing happened".
+  void _startReply(ChatItem item) {
+    ref.read(conversationProvider(widget.peer).notifier).startReply(item);
+    _composerFocus.requestFocus();
+  }
+
+  Widget _replyChip(BuildContext context, ChatItem replying) => Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Row(
           children: <Widget>[
@@ -322,7 +383,8 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 child: Text(
-                  '↩ ${replying.content}',
+                  '↩ ${replying.preview}',
+                  key: const Key('dm-reply-chip'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall,

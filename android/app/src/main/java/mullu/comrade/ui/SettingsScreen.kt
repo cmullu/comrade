@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
 import android.text.format.DateUtils
+import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
@@ -62,7 +64,12 @@ import mullu.comrade.MutedChats
 import mullu.comrade.R
 import mullu.comrade.RelayConnectionService
 import mullu.comrade.ScreenSecurity
+import mullu.comrade.attention.QuietHours
+import mullu.comrade.model.downloadPercent
+import mullu.comrade.update.UpdateCheck
 import mullu.comrade.update.UpdateChecker
+import mullu.comrade.update.UpdateDownloadState
+import mullu.comrade.update.UpdateDownloads
 import mullu.comrade.update.UpdateStatus
 import mullu.comrade.call.CallManager
 import mullu.comrade.voice.CommandDispatcher
@@ -145,6 +152,7 @@ fun SettingsScreen(
         BackgroundConnectivitySection()
         ScreenshotSection()
         NotificationsSection()
+        QuietHoursSection()
         UpdatesSection()
         TurnRelaySection()
         VaultLockSection(onLock = onLock)
@@ -442,6 +450,126 @@ private fun NotificationsSection() {
     }
 }
 
+// ── Quiet hours (docs/ATTENTION.md phase 0) ─────────────────────────────────
+
+/**
+ * The nightly window in which Comrade stays quiet.
+ *
+ * Opt-in, unlike the feed's gentle stop: silencing notifications can make
+ * someone miss something they wanted, so it is theirs to choose. The copy says
+ * plainly that a ringing call still comes through — a quiet-hours feature that
+ * quietly swallowed a call would be a serious thing to discover by accident.
+ *
+ * The window is adjusted in whole hours from this card. A minute-precision time
+ * picker would be more configurable and no more useful: nobody's sleep depends
+ * on 22:15 versus 22:00, and the extra dialog is one more thing to get wrong.
+ */
+@Composable
+private fun QuietHoursSection() {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(QuietHours.isEnabled(context)) }
+    var start by remember { mutableStateOf(QuietHours.startMinute(context)) }
+    var end by remember { mutableStateOf(QuietHours.endMinute(context)) }
+
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.settings_quiet_hours_title),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        stringResource(R.string.settings_quiet_hours_summary),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = {
+                        enabled = it
+                        QuietHours.setEnabled(context, it)
+                    },
+                    modifier = Modifier.padding(start = 12.dp),
+                )
+            }
+            if (enabled) {
+                Text(
+                    stringResource(
+                        R.string.settings_quiet_hours_window,
+                        QuietHours.formatMinute(start),
+                        QuietHours.formatMinute(end),
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    HourStepper(
+                        label = stringResource(R.string.settings_quiet_hours_start),
+                        minute = start,
+                        onChange = {
+                            start = it
+                            QuietHours.setWindow(context, it, end)
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    HourStepper(
+                        label = stringResource(R.string.settings_quiet_hours_end),
+                        minute = end,
+                        onChange = {
+                            end = it
+                            QuietHours.setWindow(context, start, it)
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    stringResource(R.string.settings_quiet_hours_device_only),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+    }
+}
+
+/** −/+ one hour, wrapping at midnight. */
+@Composable
+private fun HourStepper(
+    label: String,
+    minute: Int,
+    onChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            TextButton(onClick = { onChange(stepHour(minute, -1)) }) { Text("−") }
+            Text(QuietHours.formatMinute(minute), style = MaterialTheme.typography.bodyMedium)
+            TextButton(onClick = { onChange(stepHour(minute, +1)) }) { Text("+") }
+        }
+    }
+}
+
+/** Move [minute] by [hours], wrapping within the day. */
+private fun stepHour(minute: Int, hours: Int): Int {
+    val stepped = minute + hours * 60
+    val day = QuietHours.MINUTES_PER_DAY
+    return ((stepped % day) + day) % day
+}
+
 /** The system's own per-app notification screen — where the channels live. */
 private fun notificationSettingsIntent(context: Context): Intent =
     Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
@@ -454,17 +582,36 @@ private fun notificationSettingsIntent(context: Context): Intent =
  * Whether a newer Comrade exists, and how to get it.
  *
  * The card is the whole update UI: the notification only exists to bring
- * someone here. "Get the update" opens the release page in a browser rather
- * than downloading an APK in-app — see [UpdateChecker] for why that line is
- * drawn there.
+ * someone here. The update is downloaded **in-app** by
+ * [mullu.comrade.update.UpdateDownloadService] — a foreground service, so
+ * leaving this screen (or the app) does not stop it, and the shade shows the
+ * progress and then a tappable "ready to install". The release page remains as
+ * a fallback for a release with no single APK, and for anyone who would rather
+ * not grant the install permission.
  */
 @Composable
 private fun UpdatesSection() {
     val context = LocalContext.current
     val status by UpdateChecker.status.collectAsState()
+    val download by UpdateDownloads.state.collectAsState()
     var autoCheck by remember { mutableStateOf(UpdateChecker.isAutoCheckEnabled(context)) }
     var skipped by remember { mutableStateOf(UpdateChecker.skippedVersion(context)) }
     val lastChecked = remember(status) { UpdateChecker.lastCheckedAt(context) }
+    // The install permission is granted outside this app, so it has to be
+    // re-read when we come back — and a downloaded APK can vanish with the
+    // cache, which would otherwise leave an Install button pointing at nothing.
+    var canInstall by remember { mutableStateOf(UpdateChecker.canInstall(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                canInstall = UpdateChecker.canInstall(context)
+                UpdateChecker.refreshDownloadState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -497,10 +644,12 @@ private fun UpdatesSection() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Button(
-                        onClick = { UpdateChecker.openRelease(context, current.release) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text(stringResource(R.string.settings_updates_get)) }
+                    UpdateDownloadControls(
+                        release = current.release,
+                        download = download,
+                        canInstall = canInstall,
+                        onGrantInstall = { UpdateChecker.openInstallPermissionSettings(context) },
+                    )
                     OutlinedButton(
                         onClick = {
                             UpdateChecker.skip(context, current.release.versionName)
@@ -585,6 +734,145 @@ private fun UpdatesSection() {
                 color = MaterialTheme.colorScheme.outline,
             )
         }
+    }
+}
+
+/**
+ * The download → verify → install run of buttons, driven by
+ * [UpdateDownloads.state].
+ *
+ * One control at a time, always naming what the next tap does: **Download
+ * update (12 MB)** → a progress bar with **Cancel download** → **Install
+ * 0.0.51**. The release page sits underneath as a link, not a button, because
+ * it is now the fallback rather than the path.
+ */
+@Composable
+private fun UpdateDownloadControls(
+    release: UpdateCheck.ReleaseInfo,
+    download: UpdateDownloadState,
+    canInstall: Boolean,
+    onGrantInstall: () -> Unit,
+) {
+    val context = LocalContext.current
+
+    when (download) {
+        is UpdateDownloadState.Downloading -> {
+            Text(
+                stringResource(
+                    R.string.settings_updates_downloading,
+                    Formatter.formatShortFileSize(context, download.bytesRead),
+                    Formatter.formatShortFileSize(
+                        context,
+                        download.totalBytes.coerceAtLeast(download.bytesRead),
+                    ),
+                ),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (download.totalBytes > 0) {
+                LinearProgressIndicator(
+                    progress = { downloadPercent(download.bytesRead, download.totalBytes) / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            OutlinedButton(
+                onClick = { UpdateChecker.cancelDownload() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.settings_updates_cancel_download)) }
+        }
+
+        UpdateDownloadState.Verifying -> {
+            Text(
+                stringResource(R.string.settings_updates_verifying),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+
+        is UpdateDownloadState.Ready -> {
+            Button(
+                onClick = {
+                    if (canInstall) UpdateChecker.install(context) else onGrantInstall()
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.settings_updates_install, download.version)) }
+            if (!canInstall) InstallPermissionNote(onGrantInstall)
+        }
+
+        is UpdateDownloadState.Installing -> Text(
+            stringResource(R.string.settings_updates_installing),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        is UpdateDownloadState.Failed -> {
+            Text(
+                download.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            DownloadButton(release)
+            if (!canInstall) InstallPermissionNote(onGrantInstall)
+        }
+
+        UpdateDownloadState.Idle -> {
+            DownloadButton(release)
+            if (!canInstall) InstallPermissionNote(onGrantInstall)
+        }
+    }
+
+    // Always available, and deliberately a text button: the release page is the
+    // fallback (a release with no single APK, or someone who would rather not
+    // grant the install permission), not the recommended path any more.
+    TextButton(
+        onClick = { UpdateChecker.openRelease(context, release) },
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text(stringResource(R.string.settings_updates_open_page)) }
+}
+
+@Composable
+private fun DownloadButton(release: UpdateCheck.ReleaseInfo) {
+    val context = LocalContext.current
+    Button(
+        onClick = { UpdateChecker.download(context) },
+        // A release with no single identifiable APK cannot be downloaded here;
+        // the link below is the honest path for it.
+        enabled = release.apkUrl != null,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            if (release.apkBytes > 0) {
+                stringResource(
+                    R.string.settings_updates_download_sized,
+                    Formatter.formatShortFileSize(context, release.apkBytes),
+                )
+            } else {
+                stringResource(R.string.settings_updates_download)
+            },
+        )
+    }
+}
+
+/**
+ * Says why an install cannot happen yet, and offers the one screen that fixes
+ * it. Shown next to the button rather than as a dialog on tap: the permission
+ * is knowable in advance, so surprising someone with a system screen after they
+ * tapped "Install" would be worse.
+ */
+@Composable
+private fun InstallPermissionNote(onGrant: () -> Unit) {
+    Text(
+        stringResource(R.string.settings_updates_install_permission_title),
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    Text(
+        stringResource(R.string.settings_updates_install_permission_body),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    OutlinedButton(onClick = onGrant, modifier = Modifier.fillMaxWidth()) {
+        Text(stringResource(R.string.settings_updates_install_permission_open))
     }
 }
 

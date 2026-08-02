@@ -75,14 +75,19 @@ and a **Skip this version**). Two properties matter for release management:
   the release is never offered, and a tag marked *pre-release* or *draft* is
   skipped by design. `auto-release.yml`'s `vX.Y.Z` tags are exactly the shape it
   expects.
-- **It links, it does not install.** "Get the update" opens the release page in
-  the user's browser. The app deliberately does **not** hold
-  `REQUEST_INSTALL_PACKAGES`, so a one-tap in-app upgrade would be a new
-  permission and a product decision; today the browser is the installer, which
-  is the same flow §4 below describes. Android's refusal to install an update
-  signed with a different key is what protects the upgrade path, and that
-  guarantee is the platform's — which is another reason step 1's keystore is
-  forever.
+- **It downloads and installs, so the signing key matters more than ever.** The
+  APK is fetched by a foreground service and handed to `PackageInstaller`; the
+  app holds `REQUEST_INSTALL_PACKAGES` and the user grants "install unknown
+  apps" to Comrade once (Android still shows its own confirmation for every
+  install). Android refuses an update signed with a different key than the
+  installed copy — so a release built without the `SIGNING_*` secrets, or with a
+  different keystore, cannot land as an update on anyone's phone. That is the
+  platform's guarantee, and another reason step 1's keystore is forever. Before
+  the installer is involved at all, the app checks the download's package name,
+  version code and signing certificate against itself and refuses with a reason
+  if any disagree.
+- **A user who declines the install permission is not stuck.** The card keeps a
+  link to the release page, which is the browser flow §4 below describes.
 
 If a release ever ships **several** APK assets (per-ABI splits, say), the check
 stops offering a direct download and offers the release page instead rather than

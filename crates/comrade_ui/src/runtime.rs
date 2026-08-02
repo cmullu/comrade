@@ -31,12 +31,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use comrade_core::anon;
+use comrade_core::attention::{
+    self, FocusOutcome, UsageSignal, FOCUS_MAX_MINUTES, FOCUS_MIN_MINUTES,
+};
 use comrade_core::call::{
     derive_sas, ice_servers_for, new_call_id, parse_call_envelope, validate_turn_url, CallEnvelope,
     CallMediaKind, CallSignal, HangupReason, IceServer, IceStrategy,
 };
 use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
+use comrade_core::dak::{open_dm, seal_dm, MeshDm};
 use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
 use comrade_core::dm::{parse_profile_share, parse_receipt, ProfileShare, Receipt, ReceiptKind};
 use comrade_core::media::{
@@ -44,6 +48,8 @@ use comrade_core::media::{
     MAX_MEDIA_BYTES,
 };
 use comrade_core::metrics as core_metrics;
+use comrade_core::metrics::Metric as CoreMetric;
+use comrade_core::nudge::{is_fresh_at, nudge_expires_at, parse_nudge, Nudge, NudgeWatch};
 use comrade_core::presence::{
     is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
     PRESENCE_HEARTBEAT_SECS, PRESENCE_SWEEP_SECS,
@@ -53,9 +59,11 @@ use comrade_core::sabha::{
     display_name_of, ChitthiCallback, FeedFilterSpec, FeedScope, SabhaEngine, DEFAULT_RELAYS,
 };
 use comrade_core::sakha::{LedgerEntry, SakhaEngine, SakhaSyncCallback};
-use comrade_core::seen::SeenSet;
+use comrade_core::seen::{content_key, SeenSet, CONTENT_KEY_PREFIX};
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
-use comrade_core::vault::{VaultCallback, VaultEngine, VaultMessage};
+use comrade_core::vault::{
+    build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
+};
 use nostr_sdk::{EventId, Metadata, PublicKey, ToBech32};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -88,6 +96,15 @@ const FEED_BOOTSTRAP_LIMIT: usize = 200;
 
 /// HKDF label binding the ECDH shared secret to media encryption.
 const MEDIA_LABEL: &str = "comrade-media-v1";
+
+/// What an encrypted attachment is declared as when it is uploaded.
+///
+/// Deliberately not the file's real type: the body is AES-GCM ciphertext, and
+/// naming it `image/jpeg` would both misdescribe it and hand the media host the
+/// one piece of metadata the encryption was meant to withhold — what *kind* of
+/// thing was just sent. The recipient learns the true type from the encrypted
+/// envelope, never from the host.
+const OPAQUE_UPLOAD_MIME: &str = "application/octet-stream";
 /// Encrypted-store tree mapping a NIP-94 event id → local [`MediaRef`].
 const MEDIA_REFS_TREE: &str = "comrade_media_refs";
 /// Encrypted-store tree caching peers' published Kind-0 profiles
@@ -140,6 +157,26 @@ const OUTBOX_FLUSH_INTERVAL_SECS: u64 = 60;
 /// wrapper can arrive repeatedly, and a duplicate `Answer` or terminal `Hangup`
 /// must not be re-applied downstream.
 const CALL_SIGNAL_DEDUP_CAPACITY: usize = 512;
+
+/// How long a message stays eligible for **cross-transport** dedup.
+///
+/// A DM can reach the same person twice by two different routes: sealed over
+/// the local mesh now, and over a relay when the internet comes back. The two
+/// copies carry different ids (the mesh copy is keyed by the sender's local id,
+/// the relay copy by the event id a relay assigned), so id dedup cannot catch
+/// the pair — the content can.
+///
+/// Deliberately narrow, and keyed by transport as well as content: two
+/// identical messages that arrive over the *same* route are a person typing
+/// "ok" twice and are kept. Only a copy arriving over the *other* route inside
+/// this window is treated as the same message. That is the whole trade — a
+/// wider window would start eating genuine repeats.
+const CROSS_TRANSPORT_DEDUP_SECS: u64 = 120;
+/// Recent (peer, content, transport) triples kept for the check above.
+const CROSS_TRANSPORT_DEDUP_CAPACITY: usize = 512;
+/// Transport labels for that key.
+const TRANSPORT_RELAY: &str = "relay";
+const TRANSPORT_MESH: &str = "mesh";
 
 /// A call signal older than this is meaningless — the ring timeout has long
 /// since passed on the sender's side (an `Offer`), and every other signal
@@ -729,6 +766,73 @@ impl From<comrade_storage::TaraMessage> for TaraMessageDto {
     }
 }
 
+/// One day's usage rollup as the frontend sees it (wellbeing pillar #5).
+/// **Strictly local**, exactly like [`JournalEntryDto`] — and only ever a
+/// rollup: no app names, no per-app timings, no event stream. See
+/// `docs/ATTENTION.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AttentionDayDto {
+    /// Local calendar date, `YYYY-MM-DD`.
+    pub date: String,
+    pub screen_minutes: u32,
+    pub pickups: u32,
+    /// Minutes in the apps the *user* tagged as their own scroll traps.
+    pub doom_minutes: u32,
+}
+
+impl From<comrade_storage::AttentionDay> for AttentionDayDto {
+    fn from(d: comrade_storage::AttentionDay) -> Self {
+        Self {
+            date: d.date,
+            screen_minutes: d.screen_minutes,
+            pickups: d.pickups,
+            doom_minutes: d.doom_minutes,
+        }
+    }
+}
+
+/// Today's usage against the user's **own** recent medians — the only
+/// comparison this app makes. Never a normative target, never another user
+/// (`docs/ATTENTION.md` gate 1); `sample_days` lets the UI say how thin the
+/// baseline is instead of calling one prior day "your usual".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AttentionSummaryDto {
+    /// Today's rollup, or `None` if nothing has been recorded today.
+    pub today: Option<AttentionDayDto>,
+    pub median_screen_minutes: u32,
+    pub median_doom_minutes: u32,
+    pub median_pickups: u32,
+    /// How many prior days (0–7) the medians are drawn from.
+    pub sample_days: u32,
+}
+
+/// One focus session as the frontend sees it. Strictly local.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct FocusSessionDto {
+    pub id: String,
+    /// What the user said they'd give the time to (may be empty).
+    pub intent: String,
+    pub planned_minutes: u32,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+    /// `completed` / `abandoned` / `lapsed`; `None` while still running.
+    pub outcome: Option<String>,
+    /// Seconds left against the plan — 0 for a finished session.
+    pub remaining_secs: u64,
+}
+
+/// The saved long-read, already split into chapter-sized chunks, plus where
+/// the reader had got to. Chunking is lossless by test
+/// (`comrade_core::attention::chunk_reading`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ReadingDto {
+    pub title: String,
+    pub chunks: Vec<String>,
+    /// Index into `chunks`, always in range (a stored position past the end
+    /// after an edit is clamped rather than trusted).
+    pub position: u32,
+}
+
 /// A crisis helpline surfaced when a Tara message carries distress cues.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct CrisisResourceDto {
@@ -758,7 +862,9 @@ pub struct MessageDto {
 /// with zero cellular or relay reachability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct MeshStatusDto {
-    /// Whether the mesh engine is running at all (the workspace is `OffGridTravel`).
+    /// Whether the mesh engine is running at all — which, since local delivery
+    /// landed, is whenever the vault is unlocked, not only in `OffGridTravel`
+    /// (see [`ComradeRuntime::sync_saathi_lifecycle`]).
     pub active: bool,
     /// Peers currently reachable over the local network via mDNS. `u64`, not
     /// `SaathiEngine::peer_count`'s native `usize` — uniffi has no FFI-safe
@@ -808,6 +914,20 @@ pub enum BridgeEvent {
         /// Send time of the beacon (unix seconds) for the `online` edge; the
         /// moment the claim lapsed for an aged-out `offline` edge.
         at: u64,
+    },
+    /// A comrade wrote something for us and did not send it — see
+    /// [`comrade_core::nudge`]. Emitted once per hesitation, only for a peer
+    /// the user marked as a comrade, and only while the nudge is still fresh:
+    /// what a frontend turns into "they're around, and they might need you".
+    ///
+    /// Carries no more than [`Self::ComradePresence`] does, because the wire
+    /// envelope carries no more than that either — never the draft, its
+    /// length, or how the writing ended.
+    ComradeNudge {
+        peer: String,
+        /// Display name at the time of the event (alias → published handle),
+        /// so a notification can be raised without a store round-trip.
+        name: Option<String>,
     },
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
@@ -874,10 +994,33 @@ pub struct ComradeRuntime {
     /// The periodic outbox-flush task, tracked like [`Self::feed_task`] so
     /// [`Self::lock_vault`] can abort it.
     outbox_task: Option<tokio::task::JoinHandle<()>>,
+    /// Whether this device currently counts as *online* for presence.
+    ///
+    /// "Online" means **the app is open**, not merely that the process is
+    /// alive: a phone in someone's pocket with a connection service running
+    /// is reachable, but its owner is not at it, and a green dot that says
+    /// otherwise is the kind of small lie this feature exists to avoid.
+    /// Frontends set it through [`Self::announce_presence`] (Android: on
+    /// foreground/background); the heartbeat refreshes the claim only while
+    /// it holds. Behind an `Arc` so the heartbeat task and the
+    /// [`RuntimeHandles`] every bridge takes share one answer.
+    presence_active: Arc<std::sync::atomic::AtomicBool>,
     /// The comrade-presence heartbeat/expiry loop, tracked for the same
     /// reason as [`Self::feed_task`] — [`Self::lock_vault`] must be able to
     /// stop announcing "I'm online" the moment the user locks up.
     presence_task: Option<tokio::task::JoinHandle<()>>,
+    /// Recently ingested (peer, content, transport) triples, so one message
+    /// delivered by two routes renders once — see
+    /// [`CROSS_TRANSPORT_DEDUP_SECS`].
+    transport_dedup: Arc<SeenSet>,
+    /// The task that opens sealed frames seen on the local mesh and feeds the
+    /// ones addressed to us through the normal DM ingress.
+    mesh_dm_task: Option<tokio::task::JoinHandle<()>>,
+    /// Which composers hold unsent text, for the "your comrade might need you"
+    /// nudge ([`comrade_core::nudge`]). Behind an `Arc` so the presence sweep —
+    /// which runs on a detached [`RuntimeHandles`], not on `&self` — watches
+    /// the same map the frontends report into.
+    nudge_watch: Arc<NudgeWatch>,
 }
 
 impl Default for ComradeRuntime {
@@ -917,7 +1060,17 @@ impl ComradeRuntime {
             call_signal_dedup: Arc::new(SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY)),
             outbox: Arc::new(Outbox::new()),
             outbox_task: None,
+            // Default `true`: a frontend that never says otherwise (desktop,
+            // CLI) is one whose app is simply open. Android overrides it on
+            // every foreground/background transition.
+            presence_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             presence_task: None,
+            transport_dedup: Arc::new(SeenSet::with_ttl(
+                CROSS_TRANSPORT_DEDUP_CAPACITY,
+                std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+            )),
+            mesh_dm_task: None,
+            nudge_watch: Arc::new(NudgeWatch::new()),
         }
     }
 
@@ -1012,6 +1165,12 @@ impl ComradeRuntime {
             }
         }
 
+        // Unlocking is someone standing at the app with a passphrase typed, so
+        // presence starts active again — a previous `lock_vault` left it off
+        // (see `spawn_farewell_beacons`), and this runtime outlives the lock.
+        self.presence_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         // Restore the saved identity, or seed and persist a fresh one so the
         // engines always have keys to sign with.
         let identity = match self.ui.load_identity()? {
@@ -1042,6 +1201,11 @@ impl ComradeRuntime {
                 .map_err(|e| UiError::Engine(e.to_string()))?,
         ));
         self.restore_sakha_pairing().await;
+
+        // Local-network delivery is not a mode to opt into: bring the mesh up
+        // now that we have keys, so a DM can reach someone on this WiFi even
+        // with no internet at all. Best-effort — see `sync_saathi_lifecycle`.
+        self.sync_saathi_lifecycle().await;
 
         // Startup observability: the unlock is the gate every frontend waits
         // on, so record how long its two phases actually took.
@@ -1094,6 +1258,7 @@ impl ComradeRuntime {
             self.sakha_sync_task.take(),
             self.outbox_task.take(),
             self.presence_task.take(),
+            self.mesh_dm_task.take(),
         ]
         .into_iter()
         .flatten()
@@ -1109,6 +1274,10 @@ impl ComradeRuntime {
         self.sakha = None;
         self.loops_spawned = false;
         self.sakha_sync_spawned = false;
+        // A hesitation belongs to the session it happened in. Locking up is a
+        // deliberate exit — the goodbye beacon above has just told the comrades
+        // we are gone, and a nudge landing after it would claim the opposite.
+        self.nudge_watch.clear();
         self.ui.lock();
     }
 
@@ -1165,6 +1334,8 @@ impl ComradeRuntime {
             let vault_cb = vault.clone();
             let dedup = self.call_signal_dedup.clone();
             let outbox = self.outbox.clone();
+            let transport_dedup = self.transport_dedup.clone();
+            let mesh = self.mesh_link();
             // Widen the backfill window past the standard gift-wrap skew when
             // this device was last seen longer ago than that (see
             // `VaultEngine::subscribe_inbox_with_callback`'s `since_floor`).
@@ -1172,7 +1343,20 @@ impl ComradeRuntime {
             self.vault_task = Some(tokio::spawn(async move {
                 vault.connect().await;
                 let cb: VaultCallback = Box::new(move |msg| {
-                    dispatch_incoming_dm(&vault_cb, store.as_ref(), &tx, &dedup, &outbox, msg);
+                    let route = DmRoute {
+                        label: TRANSPORT_RELAY,
+                        dedup: &transport_dedup,
+                        mesh: mesh.as_ref(),
+                    };
+                    dispatch_incoming_dm(
+                        &vault_cb,
+                        store.as_ref(),
+                        &tx,
+                        &dedup,
+                        &outbox,
+                        &route,
+                        msg,
+                    );
                 });
                 if let Err(e) = vault.subscribe_inbox_with_callback(cb, since_floor).await {
                     warn!("vault inbox loop ended: {e}");
@@ -1204,6 +1388,11 @@ impl ComradeRuntime {
         }
 
         self.spawn_presence_loop();
+
+        // Begin opening the sealed frames the local mesh sees. The engine
+        // itself is started by `unlock_vault` (this method is sync); with no
+        // engine running this is a no-op.
+        self.spawn_mesh_dm_loop();
 
         // A pairing restored from a previous launch (see `restore_sakha_pairing`,
         // called from `unlock_vault`) should start syncing immediately too —
@@ -1244,11 +1433,97 @@ impl ComradeRuntime {
             loop {
                 ticker.tick().await;
                 if tick.is_multiple_of(announce_every) {
-                    handles.announce_presence(true).await;
+                    // Refreshes only while the app is open — a backgrounded
+                    // device stays silent instead of undoing its own goodbye.
+                    handles.refresh_presence().await;
                 }
                 expire_stale_presence(handles.store.as_deref(), &tx);
+                // Abandoned drafts ride this sweep rather than a timer of
+                // their own: a nudge is a courtesy that costs one DM, and
+                // arriving a sweep late only makes it more certain (the
+                // writer had that much longer to come back). What it must
+                // never do is arrive *early* — see `NUDGE_SETTLE_SECS`.
+                handles.nudge_abandoned_drafts(now_secs()).await;
                 tick = tick.wrapping_add(1);
             }
+        }));
+    }
+
+    /// Open the sealed frames the local mesh sees and feed the ones addressed to
+    /// us through the **same** ingress path a relay-delivered DM takes — so
+    /// message-request gating, persistence, receipts, and dedup behave
+    /// identically however a message arrived.
+    ///
+    /// Every peer on the network sees every frame; almost all of them are for
+    /// someone else and are skipped after one HMAC comparison against our
+    /// rotating tags. Idempotent: a second call replaces nothing, since
+    /// [`Self::lock_vault`] is what tears the task down.
+    fn spawn_mesh_dm_loop(&mut self) {
+        if self.mesh_dm_task.is_some() {
+            return;
+        }
+        let (Some(engine), Some(vault), Some(keys)) = (
+            self.saathi.clone(),
+            self.vault.clone(),
+            self.ui.identity_keys(),
+        ) else {
+            return;
+        };
+
+        let store = self.ui.store_arc();
+        let tx = self.events.clone();
+        let call_dedup = self.call_signal_dedup.clone();
+        let transport_dedup = self.transport_dedup.clone();
+        let outbox = self.outbox.clone();
+        let mesh = MeshLink {
+            engine: engine.clone(),
+            keys: keys.clone(),
+        };
+        let pay_regex = build_pay_regex().ok();
+
+        self.mesh_dm_task = Some(tokio::spawn(async move {
+            while let Some(envelope) = engine.recv_sealed().await {
+                let now = now_secs();
+                let opened = match open_dm(&keys, &envelope, now) {
+                    // Someone else's mail — the overwhelmingly common case.
+                    Ok(None) => continue,
+                    Ok(Some(opened)) => opened,
+                    Err(e) => {
+                        tracing::debug!("mesh: a frame addressed to us failed to open: {e}");
+                        continue;
+                    }
+                };
+
+                let sender_hex = opened.sender.to_hex();
+                let content = opened.dm.content;
+                let upi_intents = pay_regex
+                    .as_ref()
+                    .map(|re| extract_upi_intents(&content, re))
+                    .unwrap_or_default();
+                let msg = VaultMessage {
+                    event_id: opened.dm.id,
+                    sender_pubkey: sender_hex,
+                    content,
+                    created_at: opened.dm.created_at,
+                    upi_intents,
+                    reply_to: opened.dm.reply_to,
+                };
+                let route = DmRoute {
+                    label: TRANSPORT_MESH,
+                    dedup: &transport_dedup,
+                    mesh: Some(&mesh),
+                };
+                dispatch_incoming_dm(
+                    &vault,
+                    store.as_ref(),
+                    &tx,
+                    &call_dedup,
+                    &outbox,
+                    &route,
+                    msg,
+                );
+            }
+            tracing::debug!("mesh: sealed-frame stream ended");
         }));
     }
 
@@ -1704,6 +1979,11 @@ impl ComradeRuntime {
     /// engine to the spawned send, so the store's file lock is free to be
     /// reclaimed immediately regardless of how long the relay takes.
     fn spawn_farewell_beacons(&self) {
+        // A locked vault is not online, whatever the app was doing a moment
+        // ago — record that before the beacon, so nothing re-announces in the
+        // window before the heartbeat task is aborted.
+        self.presence_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let Some(store) = self.ui.store_ref() else {
             return;
         };
@@ -2153,7 +2433,14 @@ impl ComradeRuntime {
 
         // Tell them straight away, either way: a new comrade shouldn't wait a
         // heartbeat to see us, and a dropped one shouldn't keep seeing us.
-        let beacon = if comrade {
+        // A beacon either way is also what proves reciprocity to them, so
+        // choosing someone while the app isn't in the foreground still tells
+        // them we chose them — it just doesn't claim we're at the phone.
+        let beacon = if comrade
+            && self
+                .presence_active
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             PresenceBeacon::online()
         } else {
             PresenceBeacon::offline()
@@ -2247,6 +2534,55 @@ impl ComradeRuntime {
     /// for why the network half never runs under the runtime lock.
     pub async fn announce_presence(&self, online: bool) -> u64 {
         self.handles().announce_presence(online).await
+    }
+
+    /// Whether this device currently counts as online — see
+    /// [`Self::presence_active`] (the field) for what that means.
+    pub fn is_presence_active(&self) -> bool {
+        self.presence_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    // ── The nudge (abandoned drafts — see `comrade_core::nudge`) ─────────────
+
+    /// There is unsent text in `peer`'s composer, as of now.
+    ///
+    /// Frontends call this as the user types — it is idempotent, holds a
+    /// mutex for a hash lookup, touches no store and no relay, so it is safe
+    /// on a keystroke. What it starts is a clock, not a disclosure: nothing
+    /// leaves the device unless the draft is later abandoned *and* every rule
+    /// in [`comrade_core::nudge::draft_verdict`] agrees, and nothing at all
+    /// happens for a peer who was never marked as a comrade.
+    ///
+    /// Infallible on purpose, like [`Self::announce_presence`]: a nudge is a
+    /// courtesy, and a locked vault or an unparseable key simply means there
+    /// is nobody to be courteous to.
+    pub fn note_draft(&self, peer: &str) {
+        self.nudge_watch.writing(&to_npub(peer), now_secs());
+    }
+
+    /// `peer`'s draft is gone — the box was emptied, or the thread was closed
+    /// with it still unsent. Safe (and intended) to call unconditionally when a
+    /// conversation closes: a composer that never held text does nothing here.
+    ///
+    /// This is the only trigger for the whole feature, and it is deliberately
+    /// *not* the moment anything is sent: see
+    /// [`RuntimeHandles::nudge_abandoned_drafts`] for the wait that follows.
+    pub fn abandon_draft(&self, peer: &str) {
+        self.nudge_watch.abandoned(&to_npub(peer), now_secs());
+    }
+
+    /// Tell every comrade, once, that this person might need them — for
+    /// someone deliberately reaching for a pause rather than giving up on a
+    /// message. Returns how many nudges a relay accepted.
+    ///
+    /// The same envelope the abandoned-draft trigger sends, so a comrade
+    /// cannot tell the two apart, and the same cooldown, so they cannot add up
+    /// to two notifications. Delegates to
+    /// [`RuntimeHandles::nudge_comrades`] — see [`Self::send_dm`] for why the
+    /// network half never runs under the runtime lock.
+    pub async fn nudge_comrades(&self) -> u64 {
+        self.handles().nudge_comrades().await
     }
 
     // ── Journal (wellbeing pillar #1 — strictly local, never networked) ──────
@@ -2373,7 +2709,13 @@ impl ComradeRuntime {
     }
 
     /// The opener shown when the Tara thread is empty — shaped by recent
-    /// journal *mood markers* only (never entry text; data minimisation).
+    /// journal *mood markers* only (never entry text; data minimisation), and
+    /// by yesterday's usage **rollup numbers** only (never app names).
+    ///
+    /// Mood outranks usage; the precedence lives in
+    /// `ReflectiveCompanion::opener_with_usage` so no frontend can decide it
+    /// differently. With no usage recorded this is exactly the opener it always
+    /// was.
     pub fn tara_opener(&self) -> Result<String, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let now = now_secs();
@@ -2386,7 +2728,20 @@ impl ComradeRuntime {
                 age_days: now.saturating_sub(e.created_at) / 86_400,
             })
             .collect();
-        Ok(ReflectiveCompanion.opener(&signals))
+        // The newest recorded day is "yesterday" for nudging purposes only
+        // once it is no longer today's still-growing row — commenting on a
+        // day the user is still living would be both premature and preachy.
+        let days = store
+            .attention_days()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let today = iso_date(now);
+        let mut prior = days.iter().filter(|d| d.date != today);
+        let yesterday = prior.next().map(usage_signal);
+        let mut medians: Vec<u32> = prior.take(7).map(|d| d.doom_minutes).collect();
+        medians.sort_unstable();
+        let median_doom = (!medians.is_empty()).then(|| medians[medians.len() / 2]);
+        let nudge = attention::usage_opener(yesterday, median_doom);
+        Ok(ReflectiveCompanion.opener_with_usage(&signals, nudge))
     }
 
     /// The crisis helplines Tara hands off to, for any frontend to render.
@@ -2399,6 +2754,372 @@ impl ComradeRuntime {
                 note: r.note.to_string(),
             })
             .collect()
+    }
+
+    // ── Attention (wellbeing pillar #5 — strictly local, never networked) ─────
+    //
+    // The same locality guarantee as the journal and Tara: no relay, no
+    // network, nothing uploaded. Usage data is behavioural data of the most
+    // sensitive kind, so only *rollups* reach this layer at all — the raw
+    // per-app event stream is reduced on the frontend and dropped there. See
+    // `docs/ATTENTION.md` for the honesty gates these commands must keep.
+
+    /// Record (or update) one day's usage rollup. `date` is the local calendar
+    /// date as `YYYY-MM-DD`; the frontend owns the calendar, because only it
+    /// knows the device's timezone.
+    ///
+    /// Called repeatedly through the day as the numbers grow — the row is
+    /// keyed by date, so this upserts rather than accumulating duplicates.
+    pub fn record_attention_day(
+        &self,
+        date: &str,
+        screen_minutes: u32,
+        pickups: u32,
+        doom_minutes: u32,
+    ) -> Result<AttentionDayDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let date = date.trim();
+        if !is_iso_date(date) {
+            return Err(UiError::Engine(format!(
+                "attention day needs a YYYY-MM-DD date, got {date:?}"
+            )));
+        }
+        let day = comrade_storage::AttentionDay {
+            date: date.to_string(),
+            screen_minutes,
+            pickups,
+            doom_minutes,
+            updated_at: now_secs(),
+        };
+        store
+            .save_attention_day(&day)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(day.into())
+    }
+
+    /// Every recorded usage day, newest first — for the local trend view.
+    pub fn attention_days(&self) -> Result<Vec<AttentionDayDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .attention_days()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(AttentionDayDto::from)
+            .collect())
+    }
+
+    /// `today`'s rollup against the user's own medians over the previous days.
+    /// `today` is passed in (rather than derived here) for the same reason
+    /// [`Self::record_attention_day`] takes a date: the timezone lives in the
+    /// frontend.
+    pub fn attention_summary(&self, today: &str) -> Result<AttentionSummaryDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let days = store
+            .attention_days()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let today_row = days.iter().find(|d| d.date == today).cloned();
+        let prior: Vec<UsageSignal> = days
+            .iter()
+            .filter(|d| d.date != today)
+            .take(7)
+            .map(usage_signal)
+            .collect();
+        let signal = today_row.as_ref().map(usage_signal).unwrap_or(UsageSignal {
+            screen_minutes: 0,
+            doom_minutes: 0,
+            pickups: 0,
+        });
+        let cmp = attention::compare_today(signal, &prior);
+        Ok(AttentionSummaryDto {
+            today: today_row.map(AttentionDayDto::from),
+            median_screen_minutes: cmp.median_screen_minutes,
+            median_doom_minutes: cmp.median_doom_minutes,
+            median_pickups: cmp.median_pickups,
+            sample_days: cmp.sample_days,
+        })
+    }
+
+    /// The package names the user tagged as their own scroll traps.
+    ///
+    /// Comrade ships **no** built-in blacklist of apps: which apps someone is
+    /// compulsive about is their judgement, not ours, and a hard-coded list
+    /// would also be a claim about other products we have no standing to make.
+    pub fn doom_apps(&self) -> Result<Vec<String>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .load_attention_prefs()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .doom_packages)
+    }
+
+    /// Replace the user's doom-app list. Blanks are dropped and duplicates
+    /// collapsed, so the frontend can pass a raw selection.
+    pub fn set_doom_apps(&self, packages: Vec<String>) -> Result<Vec<String>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let mut cleaned: Vec<String> = Vec::new();
+        for p in packages {
+            let p = p.trim().to_string();
+            if !p.is_empty() && !cleaned.contains(&p) {
+                cleaned.push(p);
+            }
+        }
+        cleaned.sort();
+        let prefs = comrade_storage::AttentionPrefs {
+            doom_packages: cleaned.clone(),
+        };
+        store
+            .save_attention_prefs(&prefs)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(cleaned)
+    }
+
+    /// Start a focus session, persisted immediately so an app kill can't make
+    /// the history lie about a session that really ran.
+    ///
+    /// At most one session runs at a time: an earlier one still open is
+    /// resolved first — completed-in-spirit sessions past their grace window
+    /// become `lapsed`, and one genuinely still running is `abandoned`,
+    /// because the user has visibly moved on to a new intention.
+    pub fn start_focus_session(
+        &self,
+        intent: &str,
+        planned_minutes: u32,
+    ) -> Result<FocusSessionDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        if !(FOCUS_MIN_MINUTES..=FOCUS_MAX_MINUTES).contains(&planned_minutes) {
+            return Err(UiError::Engine(format!(
+                "focus session must be between {FOCUS_MIN_MINUTES} and {FOCUS_MAX_MINUTES} minutes"
+            )));
+        }
+        let now = now_secs();
+        // Close out whatever was open before starting something new.
+        if let Some(open) = self.open_focus_session(store, now)? {
+            let outcome = attention::resolve_stale(open.planned_minutes, open.started_at, now)
+                .unwrap_or(FocusOutcome::Abandoned);
+            self.finish_stored_session(store, open, outcome, now)?;
+        }
+        let session = comrade_storage::FocusSession {
+            id: timestamped_store_id(now),
+            intent: intent.trim().to_string(),
+            planned_minutes,
+            started_at: now,
+            ended_at: None,
+            outcome: None,
+        };
+        store
+            .save_focus_session(&session)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(focus_dto(session, now))
+    }
+
+    /// Finish the running session. `completed` is the user's own verdict —
+    /// `false` records it as abandoned, deliberately without ceremony (no
+    /// streak to break, `docs/ATTENTION.md` gate 3).
+    ///
+    /// A session whose planned end plus grace window has already passed is
+    /// recorded as `lapsed` whatever the caller says: claiming a completion
+    /// for a session nobody was present for would make the history a lie, and
+    /// the history is the only thing the progressive-duration rule reads.
+    /// Returns `None` when no session was running.
+    pub fn finish_focus_session(
+        &self,
+        completed: bool,
+    ) -> Result<Option<FocusSessionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        let Some(open) = self.open_focus_session(store, now)? else {
+            return Ok(None);
+        };
+        let claimed = if completed {
+            FocusOutcome::Completed
+        } else {
+            FocusOutcome::Abandoned
+        };
+        let outcome =
+            attention::resolve_stale(open.planned_minutes, open.started_at, now).unwrap_or(claimed);
+        let finished = self.finish_stored_session(store, open, outcome, now)?;
+        Ok(Some(focus_dto(finished, now)))
+    }
+
+    /// The session currently running, if any. Resolving is a *read* that can
+    /// write: a session found past its grace window is recorded as `lapsed`
+    /// here and reported as gone, so every caller sees one consistent answer
+    /// rather than each frontend inventing its own staleness rule.
+    pub fn active_focus_session(&self) -> Result<Option<FocusSessionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        Ok(self
+            .open_focus_session(store, now)?
+            .map(|s| focus_dto(s, now)))
+    }
+
+    /// Focus-session history, newest first.
+    pub fn focus_sessions(&self) -> Result<Vec<FocusSessionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        Ok(store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|s| focus_dto(s, now))
+            .collect())
+    }
+
+    /// The duration to suggest next, from this user's own completion history —
+    /// the "rebuild the span" rule (`attention::suggest_focus_minutes`).
+    pub fn suggested_focus_minutes(&self) -> Result<u32, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let history: Vec<(u32, FocusOutcome)> = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .filter_map(|s| {
+                s.outcome
+                    .as_deref()
+                    .and_then(FocusOutcome::from_key)
+                    .map(|o| (s.planned_minutes, o))
+            })
+            .collect();
+        Ok(attention::suggest_focus_minutes(&history))
+    }
+
+    /// The intention nudge to show before starting a session, rotated by how
+    /// many sessions came before it.
+    pub fn focus_prompt(&self) -> Result<String, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let prior = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .len() as u64;
+        Ok(attention::focus_prompt(prior).to_string())
+    }
+
+    /// The line to show when a session ends — a reflection prompt for a
+    /// completion, plain acknowledgement for anything else.
+    pub fn focus_reflection(&self, outcome: &str) -> Result<String, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let parsed = FocusOutcome::from_key(outcome)
+            .ok_or_else(|| UiError::Engine(format!("unknown focus outcome {outcome:?}")))?;
+        let prior = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .len() as u64;
+        Ok(attention::focus_reflection(parsed, prior))
+    }
+
+    /// Save text for the distraction-free reader, replacing whatever was
+    /// there, and return it chunked. The user brings the text (paste, share);
+    /// nothing here fetches a URL — a reader that went to the network would
+    /// put an arbitrary-fetch path into the one app that promises not to.
+    pub fn save_reading(&self, title: &str, text: &str) -> Result<ReadingDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(UiError::Engine("nothing to read".into()));
+        }
+        let state = comrade_storage::ReadingState {
+            title: title.trim().to_string(),
+            text: text.to_string(),
+            position: 0,
+            updated_at: now_secs(),
+        };
+        store
+            .save_reading_state(&state)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(reading_dto(state))
+    }
+
+    /// The saved long-read, chunked, or `None` if nothing is saved.
+    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .load_reading_state()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .map(reading_dto))
+    }
+
+    /// Remember which chunk the reader is on. Clamped to the real chunk count,
+    /// so a stored position can never point past the end of the text.
+    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let Some(mut state) = store
+            .load_reading_state()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let chunks = attention::chunk_reading(&state.text).len() as u32;
+        state.position = position.min(chunks.saturating_sub(1));
+        state.updated_at = now_secs();
+        store
+            .save_reading_state(&state)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(Some(reading_dto(state)))
+    }
+
+    /// Forget the saved long-read. Returns whether one existed.
+    pub fn clear_reading(&self) -> Result<bool, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let removed = store
+            .clear_reading_state()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(removed)
+    }
+
+    /// The session still open, resolving (and persisting) a lapse first so
+    /// every caller agrees on what "running" means. Shared by
+    /// [`Self::active_focus_session`], [`Self::start_focus_session`] and
+    /// [`Self::finish_focus_session`].
+    fn open_focus_session(
+        &self,
+        store: &comrade_storage::EncryptedStore,
+        now: u64,
+    ) -> Result<Option<comrade_storage::FocusSession>, UiError> {
+        let sessions = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let Some(open) = sessions.into_iter().find(|s| s.outcome.is_none()) else {
+            return Ok(None);
+        };
+        match attention::resolve_stale(open.planned_minutes, open.started_at, now) {
+            Some(outcome) => {
+                self.finish_stored_session(store, open, outcome, now)?;
+                Ok(None)
+            }
+            None => Ok(Some(open)),
+        }
+    }
+
+    /// Stamp `outcome` on a session and persist it.
+    fn finish_stored_session(
+        &self,
+        store: &comrade_storage::EncryptedStore,
+        session: comrade_storage::FocusSession,
+        outcome: FocusOutcome,
+        now: u64,
+    ) -> Result<comrade_storage::FocusSession, UiError> {
+        // A lapsed session ended when its plan did, not when someone finally
+        // looked: stamping "now" would credit hours nobody was present for.
+        let ended_at = match outcome {
+            FocusOutcome::Lapsed => session.started_at + u64::from(session.planned_minutes) * 60,
+            _ => now,
+        };
+        let finished = comrade_storage::FocusSession {
+            ended_at: Some(ended_at),
+            outcome: Some(outcome.as_str().to_string()),
+            ..session
+        };
+        store
+            .save_focus_session(&finished)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(finished)
     }
 
     // ── Encrypted media pipeline (NIP-94/96 · Blossom) ───────────────────────
@@ -2514,13 +3235,22 @@ impl ComradeRuntime {
         }
     }
 
-    /// Ensure the Saathi engine is running iff the current workspace is
-    /// `OffGridTravel`. Centralised here (rather than duplicated in
+    /// Ensure the Saathi engine is running whenever anything needs it.
+    /// Centralised here (rather than duplicated in
     /// `toggle_workspace`/`back`) so every path that can change the workspace —
     /// a voice command, a future UI toggle, stepping back — drives the same
     /// real engine the persistent mesh-status indicator reads from.
     async fn sync_saathi_lifecycle(&mut self) {
-        let should_run = self.ui.current_workspace().mesh_active;
+        // Two independent reasons to be running, so this is an OR, not just the
+        // workspace flag:
+        //
+        //  • the OffGridTravel workspace, where the mesh *replaces* relays, and
+        //  • any unlocked vault, because "the person I'm messaging is on this
+        //    WiFi" is not a mode the user should have to select — it is the
+        //    fallback that makes a DM arrive when the internet is down.
+        //
+        // Only when neither holds does the engine stop.
+        let should_run = self.ui.current_workspace().mesh_active || self.is_vault_unlocked();
         match (should_run, self.saathi.is_some()) {
             (true, false) => self.start_saathi().await,
             (false, true) => self.stop_saathi().await,
@@ -2786,7 +3516,20 @@ impl ComradeRuntime {
             identity: self.ui.current_identity(),
             outbox: self.outbox.clone(),
             events: self.events.clone(),
+            mesh: self.mesh_link(),
+            prefer_local: self.ui.current_workspace().mesh_active,
+            nudge_watch: self.nudge_watch.clone(),
+            presence_active: self.presence_active.clone(),
         }
+    }
+
+    /// A sealed-mail sender for the running mesh, if there is one and we have
+    /// keys to seal with.
+    fn mesh_link(&self) -> Option<MeshLink> {
+        Some(MeshLink {
+            engine: self.saathi.clone()?,
+            keys: self.ui.identity_keys()?,
+        })
     }
 }
 
@@ -2819,6 +3562,17 @@ pub struct RuntimeHandles {
     /// Event bus, so a flush can report status changes (`sent` / `failed`)
     /// without going back through `ComradeRuntime`.
     events: broadcast::Sender<BridgeEvent>,
+    /// The local-network mesh, when it is running — the transport that carries
+    /// a DM when no relay will.
+    mesh: Option<MeshLink>,
+    /// Whether the user has put the local network ahead of relays (the
+    /// `OffGridTravel` workspace, switched from the app bar).
+    prefer_local: bool,
+    /// The composer watch, shared with the runtime the frontends call into —
+    /// see [`ComradeRuntime::nudge_watch`] and [`Self::nudge_abandoned_drafts`].
+    nudge_watch: Arc<NudgeWatch>,
+    /// Shared with [`ComradeRuntime::presence_active`] — see its doc comment.
+    presence_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RuntimeHandles {
@@ -2840,34 +3594,53 @@ impl RuntimeHandles {
         let peer_npub = to_npub(target);
         let created_at = now_secs();
 
+        // Which radio goes first is the user's call, made from the app bar.
+        let plan = SendPlan::for_attempt(self.prefer_local, 0);
+        let local_id = local_message_id(&peer_npub, content, created_at);
+
+        // Local-first: seal it onto this WiFi before spending the internet. A
+        // frame nobody took is not delivery, so a `false` here falls straight
+        // through to a relay — precedence orders the transports, it does not
+        // switch one off.
+        let on_mesh = plan.local_first
+            && self
+                .try_mesh(&peer, &local_id, content, reply_to, created_at)
+                .await;
+
         // A relay that will not take the message is not the end of the road:
         // queue it, persist it as `queued`, and let the flush loop retry
         // (bitchat whitepaper §6.1). Before this, a publish failure lost the
         // text entirely — the worst failure mode an app about staying in touch
         // can have.
-        let (id, status) = match vault.send_dm_reply(&peer, content, reply_to).await {
-            Ok(id) => (id.to_hex(), "sent"),
-            Err(e) => {
-                let local_id = local_message_id(&peer_npub, content, created_at);
-                tracing::info!(error = %e, "DM could not be published — queued for retry");
-                let queued = QueuedMessage::new(
-                    local_id.clone(),
-                    peer_npub.clone(),
-                    content,
-                    reply_to.map(str::to_string),
-                    created_at,
-                );
-                if let QueueOutcome::Displaced(dropped) = self.outbox.queue(queued) {
-                    // The peer's queue was full; the oldest message is gone and
-                    // must not keep showing as pending.
-                    self.mark_status(&peer_npub, &[dropped], STATUS_FAILED);
+        let (id, status) = if on_mesh && !plan.force_both {
+            // It is on the local network but not acknowledged — a mesh publish
+            // reaching *a* peer is not proof the recipient got it, so it stays
+            // queued until their receipt clears it.
+            self.enqueue(&local_id, &peer_npub, content, reply_to, created_at);
+            (local_id, STATUS_QUEUED)
+        } else {
+            match vault.send_dm_reply(&peer, content, reply_to).await {
+                Ok(id) => (id.to_hex(), "sent"),
+                Err(e) => {
+                    tracing::info!(error = %e, "DM could not be published — queued for retry");
+                    // No relay took it, but the recipient may be on this WiFi.
+                    // (Under local precedence that attempt already happened.)
+                    if !plan.local_first {
+                        self.try_mesh(&peer, &local_id, content, reply_to, created_at)
+                            .await;
+                    }
+                    self.enqueue(&local_id, &peer_npub, content, reply_to, created_at);
+                    (local_id, STATUS_QUEUED)
                 }
-                if let Some(store) = &self.store {
-                    persist_outbox(store, &self.outbox);
-                }
-                (local_id, STATUS_QUEUED)
             }
         };
+
+        // The words are out of the composer and into the pipeline, so there is
+        // nothing left unsaid to nudge about — including in the queued case,
+        // where the outbox will deliver them without the user doing anything
+        // else. No frontend has to remember this: sending is the one way to
+        // leave a composer that must never look like abandoning it.
+        self.nudge_watch.sent(&peer_npub);
 
         let dto = MessageDto {
             id,
@@ -2904,6 +3677,74 @@ impl RuntimeHandles {
             );
         }
         Ok(dto)
+    }
+
+    /// Seal a message onto the local network, if the mesh is up at all.
+    ///
+    /// `false` means nothing on this WiFi took the frame — no mesh running, no
+    /// peers, or a payload too big to seal. Never an error: the caller falls
+    /// back to a relay and the outbox keeps the message either way.
+    async fn try_mesh(
+        &self,
+        peer: &PublicKey,
+        message_id: &str,
+        content: &str,
+        reply_to: Option<&str>,
+        created_at: u64,
+    ) -> bool {
+        let Some(mesh) = &self.mesh else {
+            return false;
+        };
+        mesh.send(
+            peer,
+            message_id,
+            content,
+            reply_to.map(str::to_string),
+            created_at,
+        )
+        .await
+    }
+
+    /// Park a message in the sender outbox under a locally minted id and
+    /// persist the queue, failing the oldest entry if the peer's queue was
+    /// full (it is gone, and must stop showing as pending).
+    fn enqueue(
+        &self,
+        message_id: &str,
+        peer_npub: &str,
+        content: &str,
+        reply_to: Option<&str>,
+        created_at: u64,
+    ) {
+        let queued = QueuedMessage::new(
+            message_id,
+            peer_npub,
+            content,
+            reply_to.map(str::to_string),
+            created_at,
+        );
+        if let QueueOutcome::Displaced(dropped) = self.outbox.queue(queued) {
+            self.mark_status(peer_npub, &[dropped], STATUS_FAILED);
+        }
+        if let Some(store) = &self.store {
+            persist_outbox(store, &self.outbox);
+        }
+    }
+
+    /// Count a delivery round against a queued message, and mark it failed once
+    /// it has run out of them.
+    fn record_attempt(&self, queued: &QueuedMessage) {
+        if matches!(
+            self.outbox
+                .record_attempt(&queued.peer_npub, &queued.message_id),
+            AttemptOutcome::Exhausted
+        ) {
+            self.mark_status(
+                &queued.peer_npub,
+                std::slice::from_ref(&queued.message_id),
+                STATUS_FAILED,
+            );
+        }
     }
 
     /// Retry every queued message that is still worth retrying, and reap the
@@ -2957,6 +3798,27 @@ impl RuntimeHandles {
                     .ack(&queued.peer_npub, std::slice::from_ref(&queued.message_id));
                 continue;
             };
+
+            let plan = SendPlan::for_attempt(self.prefer_local, queued.attempts);
+            // Under local precedence, retry the WiFi first every round — a peer
+            // may have joined the network since the last flush, and reaching
+            // them there costs nothing. `force_both` is what stops that from
+            // becoming an indefinite wait.
+            let on_mesh = plan.local_first
+                && self
+                    .try_mesh(
+                        &peer_pk,
+                        &queued.message_id,
+                        &queued.content,
+                        queued.reply_to.as_deref(),
+                        queued.queued_at,
+                    )
+                    .await;
+            if on_mesh && !plan.force_both {
+                self.record_attempt(&queued);
+                continue;
+            }
+
             match vault
                 .send_dm_reply(&peer_pk, &queued.content, queued.reply_to.as_deref())
                 .await
@@ -2993,18 +3855,22 @@ impl RuntimeHandles {
                     sent += 1;
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, "queued DM still undeliverable");
-                    if matches!(
-                        self.outbox
-                            .record_attempt(&queued.peer_npub, &queued.message_id),
-                        AttemptOutcome::Exhausted
-                    ) {
-                        self.mark_status(
-                            &queued.peer_npub,
-                            std::slice::from_ref(&queued.message_id),
-                            STATUS_FAILED,
-                        );
+                    tracing::debug!(error = %e, "queued DM still undeliverable by relay");
+                    // Still no relay — try the local network again on every
+                    // flush, since a peer may have joined the WiFi since the
+                    // last attempt. (Under local precedence that already
+                    // happened above.)
+                    if !plan.local_first {
+                        self.try_mesh(
+                            &peer_pk,
+                            &queued.message_id,
+                            &queued.content,
+                            queued.reply_to.as_deref(),
+                            queued.queued_at,
+                        )
+                        .await;
                     }
+                    self.record_attempt(&queued);
                 }
             }
         }
@@ -3126,14 +3992,51 @@ impl RuntimeHandles {
         }
     }
 
+    /// Whether this device currently counts as online — see
+    /// [`ComradeRuntime::presence_active`].
+    pub fn presence_active(&self) -> bool {
+        self.presence_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Announce presence to every comrade, one gift-wrapped beacon each, and
     /// return how many were accepted by a relay.
+    ///
+    /// This is the **frontend's** call, and it is what decides the answer:
+    /// `online` is recorded, so the heartbeat afterwards keeps refreshing
+    /// (or keeps quiet) accordingly. An Android shell calls it `true` when an
+    /// Activity comes to the foreground and `false` when the last one goes
+    /// away — the app being open is the thing "online" claims, not the
+    /// process being alive.
     ///
     /// Never fails loudly: presence is a courtesy, and a relay hiccup must
     /// not surface as an error in a UI that only ever calls this in the
     /// background. Sends are sequential — the comrade list is a handful of
     /// people by design, and a burst of parallel gift wraps buys nothing.
     pub async fn announce_presence(&self, online: bool) -> u64 {
+        self.presence_active
+            .store(online, std::sync::atomic::Ordering::Relaxed);
+        self.send_presence(online).await
+    }
+
+    /// The heartbeat's call: re-assert "online" **only while the app is
+    /// open**.
+    ///
+    /// Without this gate the loop would undo every goodbye — a backgrounded
+    /// phone would announce itself offline and then, a heartbeat later,
+    /// cheerfully claim to be online again. Returns 0 while inactive, which
+    /// is also what makes the whole feature free for a backgrounded app: no
+    /// beacons, no relay traffic.
+    pub async fn refresh_presence(&self) -> u64 {
+        if !self.presence_active() {
+            return 0;
+        }
+        self.send_presence(true).await
+    }
+
+    /// Fan one beacon out to every comrade. Shared by the two callers above so
+    /// the "who gets told, and what" half stays in one place.
+    async fn send_presence(&self, online: bool) -> u64 {
         let Some(vault) = self.vault.clone() else {
             return 0;
         };
@@ -3160,6 +4063,105 @@ impl RuntimeHandles {
             }
         }
         sent
+    }
+
+    /// Send the nudge for every draft that has now been abandoned long enough
+    /// to mean it — the sending half of [`comrade_core::nudge`]. Called on the
+    /// presence sweep; returns how many nudges went out (0 whenever the
+    /// feature is idle, which is almost always).
+    ///
+    /// Three gates, in this order, and each is load-bearing:
+    ///  * **[`NudgeWatch::due`] decides**, so every timing rule lives in one
+    ///    tested place and the cooldown is recorded at the moment we decide —
+    ///    a relay that refuses the DM does not earn the writer a second nudge.
+    ///  * **Only comrades are told.** Marking someone is what consents to
+    ///    disclosing anything about being at your phone; without it there is
+    ///    nothing to send and no one to send it to.
+    ///  * **The store read happens here, not on the keystroke.** Watching a
+    ///    composer must stay free, and the comrade flag can change between
+    ///    typing and sending anyway — so the answer that counts is the one at
+    ///    send time.
+    ///
+    /// Never fails: a locked vault, a peer un-chosen in the meantime, or an
+    /// unreachable relay all just mean nothing is sent.
+    ///
+    /// `now` is passed in rather than read here so a test can stand on the far
+    /// side of [`comrade_core::nudge::NUDGE_SETTLE_SECS`] without sleeping
+    /// through it — the same
+    /// injectable-clock treatment the presence labels get. Production has one
+    /// call site, and it passes the real clock.
+    pub async fn nudge_abandoned_drafts(&self, now: u64) -> u64 {
+        // Take the decisions out from under the mutex *before* any await —
+        // `due` hands back owned keys for exactly this reason.
+        let peers = self.nudge_watch.due(now);
+        if peers.is_empty() {
+            return 0;
+        }
+        let (Some(vault), Some(store)) = (self.vault.clone(), self.store.as_deref()) else {
+            return 0;
+        };
+        // Every store read happens here, before the first await — the same
+        // shape [`Self::announce_presence`] uses, so the encrypted store is
+        // never being read between two relay round-trips.
+        let recipients: Vec<PublicKey> = peers
+            .into_iter()
+            .filter(|npub| {
+                store
+                    .get_contact(npub)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.comrade)
+            })
+            .filter_map(|npub| PublicKey::parse(&npub).ok())
+            .collect();
+        deliver_nudges(&vault, recipients).await
+    }
+
+    /// Tell every comrade, once, that this person might need them — the
+    /// deliberate trigger, for someone reaching for the breathing screen
+    /// (`docs/ATTENTION.md`) rather than giving up on a message.
+    ///
+    /// Returns how many nudges a relay accepted; `0` for someone who has
+    /// chosen no comrades, which is what makes the whole thing free until
+    /// somebody opts in.
+    ///
+    /// Deliberately the **same envelope** as the abandoned-draft trigger, not a
+    /// second kind of message: a comrade learns "they might need you" and
+    /// cannot tell which of the two happened, so this reason added nothing to
+    /// what anyone learns. It shares the cooldown too — see
+    /// [`comrade_core::nudge::nudged_recently`] — so tapping the button after a
+    /// hard half-hour of writing and deleting does not page anyone twice.
+    ///
+    /// Never fails, like its neighbours: a locked vault, no comrades, or an
+    /// unreachable relay all just mean nothing is sent.
+    ///
+    /// Reads the clock itself, unlike [`Self::nudge_abandoned_drafts`]: there
+    /// is no settle window for a test to stand on the far side of here, and
+    /// the one timing rule that does apply — the cooldown — is pinned in
+    /// `comrade_core::nudge`'s own tests.
+    pub async fn nudge_comrades(&self) -> u64 {
+        let now = now_secs();
+        let (Some(vault), Some(store)) = (self.vault.clone(), self.store.as_deref()) else {
+            return 0;
+        };
+        // Both store reads — who the comrades are, and their keys — happen
+        // before the cooldown is claimed, and the claim before any await.
+        let comrades: Vec<String> = store
+            .list_comrades()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.npub)
+            .collect();
+        if comrades.is_empty() {
+            return 0;
+        }
+        let recipients: Vec<PublicKey> = self
+            .nudge_watch
+            .due_among(&comrades, now)
+            .iter()
+            .filter_map(|npub| PublicKey::parse(npub).ok())
+            .collect();
+        deliver_nudges(&vault, recipients).await
     }
 
     pub async fn broadcast_chitthi(
@@ -3280,8 +4282,14 @@ impl RuntimeHandles {
         let size = media.size as u64;
         let sha256_hex = media.sha256_hex.clone();
 
-        // Upload ciphertext only — the host sees opaque bytes.
-        let url = upload_blob(media.ciphertext, mime_type).await?;
+        // Upload ciphertext only — the host sees opaque bytes, and is *told*
+        // opaque bytes. This used to send the plaintext's own MIME type as the
+        // upload's `Content-Type`, which contradicted the sentence above: it
+        // told the media host whether the user had just sent a photo, a voice
+        // note or a PDF, when the body it was describing is AES-GCM ciphertext
+        // and could not be any of them. The real type travels inside the
+        // encrypted DM envelope, which is where the recipient reads it.
+        let url = upload_blob(media.ciphertext, OPAQUE_UPLOAD_MIME).await?;
 
         // Zero-knowledge NIP-94 event: URL + ciphertext hash, no key, no `ox`.
         let meta = FileMetadata {
@@ -3358,6 +4366,12 @@ impl RuntimeHandles {
             // the flush loop's later "sent" names the same handle the UI holds.
             self.mark_status(&peer_npub, std::slice::from_ref(&event_id), STATUS_QUEUED);
         }
+
+        // An attachment reaches them just as a message does, so it settles the
+        // same debt — see the same call in [`Self::send_dm_reply`]. Any text
+        // still in the composer starts its own clock again the next time they
+        // touch it.
+        self.nudge_watch.sent(&peer_npub);
 
         let sender = keys
             .public_key()
@@ -3481,8 +4495,14 @@ impl RuntimeHandles {
 /// no engine/store state at all.
 #[cfg(feature = "media-http")]
 async fn upload_blob(blob: Vec<u8>, mime: &str) -> Result<String, UiError> {
-    use comrade_core::media::{BlossomUploader, MediaUploader, DEFAULT_BLOSSOM_SERVER};
-    let uploader = BlossomUploader::new(DEFAULT_BLOSSOM_SERVER, nostr_sdk::Keys::generate());
+    use comrade_core::media::{BlossomUploader, MediaUploader, DEFAULT_BLOSSOM_SERVERS};
+    // Every default host, in order, not one: media sharing was broken outright
+    // for as long as the single hard-coded host was refusing connections, and
+    // no frontend could route around it.
+    let uploader = BlossomUploader::with_servers(
+        DEFAULT_BLOSSOM_SERVERS.iter().copied(),
+        nostr_sdk::Keys::generate(),
+    );
     let receipt = uploader
         .upload(&blob, mime)
         .await
@@ -3529,6 +4549,83 @@ async fn persist_ledger_snapshot(store: &comrade_storage::EncryptedStore, sakha:
     if let Err(e) = store.save_ledger_state(&state).and_then(|()| store.flush()) {
         warn!("failed to persist Sakha ledger snapshot: {e}");
     }
+}
+
+/// A stored usage day as the attention engine reads it (rollup numbers only).
+fn usage_signal(day: &comrade_storage::AttentionDay) -> UsageSignal {
+    UsageSignal {
+        screen_minutes: day.screen_minutes,
+        doom_minutes: day.doom_minutes,
+        pickups: day.pickups,
+    }
+}
+
+/// A stored focus session as a frontend sees it, with the live countdown
+/// filled in (0 once it has ended).
+fn focus_dto(session: comrade_storage::FocusSession, now: u64) -> FocusSessionDto {
+    let remaining = if session.outcome.is_some() {
+        0
+    } else {
+        attention::remaining_secs(session.planned_minutes, session.started_at, now)
+    };
+    FocusSessionDto {
+        id: session.id,
+        intent: session.intent,
+        planned_minutes: session.planned_minutes,
+        started_at: session.started_at,
+        ended_at: session.ended_at,
+        outcome: session.outcome,
+        remaining_secs: remaining,
+    }
+}
+
+/// The saved long-read, chunked, with its position clamped into range — a
+/// stored position must never be able to point past the end of the text.
+fn reading_dto(state: comrade_storage::ReadingState) -> ReadingDto {
+    let chunks = attention::chunk_reading(&state.text);
+    let last = chunks.len().saturating_sub(1) as u32;
+    ReadingDto {
+        title: state.title,
+        chunks,
+        position: state.position.min(last),
+    }
+}
+
+/// Whether `s` looks like `YYYY-MM-DD`. Deliberately a shape check, not a
+/// calendar check: the frontend owns the timezone and the calendar, and this
+/// crate only needs keys that sort chronologically.
+fn is_iso_date(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| matches!(i, 4 | 7) || b.is_ascii_digit())
+}
+
+/// `YYYY-MM-DD` for a unix timestamp in **UTC**.
+///
+/// Used only to answer "is the newest recorded row still today's?" for the
+/// Tara nudge. Every stored date comes from the frontend, which knows the
+/// device's real timezone; the worst this approximation can do is delay (or
+/// briefly advance) one journaling nudge by hours near midnight, which is why
+/// a timezone database is not pulled in for it.
+fn iso_date(unix_secs: u64) -> String {
+    // Days since the Unix epoch → civil date (Howard Hinnant's algorithm).
+    let days = (unix_secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Store key for a local-only record (journal entry, Tara turn): a zero-padded
@@ -3800,6 +4897,30 @@ fn spawn_presence_beacons(
     });
 }
 
+/// Fan one nudge out to peers the caller has already established are comrades,
+/// returning how many a relay accepted.
+///
+/// The one place a nudge is actually put on the wire, so both triggers — an
+/// abandoned draft and a deliberate "I might need you" — send byte-identical
+/// envelopes. Two send sites would be two chances for one of them to start
+/// carrying a reason.
+async fn deliver_nudges(vault: &Arc<VaultEngine>, recipients: Vec<PublicKey>) -> u64 {
+    if recipients.is_empty() {
+        return 0;
+    }
+    let Ok(json) = Nudge::new().to_json() else {
+        return 0;
+    };
+    let mut sent = 0u64;
+    for peer in recipients {
+        match vault.send_dm(&peer, &json).await {
+            Ok(_) => sent += 1,
+            Err(e) => tracing::debug!(%peer, "nudge not sent: {e}"),
+        }
+    }
+    sent
+}
+
 /// Whether `peer`'s last beacon still claims them online at `now`. The one
 /// read path for stored presence, so an expired claim can never render as a
 /// green dot just because no sweep has run yet.
@@ -3969,9 +5090,65 @@ fn handle_presence_beacon(
     }
 }
 
+/// Apply one incoming [`Nudge`] from an accepted conversation: raise it, once,
+/// if it is fresh and from someone the user chose.
+///
+/// Four rules, each the receiving-side mirror of something the sender promised:
+///  * **Stale nudges raise nothing.** Freshness is measured from the send time
+///    ([`nudge_expires_at`]), so a nudge delayed by a slow relay or replayed out
+///    of the two-day backfill is already spent. Without this, every launch would
+///    re-announce every hesitation of the last two days.
+///  * **A redelivered wrapper raises nothing.** Relays deliver at-least-once, so
+///    the same nudge can arrive twice inside its own TTL; the shared dedup set
+///    (the one the call-signal branch uses) makes the second one silent.
+///  * **Only our own comrades are announced.** A nudge from someone we have not
+///    marked is dropped, not recorded: unlike a presence beacon — whose
+///    arrival is *how* the mutual model becomes discoverable
+///    (`peer_marked_us`) — a nudge writes no presence state at all, so it can
+///    neither advance a "last seen" nor light a dot from outside the one path
+///    that owns them.
+///  * **Nothing about the draft is knowable here**, because nothing about it
+///    was sent. The event carries a name for the notification and no more.
+fn handle_nudge(
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    tx: &broadcast::Sender<BridgeEvent>,
+    dedup: &SeenSet,
+    peer_npub: &str,
+    event_id: &str,
+    created_at: u64,
+    nudge: Nudge,
+) {
+    let Some(store) = store else { return };
+    if !is_fresh_at(nudge_expires_at(created_at, nudge.ttl_secs), now_secs()) {
+        tracing::debug!(peer = %peer_npub, created_at, "dropping stale nudge");
+        return;
+    }
+    if dedup.already_seen(event_id) {
+        tracing::debug!(%event_id, "dropping duplicate nudge");
+        return;
+    }
+    let is_our_comrade = store
+        .get_contact(peer_npub)
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.comrade);
+    if !is_our_comrade {
+        return;
+    }
+    let _ = tx.send(BridgeEvent::ComradeNudge {
+        name: presence_display_name(store, peer_npub),
+        peer: peer_npub.to_string(),
+    });
+}
+
 /// Fire a delivered receipt back to `sender_hex` for `message_id` (best-effort;
 /// only ever called for accepted conversations).
-fn send_delivered_receipt(vault: &Arc<VaultEngine>, sender_hex: &str, message_id: &str) {
+fn send_delivered_receipt(
+    vault: &Arc<VaultEngine>,
+    mesh: Option<&MeshLink>,
+    sender_hex: &str,
+    message_id: &str,
+) {
     let Ok(peer) = PublicKey::parse(sender_hex) else {
         return;
     };
@@ -3980,9 +5157,17 @@ fn send_delivered_receipt(vault: &Arc<VaultEngine>, sender_hex: &str, message_id
         return;
     };
     let vault = vault.clone();
+    let mesh = mesh.cloned();
+    let receipt_id = format!("receipt:{message_id}");
     tokio::spawn(async move {
         if let Err(e) = vault.send_dm(&peer, &json).await {
-            tracing::debug!("delivered receipt not sent: {e}");
+            tracing::debug!("delivered receipt not sent over a relay: {e}");
+            // Offline is exactly when the receipt matters most: it is what
+            // clears the *sender's* outbox, so without this a message delivered
+            // over the mesh would keep being retried until its attempt cap.
+            if let Some(mesh) = mesh {
+                mesh.send(&peer, &receipt_id, &json, None, now_secs()).await;
+            }
         }
     });
 }
@@ -4027,6 +5212,125 @@ fn load_or_create_device_seed(
     Ok(seed)
 }
 
+// ── Local-network delivery (see docs/OFFLINE_DELIVERY.md) ────────────────────
+
+/// A handle for putting sealed mail onto the local network.
+///
+/// Wraps the running mesh engine plus our keys, which is everything needed to
+/// seal a DM for a peer and flood it to whoever is on this WiFi. Cloneable and
+/// cheap, so a fire-and-forget task can own one.
+#[derive(Clone)]
+struct MeshLink {
+    engine: Arc<SaathiEngine>,
+    keys: nostr_sdk::Keys,
+}
+
+impl MeshLink {
+    /// Seal a DM for `peer` and publish it to the local mesh. Returns whether
+    /// the mesh accepted the frame — `false` when nobody else is on the network
+    /// (gossipsub has no peer to publish to), which is not an error: the
+    /// message stays queued in the outbox exactly as before.
+    async fn send(
+        &self,
+        peer: &PublicKey,
+        id: &str,
+        content: &str,
+        reply_to: Option<String>,
+        created_at: u64,
+    ) -> bool {
+        let dm = MeshDm::new(id, content, reply_to, created_at);
+        let envelope = match seal_dm(peer, &self.keys, &dm, created_at) {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                // Oversize is the realistic case: couriered/mesh mail is capped
+                // at 16 KiB, and a long message simply waits for a relay.
+                tracing::debug!("mesh: could not seal a DM: {e}");
+                return false;
+            }
+        };
+        match self.engine.publish_sealed(&envelope).await {
+            Ok(()) => {
+                tracing::info!(peer = %peer, "DM sealed onto the local mesh");
+                true
+            }
+            Err(e) => {
+                tracing::debug!("mesh: nobody to deliver to: {e}");
+                false
+            }
+        }
+    }
+}
+
+/// Which transport a send should try first, and whether the other is still
+/// worth trying afterwards.
+///
+/// The user picks the *precedence* from the app bar (it is the `OffGridTravel`
+/// workspace under the hood, whose documented meaning has always been "the mesh
+/// replaces relays"); this turns that choice into routing. Precedence is an
+/// order, not an exclusion — a message that the preferred route cannot carry
+/// still takes the other one, because the product's promise is that the message
+/// arrives, not that it arrives by a particular radio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SendPlan {
+    /// Try this first.
+    local_first: bool,
+    /// Try the *other* transport even if the first one accepted the message.
+    ///
+    /// Only ever true for a local-first retry. A relay `OK` means a relay has
+    /// stored the message, so there is nothing to chase; a mesh publish only
+    /// means *some* peer on the network took the frame, which may not be the
+    /// recipient. After a couple of unacknowledged rounds the message stops
+    /// waiting on the local network and also goes out over a relay.
+    force_both: bool,
+}
+
+/// Mesh-only rounds a local-first message gets before a relay is tried too.
+///
+/// The outbox retries roughly once a minute, so this is about two minutes of
+/// "they might still walk back into WiFi range" before spending the internet.
+const LOCAL_FIRST_PATIENCE: u8 = 2;
+
+impl SendPlan {
+    fn for_attempt(prefer_local: bool, attempts: u8) -> Self {
+        Self {
+            local_first: prefer_local,
+            force_both: prefer_local && attempts >= LOCAL_FIRST_PATIENCE,
+        }
+    }
+}
+
+/// The route a DM arrived by, plus what the ingress needs to answer over the
+/// same route when there is no internet.
+struct DmRoute<'a> {
+    /// [`TRANSPORT_RELAY`] or [`TRANSPORT_MESH`].
+    label: &'static str,
+    /// Cross-transport dedup set — see [`CROSS_TRANSPORT_DEDUP_SECS`].
+    dedup: &'a SeenSet,
+    /// The local mesh, when one is running.
+    mesh: Option<&'a MeshLink>,
+}
+
+impl DmRoute<'_> {
+    /// Whether this message has already been ingested over the *other*
+    /// transport recently, i.e. it is the second copy of one message that took
+    /// two routes. Records it either way.
+    fn is_cross_transport_duplicate(&self, peer_npub: &str, content: &str) -> bool {
+        let key = content_key(content, CONTENT_KEY_PREFIX);
+        let other = if self.label == TRANSPORT_MESH {
+            TRANSPORT_RELAY
+        } else {
+            TRANSPORT_MESH
+        };
+        if self.dedup.contains(&format!("{peer_npub}|{key}|{other}")) {
+            core_metrics::record(CoreMetric::DuplicateDropped);
+            return true;
+        }
+        self.dedup
+            .already_seen(&format!("{peer_npub}|{key}|{}", self.label));
+        false
+    }
+}
+
 /// Read the persisted inbox high-watermark (unix seconds of the newest
 /// message processed so far), if any has been recorded yet.
 fn read_watermark(store: &comrade_storage::EncryptedStore) -> Option<u64> {
@@ -4067,6 +5371,7 @@ fn dispatch_incoming_dm(
     tx: &broadcast::Sender<BridgeEvent>,
     dedup: &SeenSet,
     outbox: &Arc<Outbox>,
+    route: &DmRoute<'_>,
     msg: VaultMessage,
 ) {
     if let Some(store) = store {
@@ -4146,7 +5451,27 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 4) Call signaling — only from an established conversation, so a stranger
+    // 4) Nudge — a comrade wrote something for us and did not send it. Gated
+    //    exactly like a presence beacon: a stranger must not be able to page us
+    //    before their message request is accepted, and returning either way
+    //    keeps a nudge from an unaccepted peer from surfacing as a message
+    //    request full of JSON.
+    if let Some(nudge) = parse_nudge(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            handle_nudge(
+                store,
+                tx,
+                dedup,
+                &peer_npub,
+                &msg.event_id,
+                msg.created_at,
+                nudge,
+            );
+        }
+        return;
+    }
+
+    // 5) Call signaling — only from an established conversation, so a stranger
     //    cannot ring you before their message request is accepted. Stale or
     //    already-dispatched signals are dropped: offers older than the ring
     //    timeout are meaningless, and a redelivered wrapper (relay
@@ -4172,7 +5497,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 5) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 6) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         // Everything in the envelope is chosen by the peer. The MIME type
@@ -4228,7 +5553,7 @@ fn dispatch_incoming_dm(
                 size: env.size,
                 outgoing: false,
             }));
-            send_delivered_receipt(vault, &msg.sender_pubkey, &msg.event_id);
+            send_delivered_receipt(vault, route.mesh, &msg.sender_pubkey, &msg.event_id);
         } else {
             ensure_pending(store, &peer_npub);
             let _ = tx.send(BridgeEvent::IncomingMessageRequest(MessageRequestDto {
@@ -4240,9 +5565,19 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 6) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 7) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
+    // A message can reach us twice by two routes — sealed over the local mesh
+    // now, over a relay when the internet returns — under two different ids, so
+    // the id check below cannot catch that pair. This can.
+    if route.is_cross_transport_duplicate(&peer_npub, &msg.content) {
+        tracing::debug!(
+            transport = route.label,
+            "dropping a message already delivered by the other transport"
+        );
+        return;
+    }
     if let Some(store) = store {
         if store.get_message(&msg.event_id).ok().flatten().is_some() {
             return;
@@ -4261,7 +5596,7 @@ fn dispatch_incoming_dm(
         }
     }
     if matches!(gate, IncomingGate::Accepted) {
-        send_delivered_receipt(vault, &msg.sender_pubkey, &msg.event_id);
+        send_delivered_receipt(vault, route.mesh, &msg.sender_pubkey, &msg.event_id);
         let _ = tx.send(BridgeEvent::IncomingDirectMessage(DirectMessageDto::from(
             msg,
         )));
@@ -4441,6 +5776,7 @@ fn normalize_handle(raw: &str) -> Result<String, UiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comrade_core::nudge::NUDGE_SETTLE_SECS;
     use tempfile::TempDir;
 
     fn assert_send_sync<T: Send + Sync>() {}
@@ -5202,6 +6538,332 @@ mod tests {
         assert!(rt.tara_opener().unwrap().contains("felt low"));
     }
 
+    // ── Attention (wellbeing pillar #5) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn attention_commands_reject_gracefully_when_vault_locked() {
+        // Every store-backed command must fail closed rather than panic or
+        // silently succeed — same contract the journal and Tara hold.
+        let rt = ComradeRuntime::new();
+        assert!(matches!(
+            rt.record_attention_day("2026-07-31", 100, 40, 20),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.attention_days(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.attention_summary("2026-07-31"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.doom_apps(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.set_doom_apps(vec![]),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.start_focus_session("x", 25),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.finish_focus_session(true),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.active_focus_session(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.focus_sessions(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.suggested_focus_minutes(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.focus_prompt(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.focus_reflection("completed"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.save_reading("t", "x"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.reading(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.set_reading_position(0),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.clear_reading(), Err(UiError::VaultLocked)));
+    }
+
+    #[tokio::test]
+    async fn attention_days_upsert_and_summarise_against_the_users_own_median() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        // A malformed date is refused rather than stored under a key that
+        // would not sort chronologically.
+        assert!(matches!(
+            rt.record_attention_day("31-07-2026", 10, 1, 1),
+            Err(UiError::Engine(_))
+        ));
+
+        for (date, screen, doom) in [
+            ("2026-07-28", 100u32, 20u32),
+            ("2026-07-29", 300, 90),
+            ("2026-07-30", 200, 60),
+            ("2026-07-31", 90, 15),
+        ] {
+            rt.record_attention_day(date, screen, 40, doom).unwrap();
+        }
+        // Same-date re-record updates in place as today's numbers grow.
+        let today = rt.record_attention_day("2026-07-31", 120, 55, 25).unwrap();
+        assert_eq!(today.screen_minutes, 120);
+        assert_eq!(rt.attention_days().unwrap().len(), 4);
+        assert_eq!(rt.attention_days().unwrap()[0].date, "2026-07-31");
+
+        let summary = rt.attention_summary("2026-07-31").unwrap();
+        assert_eq!(summary.today.as_ref().unwrap().screen_minutes, 120);
+        assert_eq!(
+            summary.sample_days, 3,
+            "today is excluded from its baseline"
+        );
+        assert_eq!(summary.median_screen_minutes, 200);
+        assert_eq!(summary.median_doom_minutes, 60);
+
+        // A day with nothing recorded reports honestly rather than zeroes
+        // masquerading as a measurement.
+        let empty = rt.attention_summary("2026-08-05").unwrap();
+        assert!(empty.today.is_none());
+        assert_eq!(empty.sample_days, 4);
+    }
+
+    #[tokio::test]
+    async fn doom_apps_are_the_users_own_list_cleaned_but_never_prefilled() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        // Comrade ships no built-in blacklist — the list starts empty.
+        assert!(rt.doom_apps().unwrap().is_empty());
+        let saved = rt
+            .set_doom_apps(vec![
+                "com.b".into(),
+                "  ".into(),
+                "com.a".into(),
+                "com.b".into(),
+            ])
+            .unwrap();
+        assert_eq!(saved, vec!["com.a".to_string(), "com.b".to_string()]);
+        assert_eq!(rt.doom_apps().unwrap(), saved);
+        // And it can be emptied again.
+        assert!(rt.set_doom_apps(vec![]).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn focus_session_lifecycle_start_finish_and_history() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        assert!(rt.active_focus_session().unwrap().is_none());
+        assert_eq!(rt.suggested_focus_minutes().unwrap(), 25, "starts small");
+        assert!(!rt.focus_prompt().unwrap().is_empty());
+
+        // Out-of-range durations are refused with a message, not clamped
+        // silently — a five-hour "focus session" is not the practice.
+        assert!(matches!(
+            rt.start_focus_session("marathon", 600),
+            Err(UiError::Engine(_))
+        ));
+        assert!(matches!(
+            rt.start_focus_session("blink", 1),
+            Err(UiError::Engine(_))
+        ));
+
+        let started = rt.start_focus_session("  draft the essay  ", 25).unwrap();
+        assert_eq!(started.intent, "draft the essay");
+        assert_eq!(started.outcome, None);
+        assert!(started.remaining_secs > 24 * 60);
+        assert_eq!(
+            rt.active_focus_session().unwrap().map(|s| s.id),
+            Some(started.id.clone())
+        );
+
+        let finished = rt.finish_focus_session(true).unwrap().unwrap();
+        assert_eq!(finished.outcome.as_deref(), Some("completed"));
+        assert_eq!(
+            finished.remaining_secs, 0,
+            "a finished session has no clock"
+        );
+        assert!(finished.ended_at.is_some());
+        assert!(rt.active_focus_session().unwrap().is_none());
+        // Finishing again is a clean None, not an error.
+        assert!(rt.finish_focus_session(true).unwrap().is_none());
+        assert_eq!(rt.focus_sessions().unwrap().len(), 1);
+
+        // Abandoning is recorded plainly.
+        rt.start_focus_session("second go", 25).unwrap();
+        let abandoned = rt.finish_focus_session(false).unwrap().unwrap();
+        assert_eq!(abandoned.outcome.as_deref(), Some("abandoned"));
+        assert!(rt
+            .focus_reflection("abandoned")
+            .unwrap()
+            .contains("not failure"));
+
+        // Two completions unlock the next rung; the abandon costs nothing.
+        rt.start_focus_session("third", 25).unwrap();
+        rt.finish_focus_session(true).unwrap();
+        assert_eq!(rt.suggested_focus_minutes().unwrap(), 45);
+    }
+
+    #[tokio::test]
+    async fn starting_a_new_session_closes_the_one_left_running() {
+        // Only one session runs at a time: the user has visibly moved on, so
+        // the old one is closed rather than left dangling forever (which would
+        // block every future start).
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let first = rt.start_focus_session("one", 25).unwrap();
+        let second = rt.start_focus_session("two", 45).unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(
+            rt.active_focus_session().unwrap().map(|s| s.id),
+            Some(second.id)
+        );
+        let history = rt.focus_sessions().unwrap();
+        assert_eq!(history.len(), 2);
+        let old = history.iter().find(|s| s.id == first.id).unwrap();
+        assert_eq!(old.outcome.as_deref(), Some("abandoned"));
+    }
+
+    #[tokio::test]
+    async fn a_session_nobody_came_back_to_is_lapsed_not_completed() {
+        // The honesty rule the progressive-duration ladder depends on: a
+        // session the user was absent for must not be able to claim a
+        // completion, or the "practice" it measures never happened.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        let long_ago = now_secs() - 6 * 3600;
+        store
+            .save_focus_session(&comrade_storage::FocusSession {
+                id: timestamped_store_id(long_ago),
+                intent: "yesterday's plan".into(),
+                planned_minutes: 25,
+                started_at: long_ago,
+                ended_at: None,
+                outcome: None,
+            })
+            .unwrap();
+
+        // Reading the active session resolves the stale one and reports none.
+        assert!(rt.active_focus_session().unwrap().is_none());
+        let history = rt.focus_sessions().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].outcome.as_deref(), Some("lapsed"));
+        // It ended when its plan did — not hours later when someone looked.
+        assert_eq!(history[0].ended_at, Some(long_ago + 25 * 60));
+        // And it earns no credit toward the next rung.
+        assert_eq!(rt.suggested_focus_minutes().unwrap(), 25);
+        assert!(rt
+            .focus_reflection("lapsed")
+            .unwrap()
+            .contains("Nothing lost"));
+    }
+
+    #[tokio::test]
+    async fn reading_roundtrips_chunked_with_a_clamped_position() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        assert!(rt.reading().unwrap().is_none());
+        assert!(matches!(
+            rt.save_reading("t", "   "),
+            Err(UiError::Engine(_))
+        ));
+
+        let text = "A paragraph worth a couple of minutes of attention.\n\n".repeat(80);
+        let saved = rt.save_reading("  Walden  ", &text).unwrap();
+        assert_eq!(saved.title, "Walden");
+        assert!(saved.chunks.len() > 1);
+        assert_eq!(saved.position, 0);
+        // Losslessness carries through the DTO: the reader shows exactly what
+        // was saved (the trailing trim is the only edit, and it is announced).
+        assert_eq!(saved.chunks.concat(), text.trim());
+
+        let moved = rt.set_reading_position(2).unwrap().unwrap();
+        assert_eq!(moved.position, 2);
+        assert_eq!(rt.reading().unwrap().unwrap().position, 2);
+        // A position past the end is clamped, never trusted.
+        let clamped = rt.set_reading_position(9_999).unwrap().unwrap();
+        assert_eq!(clamped.position as usize, clamped.chunks.len() - 1);
+
+        assert!(rt.clear_reading().unwrap());
+        assert!(!rt.clear_reading().unwrap());
+        assert!(rt.reading().unwrap().is_none());
+        // With nothing saved, moving the position is a clean None.
+        assert!(rt.set_reading_position(0).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn tara_opener_nudges_on_a_heavy_scroll_day_but_mood_still_wins() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        // Baseline days plus a heavy "yesterday". Dates are chosen relative to
+        // the real clock so the today/yesterday split is what the code sees.
+        let today = iso_date(now_secs());
+        let yesterday = iso_date(now_secs() - 86_400);
+        for (date, doom) in [
+            (iso_date(now_secs() - 4 * 86_400), 30u32),
+            (iso_date(now_secs() - 3 * 86_400), 30),
+            (iso_date(now_secs() - 2 * 86_400), 30),
+        ] {
+            rt.record_attention_day(&date, 200, 40, doom).unwrap();
+        }
+        rt.record_attention_day(&yesterday, 400, 120, 150).unwrap();
+        rt.record_attention_day(&today, 10, 2, 0).unwrap();
+
+        let opener = rt.tara_opener().unwrap();
+        assert!(opener.contains("150 minutes"), "got: {opener}");
+        assert!(opener.contains("No judgement"), "got: {opener}");
+
+        // …but two low journal days outrank it: the heavier signal wins.
+        rt.add_journal_entry("rough monday", Some("😞")).unwrap();
+        rt.add_journal_entry("rough tuesday", Some("😕")).unwrap();
+        assert!(rt.tara_opener().unwrap().contains("felt low"));
+    }
+
+    #[tokio::test]
+    async fn tara_opener_is_unchanged_when_no_usage_is_recorded() {
+        // The mirror is opt-in; someone who never grants usage access must see
+        // exactly the opener that shipped before this pillar existed.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(rt.tara_opener().unwrap().contains("not a therapist"));
+    }
+
+    #[test]
+    fn iso_date_matches_known_epochs_and_shape_check_agrees() {
+        assert_eq!(iso_date(0), "1970-01-01");
+        assert_eq!(iso_date(1_700_000_000), "2023-11-14");
+        // A leap day, and the day after.
+        assert_eq!(iso_date(1_709_164_800), "2024-02-29");
+        assert_eq!(iso_date(1_709_251_200), "2024-03-01");
+        for s in ["1970-01-01", "2026-07-31"] {
+            assert!(is_iso_date(s), "{s} should be accepted");
+        }
+        for s in ["2026-7-31", "31-07-2026", "2026/07/31", "2026-07-3x", ""] {
+            assert!(!is_iso_date(s), "{s} should be rejected");
+        }
+    }
+
     #[test]
     fn journal_ids_sort_chronologically_and_never_collide() {
         let a = timestamped_store_id(5);
@@ -5848,6 +7510,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         accepted_peer(&store, &peer, false);
 
@@ -5869,6 +7536,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", &envelope),
         );
 
@@ -5903,6 +7571,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e2", &odd),
         );
         let stored: MediaRef = store.get(MEDIA_REFS_TREE, "m2").unwrap().unwrap();
@@ -6096,6 +7765,15 @@ mod tests {
         )
     }
 
+    /// A relay-delivered route with no mesh — what most ingress tests want.
+    fn relay_route(dedup: &SeenSet) -> DmRoute<'_> {
+        DmRoute {
+            label: TRANSPORT_RELAY,
+            dedup,
+            mesh: None,
+        }
+    }
+
     fn incoming(sender_hex: &str, event_id: &str, content: &str) -> VaultMessage {
         VaultMessage {
             event_id: event_id.into(),
@@ -6115,6 +7793,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
 
         dispatch_incoming_dm(
@@ -6123,6 +7806,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", "hello?"),
         );
 
@@ -6148,6 +7832,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6166,6 +7855,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", "yo"),
         );
         assert!(matches!(
@@ -6194,6 +7884,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e2", &receipt),
         );
         assert_eq!(
@@ -6226,6 +7917,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6242,6 +7938,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e1", "let me in"),
         );
         assert!(store.messages_with(&peer).unwrap().is_empty());
@@ -6256,6 +7953,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&other_hex, "e2", &share),
         );
         match rx.try_recv().unwrap() {
@@ -6351,6 +8049,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn presence_follows_the_app_being_open_not_the_process_being_alive() {
+        // "Online" is a claim about the person, not the process: a phone in a
+        // pocket with a connection service running is reachable, but nobody
+        // is at it. The heartbeat must therefore refresh only while the
+        // frontend says the app is open — otherwise it would undo every
+        // goodbye a backgrounded app sends.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        rt.set_comrade(&peer, true).unwrap();
+
+        assert!(
+            rt.is_presence_active(),
+            "a frontend that never says otherwise (desktop, CLI) is simply open"
+        );
+
+        // Backgrounded: the flag flips, and the heartbeat has nothing to say.
+        rt.announce_presence(false).await;
+        assert!(!rt.is_presence_active());
+        assert_eq!(
+            rt.handles().refresh_presence().await,
+            0,
+            "a backgrounded app must not re-announce itself online"
+        );
+
+        // Foregrounded again: the heartbeat resumes. (Both sends fail here —
+        // there is no relay — so the count is 0 either way; what this pins is
+        // the gate, which the two-peer suite then exercises for real.)
+        rt.announce_presence(true).await;
+        assert!(rt.is_presence_active());
+
+        // Locking is its own kind of "not online", whatever the app was doing.
+        rt.lock_vault().await;
+        assert!(!rt.is_presence_active());
+
+        // …and unlocking again is someone standing at the app, so presence
+        // resumes. (Without this the heartbeat would stay silent for the rest
+        // of the process's life after any lock/unlock cycle.)
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(rt.is_presence_active());
+    }
+
+    #[tokio::test]
     async fn a_presence_event_carries_a_usable_name_or_none_at_all() {
         // The name rides the event so a frontend can title a notification
         // without a store round-trip — which makes a blank one worse than
@@ -6391,6 +8133,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         accepted_peer(&store, &peer, true);
         let now = now_secs();
@@ -6402,6 +8149,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "e1", &beacon, now),
         );
         match rx.try_recv().unwrap() {
@@ -6427,6 +8175,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "e2", &beacon, now + 1),
         );
         assert!(
@@ -6442,6 +8191,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "e3", &bye, now + 2),
         );
         match rx.try_recv().unwrap() {
@@ -6458,6 +8208,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         accepted_peer(&store, &peer, true);
         let now = now_secs();
@@ -6471,6 +8226,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "old", &beacon, now - 2 * 24 * 60 * 60),
         );
         assert!(rx.try_recv().is_err(), "a stale beacon emits nothing");
@@ -6483,6 +8239,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "new", &beacon, now),
         );
         assert!(matches!(
@@ -6496,6 +8253,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "late-bye", &stale_bye, now - 60),
         );
         assert!(
@@ -6513,6 +8271,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let now = now_secs();
         let beacon = PresenceBeacon::online().to_json().unwrap();
 
@@ -6525,6 +8288,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&stranger_hex, "s1", &beacon, now),
         );
         assert!(rx.try_recv().is_err());
@@ -6545,6 +8309,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming_at(&hex, "a1", &beacon, now),
         );
         assert!(
@@ -6554,6 +8319,237 @@ mod tests {
         let recorded = store.get_peer_presence(&peer).unwrap().unwrap();
         assert!(recorded.online);
         assert!(recorded.peer_marked_us);
+    }
+
+    /// Everything `dispatch_incoming_dm` needs, for the nudge cases below —
+    /// the presence tests above spell the same set out inline, which is
+    /// exactly why the fourth copy became a helper.
+    struct Ingress {
+        vault: Arc<VaultEngine>,
+        store: Arc<comrade_storage::EncryptedStore>,
+        dedup: SeenSet,
+        outbox: Arc<Outbox>,
+        transport_dedup: SeenSet,
+        events: broadcast::Sender<BridgeEvent>,
+    }
+
+    impl Ingress {
+        async fn new(dir: &TempDir) -> (Self, broadcast::Receiver<BridgeEvent>) {
+            let (events, rx) = broadcast::channel(16);
+            let ingress = Self {
+                vault: test_vault().await,
+                store: Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap()),
+                dedup: SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY),
+                outbox: Arc::new(Outbox::new()),
+                transport_dedup: SeenSet::with_ttl(
+                    CROSS_TRANSPORT_DEDUP_CAPACITY,
+                    std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+                ),
+                events,
+            };
+            (ingress, rx)
+        }
+
+        fn deliver(&self, sender_hex: &str, event_id: &str, content: &str, created_at: u64) {
+            dispatch_incoming_dm(
+                &self.vault,
+                Some(&self.store),
+                &self.events,
+                &self.dedup,
+                &self.outbox,
+                &relay_route(&self.transport_dedup),
+                incoming_at(sender_hex, event_id, content, created_at),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_comrade_who_gave_up_on_a_message_is_announced_once() {
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, true);
+        let now = now_secs();
+        let nudge = Nudge::new().to_json().unwrap();
+
+        ingress.deliver(&hex, "n1", &nudge, now);
+        match rx.try_recv().unwrap() {
+            BridgeEvent::ComradeNudge { peer: p, .. } => assert_eq!(p, peer),
+            other => panic!("expected ComradeNudge, got {other:?}"),
+        }
+
+        // A nudge is never a chat message, a request, or a stored DM…
+        assert!(ingress.store.messages_with(&peer).unwrap().is_empty());
+        // …and it writes no presence state: "last seen" and the dot belong to
+        // beacons alone.
+        assert!(ingress.store.get_peer_presence(&peer).unwrap().is_none());
+
+        // Relays deliver at-least-once, and the same wrapper can land twice
+        // well inside the nudge's own TTL.
+        ingress.deliver(&hex, "n1", &nudge, now);
+        assert!(
+            rx.try_recv().is_err(),
+            "a redelivered nudge must not page someone twice"
+        );
+
+        // A second, genuinely new hesitation is news again — the receiver does
+        // not hold the cooldown, the sender does.
+        ingress.deliver(&hex, "n2", &nudge, now + 1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::ComradeNudge { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_nudge_replayed_out_of_the_backfill_raises_nothing() {
+        // The vault inbox re-scans two days on every launch. Without the
+        // freshness rule, every launch would re-announce every hesitation in
+        // that window — and each one would read as if it had just happened.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, true);
+        let two_days_ago = now_secs() - 2 * 24 * 60 * 60;
+
+        ingress.deliver(&hex, "old", &Nudge::new().to_json().unwrap(), two_days_ago);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_nudge_from_a_stranger_or_someone_we_did_not_choose_raises_nothing() {
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let now = now_secs();
+        let nudge = Nudge::new().to_json().unwrap();
+
+        // An unaccepted stranger cannot page us before we accept them — and
+        // their envelope must not leak into the requests bucket as raw JSON.
+        let (stranger_hex, stranger_npub) = stranger();
+        ingress.deliver(&stranger_hex, "s1", &nudge, now);
+        assert!(rx.try_recv().is_err());
+        assert!(ingress
+            .store
+            .messages_with(&stranger_npub)
+            .unwrap()
+            .is_empty());
+        assert!(ingress
+            .store
+            .get_conversation_meta(&stranger_npub)
+            .unwrap()
+            .is_none());
+
+        // An accepted peer we never chose as a comrade: silent, and unlike a
+        // presence beacon it records nothing either — a nudge is not the thing
+        // that reveals a one-sided comrade relationship.
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        ingress.deliver(&hex, "a1", &nudge, now);
+        assert!(
+            rx.try_recv().is_err(),
+            "someone we didn't choose is not our comrade to be paged about"
+        );
+        assert!(ingress.store.get_peer_presence(&peer).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn watching_a_composer_is_safe_before_unlock_and_survives_junk_keys() {
+        // Frontends call these on a keystroke and on every thread close, so
+        // they must be harmless in every state the app can be in — a courtesy
+        // feature has no business raising an error into a text field.
+        let rt = ComradeRuntime::new();
+        rt.note_draft("npub1definitelynotakey");
+        rt.abandon_draft("npub1definitelynotakey");
+        rt.note_draft("");
+        rt.abandon_draft("");
+        // Nothing to send to, and nothing anywhere to send it with.
+        assert_eq!(rt.handles().nudge_abandoned_drafts(now_secs()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_hesitation_towards_someone_who_is_not_a_comrade_is_never_sent() {
+        // The consent gate, checked at send time: presence — and this — flow
+        // only to people the user deliberately chose.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+
+        let watch = rt.nudge_watch.clone();
+        let at = now_secs() - NUDGE_SETTLE_SECS - 60;
+        watch.writing(&peer, at);
+        watch.abandoned(&peer, at + 30);
+        assert_eq!(
+            rt.handles().nudge_abandoned_drafts(now_secs()).await,
+            0,
+            "no comrade flag, no disclosure"
+        );
+
+        // And the decision is spent either way: the same abandoned draft is
+        // not reconsidered on the next sweep just because they were marked in
+        // between.
+        rt.set_comrade(&peer, true).unwrap();
+        assert_eq!(rt.handles().nudge_abandoned_drafts(now_secs()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn reaching_for_a_pause_with_no_comrades_tells_nobody() {
+        // The whole feature has to be free for someone who never chose anyone
+        // — no relay traffic, and nothing remembered either.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert_eq!(rt.nudge_comrades().await, 0);
+
+        // …and it is safe before there is a vault at all, since the breathing
+        // screen has no idea what state the runtime is in.
+        let locked = ComradeRuntime::new();
+        assert_eq!(locked.nudge_comrades().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_pause_claims_the_same_cooldown_an_abandoned_draft_would() {
+        // The wiring behind `nudge_watch`'s shared cooldown: after a
+        // deliberate nudge, a draft given up on moments later must not become
+        // a second notification. (The relay is unreachable here, so nothing
+        // actually sends — what this pins is that the *decision* was spent.)
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        rt.set_comrade(&peer, true).unwrap();
+
+        rt.nudge_comrades().await;
+
+        let watch = rt.nudge_watch.clone();
+        let at = now_secs() - NUDGE_SETTLE_SECS - 60;
+        watch.writing(&peer, at);
+        watch.abandoned(&peer, at + 30);
+        assert!(
+            watch.due(now_secs()).is_empty(),
+            "one hard half-hour is one notification, not two"
+        );
+    }
+
+    #[tokio::test]
+    async fn locking_the_vault_drops_a_pending_nudge() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+        rt.set_comrade(&peer, true).unwrap();
+
+        let watch = rt.nudge_watch.clone();
+        let at = now_secs() - NUDGE_SETTLE_SECS - 60;
+        watch.writing(&peer, at);
+        watch.abandoned(&peer, at + 30);
+
+        rt.lock_vault().await;
+        assert!(
+            watch.due(now_secs()).is_empty(),
+            "the goodbye beacon has already said we are gone; a nudge after it \
+             would claim the opposite"
+        );
     }
 
     #[tokio::test]
@@ -6656,6 +8652,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6681,7 +8682,7 @@ mod tests {
         // window) must never ring.
         let mut stale = incoming(&hex, "e1", &envelope);
         stale.created_at = now_secs().saturating_sub(7200);
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, stale);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, stale);
         assert!(
             rx.try_recv().is_err(),
             "a call signal older than CALL_SIGNAL_MAX_AGE_SECS must not reach the bus"
@@ -6691,12 +8692,20 @@ mod tests {
         // redelivered (at-least-once relay delivery) must not fire twice.
         let mut fresh = incoming(&hex, "e2", &envelope);
         fresh.created_at = now_secs();
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, fresh.clone());
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &route,
+            fresh.clone(),
+        );
         assert!(matches!(
             rx.try_recv().unwrap(),
             BridgeEvent::IncomingCallSignal(_)
         ));
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, fresh);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, fresh);
         assert!(
             rx.try_recv().is_err(),
             "the same wrapper event id must only ever dispatch one IncomingCallSignal"
@@ -6713,6 +8722,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6725,7 +8739,15 @@ mod tests {
             .unwrap();
 
         let msg = incoming(&hex, "dup1", "hello twice");
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg.clone());
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &route,
+            msg.clone(),
+        );
         assert!(matches!(
             rx.try_recv().unwrap(),
             BridgeEvent::IncomingDirectMessage(_)
@@ -6734,7 +8756,7 @@ mod tests {
 
         // Redelivered (same event id — relay at-least-once, or a backfill
         // re-scan on the next launch) must not re-notify or duplicate the row.
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
         assert!(
             rx.try_recv().is_err(),
             "an already-persisted event id must not re-fire IncomingDirectMessage"
@@ -6750,6 +8772,11 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6778,6 +8805,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "w1", &json),
         );
         assert!(matches!(
@@ -6792,6 +8820,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "w2", &json),
         );
         assert!(
@@ -6825,11 +8854,16 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, _peer) = stranger();
 
         let mut msg = incoming(&hex, "e1", "hi");
         msg.created_at = 12_345;
-        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, msg);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
         assert_eq!(read_watermark(&store), Some(12_345));
     }
 
@@ -6951,6 +8985,11 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
         let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
         let (hex, peer) = stranger();
         store
             .set_conversation_meta(&comrade_storage::ConversationMeta {
@@ -6984,6 +9023,7 @@ mod tests {
             &tx,
             &dedup,
             &outbox,
+            &route,
             incoming(&hex, "e-receipt", &receipt),
         );
 
@@ -7112,6 +9152,226 @@ mod tests {
     async fn flush_requires_an_unlocked_vault() {
         let rt = ComradeRuntime::with_relays(vec![]);
         assert!(matches!(rt.flush_outbox().await, Err(UiError::VaultLocked)));
+    }
+
+    // ── Local-network delivery (the "no internet, same WiFi" path) ──────────
+
+    #[tokio::test]
+    async fn the_mesh_comes_up_on_unlock_without_choosing_a_workspace() {
+        // The bug this fixes: LAN delivery used to require the user to switch to
+        // the OffGridTravel workspace, and even then carried no DMs.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        assert!(!rt.mesh_status().active, "nothing running before unlock");
+
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert_eq!(
+            rt.current_workspace().key,
+            "Base",
+            "still the ordinary workspace"
+        );
+        assert!(
+            rt.mesh_status().active,
+            "an unlocked vault must have a local-network transport"
+        );
+        assert!(
+            rt.handles().mesh.is_some(),
+            "and the send path must be able to reach it"
+        );
+
+        // Locking takes it back down: no beacons, no frames, nothing listening.
+        rt.lock_vault().await;
+        assert!(!rt.mesh_status().active);
+    }
+
+    #[tokio::test]
+    async fn a_dm_with_no_relay_is_sealed_onto_the_mesh_and_stays_queued() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, peer) = stranger();
+
+        let dto = rt.send_dm(&peer, "i'm outside, no signal").await.unwrap();
+
+        // Queued, because a mesh publish is not proof the *recipient* got it —
+        // only their receipt clears the outbox.
+        assert_eq!(dto.status.as_deref(), Some("queued"));
+        assert_eq!(rt.outbox_pending(), 1);
+        assert_eq!(
+            rt.messages_with(&peer).unwrap()[0].content,
+            "i'm outside, no signal"
+        );
+    }
+
+    /// The precedence policy behind the app-bar switch, as a table.
+    #[test]
+    fn precedence_orders_the_transports_and_stops_waiting_after_two_rounds() {
+        // Relays lead by default, and a message a relay has *stored* is not
+        // worth also flooding onto the WiFi — so relay precedence never sends
+        // twice, however many rounds it takes.
+        assert_eq!(
+            SendPlan::for_attempt(false, 0),
+            SendPlan {
+                local_first: false,
+                force_both: false
+            }
+        );
+        assert!(!SendPlan::for_attempt(false, LOCAL_FIRST_PATIENCE + 5).force_both);
+
+        // Local precedence: the mesh goes first, alone at first…
+        assert_eq!(
+            SendPlan::for_attempt(true, 0),
+            SendPlan {
+                local_first: true,
+                force_both: false
+            }
+        );
+        // …but a mesh publish only means *someone* took the frame, so a message
+        // still unacknowledged after a couple of rounds stops waiting for the
+        // recipient to walk into range and goes out over a relay too.
+        assert!(SendPlan::for_attempt(true, LOCAL_FIRST_PATIENCE).force_both);
+        assert!(SendPlan::for_attempt(true, LOCAL_FIRST_PATIENCE + 1).force_both);
+    }
+
+    /// The switch has to reach the router, or the app-bar icons are decoration.
+    #[tokio::test]
+    async fn switching_precedence_changes_the_route_a_send_takes() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::with_relays(vec![]);
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(!rt.handles().prefer_local, "relays lead by default");
+
+        rt.toggle_workspace("OffGridTravel").await.unwrap();
+        assert!(rt.handles().prefer_local);
+
+        // Precedence is an order, not an exclusion: with the preferred route
+        // carrying nothing (no peers on this network) *and* no relay, the
+        // message is still queued rather than dropped on the floor.
+        let (_hex, peer) = stranger();
+        let dto = rt.send_dm(&peer, "still going out").await.unwrap();
+        assert_eq!(dto.status.as_deref(), Some("queued"));
+        assert_eq!(rt.outbox_pending(), 1);
+        assert_eq!(
+            rt.messages_with(&peer).unwrap()[0].content,
+            "still going out"
+        );
+
+        rt.toggle_workspace("Base").await.unwrap();
+        assert!(!rt.handles().prefer_local);
+    }
+
+    /// The cross-transport case: the same message arrives sealed over the mesh
+    /// and later over a relay, under two different ids. It must render once.
+    #[tokio::test]
+    async fn one_message_delivered_by_both_routes_appears_once() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                updated_at: 1,
+                last_read_at: 0,
+            })
+            .unwrap();
+
+        // Over the mesh first, keyed by the sender's local id.
+        let mesh_route = DmRoute {
+            label: TRANSPORT_MESH,
+            dedup: &transport_dedup,
+            mesh: None,
+        };
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &mesh_route,
+            incoming(&hex, "queued:abc", "are you ok?"),
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::IncomingDirectMessage(_)
+        ));
+
+        // Then the relay comes back and delivers the same text under the event
+        // id a relay assigned it.
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &relay_route(&transport_dedup),
+            incoming(&hex, "e-relay-id", "are you ok?"),
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the second copy must not reach the UI"
+        );
+        assert_eq!(
+            store.messages_with(&peer).unwrap().len(),
+            1,
+            "and must not be stored twice"
+        );
+    }
+
+    /// The flip side, and the reason the dedup key includes the transport:
+    /// someone genuinely saying the same thing twice is not a duplicate.
+    #[tokio::test]
+    async fn the_same_text_sent_twice_over_one_route_is_two_messages() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                updated_at: 1,
+                last_read_at: 0,
+            })
+            .unwrap();
+
+        for id in ["e1", "e2"] {
+            dispatch_incoming_dm(
+                &vault,
+                Some(&store),
+                &tx,
+                &dedup,
+                &outbox,
+                &relay_route(&transport_dedup),
+                incoming(&hex, id, "ok"),
+            );
+        }
+
+        let delivered = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, BridgeEvent::IncomingDirectMessage(_)))
+            .count();
+        assert_eq!(
+            delivered, 2,
+            "\"ok\" twice is two messages, not a duplicate"
+        );
+        assert_eq!(store.messages_with(&peer).unwrap().len(), 2);
     }
 
     // ── Panic wipe ──────────────────────────────────────────────────────────

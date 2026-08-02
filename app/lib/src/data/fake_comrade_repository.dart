@@ -409,6 +409,30 @@ class FakeComradeRepository implements ComradeRepository {
       _io(() =>
           _unlocked ? _contacts.where((ContactInfo c) => c.comrade).length : 0);
 
+  /// Every composer report the UI has made, in order — `('note', npub)` while
+  /// text is in the box, `('abandon', npub)` once it is gone.
+  ///
+  /// The fake records rather than simulates: turning the pair into a nudge is
+  /// timing policy that lives in `comrade_core::nudge` and is tested there, so
+  /// duplicating it here would only give the widget tests a second, drifting
+  /// answer. What a widget test needs to know is that the screen *reported*.
+  final List<(String, String)> draftReports = <(String, String)>[];
+
+  @override
+  Future<void> noteDraft(String npub) =>
+      _io(() => draftReports.add(('note', npub)));
+
+  @override
+  Future<void> abandonDraft(String npub) =>
+      _io(() => draftReports.add(('abandon', npub)));
+
+  /// Push a nudge as though [npub] had written something for us and given up on
+  /// it. Test-facing, like [seedPresence] below.
+  void seedNudge(String npub) => emit(IncomingComradeNudge(
+        peer: npub,
+        name: _contactFor(npub)?.name,
+      ));
+
   /// Push a beacon as though [npub] had sent one, and emit the transition.
   /// Test-facing, like [emit]: nothing in the fake's own flow makes a peer
   /// come online, because nothing in it talks to a peer.

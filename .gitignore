@@ -54,9 +54,18 @@ dist/
 # Contains mutation testing data
 **/mutants.out*/
 
-# Claude Code local session/tooling state (agent worktrees, local settings) —
-# machine-specific, never project content.
-.claude/
+# Claude Code. The shared configuration IS project content and is tracked:
+# settings.json, rules/, skills/, agents/, hooks/. Everything else under
+# .claude/ is machine-specific session state (worktrees, caches, local
+# settings), so the directory is excluded and the shared parts re-included.
+# Note the `/*` rather than `/`: git cannot re-include a child of a directory
+# excluded with a trailing slash, so that form would silently drop the config.
+.claude/*
+!.claude/settings.json
+!.claude/rules/
+!.claude/skills/
+!.claude/agents/
+!.claude/hooks/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
@@ -64,3 +73,7 @@ dist/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Claude Code personal (non-shared) settings — the shared config is
+# .claude/settings.json, which IS tracked.
+.claude/settings.local.json

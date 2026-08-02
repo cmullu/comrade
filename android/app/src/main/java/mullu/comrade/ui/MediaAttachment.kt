@@ -6,16 +6,14 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaPlayer
 import android.util.Base64
-import android.widget.MediaController
-import android.widget.VideoView
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -41,8 +39,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -62,7 +60,7 @@ import mullu.comrade.ComradeCore
  * the app-private cache dir (never backed up — see AndroidManifest's
  * `allowBackup=false`) and reused by event id.
  */
-private object MediaCache {
+internal object MediaCache {
     private const val BITMAP_CACHE_CAPACITY = 24
 
     // Insertion-ordered map used as a simple bounded LRU: re-inserting a key
@@ -150,9 +148,46 @@ internal fun purgeDecryptedMedia(context: Context) = MediaCache.clear(context)
  * A chat bubble for one NIP-94/96 attachment — renders images, audio, and
  * video inline, and offers a generic "open externally" action for anything
  * else (e.g. PDFs), matching standard messaging-app UX.
+ *
+ * A tap on a photo or a video opens it full screen ([MediaViewerDialog]); a
+ * long press anywhere on the bubble starts a reply aimed at it, the same
+ * gesture a text bubble answers to. [onReply] is null where the caller offers
+ * no reply, and then there is no long press to miss rather than one that does
+ * nothing.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MediaAttachmentBubble(info: ComradeCore.MediaMessageInfo, modifier: Modifier = Modifier) {
+fun MediaAttachmentBubble(
+    info: ComradeCore.MediaMessageInfo,
+    modifier: Modifier = Modifier,
+    onReply: (() -> Unit)? = null,
+) {
+    var viewerOpen by remember(info.eventId) { mutableStateOf(false) }
+    if (viewerOpen) {
+        MediaViewerDialog(info, onDismiss = { viewerOpen = false })
+    }
+    // The long press has to be attached to each *leaf* as well as the bubble:
+    // a child with its own pointer input (the photo's tap-to-open, the audio
+    // play button) consumes the gesture before an ancestor sees it, so a bubble
+    // that only wrapped itself would be repliable everywhere except on the
+    // attachment itself — which is the part people press.
+    val openFullScreen: (() -> Unit)? =
+        if (opensFullScreen(info.mimeType)) ({ viewerOpen = true }) else null
+    // A bubble with neither action gets no gesture at all, rather than a
+    // ripple that leads nowhere — the settings screen's "no fake switches"
+    // rule, applied to a tap target.
+    val bubbleModifier = modifier
+        .widthIn(max = 280.dp)
+        .let { base ->
+            if (openFullScreen == null && onReply == null) {
+                base
+            } else {
+                base.combinedClickable(
+                    onClick = { openFullScreen?.invoke() },
+                    onLongClick = onReply,
+                )
+            }
+        }
     Surface(
         shape = RoundedCornerShape(
             topStart = 18.dp,
@@ -166,7 +201,7 @@ fun MediaAttachmentBubble(info: ComradeCore.MediaMessageInfo, modifier: Modifier
             MaterialTheme.colorScheme.surfaceVariant
         },
         tonalElevation = 1.dp,
-        modifier = modifier.widthIn(max = 280.dp),
+        modifier = bubbleModifier,
     ) {
         Column(Modifier.padding(10.dp)) {
             if (info.caption.isNotBlank()) {
@@ -177,9 +212,11 @@ fun MediaAttachmentBubble(info: ComradeCore.MediaMessageInfo, modifier: Modifier
                 )
             }
             when {
-                info.mimeType.startsWith("image/") -> InlineImage(info)
+                info.mimeType.startsWith("image/") ->
+                    InlineImage(info, onOpen = openFullScreen, onReply = onReply)
                 info.mimeType.startsWith("audio/") -> InlineAudio(info)
-                info.mimeType.startsWith("video/") -> InlineVideo(info)
+                info.mimeType.startsWith("video/") ->
+                    VideoPoster(onOpen = openFullScreen, onReply = onReply)
                 else -> GenericFile(info)
             }
             Text(
@@ -192,9 +229,18 @@ fun MediaAttachmentBubble(info: ComradeCore.MediaMessageInfo, modifier: Modifier
     }
 }
 
-/** Images auto-load, like any standard messenger — no extra tap needed. */
+/**
+ * Images auto-load, like any standard messenger — no extra tap needed. The tap
+ * is spent on opening the photo full screen instead, which is what a tap on a
+ * photo means everywhere else.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun InlineImage(info: ComradeCore.MediaMessageInfo) {
+private fun InlineImage(
+    info: ComradeCore.MediaMessageInfo,
+    onOpen: (() -> Unit)?,
+    onReply: (() -> Unit)?,
+) {
     var bitmap by remember(info.eventId) { mutableStateOf<Bitmap?>(null) }
     var error by remember(info.eventId) { mutableStateOf<String?>(null) }
 
@@ -209,21 +255,27 @@ private fun InlineImage(info: ComradeCore.MediaMessageInfo) {
             .widthIn(max = 240.dp)
             .heightIn(max = 240.dp)
             .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.4f)),
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
+            .combinedClickable(
+                // A failed image keeps the retry it always had: the tap that
+                // would open a picture there is no picture for is better spent
+                // fetching one.
+                onClick = { if (error != null) error = null else onOpen?.invoke() },
+                onLongClick = onReply,
+            )
+            .testTag("media-open-fullscreen"),
         contentAlignment = Alignment.Center,
     ) {
         val shown = bitmap
         when {
             shown != null -> Image(
                 bitmap = shown.asImageBitmap(),
-                contentDescription = info.caption.ifBlank { "Image attachment" },
+                contentDescription = info.caption.ifBlank { "Photo attachment" },
             )
             error != null -> Text(
-                "⚠ ${error}",
+                "⚠ $error · tap to retry",
                 style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .padding(16.dp)
-                    .clickable { error = null }, // tap to retry (re-triggers LaunchedEffect)
+                modifier = Modifier.padding(16.dp),
             )
             else -> CircularProgressIndicator(Modifier.padding(24.dp).size(28.dp))
         }
@@ -299,64 +351,28 @@ private fun InlineAudio(info: ComradeCore.MediaMessageInfo) {
     }
 }
 
-/** Video: an explicit tap to decrypt (bandwidth-conscious), then inline playback. */
+/**
+ * Video: a poster that opens the full-screen viewer. The decrypt happens there,
+ * on the tap — still bandwidth-conscious, and now played on a whole screen
+ * rather than in a 280 dp bubble.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun InlineVideo(info: ComradeCore.MediaMessageInfo) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var file by remember(info.eventId) { mutableStateOf<File?>(null) }
-    var loading by remember(info.eventId) { mutableStateOf(false) }
-    var error by remember(info.eventId) { mutableStateOf<String?>(null) }
-
-    val loaded = file
-    if (loaded == null) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
-                .clickable(enabled = !loading) {
-                    loading = true
-                    error = null
-                    scope.launch {
-                        runCatching { MediaCache.resolveFile(context, info) }
-                            .onSuccess { file = it; loading = false }
-                            .onFailure {
-                                error = it.message ?: "Could not load video"
-                                loading = false
-                            }
-                    }
-                }
-                .padding(20.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            Text(
-                error ?: (if (loading) "Loading video…" else "🎬 Tap to load video"),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-        return
-    }
-
-    var videoView by remember(info.eventId) { mutableStateOf<VideoView?>(null) }
-    DisposableEffect(info.eventId) {
-        onDispose { videoView?.stopPlayback() }
-    }
-    AndroidView(
+private fun VideoPoster(onOpen: (() -> Unit)?, onReply: (() -> Unit)?) {
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(10.dp)),
-        factory = { ctx ->
-            VideoView(ctx).apply {
-                setVideoPath(loaded.absolutePath)
-                setMediaController(MediaController(ctx).also { it.setAnchorView(this) })
-                start()
-            }.also { videoView = it }
-        },
-    )
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
+            .combinedClickable(onClick = { onOpen?.invoke() }, onLongClick = onReply)
+            .testTag("media-open-fullscreen")
+            .padding(20.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("▶", style = MaterialTheme.typography.titleMedium)
+        Text("Tap to play video", style = MaterialTheme.typography.bodyMedium)
+    }
 }
 
 /** Anything else (PDFs, etc.): decrypt then hand off to whatever app the user has for it. */

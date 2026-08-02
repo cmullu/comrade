@@ -76,6 +76,79 @@ void main() {
     });
   });
 
+  group('UpdateState.fromMap', () {
+    test('reads both halves out of one snapshot', () {
+      final UpdateState state = UpdateState.fromMap(const <Object?, Object?>{
+        'check': <Object?, Object?>{
+          'status': 'available',
+          'version': '0.0.9',
+          'apkBytes': 1000,
+        },
+        'download': <Object?, Object?>{
+          'state': 'downloading',
+          'bytesRead': 250,
+          'totalBytes': 1000,
+        },
+      });
+      expect(state.check, isA<UpdateAvailable>());
+      expect(state.download, isA<DownloadRunning>());
+      expect((state.download as DownloadRunning).percent, 25);
+    });
+
+    test('reads every download state the service reports', () {
+      UpdateDownload parse(Map<Object?, Object?> download) =>
+          UpdateState.fromMap(<Object?, Object?>{'download': download})
+              .download;
+
+      expect(parse(const <Object?, Object?>{'state': 'idle'}),
+          isA<DownloadIdle>());
+      expect(parse(const <Object?, Object?>{'state': 'verifying'}),
+          isA<DownloadVerifying>());
+      expect(
+        parse(const <Object?, Object?>{'state': 'ready', 'version': '0.0.9'}),
+        isA<DownloadReady>()
+            .having((DownloadReady d) => d.version, 'version', '0.0.9'),
+      );
+      expect(
+        parse(const <Object?, Object?>{
+          'state': 'installing',
+          'version': '0.0.9'
+        }),
+        isA<DownloadInstalling>(),
+      );
+      expect(
+        parse(const <Object?, Object?>{'state': 'failed', 'message': 'nope'}),
+        isA<DownloadFailed>()
+            .having((DownloadFailed d) => d.message, 'message', 'nope'),
+      );
+    });
+
+    test('an unknown download state, or none at all, reads as idle', () {
+      expect(
+        UpdateState.fromMap(const <Object?, Object?>{}).download,
+        isA<DownloadIdle>(),
+      );
+      expect(
+        UpdateState.fromMap(
+          const <Object?, Object?>{
+            'download': <Object?, Object?>{'state': 'sideways'}
+          },
+        ).download,
+        isA<DownloadIdle>(),
+      );
+    });
+
+    test('an unknown total means no percentage rather than a wrong one', () {
+      // The bar goes indeterminate; inventing 100% (or 0 of 0) would be a lie
+      // about a transfer whose size the server never reported.
+      const DownloadRunning running =
+          DownloadRunning(bytesRead: 500, totalBytes: 0);
+      expect(running.percent, isNull);
+      // And a total that somehow undershoots what has arrived still clamps.
+      expect(const DownloadRunning(bytesRead: 20, totalBytes: 10).percent, 100);
+    });
+  });
+
   group('UpdateSettings', () {
     test('reads the preference map, and defaults to checking automatically',
         () {
@@ -97,6 +170,19 @@ void main() {
           UpdateSettings.fromMap(const <Object?, Object?>{}).autoCheck, isTrue);
       expect(UpdateSettings.fromMap(const <Object?, Object?>{}).skippedVersion,
           isNull);
+    });
+
+    test('canInstall defaults to true where the platform never answers', () {
+      // A card that warned "Comrade cannot install updates" on a platform with
+      // no such concept (or before the first reply) would be inventing a
+      // problem. The native side is the only thing that can say otherwise.
+      expect(UpdateSettings.fromMap(const <Object?, Object?>{}).canInstall,
+          isTrue);
+      expect(
+        UpdateSettings.fromMap(const <Object?, Object?>{'canInstall': false})
+            .canInstall,
+        isFalse,
+      );
     });
   });
 
@@ -144,6 +230,28 @@ void main() {
       expect(
           (calls.first.arguments as Map<Object?, Object?>)['force'], isFalse);
       expect((calls.last.arguments as Map<Object?, Object?>)['force'], isTrue);
+    });
+
+    test('the download and install calls take no arguments at all', () async {
+      // Deliberate: nothing here can name a URL or a file. The native side
+      // fetches the asset its own check reported, and installs the file it
+      // itself wrote.
+      await channel.download();
+      await channel.cancelDownload();
+      await channel.install();
+      await channel.refreshDownloadState();
+      await channel.openInstallPermissionSettings();
+      expect(
+        calls.map((MethodCall c) => c.method),
+        <String>[
+          'download',
+          'cancelDownload',
+          'install',
+          'refreshDownloadState',
+          'openInstallPermissionSettings',
+        ],
+      );
+      expect(calls.every((MethodCall c) => c.arguments == null), isTrue);
     });
 
     test('skip/unskip/setAutoCheck/openRelease name their arguments', () async {

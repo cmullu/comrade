@@ -62,6 +62,14 @@ const JOURNAL_TREE: &str = "journal";
 const TARA_TREE: &str = "tara_companion";
 /// Per-peer conversation gate: request / accepted / blocked (message requests).
 const CONVERSATIONS_TREE: &str = "conversation_meta";
+/// Daily usage rollups for the attention mirror (strictly local, like the journal).
+const ATTENTION_DAYS_TREE: &str = "attention_days";
+/// Focus-session history (attention pillar — strictly local).
+const FOCUS_SESSIONS_TREE: &str = "focus_sessions";
+/// The single saved long-read (title, full text, reading position).
+const READING_TREE: &str = "reading_state";
+/// Attention preferences: the user's own doom-app package list.
+const ATTENTION_META_TREE: &str = "attention_meta";
 /// Voice/video call log, keyed by call id.
 const CALLS_TREE: &str = "call_log";
 /// Last known presence of a comrade, keyed by their npub.
@@ -70,6 +78,8 @@ const PRESENCE_TREE: &str = "peer_presence";
 const IDENTITY_KEY: &str = "self";
 const LEDGER_SNAPSHOT_KEY: &str = "hisab_kitab";
 const LEDGER_STATE_KEY: &str = "hisab_kitab_state";
+const READING_KEY: &str = "current";
+const ATTENTION_PREFS_KEY: &str = "prefs";
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -206,6 +216,65 @@ pub struct TaraMessage {
     #[serde(default)]
     pub crisis: bool,
     pub created_at: u64,
+}
+
+/// One day's usage rollup for the attention mirror (wellbeing pillar #5).
+/// Strictly local, like [`JournalEntry`] — and deliberately only a rollup:
+/// the raw per-app event stream is reduced on the frontend and dropped, so
+/// what apps were opened, and when, is never persisted anywhere
+/// (`docs/ATTENTION.md`, gate 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionDay {
+    /// Store key: the local calendar date, `YYYY-MM-DD` — which also makes
+    /// lexicographic key order chronological.
+    pub date: String,
+    pub screen_minutes: u32,
+    pub pickups: u32,
+    /// Minutes in the apps the user themself tagged as doom apps.
+    pub doom_minutes: u32,
+    pub updated_at: u64,
+}
+
+/// One focus session (attention pillar). Persisted from the moment it starts
+/// so an app kill cannot make the history lie about a session that ran; a
+/// session with no `outcome` yet is the (at most one) currently-running one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusSession {
+    /// Store key. Zero-padded-timestamp-prefixed so ids sort chronologically.
+    pub id: String,
+    /// What the user said they'd give the time to. May be empty; never leaves
+    /// the device (it can name anything — a person, a worry, a deadline).
+    pub intent: String,
+    pub planned_minutes: u32,
+    pub started_at: u64,
+    #[serde(default)]
+    pub ended_at: Option<u64>,
+    /// `"completed"`, `"abandoned"`, or `"lapsed"` — `None` while running.
+    /// See `comrade_core::attention::FocusOutcome`.
+    #[serde(default)]
+    pub outcome: Option<String>,
+}
+
+/// The one saved long-read for the distraction-free reader: user-supplied
+/// text, held whole (sealed like everything else) with the reading position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadingState {
+    pub title: String,
+    pub text: String,
+    /// Index of the chunk the reader is on (chunking is recomputed from the
+    /// text — see `comrade_core::attention::chunk_reading` — so the position
+    /// is the only state worth storing).
+    pub position: u32,
+    pub updated_at: u64,
+}
+
+/// Attention preferences. Package names are stored *inside* the encrypted
+/// vault on purpose: which apps someone considers their compulsion is
+/// sensitive in exactly the way a journal is.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AttentionPrefs {
+    #[serde(default)]
+    pub doom_packages: Vec<String>,
 }
 
 /// Per-peer conversation gate — the storage half of message requests. A DM from
@@ -599,6 +668,63 @@ impl EncryptedStore {
         Ok(removed)
     }
 
+    // Attention (wellbeing pillar #5 — strictly local, never networked) --------
+
+    /// Persist (or overwrite) one day's usage rollup, keyed by its date.
+    pub fn save_attention_day(&self, day: &AttentionDay) -> Result<(), StorageError> {
+        self.put(ATTENTION_DAYS_TREE, &day.date, day)
+    }
+
+    /// All recorded usage days, newest first.
+    pub fn attention_days(&self) -> Result<Vec<AttentionDay>, StorageError> {
+        let mut days: Vec<AttentionDay> = self.values(ATTENTION_DAYS_TREE)?;
+        days.sort_by(|a, b| b.date.cmp(&a.date));
+        Ok(days)
+    }
+
+    /// Persist one focus session, keyed by its id (insert or update-in-place).
+    pub fn save_focus_session(&self, session: &FocusSession) -> Result<(), StorageError> {
+        self.put(FOCUS_SESSIONS_TREE, &session.id, session)
+    }
+
+    /// Every focus session, newest first.
+    pub fn focus_sessions(&self) -> Result<Vec<FocusSession>, StorageError> {
+        let mut sessions: Vec<FocusSession> = self.values(FOCUS_SESSIONS_TREE)?;
+        sessions.sort_by(|a, b| {
+            b.started_at
+                .cmp(&a.started_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(sessions)
+    }
+
+    /// Persist the current long-read (there is exactly one slot).
+    pub fn save_reading_state(&self, state: &ReadingState) -> Result<(), StorageError> {
+        self.put(READING_TREE, READING_KEY, state)
+    }
+
+    /// The saved long-read, if any.
+    pub fn load_reading_state(&self) -> Result<Option<ReadingState>, StorageError> {
+        self.get(READING_TREE, READING_KEY)
+    }
+
+    /// Delete the saved long-read. Returns `true` if one existed.
+    pub fn clear_reading_state(&self) -> Result<bool, StorageError> {
+        self.delete(READING_TREE, READING_KEY)
+    }
+
+    /// Persist the attention preferences (doom-app list).
+    pub fn save_attention_prefs(&self, prefs: &AttentionPrefs) -> Result<(), StorageError> {
+        self.put(ATTENTION_META_TREE, ATTENTION_PREFS_KEY, prefs)
+    }
+
+    /// The attention preferences; an empty default when never saved.
+    pub fn load_attention_prefs(&self) -> Result<AttentionPrefs, StorageError> {
+        Ok(self
+            .get(ATTENTION_META_TREE, ATTENTION_PREFS_KEY)?
+            .unwrap_or_default())
+    }
+
     // Ledger ------------------------------------------------------------------
 
     /// Persist a binary CRDT (Yrs) ledger snapshot (raw bytes).
@@ -939,6 +1065,219 @@ mod tests {
 
         let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
         assert_eq!(s.tara_messages().unwrap()[0].text, secret_confession);
+    }
+
+    #[test]
+    fn attention_days_upsert_by_date_and_sort_newest_first() {
+        let (_d, s) = store();
+        assert!(s.attention_days().unwrap().is_empty());
+        for (date, screen) in [
+            ("2026-07-29", 210u32),
+            ("2026-07-31", 95),
+            ("2026-07-30", 180),
+        ] {
+            s.save_attention_day(&AttentionDay {
+                date: date.into(),
+                screen_minutes: screen,
+                pickups: 40,
+                doom_minutes: 30,
+                updated_at: 1,
+            })
+            .unwrap();
+        }
+        let days = s.attention_days().unwrap();
+        assert_eq!(
+            days.iter().map(|d| d.date.as_str()).collect::<Vec<_>>(),
+            ["2026-07-31", "2026-07-30", "2026-07-29"],
+            "newest first"
+        );
+        // Same date upserts in place (the reader re-records today as it grows).
+        s.save_attention_day(&AttentionDay {
+            date: "2026-07-31".into(),
+            screen_minutes: 120,
+            pickups: 55,
+            doom_minutes: 45,
+            updated_at: 2,
+        })
+        .unwrap();
+        let days = s.attention_days().unwrap();
+        assert_eq!(days.len(), 3);
+        assert_eq!(days[0].screen_minutes, 120);
+    }
+
+    #[test]
+    fn focus_sessions_crud_ordering_and_update_in_place() {
+        let (_d, s) = store();
+        assert!(s.focus_sessions().unwrap().is_empty());
+        for (id, at) in [
+            ("00000000000000000020-bbbb", 20u64),
+            ("00000000000000000010-aaaa", 10),
+        ] {
+            s.save_focus_session(&FocusSession {
+                id: id.into(),
+                intent: "draft the essay".into(),
+                planned_minutes: 25,
+                started_at: at,
+                ended_at: None,
+                outcome: None,
+            })
+            .unwrap();
+        }
+        let sessions = s.focus_sessions().unwrap();
+        assert_eq!(sessions[0].started_at, 20, "newest first");
+
+        // Finishing updates the same row rather than duplicating.
+        s.save_focus_session(&FocusSession {
+            id: "00000000000000000020-bbbb".into(),
+            intent: "draft the essay".into(),
+            planned_minutes: 25,
+            started_at: 20,
+            ended_at: Some(20 + 25 * 60),
+            outcome: Some("completed".into()),
+        })
+        .unwrap();
+        let sessions = s.focus_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].outcome.as_deref(), Some("completed"));
+
+        // A row written before ended_at/outcome existed still loads.
+        let legacy: FocusSession =
+            serde_json::from_str(r#"{"id":"x","intent":"","planned_minutes":45,"started_at":5}"#)
+                .unwrap();
+        assert_eq!(legacy.outcome, None);
+        assert_eq!(legacy.ended_at, None);
+    }
+
+    #[test]
+    fn reading_state_roundtrip_and_clear() {
+        let (_d, s) = store();
+        assert!(s.load_reading_state().unwrap().is_none());
+        let state = ReadingState {
+            title: "Walden".into(),
+            text: "I went to the woods because I wished to live deliberately.".into(),
+            position: 0,
+            updated_at: 9,
+        };
+        s.save_reading_state(&state).unwrap();
+        assert_eq!(s.load_reading_state().unwrap(), Some(state.clone()));
+        // Saving again overwrites the one slot.
+        s.save_reading_state(&ReadingState {
+            position: 3,
+            ..state
+        })
+        .unwrap();
+        assert_eq!(s.load_reading_state().unwrap().unwrap().position, 3);
+        assert!(s.clear_reading_state().unwrap());
+        assert!(!s.clear_reading_state().unwrap());
+        assert!(s.load_reading_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn attention_prefs_default_empty_and_roundtrip() {
+        let (_d, s) = store();
+        assert!(s.load_attention_prefs().unwrap().doom_packages.is_empty());
+        s.save_attention_prefs(&AttentionPrefs {
+            doom_packages: vec!["com.example.shortvideo".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            s.load_attention_prefs().unwrap().doom_packages,
+            vec!["com.example.shortvideo".to_string()]
+        );
+    }
+
+    #[test]
+    fn reading_text_and_focus_intent_never_plaintext_at_rest() {
+        // A focus intent can name anything (a person, a worry); the saved
+        // long-read is whatever the user chose to keep. Same ciphertext-on-disk
+        // guarantee as the journal, proven the same way.
+        let dir = TempDir::new().unwrap();
+        let secret_intent = "my-very-private-focus-intent-0123456789";
+        let secret_text = "my-very-private-reading-text-0123456789";
+        {
+            let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+            s.save_focus_session(&FocusSession {
+                id: "00000000000000000001-test".into(),
+                intent: secret_intent.into(),
+                planned_minutes: 25,
+                started_at: 1,
+                ended_at: None,
+                outcome: None,
+            })
+            .unwrap();
+            s.save_reading_state(&ReadingState {
+                title: "t".into(),
+                text: secret_text.into(),
+                position: 0,
+                updated_at: 1,
+            })
+            .unwrap();
+            s.flush().unwrap();
+        }
+        let mut leaked = false;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    for secret in [secret_intent, secret_text] {
+                        if bytes.windows(secret.len()).any(|w| w == secret.as_bytes()) {
+                            leaked = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            !leaked,
+            "attention records must never be written in plaintext"
+        );
+
+        let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+        assert_eq!(s.focus_sessions().unwrap()[0].intent, secret_intent);
+        assert_eq!(s.load_reading_state().unwrap().unwrap().text, secret_text);
+    }
+
+    #[test]
+    fn panic_wipe_reaches_the_attention_trees() {
+        // The wipe enumerates the database's *actual* tables, so this holds by
+        // construction — but pin it: a wipe that left a usage ledger or a
+        // focus history behind would betray exactly the users it exists for.
+        let (_d, s) = store();
+        s.save_attention_day(&AttentionDay {
+            date: "2026-07-31".into(),
+            screen_minutes: 100,
+            pickups: 10,
+            doom_minutes: 5,
+            updated_at: 1,
+        })
+        .unwrap();
+        s.save_focus_session(&FocusSession {
+            id: "00000000000000000001-test".into(),
+            intent: "…".into(),
+            planned_minutes: 25,
+            started_at: 1,
+            ended_at: None,
+            outcome: None,
+        })
+        .unwrap();
+        s.save_reading_state(&ReadingState {
+            title: "t".into(),
+            text: "body".into(),
+            position: 0,
+            updated_at: 1,
+        })
+        .unwrap();
+        s.save_attention_prefs(&AttentionPrefs {
+            doom_packages: vec!["com.example".into()],
+        })
+        .unwrap();
+
+        s.panic_wipe().unwrap();
+
+        assert!(s.attention_days().unwrap().is_empty());
+        assert!(s.focus_sessions().unwrap().is_empty());
+        assert!(s.load_reading_state().unwrap().is_none());
+        assert!(s.load_attention_prefs().unwrap().doom_packages.is_empty());
     }
 
     #[test]

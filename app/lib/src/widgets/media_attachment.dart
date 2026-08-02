@@ -3,8 +3,12 @@
 /// Port of `ui/MediaAttachment.kt`. What is kept and what is not:
 ///
 ///  * **Kept**: images auto-load (the common, low-risk case); audio and video
-///    need an explicit tap; anything else offers "open externally"; the
-///    bubble's tail-corner shape matches a text bubble's.
+///    fetch only on an explicit tap; anything else offers "open externally";
+///    the bubble's tail-corner shape matches a text bubble's.
+///  * **Added since the port**: a tap on a photo or a video opens it full
+///    screen (`media_viewer.dart`), and a long-press on any attachment starts a
+///    reply aimed at it. Both were in every messenger this is compared to and
+///    in neither of the frontends this was ported from.
 ///  * **Kept, and load-bearing**: decrypted plaintext lives in a bounded
 ///    in-memory cache and **never touches disk** (AUDIT S-4). Android had to
 ///    write audio/video to `cacheDir/media` because `MediaPlayer`/`VideoView`
@@ -28,6 +32,8 @@ import '../data/models.dart';
 import '../state/providers.dart';
 import '../theme/comrade_theme.dart';
 import '../util/display_name.dart';
+import 'media_viewer.dart';
+import 'message_bubble.dart';
 
 /// Platform hooks the pure-Dart UI cannot provide by itself.
 ///
@@ -140,16 +146,26 @@ final FutureProviderFamily<MediaBytes, String> decryptedMediaProvider =
 });
 
 class MediaAttachmentBubble extends ConsumerWidget {
-  const MediaAttachmentBubble(this.info, {this.maxWidth = 280, super.key});
+  const MediaAttachmentBubble(
+    this.info, {
+    this.onReply,
+    this.maxWidth = 280,
+    super.key,
+  });
 
   final MediaMessageInfo info;
+
+  /// Start a reply aimed at this attachment. Null where the caller offers no
+  /// reply (the couple panel, a preview) — see [ReplyAffordance].
+  final VoidCallback? onReply;
+
   final double maxWidth;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final ColorScheme colors = Theme.of(context).colorScheme;
     final bool out = info.outgoing;
-    return Container(
+    final Widget bubble = Container(
       constraints: BoxConstraints(maxWidth: maxWidth),
       decoration: BoxDecoration(
         color: out ? colors.primaryContainer : colors.surfaceContainerHighest,
@@ -189,21 +205,22 @@ class MediaAttachmentBubble extends ConsumerWidget {
         ],
       ),
     );
+    return ReplyAffordance(onReply: onReply, outgoing: out, child: bubble);
   }
 
   Widget _body(BuildContext context, WidgetRef ref) {
     if (info.mimeType.startsWith('image/')) return _InlineImage(info);
+    if (info.mimeType.startsWith('video/')) return _VideoPoster(info);
     if (info.mimeType.startsWith('audio/')) {
       return _TapToLoad(info: info, kind: _Kind.audio);
-    }
-    if (info.mimeType.startsWith('video/')) {
-      return _TapToLoad(info: info, kind: _Kind.video);
     }
     return _TapToLoad(info: info, kind: _Kind.file);
   }
 }
 
-/// Images auto-load, like any standard messenger — no extra tap needed.
+/// Images auto-load, like any standard messenger — no extra tap needed. The
+/// tap is spent on opening the photo full screen instead, which is what a tap
+/// on a photo means everywhere else.
 class _InlineImage extends ConsumerWidget {
   const _InlineImage(this.info);
 
@@ -218,15 +235,20 @@ class _InlineImage extends ConsumerWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(ComradeRadii.small),
         child: bytes.when(
-          data: (MediaBytes m) => Image.memory(
-            m.bytes,
-            fit: BoxFit.contain,
-            semanticLabel:
-                info.caption.trim().isEmpty ? 'Image attachment' : info.caption,
-            errorBuilder: (BuildContext c, Object e, StackTrace? s) =>
-                _error(context, 'Could not decode image', () {
-              ref.invalidate(decryptedMediaProvider(info.eventId));
-            }),
+          data: (MediaBytes m) => GestureDetector(
+            key: const Key('media-open-fullscreen'),
+            onTap: () => openMediaViewer(context, info),
+            child: Image.memory(
+              m.bytes,
+              fit: BoxFit.contain,
+              semanticLabel: info.caption.trim().isEmpty
+                  ? 'Photo attachment — tap to view full screen'
+                  : info.caption,
+              errorBuilder: (BuildContext c, Object e, StackTrace? s) =>
+                  _error(context, 'Could not decode image', () {
+                ref.invalidate(decryptedMediaProvider(info.eventId));
+              }),
+            ),
           ),
           loading: () => const Padding(
             padding: EdgeInsets.all(24),
@@ -257,17 +279,52 @@ class _InlineImage extends ConsumerWidget {
       );
 }
 
-enum _Kind { audio, video, file }
-
-/// Audio, video, and generic files: decrypt on an explicit tap
-/// (bandwidth-conscious), then hand off to the platform delegate.
+/// A video is a tap target that opens the full-screen viewer — the decrypt and
+/// the two-step player fallback both live there now.
 ///
-/// Video has a two-step fallback rather than one refusal. An in-app player
-/// needs a PlatformView and a media engine, so [MediaPlaybackDelegate.videoPlayer]
-/// is allowed to return null — and when it does, the bytes go to the system
-/// player through [MediaPlaybackDelegate.openExternally] (from memory, never a
-/// file). A received video is watchable either way; only a platform with neither
-/// gets the honest "not wired up here" line.
+/// Nothing is fetched until the tap, so this is still bandwidth-conscious; the
+/// difference is that the bytes, once fetched, are played on a whole screen
+/// rather than in a 240 px bubble.
+class _VideoPoster extends StatelessWidget {
+  const _VideoPoster(this.info);
+
+  final MediaMessageInfo info;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme colors = Theme.of(context).colorScheme;
+    return InkWell(
+      key: const Key('media-open-fullscreen'),
+      borderRadius: BorderRadius.circular(ComradeRadii.small),
+      onTap: () => openMediaViewer(context, info),
+      child: Container(
+        width: 220,
+        height: 124,
+        decoration: BoxDecoration(
+          color: colors.surface.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(ComradeRadii.small),
+        ),
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(Icons.play_circle_outline, size: 42, color: colors.primary),
+            const SizedBox(height: 4),
+            Text(
+              'Tap to play video',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum _Kind { audio, file }
+
+/// Audio and generic files: decrypt on an explicit tap (bandwidth-conscious),
+/// then hand off to the platform delegate.
 class _TapToLoad extends ConsumerStatefulWidget {
   const _TapToLoad({required this.info, required this.kind});
 
@@ -281,7 +338,6 @@ class _TapToLoad extends ConsumerStatefulWidget {
 class _TapToLoadState extends ConsumerState<_TapToLoad> {
   bool _loading = false;
   String? _error;
-  Widget? _player;
 
   /// Playing, for audio only — the glyph is a pause while it is.
   bool _playing = false;
@@ -309,15 +365,6 @@ class _TapToLoadState extends ConsumerState<_TapToLoad> {
           if (!playing && !wasPlaying) {
             _error = 'Audio playback is not wired up on this platform yet.';
           }
-        case _Kind.video:
-          final Widget? player =
-              delegate.videoPlayer(widget.info.eventId, bytes);
-          if (player != null) {
-            _player = player;
-          } else if (!await delegate.openExternally(
-              widget.info.eventId, bytes)) {
-            _error = 'Nothing on this device can play this video.';
-          }
         case _Kind.file:
           final bool ok =
               await delegate.openExternally(widget.info.eventId, bytes);
@@ -335,17 +382,12 @@ class _TapToLoadState extends ConsumerState<_TapToLoad> {
 
   @override
   Widget build(BuildContext context) {
-    if (_player != null) {
-      return AspectRatio(aspectRatio: 16 / 9, child: _player);
-    }
     final String label = switch (widget.kind) {
       _Kind.audio => _playing ? 'Playing…' : 'Voice message',
-      _Kind.video => 'Tap to load video',
       _Kind.file => 'Open ${widget.info.mimeType.split('/').last}',
     };
     final IconData icon = switch (widget.kind) {
       _Kind.audio => _playing ? Icons.pause : Icons.play_arrow,
-      _Kind.video => Icons.movie_outlined,
       _Kind.file => Icons.download_outlined,
     };
     return Column(

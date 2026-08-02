@@ -8,7 +8,10 @@
 ///
 /// Nothing here takes a URL: the endpoint is compiled in on the native side,
 /// because an update path is code execution and a settable source would be a
-/// way to point someone's upgrade at another APK.
+/// way to point someone's upgrade at another APK. The APK is fetched by a
+/// foreground service — so it survives leaving the app, shows progress in the
+/// notification shade, and finishes with a tappable "ready to install" — and
+/// handed to the system installer, which always asks the user to confirm.
 library;
 
 import 'dart:async';
@@ -104,19 +107,22 @@ class UpdateSettings {
     required this.autoCheck,
     required this.lastCheckedAt,
     this.skippedVersion,
+    this.canInstall = true,
   });
 
   const UpdateSettings.unknown()
       : currentVersion = '?',
         autoCheck = true,
         lastCheckedAt = 0,
-        skippedVersion = null;
+        skippedVersion = null,
+        canInstall = true;
 
   factory UpdateSettings.fromMap(Map<Object?, Object?> map) => UpdateSettings(
         currentVersion: (map['currentVersion'] as String?) ?? '?',
         autoCheck: (map['autoCheck'] as bool?) ?? true,
         lastCheckedAt: (map['lastCheckedAt'] as int?) ?? 0,
         skippedVersion: map['skippedVersion'] as String?,
+        canInstall: (map['canInstall'] as bool?) ?? true,
       );
 
   /// What this build reports as its version — what a release is compared to.
@@ -132,6 +138,112 @@ class UpdateSettings {
   /// A version the user asked not to be told about again. Anything *newer* is
   /// still announced.
   final String? skippedVersion;
+
+  /// Whether the OS will let Comrade install an APK — the per-source "install
+  /// unknown apps" grant, which lives outside this app and can be revoked at any
+  /// time, so it is re-read rather than remembered. Defaults to true so a
+  /// platform that has no such notion (or an unanswered call) does not render a
+  /// permission warning that means nothing there.
+  final bool canInstall;
+}
+
+/// Where the update APK's download-and-install has got to — the Dart mirror of
+/// `mullu.comrade.update.UpdateDownloadState`.
+sealed class UpdateDownload {
+  const UpdateDownload();
+
+  /// Parse one native `download` map. An unrecognised state reads as
+  /// [DownloadIdle] rather than throwing, for the same reason
+  /// [UpdateStatus.fromMap] is forgiving.
+  factory UpdateDownload.fromMap(Map<Object?, Object?> map) {
+    switch (map['state'] as String?) {
+      case 'downloading':
+        return DownloadRunning(
+          bytesRead: (map['bytesRead'] as int?) ?? 0,
+          totalBytes: (map['totalBytes'] as int?) ?? 0,
+        );
+      case 'verifying':
+        return const DownloadVerifying();
+      case 'ready':
+        return DownloadReady(version: (map['version'] as String?) ?? '');
+      case 'installing':
+        return DownloadInstalling(version: (map['version'] as String?) ?? '');
+      case 'failed':
+        return DownloadFailed(
+          message: (map['message'] as String?) ?? 'Download failed',
+        );
+      default:
+        return const DownloadIdle();
+    }
+  }
+}
+
+/// Nothing in flight — the card offers the download.
+class DownloadIdle extends UpdateDownload {
+  const DownloadIdle();
+}
+
+class DownloadRunning extends UpdateDownload {
+  const DownloadRunning({required this.bytesRead, required this.totalBytes});
+
+  final int bytesRead;
+
+  /// 0 until the server (or the release asset) says — the card then shows an
+  /// indeterminate bar rather than inventing a denominator.
+  final int totalBytes;
+
+  /// Whole percent, or null when the total is not known yet.
+  int? get percent =>
+      totalBytes > 0 ? ((bytesRead * 100) ~/ totalBytes).clamp(0, 100) : null;
+}
+
+/// Downloaded; the size, package, version and signer are being checked.
+class DownloadVerifying extends UpdateDownload {
+  const DownloadVerifying();
+}
+
+/// Verified and waiting in the cache — one tap from the installer.
+class DownloadReady extends UpdateDownload {
+  const DownloadReady({required this.version});
+
+  final String version;
+}
+
+/// Handed to the system installer; the OS is asking the user to confirm.
+class DownloadInstalling extends UpdateDownload {
+  const DownloadInstalling({required this.version});
+
+  final String version;
+}
+
+class DownloadFailed extends UpdateDownload {
+  const DownloadFailed({required this.message});
+
+  final String message;
+}
+
+/// One snapshot of both halves: whether an update exists, and where its
+/// download has got to.
+class UpdateState {
+  const UpdateState({required this.check, required this.download});
+
+  const UpdateState.unknown()
+      : check = const UpdateUnknown(),
+        download = const DownloadIdle();
+
+  factory UpdateState.fromMap(Map<Object?, Object?> map) => UpdateState(
+        check: UpdateStatus.fromMap(
+          (map['check'] as Map<Object?, Object?>?) ??
+              const <Object?, Object?>{},
+        ),
+        download: UpdateDownload.fromMap(
+          (map['download'] as Map<Object?, Object?>?) ??
+              const <Object?, Object?>{},
+        ),
+      );
+
+  final UpdateStatus check;
+  final UpdateDownload download;
 }
 
 class UpdateChannel {
@@ -142,11 +254,11 @@ class UpdateChannel {
   final MethodChannel _methods;
   final EventChannel _state;
 
-  /// Live check status. The native source is a `StateFlow`, so the first event
-  /// is the current answer — including a finding made while no engine was
-  /// attached.
-  Stream<UpdateStatus> get status => _state.receiveBroadcastStream().map(
-        (Object? event) => UpdateStatus.fromMap(
+  /// Live check + download state. The native source is a combine of two
+  /// `StateFlow`s, so the first event is the current answer — including a
+  /// finding, or a finished download, from while no engine was attached.
+  Stream<UpdateState> get updates => _state.receiveBroadcastStream().map(
+        (Object? event) => UpdateState.fromMap(
             (event as Map<Object?, Object?>?) ?? const <Object?, Object?>{}),
       );
 
@@ -177,7 +289,33 @@ class UpdateChannel {
 
   Future<void> unskip() => _methods.invokeMethod<void>('unskip');
 
-  /// Open the release page in a browser, where the APK is downloaded and
-  /// installed. Comrade never installs an APK itself — see `UpdateChecker`.
+  // ── Downloading and installing ─────────────────────────────────────────────
+
+  /// Start fetching the update APK. Returns as soon as the foreground service
+  /// is up: the transfer then runs without this engine, and its progress arrives
+  /// on [updates].
+  Future<void> download() => _methods.invokeMethod<void>('download');
+
+  /// Abort an in-flight download; the partial file is deleted.
+  Future<void> cancelDownload() =>
+      _methods.invokeMethod<void>('cancelDownload');
+
+  /// Hand the downloaded APK to the system installer. It re-verifies first, and
+  /// the OS still shows its own confirmation dialog.
+  Future<void> install() => _methods.invokeMethod<void>('install');
+
+  /// Drop a "ready to install" whose file is no longer there (the OS reaped the
+  /// cache, or the install went through). Cheap; call it on resume.
+  Future<void> refreshDownloadState() =>
+      _methods.invokeMethod<void>('refreshDownloadState');
+
+  /// The system screen that lets Comrade install apps. There is no in-app way to
+  /// ask for that permission, so this is the whole of the flow.
+  Future<void> openInstallPermissionSettings() =>
+      _methods.invokeMethod<void>('openInstallPermissionSettings');
+
+  /// Open the release page in a browser — the fallback for a release with no
+  /// single APK asset, and for anyone who would rather install from there than
+  /// let Comrade install apps.
   Future<void> openRelease() => _methods.invokeMethod<void>('openRelease');
 }

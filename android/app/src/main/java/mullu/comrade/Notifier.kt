@@ -387,10 +387,49 @@ object Notifier {
     }
 
     /**
+     * A comrade wrote something for the user and never sent it (see
+     * `comrade_core::nudge`). Same title as [notifyComradeOnline] — they are
+     * around, which is the part that makes this actionable — with a body that
+     * says they might need you.
+     *
+     * **Deliberately the same notification id as [notifyComradeOnline]**, so
+     * this replaces "Your comrade is around" in place instead of stacking a
+     * second line about one person. That cannot silently downgrade back to the
+     * gentler wording either: the online notice only fires on a transition
+     * *into* online, and the only way a peer becomes non-online is an event
+     * that routes through [clearComradeOnline] first.
+     *
+     * Content-light for a stronger reason than the rest: there is nothing else
+     * to say. The envelope carries no draft, no length, and no difference
+     * between "cleared it" and "walked away" — [ONLINE_TIMEOUT_MS] then drops
+     * it on its own, because the nudge's own TTL matches presence's.
+     */
+    @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
+    fun notifyComradeNudge(context: Context, peer: String, title: String) {
+        if (!canPost(context)) return
+        val n = NotificationCompat.Builder(context, CHANNEL_COMRADES)
+            .setSmallIcon(R.drawable.ic_notification_comrade)
+            .setContentTitle(context.getString(R.string.comrade_online_title, title.ifBlank { shortNpub(peer) }))
+            .setContentText(context.getString(R.string.comrade_nudge_text))
+            .setAutoCancel(true)
+            .setGroup(GROUP_COMRADES)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setTimeoutAfter(ONLINE_TIMEOUT_MS)
+            // Tapping lands in their conversation, not the app's last screen:
+            // the one thing a person wants from this notice is the chat it is
+            // about (WP11, the same rule message notifications follow).
+            .setContentIntent(openAppIntent(context, peer = peer))
+            .build()
+        NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+    }
+
+    /**
      * Drop the "is online" notice for `peer` — they went offline (or their
      * claim aged out) before the user got to it. A stale "Ana is online" is
      * worse than no notification: it invites a call to someone who isn't
-     * there any more.
+     * there any more. Drops a nudge for the same peer with it: it shares this
+     * id, and "they might need you" is no truer than "they're around" once
+     * they have gone.
      */
     fun clearComradeOnline(context: Context, peer: String) {
         NotificationManagerCompat.from(context).cancel("online:$peer".hashCode())

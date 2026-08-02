@@ -113,8 +113,37 @@ object ComradeCore {
         try {
             block()
         } catch (e: UiException) {
-            throw IllegalStateException("$what failed: ${e.message}", e)
+            throw IllegalStateException("$what failed: ${e.humanMessage()}", e)
         }
+
+    /**
+     * The sentence to show a person, rather than uniffi's rendering of the
+     * error's *fields*.
+     *
+     * `UiException`'s generated `message` is built from the variant's field
+     * names, so a failed attachment reached the chat screen reading
+     * `Send media failed: v1=http error: error sending request for url (…)`.
+     * The `v1=` is the name of a tuple field in Rust; it means nothing to
+     * anyone, and it made a legible error (a media host was unreachable) look
+     * like a crash. Every error the app shows goes through here.
+     *
+     * Mirrors `describeUiError` in the Flutter app's
+     * `rust_comrade_repository.dart`, so the two frontends word the same
+     * failure the same way.
+     */
+    fun UiException.humanMessage(): String = when (this) {
+        is UiException.UnknownWorkspace -> "Unknown workspace: $v1"
+        is UiException.Transition -> v1
+        is UiException.NoIdentity -> "No identity yet — unlock the vault to create one."
+        is UiException.StoreLocked, is UiException.VaultLocked -> "The vault is locked."
+        is UiException.Crypto -> v1
+        is UiException.Storage -> v1
+        is UiException.Engine -> v1
+        // No `else` on purpose. `UiException` is a sealed hierarchy generated
+        // from `UiError`, so adding a variant in Rust should break *this*
+        // compile and make someone word the new failure — the alternative is a
+        // fallback branch that silently starts printing `v1=` again.
+    }
 
     // ── Library / crypto helpers (no store required) ─────────────────────────
 
@@ -456,6 +485,40 @@ object ComradeCore {
      */
     fun announcePresenceTyped(online: Boolean): Long = runBlocking { ffi.announcePresence(online) }.toLong()
 
+    /**
+     * There is unsent text in [npub]'s composer, as of now.
+     *
+     * Called from the composer's `onValueChange`, so it has to be cheap: the
+     * native side takes a lock for one map insert and returns — no store, no
+     * relay, no coroutine. It discloses nothing by itself. If that draft is
+     * later abandoned *and* [npub] is a comrade, their device is told that it
+     * happened and nothing more (`comrade_core::nudge`).
+     */
+    fun noteDraft(npub: String) = ffi.noteDraft(npub)
+
+    /**
+     * That draft is gone — the box was emptied, or the conversation closed with
+     * it still unsent. Safe to call whenever a thread closes: a composer that
+     * never held text does nothing.
+     */
+    fun abandonDraft(npub: String) = ffi.abandonDraft(npub)
+
+    /**
+     * Tell every comrade, once, that this person might need them — the
+     * deliberate trigger behind [mullu.comrade.ui.BreathingScreen]. Returns how
+     * many nudges a relay accepted.
+     *
+     * This is a disclosure, so say what it is: each comrade — nobody else, and
+     * no relay — learns that you might need them, and *nothing else*. It is the
+     * same envelope an abandoned draft sends, so they cannot tell which
+     * happened, and it shares that cooldown so the two never add up to two
+     * notifications. Nothing about it is stored on this device.
+     *
+     * Never throws: like presence, this is a courtesy, not a call worth failing
+     * a screen over. Blocking, so call it off the main thread.
+     */
+    fun nudgeComrades(): Long = runBlocking { ffi.nudgeComrades() }.toLong()
+
     // ── Journal (strictly local) ──────────────────────────────────────────────
 
     data class JournalEntryInfo(val id: String, val text: String, val mood: String?, val createdAt: Long)
@@ -509,6 +572,137 @@ object ComradeCore {
             CrisisResourceInfo(name = it.name, contact = it.contact, note = it.note)
         }
     }
+
+    // ── Attention (usage mirror · focus · long read — strictly local) ─────────
+    //
+    // Wellbeing pillar #5 (docs/ATTENTION.md). Nothing here is ever networked,
+    // and only *rollups* cross this boundary: the raw UsageStats event stream
+    // is reduced in [mullu.comrade.attention.UsageStatsReader] and dropped
+    // there, so which apps were opened and when is never persisted.
+
+    data class AttentionDayInfo(
+        /** Local calendar date, `YYYY-MM-DD`. */
+        val date: String,
+        val screenMinutes: Int,
+        val pickups: Int,
+        /** Minutes in the apps the *user* tagged as their own scroll traps. */
+        val doomMinutes: Int,
+    )
+
+    /** Today against the user's **own** recent medians — never a normative target. */
+    data class AttentionSummaryInfo(
+        val today: AttentionDayInfo?,
+        val medianScreenMinutes: Int,
+        val medianDoomMinutes: Int,
+        val medianPickups: Int,
+        /** How many prior days (0–7) the medians rest on. 0 means "no baseline yet". */
+        val sampleDays: Int,
+    )
+
+    data class FocusSessionInfo(
+        val id: String,
+        val intent: String,
+        val plannedMinutes: Int,
+        val startedAt: Long,
+        val endedAt: Long?,
+        /** `completed` / `abandoned` / `lapsed`; null while running. */
+        val outcome: String?,
+        val remainingSecs: Long,
+    )
+
+    data class ReadingInfo(val title: String, val chunks: List<String>, val position: Int)
+
+    private fun uniffi.comrade_ui.AttentionDayDto.toInfo() = AttentionDayInfo(
+        date = date,
+        screenMinutes = screenMinutes.toInt(),
+        pickups = pickups.toInt(),
+        doomMinutes = doomMinutes.toInt(),
+    )
+
+    private fun uniffi.comrade_ui.FocusSessionDto.toInfo() = FocusSessionInfo(
+        id = id,
+        intent = intent,
+        plannedMinutes = plannedMinutes.toInt(),
+        startedAt = startedAt.toLong(),
+        endedAt = endedAt?.toLong(),
+        outcome = outcome,
+        remainingSecs = remainingSecs.toLong(),
+    )
+
+    private fun uniffi.comrade_ui.ReadingDto.toInfo() =
+        ReadingInfo(title = title, chunks = chunks, position = position.toInt())
+
+    fun recordAttentionDayTyped(
+        date: String,
+        screenMinutes: Int,
+        pickups: Int,
+        doomMinutes: Int,
+    ): AttentionDayInfo = rethrowing("Usage record") {
+        ffi.recordAttentionDay(
+            date,
+            screenMinutes.toUInt(),
+            pickups.toUInt(),
+            doomMinutes.toUInt(),
+        ).toInfo()
+    }
+
+    fun attentionDays(): List<AttentionDayInfo> =
+        rethrowing("Usage history") { ffi.attentionDays().map { it.toInfo() } }
+
+    fun attentionSummaryTyped(today: String): AttentionSummaryInfo = rethrowing("Usage summary") {
+        ffi.attentionSummary(today).let {
+            AttentionSummaryInfo(
+                today = it.today?.toInfo(),
+                medianScreenMinutes = it.medianScreenMinutes.toInt(),
+                medianDoomMinutes = it.medianDoomMinutes.toInt(),
+                medianPickups = it.medianPickups.toInt(),
+                sampleDays = it.sampleDays.toInt(),
+            )
+        }
+    }
+
+    /** The user's own scroll-trap list. Comrade ships no built-in blacklist. */
+    fun doomApps(): List<String> = rethrowing("Scroll traps") { ffi.doomApps() }
+
+    fun setDoomAppsTyped(packages: List<String>): List<String> =
+        rethrowing("Scroll traps") { ffi.setDoomApps(packages) }
+
+    fun startFocusSessionTyped(intent: String, plannedMinutes: Int): FocusSessionInfo =
+        rethrowing("Focus session") {
+            ffi.startFocusSession(intent, plannedMinutes.toUInt()).toInfo()
+        }
+
+    /**
+     * Finish the running session; null if none was. A session past its grace
+     * window is recorded as `lapsed` whatever [completed] says — see
+     * `ComradeRuntime::finish_focus_session`.
+     */
+    fun finishFocusSessionTyped(completed: Boolean): FocusSessionInfo? =
+        rethrowing("Focus session") { ffi.finishFocusSession(completed)?.toInfo() }
+
+    fun activeFocusSessionTyped(): FocusSessionInfo? =
+        rethrowing("Focus session") { ffi.activeFocusSession()?.toInfo() }
+
+    fun focusSessions(): List<FocusSessionInfo> =
+        rethrowing("Focus history") { ffi.focusSessions().map { it.toInfo() } }
+
+    fun suggestedFocusMinutesTyped(): Int =
+        rethrowing("Focus suggestion") { ffi.suggestedFocusMinutes().toInt() }
+
+    fun focusPrompt(): String = rethrowing("Focus prompt") { ffi.focusPrompt() }
+
+    fun focusReflectionTyped(outcome: String): String =
+        rethrowing("Focus reflection") { ffi.focusReflection(outcome) }
+
+    fun saveReadingTyped(title: String, text: String): ReadingInfo =
+        rethrowing("Reading") { ffi.saveReading(title, text).toInfo() }
+
+    fun reading(): ReadingInfo? = rethrowing("Reading") { ffi.reading()?.toInfo() }
+
+    fun setReadingPositionTyped(position: Int): ReadingInfo? =
+        rethrowing("Reading") { ffi.setReadingPosition(position.toUInt())?.toInfo() }
+
+    fun clearReadingTyped(): Boolean = rethrowing("Reading") { ffi.clearReading() }
 
     // ── Encrypted media (NIP-94/96 · Blossom) ─────────────────────────────────
 
@@ -731,6 +925,12 @@ class EventBus internal constructor() {
         // makes an online-then-offline flap resolve to one correct dot (and
         // no stale "they're online" notification) rather than two events.
         is BridgeEvent.ComradePresence -> Placement.Coalesced("presence:${event.peer}")
+        // A nudge is *not* coalesced with presence, and not with itself: each
+        // one is a distinct moment someone gave up on a message, and dropping
+        // the older of two would silently discard one of them. The sender's
+        // cooldown is what bounds the volume, so there is nothing here to
+        // protect against.
+        is BridgeEvent.ComradeNudge -> Placement.Critical
         // DMs, media, message requests, call signals (offer/answer/ICE/hangup).
         else -> Placement.Critical
     }

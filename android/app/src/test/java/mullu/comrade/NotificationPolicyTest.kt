@@ -55,6 +55,69 @@ class NotificationPolicyTest {
     }
 
     @Test
+    fun quietHoursSilenceEveryNotifiableClass() {
+        // docs/ATTENTION.md phase 0: the nightly window covers messages,
+        // presence, requests and update notices alike.
+        assertFalse(
+            NotificationPolicy.shouldNotifyMessage(
+                ana,
+                openConversationPeer = null,
+                muted = false,
+                quietHours = true,
+            ),
+        )
+        assertFalse(
+            NotificationPolicy.shouldNotifyPresence(
+                ana,
+                openConversationPeer = null,
+                muted = false,
+                becameOnline = true,
+                quietHours = true,
+            ),
+        )
+        assertFalse(NotificationPolicy.shouldNotifyRequest(quietHours = true))
+        assertFalse(NotificationPolicy.shouldNotifyUpdate(quietHours = true))
+    }
+
+    @Test
+    fun outsideQuietHoursEverythingBehavesExactlyAsBefore() {
+        // The parameter defaults to false, so every existing call site — and
+        // every user who never turns the window on — is unaffected.
+        assertTrue(
+            NotificationPolicy.shouldNotifyMessage(ana, openConversationPeer = null, muted = false),
+        )
+        assertTrue(NotificationPolicy.shouldNotifyRequest())
+        assertTrue(NotificationPolicy.shouldNotifyUpdate())
+        assertTrue(
+            NotificationPolicy.shouldNotifyMessage(
+                ana,
+                openConversationPeer = null,
+                muted = false,
+                quietHours = false,
+            ),
+        )
+    }
+
+    @Test
+    fun aNudgeFollowsTheSameTwoSuppressorsAsEverythingElseAboutAPerson() {
+        assertTrue(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = null, muted = false))
+        assertTrue(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = bo, muted = false))
+        // Muting a conversation means the person, not one class of event.
+        assertFalse(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = null, muted = true))
+        // Already looking at the thread the nudge would send them to.
+        assertFalse(NotificationPolicy.shouldNotifyNudge(ana, openConversationPeer = ana, muted = false))
+        // …and the nightly quiet window, like every other non-call notice.
+        assertFalse(
+            NotificationPolicy.shouldNotifyNudge(
+                ana,
+                openConversationPeer = null,
+                muted = false,
+                quietHours = true,
+            ),
+        )
+    }
+
+    @Test
     fun theMessageSummaryGoesWhenItsLastChildDoes() {
         assertTrue(NotificationPolicy.summaryStale(0))
         assertFalse(NotificationPolicy.summaryStale(1))
