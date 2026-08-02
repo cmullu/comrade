@@ -182,9 +182,29 @@ Attention is trained by doing attention, not by minigames:
     the pace can be followed with the eyes closed. A single pulse would say
     "a phase changed" without saying which way it went, which is why the shape
     (not just the timing) is a tested property — `BreathHaptics`, pure and
-    JVM-tested for the two things a device would otherwise be the first to
-    catch: an amplitude outside the platform's 1..255, and a ramp still
-    running when the next phase starts.
+    JVM-tested for the things a device would otherwise be the first to catch:
+    an amplitude outside the platform's 1..255, and a ramp that does not land
+    exactly on the phase boundary.
+
+    The ramp **spans the whole phase** rather than firing at the top of it, so
+    the buzz is faintest when the circle is smallest and strongest when it is
+    fullest: they are two renderings of one breath, and following either is
+    following both. It was a 540ms burst until an owner sat with it on a
+    handset — a burst says "a phase began", which you can only obey after the
+    fact, and is useless with your eyes shut, which is when this is for.
+  - **The circle grows into the in-breath.** It opens small and fills, because
+    that is what an inhale is; it shipped opening *full* for a fortnight,
+    because `animateFloatAsState` starts at its first target and the opening
+    phase targets full. Now an `Animatable` the screen seeds itself, linear so
+    it keeps pace with the haptic, and the hold snaps rather than easing so the
+    still phase is still.
+  - **Calming lines, rotated once per full cycle.** Where the screen used to
+    repeat its own app-bar title. Each is a permission to stop, never an
+    instruction and never a claim about what breathing does — a pause screen
+    dispensing advice would quietly walk back the "not a therapist" line the
+    rest of the app holds. Per *cycle*, not per phase: a sentence changing
+    every four seconds is one more thing to keep up with, on the one screen
+    with nothing to keep up with.
   - **It nudges your comrades.** Reaching for a pause raises one *"your
     comrade might need you"* on the phones of the people the user chose —
     the *same* one-bit envelope an abandoned draft sends
