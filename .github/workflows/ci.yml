@@ -244,6 +244,45 @@ jobs:
   # stays bounded. Marked #[ignore] in the source (so a normal `cargo test`
   # stays fast) and run explicitly here as its own required gate, per
   # AUDIT.md COMMS-03's "make this lane a required release gate".
+  # The product's critical path: a voice call, a video call, and a message,
+  # each driven end to end between two real identities over one isolated
+  # in-process relay — including a relay that refuses part of the burst, which
+  # is how "calls stuck at Connecting…" reached users.
+  #
+  # These also run inside the main `cargo test --workspace` job, so this lane
+  # is not about coverage; it is about legibility. When comms break, the thing
+  # that should be red is a job called "Comms", not a generic Rust job that
+  # also compiles nine other crates — and the failure should name the call
+  # kind, so "video is broken but voice is fine" is readable from the summary.
+  comms:
+    name: Comms — voice, video, messages end to end
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-comms-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-comms-
+
+      # Both suites: the happy path of the signalling pipe, and what happens
+      # when that pipe is lossy.
+      - name: cargo test (two-peer signalling)
+        run: cargo test -p comrade_ui --test two_peer_integration --locked -- --nocapture
+
+      - name: cargo test (calls and messages over a lossy relay)
+        run: cargo test -p comrade_ui --test comms_regression --locked -- --nocapture
+
   load-test:
     name: Rust — COMMS-04 public-feed-flood load test
     runs-on: ubuntu-latest
