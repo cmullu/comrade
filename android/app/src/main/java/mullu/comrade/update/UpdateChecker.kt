@@ -275,14 +275,30 @@ object UpdateChecker {
     fun cancelDownload() = UpdateDownloadService.cancel()
 
     /**
-     * Install what has been downloaded. Verifies package, version and signer
-     * again first — this can be tapped days after the download, from a
-     * notification, against a file that has sat in the cache since.
+     * Install what has been downloaded, through [UpdateInstallActivity].
+     *
+     * Not a direct call into [UpdateInstaller]: the install has to be driven
+     * from an Activity so the system's confirmation dialog can be started from
+     * one, and it has to be off the main thread so a 50 MB copy does not freeze
+     * the caller. That activity draws nothing — see its doc comment.
      */
     fun install(context: Context) {
-        val app = context.applicationContext
         val ready = UpdateDownloads.state.value as? UpdateDownloadState.Ready ?: return
-        UpdateInstaller.install(app, java.io.File(ready.path), ready.version)
+        UpdateInstallActivity.start(context.applicationContext, ready.version, ready.path)
+    }
+
+    /**
+     * Give up on a hand-off that never came back, and start it again.
+     *
+     * The card offers this next to "Waiting for Android to install it…" because
+     * a dropped confirmation dialog is invisible to the app — no status, no
+     * error — and the alternative for the user is force-stopping Comrade.
+     * A copy that is genuinely still running is left alone.
+     */
+    fun retryInstall(context: Context) {
+        if (UpdateInstaller.isInstalling()) return
+        UpdateDownloads.dismissInstalling { path -> java.io.File(path).exists() }
+        install(context)
     }
 
     /** Whether the OS will let this app install an APK (the per-source grant). */
@@ -295,11 +311,36 @@ object UpdateChecker {
     }
 
     /**
-     * Drop a "ready to install" that no longer has a file behind it (the OS
-     * reaped the cache, or the install went through and the APK was deleted).
+     * Line the download state up with what is actually in the cache. Cheap, and
+     * called whenever a settings card resumes.
+     *
+     * Both directions matter. A "ready to install" whose APK has gone (the OS
+     * reaped the cache, or the install went through) must stop offering an
+     * Install button that points at nothing — and a **fresh process** that finds
+     * a verified APK still sitting in the cache must offer to install it rather
+     * than ask for the same download again.
      */
-    fun refreshDownloadState() {
-        UpdateDownloads.forgetIfGone { path -> java.io.File(path).exists() }
+    fun refreshDownloadState(context: Context) {
+        val app = context.applicationContext
+        UpdateDownloads.reconcile(
+            exists = { path -> java.io.File(path).exists() },
+            cached = cachedReady(app),
+        )
+    }
+
+    /**
+     * A previously downloaded APK for the release currently on offer, if it is
+     * still there and still the size the release published. The size check is
+     * what keeps a download the process died half-way through from being
+     * presented as ready; the full package/version/signer verification still
+     * runs again at install time.
+     */
+    private fun cachedReady(context: Context): UpdateDownloadState.Ready? {
+        val release = (status.value as? UpdateStatus.Available)?.release ?: return null
+        val file = UpdateDownloadService.apkFile(context, release.versionName)
+        if (!file.isFile) return null
+        if (!UpdateInstall.sizeLooksRight(release.apkBytes, file.length())) return null
+        return UpdateDownloadState.Ready(release.versionName, file.absolutePath)
     }
 
     /**

@@ -716,6 +716,15 @@ class _UpdatesCardState extends ConsumerState<_UpdatesCard>
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
+          const SizedBox(height: 8),
+          // Android reports nothing when it declines to show an app's install
+          // confirmation, so "waiting" and "never going to happen" look
+          // identical from here. This hands the install back to the user
+          // instead of stranding them on that line.
+          OutlinedButton(
+            onPressed: controller.retryInstall,
+            child: const Text('Nothing happened? Try again'),
+          ),
         ];
       case DownloadFailed(:final String message):
         return <Widget>[
@@ -797,9 +806,11 @@ class _UpdatesCardState extends ConsumerState<_UpdatesCard>
           const SizedBox(height: 4),
           Text(
             'The download keeps going if you leave this screen, and the shade '
-            'tells you when it is ready to install. Android still shows its own '
-            'confirmation, and still refuses an APK signed with a different key '
-            'than the copy you already have.',
+            'tells you when it is ready to install. On Android 12 and newer it '
+            'usually installs without a confirmation dialog — Comrade closes, '
+            'the new version goes in, and a notification offers to reopen it. '
+            'Some devices still ask you to confirm; either way Android refuses '
+            'an APK signed with a different key than the copy you already have.',
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: theme.colorScheme.outline),
           ),

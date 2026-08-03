@@ -300,12 +300,31 @@ class UpdateChannel {
   Future<void> cancelDownload() =>
       _methods.invokeMethod<void>('cancelDownload');
 
-  /// Hand the downloaded APK to the system installer. It re-verifies first, and
-  /// the OS still shows its own confirmation dialog.
+  /// Hand the downloaded APK to the system installer. It re-verifies first.
+  ///
+  /// Returns as soon as the native side has the request: the copy into the
+  /// installer session runs on a worker thread there, and the outcome — a
+  /// confirmation dialog, a refusal, a success — arrives on [updates].
+  ///
+  /// On Android 12 and newer the session asks to skip the confirmation dialog,
+  /// so a successful install usually means this process is *replaced*: no
+  /// further event arrives here, and the user's only notice is the native
+  /// "installed, tap to reopen" notification. Whether the dialog is skipped is
+  /// the platform's call, so neither outcome may be assumed.
   Future<void> install() => _methods.invokeMethod<void>('install');
 
-  /// Drop a "ready to install" whose file is no longer there (the OS reaped the
-  /// cache, or the install went through). Cheap; call it on resume.
+  /// Start the install again after a hand-off that never came back.
+  ///
+  /// The native side cannot tell "the confirmation dialog is up" from "the
+  /// platform declined to show it", because a dropped activity start reports
+  /// nothing. So the card offers this rather than stranding someone on
+  /// "Waiting for Android to install it…". A copy that is genuinely still
+  /// running is left alone.
+  Future<void> retryInstall() => _methods.invokeMethod<void>('retryInstall');
+
+  /// Line the download state up with the cache: drop a "ready to install" whose
+  /// file has gone, and pick up an APK that was already downloaded before this
+  /// process started. Cheap; call it on resume.
   Future<void> refreshDownloadState() =>
       _methods.invokeMethod<void>('refreshDownloadState');
 

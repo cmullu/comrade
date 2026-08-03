@@ -12,6 +12,7 @@ import 'package:comrade/src/platform/platform.dart'
     show
         DownloadFailed,
         DownloadIdle,
+        DownloadInstalling,
         DownloadReady,
         DownloadRunning,
         SystemChannel,
@@ -89,6 +90,9 @@ class _FakeUpdateChannel extends UpdateChannel {
 
   @override
   Future<void> install() async => calls.add('install');
+
+  @override
+  Future<void> retryInstall() async => calls.add('retryInstall');
 
   @override
   Future<void> refreshDownloadState() async =>
@@ -289,6 +293,37 @@ void main() {
       // Nothing about a browser: the whole point is that the install happens
       // from here.
       expect(find.text('Allow installing'), findsNothing);
+    });
+
+    testWidgets('a stuck install can be handed back to the user',
+        (WidgetTester tester) async {
+      // The failure this exists for: Android silently declines to show its
+      // install confirmation, no status ever comes back, and the card would
+      // otherwise sit on "Waiting for Android to install it…" with nothing to
+      // tap but a force-stop.
+      final FakeComradeRepository repo = await unlockedFake();
+      final _FakeUpdateChannel updates = _FakeUpdateChannel(
+        status: const UpdateAvailable(
+          version: '0.0.9',
+          tag: 'v0.0.9',
+          notes: '',
+          pageUrl: 'https://github.test/releases/tag/v0.0.9',
+          apkBytes: 1000,
+          checkedAt: 1,
+        ),
+        download: const DownloadInstalling(version: '0.0.9'),
+        settingsValue: const UpdateSettings(
+          currentVersion: '0.0.8',
+          autoCheck: true,
+          lastCheckedAt: 1,
+        ),
+      );
+      await pumpSettings(tester, repo, updates: updates);
+
+      expect(find.text('Waiting for Android to install it…'), findsOneWidget);
+      await tester.tap(find.text('Nothing happened? Try again'));
+      await tester.pumpAndSettle();
+      expect(updates.calls, contains('retryInstall'));
     });
 
     testWidgets('without the install permission, Install asks for it instead',

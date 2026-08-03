@@ -1,5 +1,6 @@
 package mullu.comrade.update
 
+import android.content.pm.PackageInstaller
 import mullu.comrade.update.UpdateInstall.ArchiveFacts
 import mullu.comrade.update.UpdateInstall.InstalledFacts
 import mullu.comrade.update.UpdateInstall.Reason
@@ -141,5 +142,64 @@ class UpdateInstallTest {
         // not "the file should be empty".
         assertTrue(UpdateInstall.sizeLooksRight(expectedBytes = 0L, actualBytes = 1_000L))
         assertFalse(UpdateInstall.sizeLooksRight(expectedBytes = 0L, actualBytes = 0L))
+    }
+
+    // ── Reading the session's answer ─────────────────────────────────────────
+
+    @Test
+    fun pendingUserActionIsAnInstructionNotAFailure() {
+        // The one the first version got wrong. Treating this as anything other
+        // than "start the Intent it handed you" leaves the install in limbo with
+        // nothing on screen and no error.
+        assertEquals(
+            UpdateInstall.Outcome.NeedsConfirmation,
+            UpdateInstall.outcomeOf(PackageInstaller.STATUS_PENDING_USER_ACTION, null),
+        )
+    }
+
+    @Test
+    fun successAndRefusalAreToldApart() {
+        assertEquals(
+            UpdateInstall.Outcome.Installed,
+            UpdateInstall.outcomeOf(PackageInstaller.STATUS_SUCCESS, null),
+        )
+        // Declining at the OS dialog is not an error worth deleting the APK for.
+        assertEquals(
+            UpdateInstall.Outcome.Cancelled,
+            UpdateInstall.outcomeOf(PackageInstaller.STATUS_FAILURE_ABORTED, null),
+        )
+        assertEquals(
+            UpdateInstall.Outcome.NoSpace,
+            UpdateInstall.outcomeOf(PackageInstaller.STATUS_FAILURE_STORAGE, null),
+        )
+    }
+
+    @Test
+    fun anyOtherFailureCarriesWhateverThePlatformSaid() {
+        assertEquals(
+            UpdateInstall.Outcome.Failed("Package is invalid"),
+            UpdateInstall.outcomeOf(PackageInstaller.STATUS_FAILURE_INVALID, "Package is invalid"),
+        )
+        // The platform frequently says nothing at all; a blank message must not
+        // become a blank line in the settings card.
+        assertEquals(
+            UpdateInstall.Outcome.Failed(null),
+            UpdateInstall.outcomeOf(PackageInstaller.STATUS_FAILURE, "   "),
+        )
+        assertEquals(
+            UpdateInstall.Outcome.Failed(null),
+            UpdateInstall.outcomeOf(PackageInstaller.STATUS_FAILURE_CONFLICT, null),
+        )
+    }
+
+    @Test
+    fun anIntentWithNoStatusAtAllIsAFailureNotASuccess() {
+        // Int.MIN_VALUE is the "extra absent" sentinel the caller reads with.
+        // It must never fall through to Installed — STATUS_SUCCESS is 0, and a
+        // missing extra defaulting to 0 would report an install that never ran.
+        assertEquals(
+            UpdateInstall.Outcome.Failed(null),
+            UpdateInstall.outcomeOf(Int.MIN_VALUE, null),
+        )
     }
 }

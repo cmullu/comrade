@@ -606,7 +606,7 @@ private fun UpdatesSection() {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 canInstall = UpdateChecker.canInstall(context)
-                UpdateChecker.refreshDownloadState()
+                UpdateChecker.refreshDownloadState(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -800,11 +800,21 @@ private fun UpdateDownloadControls(
             if (!canInstall) InstallPermissionNote(onGrantInstall)
         }
 
-        is UpdateDownloadState.Installing -> Text(
-            stringResource(R.string.settings_updates_installing),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        is UpdateDownloadState.Installing -> {
+            Text(
+                stringResource(R.string.settings_updates_installing),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // The app cannot tell a confirmation dialog that is up from one the
+            // platform declined to show — a dropped activity start reports
+            // nothing at all. Rather than leave someone stuck on a line that
+            // says "waiting" forever, this hands the install back to them.
+            OutlinedButton(
+                onClick = { UpdateChecker.retryInstall(context) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.settings_updates_install_retry)) }
+        }
 
         is UpdateDownloadState.Failed -> {
             Text(

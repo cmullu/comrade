@@ -78,14 +78,22 @@ and a **Skip this version**). Two properties matter for release management:
 - **It downloads and installs, so the signing key matters more than ever.** The
   APK is fetched by a foreground service and handed to `PackageInstaller`; the
   app holds `REQUEST_INSTALL_PACKAGES` and the user grants "install unknown
-  apps" to Comrade once (Android still shows its own confirmation for every
-  install). Android refuses an update signed with a different key than the
-  installed copy — so a release built without the `SIGNING_*` secrets, or with a
-  different keystore, cannot land as an update on anyone's phone. That is the
-  platform's guarantee, and another reason step 1's keystore is forever. Before
-  the installer is involved at all, the app checks the download's package name,
-  version code and signing certificate against itself and refuses with a reason
-  if any disagree.
+  apps" to Comrade once. Android refuses an update signed with a different key
+  than the installed copy — so a release built without the `SIGNING_*` secrets,
+  or with a different keystore, cannot land as an update on anyone's phone. That
+  is the platform's guarantee, and another reason step 1's keystore is forever.
+  Before the installer is involved at all, the app checks the download's package
+  name, version code and signing certificate against itself and refuses with a
+  reason if any disagree.
+- **On Android 12+ the install usually has no confirmation dialog.** The session
+  asks for `USER_ACTION_NOT_REQUIRED`, so the update applies, the app's process
+  is replaced, and a notification offers to reopen it. Two consequences for
+  whoever cuts a release: a broken build reaches users with *less* friction than
+  before, so `versionCode` monotonicity and a green CI run matter more; and the
+  same-key rule is now the only gate a user sees nothing of — it is unconditional
+  enforcement, not a dialog, so it still holds, but a mis-signed release fails as
+  a silent "could not install" rather than a visible refusal. Whether the dialog
+  is skipped is the platform's call — plenty of devices will still show it.
 - **A user who declines the install permission is not stuck.** The card keeps a
   link to the release page, which is the browser flow §4 below describes.
 
