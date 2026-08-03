@@ -205,6 +205,45 @@ pub fn new_call_id() -> String {
     hex::encode(bytes)
 }
 
+// ── Retrying a refused call signal ───────────────────────────────────────────
+//
+// A chat DM a relay refuses is queued in the outbox and retried for minutes
+// (`ComradeRuntime`'s flush loop). A call signal had no such path: one
+// `send_dm`, and a refusal was a warning in the log and a signal that simply
+// never existed. That asymmetry is survivable for an offer or an answer —
+// there is exactly one of each, seconds apart, and losing one fails the call
+// loudly. It is not survivable for ICE.
+//
+// Trickled ICE is the only part of signalling sent in a *burst*: a gathering
+// agent emits one candidate per interface per protocol per server, so a call
+// publishes ten to thirty gift-wrapped events within a couple of seconds, each
+// one a separate relay write. A relay that rate-limits a burst answers `OK
+// false` and `send_dm` turns that into an error — so the offer and the answer
+// get through, every candidate is dropped, and the call sits on "Connecting…"
+// until the connect timeout, on voice and video alike.
+//
+// So: retry, but on a signalling clock rather than the outbox's. A few
+// attempts inside ~1.5s stays far inside `CONNECT_TIMEOUT_MS` (30s on both
+// frontends) while riding out the burst that provoked the limit.
+
+/// Total attempts (the first send plus its retries) for one call signal.
+pub const CALL_SIGNAL_SEND_ATTEMPTS: u32 = 4;
+
+/// How long to wait before attempt `attempt` (1-based, so `1` is the delay
+/// *after* the first send failed), or `None` once the attempts are spent.
+///
+/// Exponential from 120ms — 120, 360, 1080 — because the thing being waited
+/// out is a relay's rate-limit window, and a fixed short delay just spends the
+/// budget inside it. The total (~1.5s) is bounded deliberately: a call signal
+/// that arrives after the peer has given up is worse than useless, so this
+/// gives up long before the connect timeout does rather than racing it.
+pub fn call_signal_retry_delay_ms(attempt: u32) -> Option<u64> {
+    if attempt == 0 || attempt >= CALL_SIGNAL_SEND_ATTEMPTS {
+        return None;
+    }
+    Some(120u64 * 3u64.pow(attempt - 1))
+}
+
 // ── ICE server configuration ─────────────────────────────────────────────────
 
 /// A WebRTC ICE server (STUN or TURN), shaped to drop straight into an
@@ -650,6 +689,62 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 32, "128 bits as hex");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// The regression: a relay that refuses a burst of trickled ICE used to
+    /// cost the call every candidate — `send_call_signal` did one `send_dm` and
+    /// turned a refusal into a log line. The offer and answer, one each and
+    /// seconds apart, still got through, so both ends reached "Connecting…" and
+    /// stayed there. These pin the retry budget that rides out the burst.
+    #[test]
+    fn a_refused_call_signal_is_retried_before_it_is_given_up_on() {
+        // Attempt 1 is the delay after the *first* send failed, so there are
+        // CALL_SIGNAL_SEND_ATTEMPTS - 1 delays for CALL_SIGNAL_SEND_ATTEMPTS sends.
+        let delays: Vec<u64> = (1..CALL_SIGNAL_SEND_ATTEMPTS)
+            .map(|a| call_signal_retry_delay_ms(a).expect("attempt within budget must retry"))
+            .collect();
+        assert_eq!(delays, vec![120, 360, 1080]);
+        assert_eq!(
+            delays.len() as u32,
+            CALL_SIGNAL_SEND_ATTEMPTS - 1,
+            "one delay per retry, none for the first send",
+        );
+    }
+
+    #[test]
+    fn the_retry_budget_is_bounded_and_gives_up_well_inside_the_connect_timeout() {
+        assert_eq!(
+            call_signal_retry_delay_ms(CALL_SIGNAL_SEND_ATTEMPTS),
+            None,
+            "the budget must run out rather than retrying forever",
+        );
+        assert_eq!(call_signal_retry_delay_ms(0), None, "0 is not an attempt");
+
+        // A signal delivered after the peer gave up is worse than useless, so
+        // the whole budget has to finish long before either frontend's 30s
+        // connect timeout — not race it.
+        let total: u64 = (1..CALL_SIGNAL_SEND_ATTEMPTS)
+            .filter_map(call_signal_retry_delay_ms)
+            .sum();
+        assert!(
+            total < 5_000,
+            "retry budget is {total}ms; it must stay far inside the 30s connect timeout",
+        );
+    }
+
+    #[test]
+    fn retry_delays_grow_so_a_rate_limit_window_is_actually_waited_out() {
+        // A flat short delay just spends the budget inside the window that
+        // refused the burst in the first place.
+        let mut previous = 0;
+        for attempt in 1..CALL_SIGNAL_SEND_ATTEMPTS {
+            let delay = call_signal_retry_delay_ms(attempt).unwrap();
+            assert!(
+                delay > previous,
+                "delay {delay} must exceed the previous {previous}"
+            );
+            previous = delay;
+        }
     }
 
     #[test]
