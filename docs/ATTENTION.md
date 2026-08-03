@@ -172,11 +172,21 @@ Attention is trained by doing attention, not by minigames:
   the user brings the text. (Fetching URLs is explicitly out of scope v1:
   it would drag readability-extraction and network policy into a privacy
   app for marginal gain.)
-- **Grounding breaths** (*"Take a deep breath"*): a 60-second box-breathing
-  screen offered before a focus session and inside the gentle-stop card.
-  Deterministic animation, no audio, no cloud — Tara-v1 philosophy. Two
-  additions since, both owner-requested and both disclosed on the screen
-  itself rather than left to a changelog:
+- **Grounding breaths** (*"Take a deep breath"*): a box-breathing screen
+  offered before a focus session and inside the gentle-stop card, one minute
+  by default and settable to two, three or five. Deterministic animation, no
+  audio, no cloud — Tara-v1 philosophy. Several additions since, all
+  owner-requested and all disclosed on the screen itself rather than left to a
+  changelog:
+  - **It is actually a box now.** For its first two releases the cycle ran
+    `% 3` — in, hold, out, and straight back into the next inhale with no pause
+    on empty — while this document and the screen's own note both said "four
+    counts in, four held, four out". Three sides is a triangle, and it felt
+    like one from a handset: *"we immediately breathe out and breathe in
+    immediately… it feels forced."* The cycle is now a four-value
+    `BreathPhase` enum rather than modular arithmetic, so it cannot be one side
+    short without the type saying so, and a regression test asserts that an
+    inhale never follows an exhale directly.
   - **Haptics** shaped after the Pixel Watch's: the buzz swells through the
     in-breath, fades through the out-breath, and is silent through the hold, so
     the pace can be followed with the eyes closed. A single pulse would say
@@ -196,15 +206,29 @@ Attention is trained by doing attention, not by minigames:
     that is what an inhale is; it shipped opening *full* for a fortnight,
     because `animateFloatAsState` starts at its first target and the opening
     phase targets full. Now an `Animatable` the screen seeds itself, linear so
-    it keeps pace with the haptic, and the hold snaps rather than easing so the
-    still phase is still.
-  - **Calming lines, rotated once per full cycle.** Where the screen used to
-    repeat its own app-bar title. Each is a permission to stop, never an
-    instruction and never a claim about what breathing does — a pause screen
-    dispensing advice would quietly walk back the "not a therapist" line the
-    rest of the app holds. Per *cycle*, not per phase: a sentence changing
-    every four seconds is one more thing to keep up with, on the one screen
-    with nothing to keep up with.
+    it keeps pace with the haptic, and both holds snap rather than easing so the
+    still phases are still.
+  - **Ten calming lines, rotated every two cycles.** Where the screen used to
+    repeat its own app-bar title. Each names one *concrete physical* thing to
+    notice or let go of — a jaw, the floor under your feet, the air being cooler
+    going in than coming out. The first draft was abstract ("you don't have to be
+    doing something") and read as vague, which is the failure mode here: an
+    attention with nothing to rest on returns to whatever it was chewing on.
+    None of them claims anything about what breathing achieves, or sets up
+    something the reader can get wrong — a pause screen dispensing advice would
+    quietly walk back the "not a therapist" line the rest of the app holds.
+    Every two *cycles*, not every phase: a sentence changing every four seconds
+    is one more thing to keep up with, on the one screen with nothing to keep up
+    with. Ten of them covers the longest offered sit without a repeat.
+  - **You choose how long.** Duration chips (1 / 2 / 3 / 5 min, defaulting to
+    one) and a progress line with no digits on it. One minute is the default
+    because the screen is reached for mid-something and the shortest useful
+    pause is the one a person actually takes; the chips exist because someone
+    who came here deliberately should not have to keep re-opening it. Changing
+    the length mid-sit extends or ends the sit in progress rather than
+    restarting it. The bar carries no number, for the same reason nothing else
+    on this screen does — but a five-minute sit with no feedback at all is one
+    you cannot tell you are two minutes into.
   - **It nudges your comrades.** Reaching for a pause raises one *"your
     comrade might need you"* on the phones of the people the user chose —
     the *same* one-bit envelope an abandoned draft sends
@@ -375,7 +399,7 @@ with `VaultLocked`. Three decisions worth naming:
 | **Calm-feed contract** | Documented on `FeedScreen` and now load-bearing: chronological only, no ranking, no autoplay, no counters. Plus the gentle stop — one inline card after 10 unbroken minutes, dismissible for the sitting, quoting **no duration and no count** (a number invites a score). Rule in `attention/ScrollSitting.kt`, 8 tests |
 | **Quiet hours** | `attention/QuietHours.kt` + `NotificationPolicy`: silences messages, requests, presence and update notices in a nightly window — **never a ringing call.** 6 tests on the window arithmetic, where the overnight wrap is the normal case and an empty window (`start == end`) silences nothing rather than the whole day |
 | **Usage mirror** | Opt-in `PACKAGE_USAGE_STATS` behind an explainer that states what is read and that it cannot leave the device. `attention/UsageMirror.kt` reduces the event stream to three integers **in memory** and drops it (8 tests, including that overlapping stretches count once, so a day can never exceed itself, and that Comrade excludes its own screen time). Card lives on the Journal tab, self-relative, no red |
-| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen (haptic-paced, and it tells your comrades you might need them) |
+| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen — four-sided box breathing, 1–5 minutes, haptic-paced, and it tells your comrades you might need them |
 | **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |
 
 ### Desktop
