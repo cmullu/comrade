@@ -44,13 +44,13 @@ import mullu.comrade.ComradeCore
 import mullu.comrade.R
 
 /**
- * Box breathing — offered before a focus session, and from the feed's gentle
+ * Paced breathing — offered before a focus session, and from the feed's gentle
  * stop (`docs/ATTENTION.md` phase 2).
  *
- * Four counts in, four held, four out, four empty, repeated. Deliberately the
- * least ambitious feature in the pillar: it makes no claim, asks for no runtime
- * permission (`VIBRATE` is a normal one, granted at install), and cannot fail.
- * Nothing about having used it is stored — there is no count of breathing
+ * Four counts in, four held, four out, **two** to settle, repeated. Deliberately
+ * the least ambitious feature in the pillar: it makes no claim, asks for no
+ * runtime permission (`VIBRATE` is a normal one, granted at install), and cannot
+ * fail. Nothing about having used it is stored — there is no count of breathing
  * minutes to accumulate, because a number would turn a pause into a task.
  *
  * Two things it does that a person should know about, and which the screen says
@@ -66,9 +66,6 @@ import mullu.comrade.R
  *   deliberately chose are told, and nothing about *this screen* travels — the
  *   local "no record kept" promise above is unchanged.
  */
-private const val PHASE_SECONDS = 4
-private const val PHASE_MS = PHASE_SECONDS * 1_000L
-
 /** Diameter of the circle at the top of an in-breath. */
 private const val CIRCLE_DP = 200
 
@@ -96,17 +93,61 @@ private val DURATION_MINUTES = listOf(1, 2, 3, 5)
 private const val DEFAULT_MINUTES = 1
 
 /**
- * One side of the box.
+ * One phase of the cycle, and how long it lasts.
  *
  * Typed rather than an index into a `% n`, because the arithmetic is exactly
- * where the bug was: this cycle ran `% 3` for its first two releases — in, hold,
- * out, and then straight back into the next inhale with no pause on empty — for
- * the whole time both this file and `docs/ATTENTION.md` called it *box*
+ * where the last bug was: this cycle ran `% 3` for its first two releases — in,
+ * hold, out, and then straight back into the next inhale with no pause at all —
+ * for the whole time both this file and `docs/ATTENTION.md` called it *box*
  * breathing. Three sides is a triangle, and it felt like one: reported from a
  * handset as "we immediately breathe out and breathe in immediately… it feels
- * forced". An enum cannot be one short without someone noticing.
+ * forced".
+ *
+ * ## Why the last phase is two counts and not four
+ *
+ * The fix for that made it a true 4-4-4-4 box, which is what the copy had been
+ * claiming — and then the obvious next question was whether four is actually
+ * right, because a hold *after an exhale* is not the same thing as a hold after
+ * an inhale even though the box treats them as equals:
+ *
+ * * **It starts from a smaller reservoir.** Breath-hold tolerance is
+ *   substantially shorter at functional residual capacity than at total lung
+ *   capacity: less stored gas, so arterial CO₂ reaches the breaking point sooner
+ *   (Frontiers in Physiology, *Large Lung Volumes Delay the Onset of the
+ *   Physiological Breaking Point*).
+ * * **The brake is missing.** Hering–Breuer stretch-receptor inhibition of
+ *   inspiratory drive is strongest immediately after an inhale and decays from
+ *   there; after an exhale there is none. So the urge to breathe arrives earliest
+ *   in precisely this phase.
+ * * **The people reaching for this screen are the worst case.** Anxiety and panic
+ *   are associated with heightened CO₂ sensitivity and the *shortest* voluntary
+ *   breath-hold times. An end-expiratory hold long enough to produce air hunger
+ *   is the one thing on this screen that could make a bad minute worse.
+ * * **Slower is not automatically calmer.** The vagal/HRV effects of paced
+ *   breathing peak around 5.5–6 breaths/min; 4-4-4-4 is 3.75/min, below that
+ *   band, and a head-to-head trial found box breathing produced *higher* heart
+ *   rate and *higher* perceived exertion than 6/min (PLOS One, 2025). "Higher
+ *   perceived exertion" is the measured version of "it feels forced". At 14
+ *   seconds this cycle is ~4.3/min — toward the evidenced band rather than away.
+ *
+ * Shortening the empty hold is also the standard practitioner variation (4-2-4-2
+ * is named as such, and beginner guidance is to shrink the holds first), and the
+ * one four-arm RCT running box breathing individualises its timing off a CO₂
+ * tolerance test rather than fixing it at four. So: four, four, four, two.
+ *
+ * That makes the sides unequal, which means **this is no longer a box**, and
+ * nothing in the code, the copy or the docs may say otherwise. Losing the tidy
+ * name is the cost of not making the hardest phase the longest one.
  */
-internal enum class BreathPhase { IN, HOLD_FULL, OUT, HOLD_EMPTY }
+internal enum class BreathPhase(val seconds: Int) {
+    IN(4),
+    HOLD_FULL(4),
+    OUT(4),
+    HOLD_EMPTY(2),
+}
+
+/** One full in–hold–out–settle cycle. Derived, never written down twice. */
+internal val CYCLE_SECONDS: Int = BreathPhase.entries.sumOf { it.seconds }
 
 @Composable
 fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
@@ -136,21 +177,25 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
         withContext(Dispatchers.IO) { runCatching { ComradeCore.nudgeComrades() } }
     }
 
-    val phase = breathingPhase(elapsed, PHASE_SECONDS)
+    val phase = breathingPhase(elapsed)
     val label = when (phase) {
         BreathPhase.IN -> R.string.breathe_in
         BreathPhase.OUT -> R.string.breathe_out
-        // Both holds say "Hold", which is what box breathing calls both. The
-        // circle is full for one and small for the other, so the word does not
-        // have to carry that difference — and a second word ("Rest"? "Empty"?)
-        // would suggest a second thing to do.
-        BreathPhase.HOLD_FULL, BreathPhase.HOLD_EMPTY -> R.string.breathe_hold
+        // The full hold says "Hold" and the empty one says "Settle". They were
+        // one word while both were four counts; now that one is shorter, calling
+        // them the same thing would have the screen say "Hold" for four seconds
+        // and then "Hold" for two with no way to tell which you were in.
+        BreathPhase.HOLD_FULL -> R.string.breathe_hold
+        BreathPhase.HOLD_EMPTY -> R.string.breathe_settle
     }
 
     // One cue per phase change, and the first fires on entry — which is right:
-    // the screen opens on an in-breath. The ramp is handed the phase length so
-    // it spans the same four seconds the circle does; buzz and circle are two
-    // renderings of one breath, and following either is following both.
+    // the screen opens on an in-breath. The ramp is handed *this phase's* length
+    // rather than a shared constant, so it spans exactly the seconds the circle
+    // does; buzz and circle are two renderings of one breath, and following
+    // either is following both. Only IN and OUT actually ramp, and both are four
+    // counts — but reading the length off the phase is what keeps that true if
+    // the numbers ever move again.
     //
     // Both holds are silent. A buzz through a hold makes a pause feel like
     // something to do, and the two are already told apart by what follows:
@@ -163,7 +208,7 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
                 BreathPhase.OUT -> BreathHaptics.Phase.OUT
                 BreathPhase.HOLD_FULL, BreathPhase.HOLD_EMPTY -> BreathHaptics.Phase.HOLD
             },
-            PHASE_MS,
+            phase.seconds * 1_000L,
         )
     }
     // Leaving mid-breath must not leave the phone buzzing in a pocket.
@@ -181,8 +226,8 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
     val scale = remember { Animatable(MIN_SCALE) }
     LaunchedEffect(phase) {
         when (phase) {
-            BreathPhase.IN -> scale.animateTo(MAX_SCALE, breathTween())
-            BreathPhase.OUT -> scale.animateTo(MIN_SCALE, breathTween())
+            BreathPhase.IN -> scale.animateTo(MAX_SCALE, breathTween(phase))
+            BreathPhase.OUT -> scale.animateTo(MIN_SCALE, breathTween(phase))
             // A hold is *held*. Snapping absorbs whatever fraction the moving
             // phase had left when the second counter rolled over; easing it
             // instead would spend the whole hold creeping the last half-percent,
@@ -196,7 +241,7 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
     // `getOrNull` rather than `[]`: the count comes from a resource a
     // translation could ship empty, and the pause screen is the last place in
     // the app that should be able to crash.
-    val line = lines.getOrNull(breathingLineIndex(elapsed, PHASE_SECONDS, lines.size)).orEmpty()
+    val line = lines.getOrNull(breathingLineIndex(elapsed, lines.size)).orEmpty()
 
     Column(
         modifier = modifier
@@ -286,29 +331,38 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
  * circle that raced ahead and coasted would be pacing a different breath from
  * the one in your hand.
  */
-private fun breathTween() =
-    tween<Float>(durationMillis = PHASE_MS.toInt(), easing = LinearEasing)
+private fun breathTween(phase: BreathPhase) =
+    tween<Float>(durationMillis = phase.seconds * 1_000, easing = LinearEasing)
 
 /**
- * Which side of the box [elapsedSeconds] falls on, given a phase of
- * [phaseSeconds].
+ * Which phase [elapsedSeconds] falls in.
  *
- * All four sides are equal length, which is what makes it a box; the ordering
- * comes from [BreathPhase]'s declaration order, so an inhale can never follow an
- * exhale without the empty hold in between.
+ * Walks the cumulative boundaries rather than dividing, because the phases are
+ * no longer the same length — a single `/ phaseSeconds` is what the equal-sided
+ * version could get away with, and quietly assuming it again is how the last two
+ * bugs here happened. The ordering comes from [BreathPhase]'s declaration order,
+ * so an inhale can never follow an exhale without the settle in between.
  */
-internal fun breathingPhase(elapsedSeconds: Int, phaseSeconds: Int): BreathPhase {
-    if (phaseSeconds <= 0) return BreathPhase.IN
-    val sides = BreathPhase.entries
-    return sides[(elapsedSeconds.coerceAtLeast(0) / phaseSeconds) % sides.size]
+internal fun breathingPhase(elapsedSeconds: Int): BreathPhase {
+    val into = elapsedSeconds.coerceAtLeast(0) % CYCLE_SECONDS
+    var boundary = 0
+    for (phase in BreathPhase.entries) {
+        boundary += phase.seconds
+        if (into < boundary) return phase
+    }
+    // Unreachable: `into` is bounded by the sum of exactly these durations.
+    return BreathPhase.entries.first()
 }
 
 /** How many full cycles one calming line stays on screen for. */
 private const val CYCLES_PER_LINE = 2
 
+/** How long one calming line stays on screen. */
+internal val LINE_SECONDS: Int = CYCLE_SECONDS * CYCLES_PER_LINE
+
 /**
  * Which of the calming lines to show at [elapsedSeconds], given [lineCount] of
- * them and a phase of [phaseSeconds].
+ * them.
  *
  * Changes every [CYCLES_PER_LINE] **cycles**, not every phase. A line that
  * swapped every four seconds would be one more thing to keep up with, and this
@@ -320,11 +374,9 @@ private const val CYCLES_PER_LINE = 2
  * Pure, and tested, because the failure it guards is an index out of bounds on
  * a screen someone reached for while having a bad minute.
  */
-internal fun breathingLineIndex(elapsedSeconds: Int, phaseSeconds: Int, lineCount: Int): Int {
-    if (lineCount <= 0) return 0
-    val lineSeconds = phaseSeconds * BreathPhase.entries.size * CYCLES_PER_LINE
-    if (lineSeconds <= 0) return 0
-    return (elapsedSeconds.coerceAtLeast(0) / lineSeconds) % lineCount
+internal fun breathingLineIndex(elapsedSeconds: Int, lineCount: Int): Int {
+    if (lineCount <= 0 || LINE_SECONDS <= 0) return 0
+    return (elapsedSeconds.coerceAtLeast(0) / LINE_SECONDS) % lineCount
 }
 
 /**

@@ -14,8 +14,12 @@ import org.junit.Test
  */
 class BreathHapticsTest {
 
-    /** How long one phase of box breathing lasts (`BreathingScreen.PHASE_MS`). */
-    private val phaseMs = 4_000L
+    /**
+     * How long a *moving* phase lasts — `BreathPhase.IN.seconds` and
+     * `OUT.seconds`, the only two that ramp. The settle is shorter but silent,
+     * so no waveform is built for it.
+     */
+    private val phaseMs = BreathPhase.IN.seconds * 1_000L
 
     @Test
     fun aRampFillsExactlyThePhaseItPaces() {

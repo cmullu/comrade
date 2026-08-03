@@ -172,21 +172,42 @@ Attention is trained by doing attention, not by minigames:
   the user brings the text. (Fetching URLs is explicitly out of scope v1:
   it would drag readability-extraction and network policy into a privacy
   app for marginal gain.)
-- **Grounding breaths** (*"Take a deep breath"*): a box-breathing screen
-  offered before a focus session and inside the gentle-stop card, one minute
-  by default and settable to two, three or five. Deterministic animation, no
-  audio, no cloud — Tara-v1 philosophy. Several additions since, all
-  owner-requested and all disclosed on the screen itself rather than left to a
-  changelog:
-  - **It is actually a box now.** For its first two releases the cycle ran
-    `% 3` — in, hold, out, and straight back into the next inhale with no pause
-    on empty — while this document and the screen's own note both said "four
-    counts in, four held, four out". Three sides is a triangle, and it felt
-    like one from a handset: *"we immediately breathe out and breathe in
-    immediately… it feels forced."* The cycle is now a four-value
-    `BreathPhase` enum rather than modular arithmetic, so it cannot be one side
-    short without the type saying so, and a regression test asserts that an
-    inhale never follows an exhale directly.
+- **Grounding breaths** (*"Take a deep breath"*): a paced-breathing screen —
+  **4 in, 4 held, 4 out, 2 to settle** — offered before a focus session and
+  inside the gentle-stop card, one minute by default and settable to two, three
+  or five. Deterministic animation, no audio, no cloud — Tara-v1 philosophy.
+  Several additions since, all owner-requested and all disclosed on the screen
+  itself rather than left to a changelog:
+  - **There is a pause after the exhale, and it is deliberately the short
+    one.** For its first two releases the cycle ran `% 3` — in, hold, out, and
+    straight back into the next inhale with no pause at all — while this
+    document and the screen's own note both said "four counts in, four held,
+    four out". Three sides is a triangle, and it felt like one from a handset:
+    *"we immediately breathe out and breathe in immediately… it feels forced."*
+
+    The first fix made it a true 4-4-4-4 box, which is what the copy had been
+    claiming. Then the question was whether four is right, and the literature
+    says no: a hold after an **exhale** is not the mirror of a hold after an
+    inhale. It starts from a smaller gas reservoir, so CO₂ reaches the breaking
+    point sooner; Hering–Breuer stretch-receptor inhibition of inspiratory drive
+    is strongest right after an inhale and absent after an exhale, so the urge
+    to breathe arrives earliest there; and anxiety is associated with heightened
+    CO₂ sensitivity and the *shortest* voluntary hold times — meaning the phase
+    most likely to produce air hunger is the one the people opening this screen
+    tolerate least. Separately, slower is not automatically calmer: paced-
+    breathing vagal effects peak near 5.5–6 breaths/min, and a head-to-head
+    trial found 4-4-4-4 (3.75/min) produced *higher* heart rate and *higher*
+    perceived exertion than 6/min. At 14s the cycle is ~4.3/min.
+
+    So the settle is two counts. That makes the sides unequal, so **it is no
+    longer a box** and nothing may call it one; `BreathPhase` carries a
+    per-phase duration, `breathingPhase` walks cumulative boundaries instead of
+    dividing, and tests pin the four numbers, the empty-hold-is-shorter
+    property, the breaths-per-minute band, and that an inhale never follows an
+    exhale directly. Citations live in `BreathPhase`'s KDoc. The empty pause has
+    its own word on screen — *Settle*, not a second "Hold" — because two phases
+    of different length sharing a label leave the reader unable to tell which
+    one they are in.
   - **Haptics** shaped after the Pixel Watch's: the buzz swells through the
     in-breath, fades through the out-breath, and is silent through the hold, so
     the pace can be followed with the eyes closed. A single pulse would say
@@ -399,7 +420,7 @@ with `VaultLocked`. Three decisions worth naming:
 | **Calm-feed contract** | Documented on `FeedScreen` and now load-bearing: chronological only, no ranking, no autoplay, no counters. Plus the gentle stop — one inline card after 10 unbroken minutes, dismissible for the sitting, quoting **no duration and no count** (a number invites a score). Rule in `attention/ScrollSitting.kt`, 8 tests |
 | **Quiet hours** | `attention/QuietHours.kt` + `NotificationPolicy`: silences messages, requests, presence and update notices in a nightly window — **never a ringing call.** 6 tests on the window arithmetic, where the overnight wrap is the normal case and an empty window (`start == end`) silences nothing rather than the whole day |
 | **Usage mirror** | Opt-in `PACKAGE_USAGE_STATS` behind an explainer that states what is read and that it cannot leave the device. `attention/UsageMirror.kt` reduces the event stream to three integers **in memory** and drops it (8 tests, including that overlapping stretches count once, so a day can never exceed itself, and that Comrade excludes its own screen time). Card lives on the Journal tab, self-relative, no red |
-| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen — four-sided box breathing, 1–5 minutes, haptic-paced, and it tells your comrades you might need them |
+| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen — paced breathing at 4-4-4-2, 1–5 minutes, haptic-paced, and it tells your comrades you might need them |
 | **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |
 
 ### Desktop
