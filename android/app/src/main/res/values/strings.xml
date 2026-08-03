@@ -339,30 +339,48 @@
     <string name="breathe_hold">Hold</string>
     <string name="breathe_out">Breathe out</string>
     <string name="breathe_done">Done</string>
+    <string name="breathe_minutes">%1$d min</string>
     <!--
       Two disclosures the screen has to make itself, because both are things a
       person would reasonably not expect: it buzzes, and it tells the people
       they chose. The wording of the second matters — comrades learn only that
       you might need them, never that you were breathing.
-    -->
-    <string name="breathe_note">Four counts in, four held, four out — follow the buzz if you\'d rather close your eyes. No account of this is kept here, and your comrades are told only that you might need them.</string>
-    <!--
-      Rotated once per full cycle by BreathingScreen, in this order. They sit
-      where the screen used to repeat its own title, which said nothing the app
-      bar had not already said.
 
-      Each one is a permission to stop, never an instruction and never a claim
-      about what breathing will do for you — this app is not a therapist and
-      says so elsewhere (docs/TARA.md); a pause screen that started dispensing
-      advice would be quietly walking that back. Nothing here asks the reader
-      to achieve anything, because there is nothing here to get right.
+      The count enumerates all four sides. It said "four counts in, four held,
+      four out" while the code ran a three-phase cycle with no pause on empty —
+      copy describing a box over an animation drawing a triangle.
+    -->
+    <string name="breathe_note">Four counts in, four held, four out, four empty — follow the buzz if you\'d rather close your eyes. No account of this is kept here, and your comrades are told only that you might need them.</string>
+    <!--
+      Rotated every two full cycles by BreathingScreen, in this order. They sit
+      where the screen used to repeat its own title, which said nothing the app
+      bar had not already said. Ten of them, so the longest offered sit (five
+      minutes) gets through the list without repeating one.
+
+      Each names **one concrete physical thing** to notice or let go of. The
+      first draft was abstract — "you don't have to be doing something", "this is
+      enough" — and read as vague, which is the failure mode here: an attention
+      with nothing to rest on goes back to whatever it was chewing on. A jaw is
+      somewhere to put it.
+
+      What none of them do is claim anything about what breathing will achieve,
+      or set up something the reader can get wrong. This app is not a therapist
+      and says so elsewhere (docs/TARA.md); a pause screen dispensing advice
+      would be quietly walking that back. "Notice" and "let go", never "you
+      should" — and nothing that mentions a duration, because the reader chose
+      that and it may not be a minute.
     -->
     <string-array name="breathe_lines">
-        <item>Nothing else needs you for the next minute.</item>
-        <item>Let your shoulders down.</item>
-        <item>Whatever it is, it will still be there afterwards.</item>
-        <item>You don\'t have to be doing something.</item>
-        <item>This is enough. Just this.</item>
+        <item>Let your shoulders drop away from your ears.</item>
+        <item>Unclench your jaw. It was clenched.</item>
+        <item>Feel the floor holding your feet up.</item>
+        <item>Let your tongue come off the roof of your mouth.</item>
+        <item>The air is cooler going in than coming out.</item>
+        <item>Let your hands go heavy wherever they are.</item>
+        <item>Let your eyes go soft. Nothing here needs reading.</item>
+        <item>Feel your breath in your belly, not your chest.</item>
+        <item>Whatever you were about to do can be done after.</item>
+        <item>Notice the weight of the phone in your hand.</item>
     </string-array>
 
     <!-- Attention: the tab and its honesty gate -->
