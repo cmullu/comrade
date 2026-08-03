@@ -162,6 +162,7 @@ pub fn run() {
             commands::active_focus_session,
             commands::focus_sessions,
             commands::suggested_focus_minutes,
+            commands::focus_presets,
             commands::focus_prompt,
             commands::focus_reflection,
             commands::save_reading,

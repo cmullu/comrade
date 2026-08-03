@@ -402,6 +402,28 @@ mod tests {
     }
 
     #[test]
+    fn every_offered_length_is_one_the_ladder_can_suggest_back() {
+        // The frontends draw a chip per FOCUS_PRESETS entry and the ladder
+        // reads the same list, so a rung that no history can reach would be a
+        // length the app offers and then never suggests again — and one the
+        // engine's own `windows(2)` walk would step straight past.
+        assert!(!FOCUS_PRESETS.is_empty());
+        assert!(FOCUS_PRESETS.windows(2).all(|w| w[0] < w[1]), "ascending");
+
+        let mut history: Vec<(u32, FocusOutcome)> = Vec::new();
+        for (i, &rung) in FOCUS_PRESETS.iter().enumerate() {
+            assert_eq!(
+                suggest_focus_minutes(&history),
+                rung,
+                "rung {i} ({rung}m) is unreachable",
+            );
+            // Two completions at this rung are what unlocks the next one.
+            history.push((rung, FocusOutcome::Completed));
+            history.push((rung, FocusOutcome::Completed));
+        }
+    }
+
+    #[test]
     fn abandoned_and_lapsed_sessions_cost_no_progress() {
         // Gate 2: no loss aversion — an abandon never drops the suggestion.
         let history = [

@@ -182,9 +182,29 @@ Attention is trained by doing attention, not by minigames:
     the pace can be followed with the eyes closed. A single pulse would say
     "a phase changed" without saying which way it went, which is why the shape
     (not just the timing) is a tested property — `BreathHaptics`, pure and
-    JVM-tested for the two things a device would otherwise be the first to
-    catch: an amplitude outside the platform's 1..255, and a ramp still
-    running when the next phase starts.
+    JVM-tested for the things a device would otherwise be the first to catch:
+    an amplitude outside the platform's 1..255, and a ramp that does not land
+    exactly on the phase boundary.
+
+    The ramp **spans the whole phase** rather than firing at the top of it, so
+    the buzz is faintest when the circle is smallest and strongest when it is
+    fullest: they are two renderings of one breath, and following either is
+    following both. It was a 540ms burst until an owner sat with it on a
+    handset — a burst says "a phase began", which you can only obey after the
+    fact, and is useless with your eyes shut, which is when this is for.
+  - **The circle grows into the in-breath.** It opens small and fills, because
+    that is what an inhale is; it shipped opening *full* for a fortnight,
+    because `animateFloatAsState` starts at its first target and the opening
+    phase targets full. Now an `Animatable` the screen seeds itself, linear so
+    it keeps pace with the haptic, and the hold snaps rather than easing so the
+    still phase is still.
+  - **Calming lines, rotated once per full cycle.** Where the screen used to
+    repeat its own app-bar title. Each is a permission to stop, never an
+    instruction and never a claim about what breathing does — a pause screen
+    dispensing advice would quietly walk back the "not a therapist" line the
+    rest of the app holds. Per *cycle*, not per phase: a sentence changing
+    every four seconds is one more thing to keep up with, on the one screen
+    with nothing to keep up with.
   - **It nudges your comrades.** Reaching for a pause raises one *"your
     comrade might need you"* on the phones of the people the user chose —
     the *same* one-bit envelope an abandoned draft sends
@@ -358,9 +378,40 @@ with `VaultLocked`. Three decisions worth naming:
 | **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen (haptic-paced, and it tells your comrades you might need them) |
 | **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |
 
+### Desktop
+
+The Focus tab (`desktop/ui/index.html` · `main.js` · `focus_view.mjs`) — a
+third nav slot beside Sabha and Vault, carrying the two halves of phase 2 that
+need nothing from Android: focus sessions and the long read. The decisions are
+in `focus_view.mjs` with 12 `node --test` cases, following the
+`call_decisions.mjs` / `media_cache.mjs` split, because `main.js` is DOM glue
+and cannot be tested.
+
+Three things it deliberately does not do:
+
+- **No usage mirror.** The rollups come from Android's `UsageStatsManager` and
+  the store is per-device, so a desktop panel could only ever read zero. A
+  panel that always says zero is a worse answer than no panel.
+- **No local countdown.** The clock re-reads `active_focus_session` once a
+  second rather than counting down in JS, because that call is also what
+  resolves a session which outlived its plan into a *lapse*. A local timer
+  would count into the negatives on a machine that slept.
+- **No opinion about the ladder.** Which durations exist is now
+  `ComradeRuntime::focus_presets`, the one attention command that needs no
+  vault (the rungs are a constant of the design, not the user's data). Android
+  and desktop both read it; neither keeps a list. `chosenPreset` refuses to
+  select a length outside it, and an engine test pins that every offered rung
+  is one `suggest_focus_minutes` can actually suggest back — the previous
+  hardcoded `listOf(25, 45, 90)` on Android was a second copy waiting to drift.
+
 Verified locally against the real CI lanes: `cargo fmt --check`, `clippy
---workspace --all-targets -D warnings`, `cargo test --workspace` (449 tests),
-the desktop Tauri clippy lane, and `./gradlew test` (188 Android tests).
+--workspace --all-targets -D warnings`, `cargo test --workspace` (490 tests),
+the desktop Tauri clippy lane, `node --test desktop/ui/*.test.mjs` (90 tests),
+and `./gradlew test` (247 Android JVM tests) — which also regenerates the
+uniffi bindings, so it is what proves `focusPresets()` actually crosses the
+FFI. Still unverified anywhere: nobody has *used* the desktop tab against a
+real vault; it is exercised only by its unit tests and the browser-preview
+mock.
 
 ### Open, and honestly so
 
@@ -371,9 +422,10 @@ the desktop Tauri clippy lane, and `./gradlew test` (188 Android tests).
   with usage access refused — only the mirror card is absent.
 - **OQ12** answered as "on by default": the gentle stop needs no permission and
   costs nothing, so a calm product is calm out of the box.
-- **OQ14** answered as Android-first, matching every pillar so far. The desktop
-  Tauri commands are registered and compile-checked in CI, but the vanilla-JS
-  web UI renders neither these nor the journal nor Tara.
+- **OQ14** answered as Android-first, then partly closed: the desktop web UI
+  now has a **Focus tab** — sessions and the long read, the two halves that are
+  platform-neutral. See "Desktop" below. The journal and Tara are still absent
+  there, and so is the usage mirror.
 - **No on-device trend chart yet.** Phase 4's *storage and API* shipped
   (`attention_days` keeps the full history and `attention_days()` returns it),
   and the monthly self-check-in did not — it is a small addition on top of the

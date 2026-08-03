@@ -346,6 +346,24 @@
       you might need them, never that you were breathing.
     -->
     <string name="breathe_note">Four counts in, four held, four out — follow the buzz if you\'d rather close your eyes. No account of this is kept here, and your comrades are told only that you might need them.</string>
+    <!--
+      Rotated once per full cycle by BreathingScreen, in this order. They sit
+      where the screen used to repeat its own title, which said nothing the app
+      bar had not already said.
+
+      Each one is a permission to stop, never an instruction and never a claim
+      about what breathing will do for you — this app is not a therapist and
+      says so elsewhere (docs/TARA.md); a pause screen that started dispensing
+      advice would be quietly walking that back. Nothing here asks the reader
+      to achieve anything, because there is nothing here to get right.
+    -->
+    <string-array name="breathe_lines">
+        <item>Nothing else needs you for the next minute.</item>
+        <item>Let your shoulders down.</item>
+        <item>Whatever it is, it will still be there afterwards.</item>
+        <item>You don\'t have to be doing something.</item>
+        <item>This is enough. Just this.</item>
+    </string-array>
 
     <!-- Attention: the tab and its honesty gate -->
     <string name="attention_tab">Focus</string>

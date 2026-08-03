@@ -17,19 +17,29 @@ import android.os.VibratorManager
  * out-breath ramps down, and the hold is silent — a hold with a buzz in it is
  * something to do rather than a pause.
  *
+ * **The ramp spans the whole phase**, because it is pacing the same breath the
+ * circle on screen is pacing: the buzz is faintest when the circle is smallest
+ * and strongest when it is fullest, so following one is following the other.
+ * It used to be a 540ms burst at the top of each phase, which said "a phase
+ * began" — a thing you can only obey after the fact, and useless with your eyes
+ * shut, which is exactly when this is meant to be used.
+ *
  * The waveform itself is pure and lives in [ramp], with a JVM test
- * ([BreathHapticsTest]), because two of its properties are easy to get wrong
- * and impossible to see: an amplitude outside 1..255 throws at the platform
- * boundary, and a ramp longer than the phase it belongs to would still be
- * buzzing when the next one starts.
+ * ([BreathHapticsTest]), because its properties are easy to get wrong and
+ * impossible to see: an amplitude outside 1..255 throws at the platform
+ * boundary, and a ramp that did not land exactly on the phase boundary would
+ * drift out of step with the circle over a minute of breathing.
  */
 object BreathHaptics {
 
-    /** How many steps a ramp is built from — enough to feel continuous. */
-    const val STEPS = 6
-
-    /** Duration of each step, so a whole ramp is [STEPS] × this. */
-    const val STEP_MS = 90L
+    /**
+     * How many amplitude steps a ramp is built from.
+     *
+     * These are spread across the entire phase, so this is the resolution of
+     * the swell rather than its length: 20 steps over four seconds is a change
+     * every 200ms, fine enough to feel like a rise rather than a staircase.
+     */
+    const val STEPS = 20
 
     /**
      * Quietest and loudest amplitude in a ramp (the platform's scale is 1..255).
@@ -41,26 +51,42 @@ object BreathHaptics {
     const val MIN_AMPLITUDE = 24
     const val MAX_AMPLITUDE = 120
 
-    /** A whole ramp must finish inside the phase that owns it. */
-    val RAMP_MS: Long = STEPS * STEP_MS
-
     /** One phase of the cycle, as [BreathingScreen] counts them. */
     enum class Phase { IN, HOLD, OUT }
 
     /**
-     * The waveform for [phase]: rising for the in-breath, falling for the
-     * out-breath, and `null` for the hold — nothing to play, not a silent
-     * pattern, so the caller skips the platform call entirely.
+     * The waveform for [phase] stretched over [phaseMs]: rising for the
+     * in-breath, falling for the out-breath, and `null` for the hold — nothing
+     * to play, not a silent pattern, so the caller skips the platform call
+     * entirely.
      *
-     * Timings are uniform; only the amplitudes carry the shape.
+     * Timings are as uniform as the phase divides; only the amplitudes carry
+     * the shape. `null` too for a phase shorter than [STEPS] milliseconds,
+     * where a step would round to nothing — not a case this screen produces,
+     * but a zero-length waveform is not worth handing to a vibrator to find out.
      */
-    fun ramp(phase: Phase): Pair<LongArray, IntArray>? {
+    fun ramp(phase: Phase, phaseMs: Long): Pair<LongArray, IntArray>? {
+        if (phaseMs < STEPS) return null
         val amplitudes = when (phase) {
             Phase.IN -> IntArray(STEPS) { step -> amplitudeAt(step) }
             Phase.OUT -> IntArray(STEPS) { step -> amplitudeAt(STEPS - 1 - step) }
             Phase.HOLD -> return null
         }
-        return LongArray(STEPS) { STEP_MS } to amplitudes
+        return stepTimings(phaseMs) to amplitudes
+    }
+
+    /**
+     * [STEPS] step lengths summing to exactly [phaseMs].
+     *
+     * The remainder of the division is handed out a millisecond at a time
+     * rather than dropped, because dropping it would end every ramp a few
+     * milliseconds early and the error compounds: five cycles into a
+     * sixty-second sit, the buzz would be visibly ahead of the circle.
+     */
+    fun stepTimings(phaseMs: Long): LongArray {
+        val base = phaseMs / STEPS
+        val remainder = (phaseMs % STEPS).toInt()
+        return LongArray(STEPS) { step -> base + if (step < remainder) 1L else 0L }
     }
 
     /**
@@ -76,29 +102,37 @@ object BreathHaptics {
 
     /**
      * How long a fallback one-shot lasts for [phase], on a device whose
-     * vibrator cannot vary amplitude. The shape is lost, so the two are made
-     * distinguishable by *length* instead — a longer pulse to breathe in
-     * against, a shorter one to let go on — rather than firing the same buzz
-     * twice and leaving the person guessing.
+     * vibrator cannot vary amplitude.
+     *
+     * The shape is unavailable there, so the two are made distinguishable by
+     * *length* instead — a longer pulse to breathe in against, a shorter one to
+     * let go on. It deliberately does **not** fill the phase the way the ramp
+     * does: a flat four-second buzz at whatever amplitude the OEM picked is not
+     * a swell, it is a phone that will not stop, and on a pause screen that is
+     * worse than a short cue and silence.
      */
+    const val FALLBACK_IN_MS = 400L
+    const val FALLBACK_OUT_MS = 200L
+
     fun fallbackMs(phase: Phase): Long? = when (phase) {
-        Phase.IN -> RAMP_MS
-        Phase.OUT -> RAMP_MS / 2
+        Phase.IN -> FALLBACK_IN_MS
+        Phase.OUT -> FALLBACK_OUT_MS
         Phase.HOLD -> null
     }
 
     /**
-     * Play the cue for [phase]. Silent — and harmless — on a device with no
-     * vibrator, and wrapped in [runCatching] because a breathing screen must
-     * never be the thing that crashes: some OEM vibrators throw on waveforms
-     * they dislike, and there is nothing here worth propagating that for.
+     * Play the cue for [phase], shaped to last [phaseMs]. Silent — and harmless
+     * — on a device with no vibrator, and wrapped in [runCatching] because a
+     * breathing screen must never be the thing that crashes: some OEM vibrators
+     * throw on waveforms they dislike, and there is nothing here worth
+     * propagating that for.
      */
-    fun play(context: Context, phase: Phase) {
+    fun play(context: Context, phase: Phase, phaseMs: Long) {
         val vibrator = vibrator(context) ?: return
         if (!vibrator.hasVibrator()) return
         runCatching {
             val effect = if (vibrator.hasAmplitudeControl()) {
-                val (timings, amplitudes) = ramp(phase) ?: return
+                val (timings, amplitudes) = ramp(phase, phaseMs) ?: return
                 VibrationEffect.createWaveform(timings, amplitudes, NO_REPEAT)
             } else {
                 VibrationEffect.createOneShot(

@@ -679,9 +679,11 @@ pub async fn tara_crisis_resources(
 
 // ── Attention (usage mirror · focus sessions · long read) ──────────────────────
 //
-// Strictly local, like the journal and Tara. Registered here for parity with
-// the Android bridge; the vanilla-JS web UI does not render these yet (same
-// state as the journal and Tara — see `docs/ATTENTION.md` OQ14).
+// Strictly local, like the journal and Tara. The web UI's Focus tab renders
+// the focus-session and long-read halves (`desktop/ui/main.js`); the usage
+// mirror is registered for parity with the Android bridge but has nothing to
+// draw here, because the rollups come from Android's UsageStatsManager and the
+// store is per-device — see `docs/ATTENTION.md` §7 and OQ14.
 //
 // `date`/`today` are `YYYY-MM-DD` in the frontend's timezone.
 
@@ -791,6 +793,13 @@ pub async fn suggested_focus_minutes(state: tauri::State<'_, Runtime>) -> Result
         .await
         .suggested_focus_minutes()
         .map_err(|e| e.to_string())
+}
+
+/// The session lengths to offer. Vault-free, so the Focus view can draw its
+/// duration chips before unlock — see `ComradeRuntime::focus_presets`.
+#[tauri::command]
+pub async fn focus_presets(state: tauri::State<'_, Runtime>) -> Result<Vec<u32>, String> {
+    Ok(state.read().await.focus_presets())
 }
 
 #[tauri::command]

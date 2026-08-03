@@ -2986,6 +2986,20 @@ impl ComradeRuntime {
         Ok(attention::suggest_focus_minutes(&history))
     }
 
+    /// The session lengths to offer, in ascending order.
+    ///
+    /// Unlike everything else on this surface it needs no vault: the ladder's
+    /// rungs are a constant of the design, not the user's data, and a frontend
+    /// that had to unlock before it could draw its own duration chips would be
+    /// gatekeeping for no privacy gain. It is here rather than hardcoded per
+    /// frontend so the three UIs cannot drift from
+    /// [`attention::suggest_focus_minutes`], which reads the same list to
+    /// decide which rung the user has earned — an Android that offered 60m
+    /// would offer a length the ladder can never suggest back.
+    pub fn focus_presets(&self) -> Vec<u32> {
+        attention::FOCUS_PRESETS.to_vec()
+    }
+
     /// The intention nudge to show before starting a session, rotated by how
     /// many sessions came before it.
     pub fn focus_prompt(&self) -> Result<String, UiError> {
@@ -6591,6 +6605,18 @@ mod tests {
             Err(UiError::VaultLocked)
         ));
         assert!(matches!(rt.clear_reading(), Err(UiError::VaultLocked)));
+    }
+
+    #[test]
+    fn the_duration_chips_are_drawable_before_the_vault_is_open() {
+        // The one attention call that is not vault-gated. A frontend paints its
+        // focus surface on first frame; making it wait for a passphrase to know
+        // what "25m / 45m / 90m" is would gate a constant behind a secret.
+        let rt = ComradeRuntime::new();
+        let presets = rt.focus_presets();
+        assert_eq!(presets, attention::FOCUS_PRESETS.to_vec());
+        assert!(!presets.is_empty());
+        assert!(presets.windows(2).all(|w| w[0] < w[1]), "ascending");
     }
 
     #[tokio::test]
