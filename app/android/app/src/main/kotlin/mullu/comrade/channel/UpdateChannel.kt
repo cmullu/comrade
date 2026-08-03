@@ -29,9 +29,15 @@ import mullu.comrade.update.UpdateStatus
  * `download` returns as soon as the foreground service has been started: the
  * transfer outlives the engine, shows progress in the notification shade, and
  * reports through the state channel. `install` is the same shape — it opens
- * `UpdateInstallActivity`, which does the copy on a worker thread and starts the
- * system installer's own confirmation dialog; nothing blocks the platform
- * thread, and the outcome arrives on the state channel.
+ * `UpdateInstallActivity`, which does the copy on a worker thread; nothing
+ * blocks the platform thread, and the outcome arrives on the state channel.
+ *
+ * With one exception worth stating: a **successful** install often produces no
+ * event at all, because from API 31 the session asks to skip the confirmation
+ * dialog and applying an update replaces this process. The user's notice in that
+ * case is native (`UpdateInstaller.notifyInstalled`), not Dart. Where the
+ * platform refuses to skip it, the dialog appears and the outcome arrives
+ * normally — no code on either side may assume which happened.
  */
 internal class UpdateChannel(
     messenger: BinaryMessenger,

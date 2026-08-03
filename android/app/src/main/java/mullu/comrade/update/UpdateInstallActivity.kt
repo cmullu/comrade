@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import java.io.File
+import mullu.comrade.Notifier
 import mullu.comrade.R
 
 /**
@@ -16,11 +17,13 @@ import mullu.comrade.R
  *
  * ## Why an Activity, when nothing is drawn
  *
- * `PackageInstaller` answers `STATUS_PENDING_USER_ACTION` by handing back an
- * Intent for its own confirmation dialog and expecting the app to start it.
- * Starting an activity is exactly the thing Android has spent several releases
- * restricting, and both restrictions applied to the `BroadcastReceiver` this
- * replaces:
+ * The session asks the platform to skip its confirmation dialog
+ * (`USER_ACTION_NOT_REQUIRED`, API 31+), but that is a request and the platform
+ * may refuse it on any device, at any time. When it refuses it answers
+ * `STATUS_PENDING_USER_ACTION` — handing back an Intent for its own dialog and
+ * expecting the app to start it. Starting an activity is exactly the thing
+ * Android has spent several releases restricting, and both restrictions applied
+ * to the `BroadcastReceiver` this replaces:
  *
  * - **Notification trampolines** (Android 12, API 31). A notification whose
  *   `contentIntent` targets a receiver or service which then calls
@@ -36,8 +39,11 @@ import mullu.comrade.R
  * platform has never restricted.
  *
  * It draws nothing (`Theme.Translucent.NoTitleBar`, no `setContentView`) and
- * lives in its own excluded-from-recents task, so from the user's side there is
- * a tap and then the system's install dialog.
+ * lives in its own excluded-from-recents task. From the user's side there is a
+ * tap and then either the system's install dialog or — on a device that allows
+ * the dialog-less update — the app closing and a notification saying the new
+ * version is in (`UpdateInstaller.notifyInstalled`). This class handles both
+ * without assuming which.
  *
  * ## Lifecycle
  *
@@ -125,12 +131,20 @@ class UpdateInstallActivity : Activity() {
             UpdateInstall.Outcome.NeedsConfirmation -> showConfirmation(intent)
 
             UpdateInstall.Outcome.Installed -> {
-                // The process is usually replaced moments after this, so treat
-                // it as bookkeeping only: drop the APK and the state so a
-                // restarted app does not offer to install what it is running.
+                // Order matters: the notification first, because everything
+                // after it is bookkeeping and the process can be replaced at any
+                // moment. With no confirmation dialog this notice is the *only*
+                // sign the user gets that anything happened, and the only way
+                // back into an app the platform has just restarted underneath
+                // them — see UpdateInstaller.notifyInstalled.
+                UpdateInstaller.notifyInstalled(this, intent.getStringExtra(EXTRA_VERSION).orEmpty())
+                // Drop the APK and the state so a restarted app does not offer
+                // to install what it is already running, and take down the "an
+                // update is available" notice, which is now about this build.
                 path?.let { File(it).delete() }
                 UpdateDownloads.update(UpdateDownloadState.Idle)
                 UpdateInstaller.clearReady(this)
+                Notifier.clearUpdate(this)
                 finish()
             }
 

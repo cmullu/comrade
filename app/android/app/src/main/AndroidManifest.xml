@@ -34,11 +34,27 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- Installs an update the app downloaded itself (UpdateDownloadService →
-         UpdateInstaller, both in the preserved native tree). From Android 8 the
-         user grants "install unknown apps" to this app once; the OS still shows
-         its own confirmation for every install and still refuses an APK signed
-         with a different key than the installed copy. -->
+         UpdateInstaller). Declaring it is not enough: from Android 8 the user
+         grants "install unknown apps" to this app once, which is the same
+         consent a browser needs to install a sideloaded APK — moved to the app
+         that actually knows what the file is. Android still refuses an APK
+         signed with a different key than the copy already installed, and that
+         refusal is unconditional enforcement rather than a dialog. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- Lets the session above ask for USER_ACTION_NOT_REQUIRED, so a self-update
+         applies without a confirmation dialog: Comrade's process is replaced and
+         a notification offers to reopen it (UpdateInstaller.notifyInstalled).
+         An owner decision, taken after the dialog turned out to be the part that
+         silently failed to appear.
+
+         A normal permission — granted at install, no runtime prompt — and it
+         grants nothing on its own. Whether the dialog is actually skipped is the
+         platform's call and can differ by device, by OEM policy, and by which
+         installer holds update ownership (Android 14+); when it says no the
+         session answers STATUS_PENDING_USER_ACTION and UpdateInstallActivity
+         shows the dialog exactly as before. Nothing may assume which happened. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
     <!-- CallService: keeps an in-progress call's process alive while the app
          is backgrounded. Required alongside the matching foregroundServiceType

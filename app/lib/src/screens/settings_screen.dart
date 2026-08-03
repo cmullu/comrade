@@ -806,9 +806,11 @@ class _UpdatesCardState extends ConsumerState<_UpdatesCard>
           const SizedBox(height: 4),
           Text(
             'The download keeps going if you leave this screen, and the shade '
-            'tells you when it is ready to install. Android still shows its own '
-            'confirmation, and still refuses an APK signed with a different key '
-            'than the copy you already have.',
+            'tells you when it is ready to install. On Android 12 and newer it '
+            'usually installs without a confirmation dialog — Comrade closes, '
+            'the new version goes in, and a notification offers to reopen it. '
+            'Some devices still ask you to confirm; either way Android refuses '
+            'an APK signed with a different key than the copy you already have.',
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: theme.colorScheme.outline),
           ),

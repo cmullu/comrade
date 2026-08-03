@@ -300,12 +300,17 @@ class UpdateChannel {
   Future<void> cancelDownload() =>
       _methods.invokeMethod<void>('cancelDownload');
 
-  /// Hand the downloaded APK to the system installer. It re-verifies first, and
-  /// the OS still shows its own confirmation dialog.
+  /// Hand the downloaded APK to the system installer. It re-verifies first.
   ///
   /// Returns as soon as the native side has the request: the copy into the
-  /// installer session runs on a worker thread there, and the outcome — the
+  /// installer session runs on a worker thread there, and the outcome — a
   /// confirmation dialog, a refusal, a success — arrives on [updates].
+  ///
+  /// On Android 12 and newer the session asks to skip the confirmation dialog,
+  /// so a successful install usually means this process is *replaced*: no
+  /// further event arrives here, and the user's only notice is the native
+  /// "installed, tap to reopen" notification. Whether the dialog is skipped is
+  /// the platform's call, so neither outcome may be assumed.
   Future<void> install() => _methods.invokeMethod<void>('install');
 
   /// Start the install again after a hand-off that never came back.

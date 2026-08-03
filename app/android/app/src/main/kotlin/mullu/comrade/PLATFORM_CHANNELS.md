@@ -833,15 +833,27 @@ the callback target, and `retryInstall` exists because the app *still* cannot
 distinguish "the dialog is up" from "the platform dropped it" — a dropped
 activity start reports nothing at all.
 
+**The confirmation dialog is asked to stand aside.** From API 31 the session
+requests `USER_ACTION_NOT_REQUIRED`, so on a device that allows it the update
+applies with no dialog: the process is replaced and a notification
+(`UpdateInstaller.notifyInstalled`) is the only thing the user sees, offering to
+reopen the app. This is an owner decision, taken after the dialog turned out to
+be the part that silently failed. **It is a request, not a guarantee** — update
+ownership (Android 14+), OEM policy, or an older release all end with the
+platform answering `STATUS_PENDING_USER_ACTION` instead, so the dialog path is
+the live fallback and no code here may assume which one happened. A Dart caller
+sees the consequence in one place: after `install` succeeds, *no further event
+may arrive*, because the engine's process may be gone.
+
 **The install is gated twice, and the app owns only one of the gates.**
 `UpdateInstall.verify` (pure, host-tested) refuses a download whose package name,
 version code or signing certificate disagrees with the running app, deleting it
 with a reason rather than handing it to a system dialog that says only "app not
 installed"; `canInstall` reports the per-source "install unknown apps" grant,
 which cannot be requested in-app — `openInstallPermissionSettings` is the whole
-of that flow. Android then shows its own confirmation for every install and
-applies its own same-signature rule, and that enforcement, not ours, is what
-finally protects the upgrade.
+of that flow. Android then applies its own same-signature rule, and that
+enforcement, not ours, is what finally protects the upgrade. Note that it is
+*enforcement, not a dialog*: skipping the confirmation does not weaken it.
 
 **Where the certificates cannot be read**, `UpdateInstall` allows the install and
 records that the signature was *not* checked (`Ok(signatureChecked = false)`)

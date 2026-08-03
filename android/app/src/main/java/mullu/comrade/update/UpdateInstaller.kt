@@ -20,6 +20,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import mullu.comrade.MainActivity
 import mullu.comrade.Notifier
 import mullu.comrade.R
 
@@ -29,9 +30,29 @@ import mullu.comrade.R
  * `PackageInstaller` rather than an `ACTION_VIEW` on a `content://` URI: the
  * session API reports what happened (`STATUS_*` back to
  * [UpdateInstallActivity]), so a refusal or a failure can be said out loud
- * instead of the app assuming an install it never got. The user still confirms —
- * `STATUS_PENDING_USER_ACTION` is the OS's own dialog and cannot be skipped by
- * an app, which is exactly as it should be.
+ * instead of the app assuming an install it never got.
+ *
+ * ## The confirmation dialog is asked to stand aside, not relied on
+ *
+ * From API 31 the session asks for `USER_ACTION_NOT_REQUIRED`, so on a device
+ * that allows it the update applies with no dialog: Comrade's process is
+ * replaced and [notifyInstalled] is the only thing the user sees — a
+ * notification saying the new version is in and offering to reopen it. That is
+ * an owner decision, taken after the dialog turned out to be the part that
+ * failed.
+ *
+ * **Whether it is allowed is entirely the platform's call**, and it can differ
+ * between devices and over time — another installer holding update ownership
+ * (Android 14+), an OEM policy, or simply an older release all end with the
+ * platform answering `STATUS_PENDING_USER_ACTION` instead. So the dialog path
+ * below is not legacy code: it is the fallback, and on many devices it will be
+ * the normal path. Nothing here may assume which one happened.
+ *
+ * **What is *not* given up.** Android's refusal to install an APK signed with a
+ * different key than the installed copy is unconditional enforcement, not a
+ * dialog — it does not weaken when the dialog is skipped. Neither does
+ * [UpdateInstall.verify], which still runs first. What the user gives up is
+ * *seeing* the install as it happens, which is what the notification is for.
  *
  * ## Two things this must never do again
  *
@@ -71,6 +92,9 @@ object UpdateInstaller {
 
     private const val TAG = "UpdateInstaller"
     private const val READY_ID = 0xC0DE22
+
+    /** Distinct from [READY_ID]: "ready" is cancelled the moment an install starts. */
+    private const val INSTALLED_ID = 0xC0DE24
 
     /**
      * One at a time, off the main thread. A single thread rather than a pool
@@ -235,6 +259,17 @@ object UpdateInstaller {
             // fail fast on a full device instead of part-way through the copy.
             setAppPackageName(context.packageName)
             setSize(apk.length())
+            // Ask to skip the confirmation dialog — see this object's doc for
+            // what that does and does not buy. A request, not an instruction:
+            // when the platform says no it answers STATUS_PENDING_USER_ACTION
+            // exactly as before and UpdateInstallActivity shows the dialog.
+            //
+            // setRequestUpdateOwnership (API 34) is deliberately *not* set:
+            // ownership can only be claimed on a first install, so on an update
+            // it is a no-op, and writing it here would read as if it helped.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+            }
         }
         var sessionId = -1
         try {
@@ -318,5 +353,54 @@ object UpdateInstaller {
 
     fun clearReady(context: Context) {
         NotificationManagerCompat.from(context).cancel(READY_ID)
+    }
+
+    // ── The "installed, reopen it" notification ──────────────────────────────
+
+    /**
+     * Say that the update went in, and offer to reopen Comrade.
+     *
+     * This is the whole of the user-visible story for a dialog-less install.
+     * Applying an update replaces the process, so the app the user was looking
+     * at simply disappears — without this they would be left staring at a
+     * launcher wondering what happened.
+     *
+     * Posted from whichever process receives `STATUS_SUCCESS`, which for a
+     * self-update is usually a fresh one running the **new** code: the
+     * `PendingIntent` resolves against whatever is installed by the time the
+     * platform sends it. Either way the id is fixed, so a duplicate replaces
+     * rather than stacks.
+     */
+    @SuppressLint("MissingPermission") // guarded by areNotificationsEnabled()
+    fun notifyInstalled(context: Context, version: String) {
+        // Not redundant: this can be the first thing a brand-new process does,
+        // launched by the session callback alone with no service having started,
+        // and posting to a channel that does not exist yet is dropped in silence
+        // from Android 8 — which would lose the only notice of the install.
+        Notifier.ensureChannels(context)
+        val mgr = NotificationManagerCompat.from(context)
+        if (!mgr.areNotificationsEnabled()) return
+        val open = PendingIntent.getActivity(
+            context,
+            "installed:$version".hashCode(),
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val n = NotificationCompat.Builder(context, Notifier.CHANNEL_UPDATES)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(
+                if (version.isNotBlank()) {
+                    context.getString(R.string.update_installed_title, version)
+                } else {
+                    context.getString(R.string.update_installed_title_generic)
+                },
+            )
+            .setContentText(context.getString(R.string.update_installed_text))
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(open)
+            .build()
+        mgr.notify(INSTALLED_ID, n)
     }
 }
