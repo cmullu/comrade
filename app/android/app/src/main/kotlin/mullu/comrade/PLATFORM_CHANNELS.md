@@ -791,7 +791,8 @@ untouched by this phase and Dart has no way to create a channel.
 | `unskip` | — | `null` |
 | `download` | — | `null` (the service owns the transfer from here) |
 | `cancelDownload` | — | `null` |
-| `install` | — | `null` |
+| `install` | — | `null` (the outcome arrives on the state channel) |
+| `retryInstall` | — | `null` |
 | `refreshDownloadState` | — | `null` |
 | `openInstallPermissionSettings` | — | `null` |
 | `openRelease` | — | `null` |
@@ -814,6 +815,23 @@ intent extra; `install` installs the file the service itself wrote; `openRelease
 opens that release's page. An update path is code execution, so every one of
 those is a place a caller-supplied string would be a way to run someone else's
 APK — and none of them accept one.
+
+**The install runs on a worker thread, and the confirmation dialog is started
+from an Activity.** Both are load-bearing, and the first shipped version had
+neither. Copying a release APK into a `PackageInstaller` session is tens of
+megabytes of I/O; doing it on the thread the method call arrives on froze the app
+long enough for an ANR. And `STATUS_PENDING_USER_ACTION` — the platform handing
+back an Intent for its own confirmation dialog, expecting the app to start it —
+came back to a `BroadcastReceiver`, which is the one context that may not
+reliably start an activity: a notification whose `contentIntent` is a broadcast
+that starts an activity is a *notification trampoline*, blocked since Android 12,
+and a background activity start from a receiver has been blocked since Android
+10. Neither throws. The dialog simply never appeared and the card sat on
+"Waiting for Android to install it…" forever. `UpdateInstallActivity` (invisible,
+translucent, its own excluded-from-recents task) is now both the entry point and
+the callback target, and `retryInstall` exists because the app *still* cannot
+distinguish "the dialog is up" from "the platform dropped it" — a dropped
+activity start reports nothing at all.
 
 **The install is gated twice, and the app owns only one of the gates.**
 `UpdateInstall.verify` (pure, host-tested) refuses a download whose package name,

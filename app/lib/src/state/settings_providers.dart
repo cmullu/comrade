@@ -416,6 +416,13 @@ class UpdateSettingsController extends AsyncNotifier<UpdateSettings> {
         null,
       );
 
+  /// Start the install again when the system's confirmation never appeared.
+  /// See [UpdateChannel.retryInstall] for why the app cannot tell the two apart.
+  Future<void> retryInstall() => _ifSupported<void>(
+        ref.read(updateChannelProvider).retryInstall,
+        null,
+      );
+
   /// The system screen that lets Comrade install apps, followed by a re-read:
   /// the grant happens outside this app, so the card has to ask again on return.
   Future<void> openInstallPermissionSettings() async {
@@ -425,8 +432,10 @@ class UpdateSettingsController extends AsyncNotifier<UpdateSettings> {
     );
   }
 
-  /// Re-read the permission, and drop a "ready to install" whose file has gone.
-  /// Cheap enough to call on every resume.
+  /// Re-read the permission and line the download state up with the cache —
+  /// both dropping a "ready to install" whose file has gone and picking up an
+  /// APK downloaded before this process started. Cheap enough to call on every
+  /// resume.
   Future<void> refresh() async {
     await _ifSupported<void>(
       ref.read(updateChannelProvider).refreshDownloadState,

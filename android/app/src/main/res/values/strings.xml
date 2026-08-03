@@ -241,6 +241,7 @@
     <string name="settings_updates_verifying">Checking the download…</string>
     <string name="settings_updates_install">Install %1$s</string>
     <string name="settings_updates_installing">Waiting for Android to install it…</string>
+    <string name="settings_updates_install_retry">Nothing happened? Try again</string>
     <string name="settings_updates_cancel_download">Cancel download</string>
     <string name="settings_updates_open_page">Open the release page instead</string>
     <string name="settings_updates_install_permission_title">Allow Comrade to install updates</string>
@@ -257,6 +258,7 @@
     <string name="update_gone_before_install">The downloaded update is no longer there — download it again</string>
     <string name="update_install_permission_needed">Comrade needs your permission to install apps — grant it in Settings, then tap Install again</string>
     <string name="update_install_failed_generic">Android could not install the update</string>
+    <string name="update_install_no_space">There is not enough free space to install the update — free some up and try again</string>
     <string name="update_install_cancelled">Install cancelled</string>
     <string name="update_refused_wrong_package">That download is not Comrade — refusing to install it</string>
     <string name="update_refused_not_newer">That download is not newer than the version you are running</string>

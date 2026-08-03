@@ -28,8 +28,10 @@ import mullu.comrade.update.UpdateStatus
  *
  * `download` returns as soon as the foreground service has been started: the
  * transfer outlives the engine, shows progress in the notification shade, and
- * reports through the state channel. `install` hands the verified APK to the
- * system installer, which always shows its own confirmation.
+ * reports through the state channel. `install` is the same shape — it opens
+ * `UpdateInstallActivity`, which does the copy on a worker thread and starts the
+ * system installer's own confirmation dialog; nothing blocks the platform
+ * thread, and the outcome arrives on the state channel.
  */
 internal class UpdateChannel(
     messenger: BinaryMessenger,
@@ -78,6 +80,8 @@ internal class UpdateChannel(
         )
         UpdateDownloadState.Verifying -> mapOf("state" to "verifying")
         is UpdateDownloadState.Ready -> mapOf("state" to "ready", "version" to version)
+        // `path` is deliberately not exposed: Dart never names a file to the
+        // installer, it only ever says "install what is ready".
         is UpdateDownloadState.Installing -> mapOf("state" to "installing", "version" to version)
         is UpdateDownloadState.Failed -> mapOf("state" to "failed", "message" to message)
     }
@@ -128,8 +132,14 @@ internal class UpdateChannel(
                     UpdateChecker.install(appContext)
                     result.postSuccess()
                 }
+                // The way out of a hand-off that never came back — see
+                // UpdateChecker.retryInstall.
+                "retryInstall" -> {
+                    UpdateChecker.retryInstall(appContext)
+                    result.postSuccess()
+                }
                 "refreshDownloadState" -> {
-                    UpdateChecker.refreshDownloadState()
+                    UpdateChecker.refreshDownloadState(appContext)
                     result.postSuccess()
                 }
                 "openInstallPermissionSettings" -> {

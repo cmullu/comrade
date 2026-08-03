@@ -716,6 +716,15 @@ class _UpdatesCardState extends ConsumerState<_UpdatesCard>
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
+          const SizedBox(height: 8),
+          // Android reports nothing when it declines to show an app's install
+          // confirmation, so "waiting" and "never going to happen" look
+          // identical from here. This hands the install back to the user
+          // instead of stranding them on that line.
+          OutlinedButton(
+            onPressed: controller.retryInstall,
+            child: const Text('Nothing happened? Try again'),
+          ),
         ];
       case DownloadFailed(:final String message):
         return <Widget>[

@@ -1,11 +1,16 @@
 package mullu.comrade.update
 
+import android.content.pm.PackageInstaller
+
 /**
- * Whether a downloaded APK may be handed to the installer.
+ * Whether a downloaded APK may be handed to the installer, and what the
+ * installer's answer means.
  *
- * Pure, so `UpdateInstallTest` can drive every refusal on the host JVM. The
- * Android side that reads these facts off the archive (and off ourselves) is
- * [UpdateInstaller].
+ * Pure, so `UpdateInstallTest` can drive every refusal and every session status
+ * on the host JVM. The only Android reference is [PackageInstaller]'s `STATUS_*`
+ * constants, which are `public static final int` literals and so are inlined at
+ * compile time — nothing here loads an Android class at runtime. The side that
+ * reads these facts off the archive (and off ourselves) is [UpdateInstaller].
  *
  * ## Why this exists when the OS already checks
  *
@@ -97,5 +102,45 @@ object UpdateInstall {
         if (actualBytes <= 0L) return false
         if (expectedBytes <= 0L) return true
         return expectedBytes == actualBytes
+    }
+
+    // ── What the installer session said ──────────────────────────────────────
+
+    /**
+     * A `PackageInstaller` session status, reduced to the four things the app
+     * actually does about it.
+     *
+     * The distinction that matters is [NeedsConfirmation]: it is not a failure
+     * and not a success but an *instruction* — the OS has handed back an Intent
+     * and expects the app to start it. Getting that one wrong is silent (the
+     * platform reports nothing when an activity start is dropped), which is
+     * exactly how it went unnoticed the first time.
+     */
+    sealed class Outcome {
+        /** Show the OS's own confirmation dialog. Nothing is installed yet. */
+        object NeedsConfirmation : Outcome()
+
+        object Installed : Outcome()
+
+        /** The user declined at the OS dialog. The APK is kept for a retry. */
+        object Cancelled : Outcome()
+
+        /** No room for the install. Worth its own wording — it is fixable. */
+        object NoSpace : Outcome()
+
+        /** [message] is the platform's, when it gave one. */
+        data class Failed(val message: String?) : Outcome()
+    }
+
+    /**
+     * @param status `EXTRA_STATUS` from the session's callback intent.
+     * @param message `EXTRA_STATUS_MESSAGE`, which the platform often omits.
+     */
+    fun outcomeOf(status: Int, message: String?): Outcome = when (status) {
+        PackageInstaller.STATUS_PENDING_USER_ACTION -> Outcome.NeedsConfirmation
+        PackageInstaller.STATUS_SUCCESS -> Outcome.Installed
+        PackageInstaller.STATUS_FAILURE_ABORTED -> Outcome.Cancelled
+        PackageInstaller.STATUS_FAILURE_STORAGE -> Outcome.NoSpace
+        else -> Outcome.Failed(message?.takeIf { it.isNotBlank() })
     }
 }
