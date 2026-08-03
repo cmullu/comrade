@@ -357,6 +357,29 @@ Future<void> sendCallSignal(
         peer: peer, callId: callId, media: media, signal: signal);
 
 /// See [`broadcast_chitthi`] for the lock discipline.
+Future<TogetherSessionDto> togetherStart(
+        {required String peer, required TogetherContent content}) =>
+    RustLib.instance.api.crateApiTogetherStart(peer: peer, content: content);
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<void> togetherJoin() => RustLib.instance.api.crateApiTogetherJoin();
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<void> togetherSetState({required BigInt posMs, required bool playing}) =>
+    RustLib.instance.api
+        .crateApiTogetherSetState(posMs: posMs, playing: playing);
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<void> togetherEnd() => RustLib.instance.api.crateApiTogetherEnd();
+
+/// Report where our own player is. Synchronous and skipped under contention —
+/// see [`Comrade::together_report_position`] in this crate's uniffi half.
+Future<void> togetherReportPosition(
+        {required BigInt posMs, required bool playing}) =>
+    RustLib.instance.api
+        .crateApiTogetherReportPosition(posMs: posMs, playing: playing);
+
+/// See [`broadcast_chitthi`] for the lock discipline.
 Future<void> hangupCall(
         {required String peer,
         required String callId,
@@ -465,6 +488,24 @@ sealed class BridgeEvent with _$BridgeEvent {
     required String peer,
     String? name,
   }) = BridgeEvent_ComradeNudge;
+  const factory BridgeEvent.togetherInvited(
+    TogetherInviteDto field0,
+  ) = BridgeEvent_TogetherInvited;
+  const factory BridgeEvent.togetherJoined({
+    required String sessionId,
+    required String peer,
+  }) = BridgeEvent_TogetherJoined;
+  const factory BridgeEvent.togetherCommand(
+    TogetherCommandDto field0,
+  ) = BridgeEvent_TogetherCommand;
+  const factory BridgeEvent.togetherCorrection(
+    TogetherCorrectionDto field0,
+  ) = BridgeEvent_TogetherCorrection;
+  const factory BridgeEvent.togetherEnded({
+    required String sessionId,
+    required String peer,
+    required bool byPeer,
+  }) = BridgeEvent_TogetherEnded;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;
@@ -1162,6 +1203,33 @@ class ProfileDto {
           username == other.username;
 }
 
+enum StateChange {
+  played,
+  paused,
+  seeked,
+  pausedAndSeeked,
+  unchanged,
+  ;
+}
+
+@freezed
+sealed class SyncVerdict with _$SyncVerdict {
+  const SyncVerdict._();
+
+  const factory SyncVerdict.hold() = SyncVerdict_Hold;
+  const factory SyncVerdict.adopt({
+    required BigInt posMs,
+    required bool playing,
+    required BigInt seq,
+  }) = SyncVerdict_Adopt;
+  const factory SyncVerdict.nudge({
+    required double rate,
+  }) = SyncVerdict_Nudge;
+  const factory SyncVerdict.seek({
+    required BigInt posMs,
+  }) = SyncVerdict_Seek;
+}
+
 class TaraMessageDto {
   final String id;
   final String text;
@@ -1195,6 +1263,160 @@ class TaraMessageDto {
           fromTara == other.fromTara &&
           crisis == other.crisis &&
           createdAt == other.createdAt;
+}
+
+class TogetherCommandDto {
+  final String sessionId;
+  final BigInt posMs;
+  final bool playing;
+  final StateChange change;
+
+  const TogetherCommandDto({
+    required this.sessionId,
+    required this.posMs,
+    required this.playing,
+    required this.change,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^ posMs.hashCode ^ playing.hashCode ^ change.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherCommandDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          posMs == other.posMs &&
+          playing == other.playing &&
+          change == other.change;
+}
+
+@freezed
+sealed class TogetherContent with _$TogetherContent {
+  const TogetherContent._();
+
+  const factory TogetherContent.localFile({
+    required BigInt durationMs,
+    String? label,
+  }) = TogetherContent_LocalFile;
+  const factory TogetherContent.youtube({
+    required String videoId,
+  }) = TogetherContent_Youtube;
+}
+
+class TogetherCorrectionDto {
+  final String sessionId;
+  final SyncVerdict verdict;
+  final PlatformInt64 driftMs;
+  final BigInt qualityMs;
+
+  const TogetherCorrectionDto({
+    required this.sessionId,
+    required this.verdict,
+    required this.driftMs,
+    required this.qualityMs,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      verdict.hashCode ^
+      driftMs.hashCode ^
+      qualityMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherCorrectionDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          verdict == other.verdict &&
+          driftMs == other.driftMs &&
+          qualityMs == other.qualityMs;
+}
+
+class TogetherInviteDto {
+  final String sessionId;
+  final String peer;
+  final TogetherContent content;
+  final BigInt posMs;
+  final bool playing;
+  final BigInt createdAt;
+
+  const TogetherInviteDto({
+    required this.sessionId,
+    required this.peer,
+    required this.content,
+    required this.posMs,
+    required this.playing,
+    required this.createdAt,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      peer.hashCode ^
+      content.hashCode ^
+      posMs.hashCode ^
+      playing.hashCode ^
+      createdAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherInviteDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          peer == other.peer &&
+          content == other.content &&
+          posMs == other.posMs &&
+          playing == other.playing &&
+          createdAt == other.createdAt;
+}
+
+class TogetherSessionDto {
+  final String sessionId;
+  final String peer;
+  final TogetherContent content;
+  final bool weLead;
+  final bool joined;
+  final BigInt posMs;
+  final bool playing;
+
+  const TogetherSessionDto({
+    required this.sessionId,
+    required this.peer,
+    required this.content,
+    required this.weLead,
+    required this.joined,
+    required this.posMs,
+    required this.playing,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      peer.hashCode ^
+      content.hashCode ^
+      weLead.hashCode ^
+      joined.hashCode ^
+      posMs.hashCode ^
+      playing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherSessionDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          peer == other.peer &&
+          content == other.content &&
+          weLead == other.weLead &&
+          joined == other.joined &&
+          posMs == other.posMs &&
+          playing == other.playing;
 }
 
 class TurnServerStatusDto {

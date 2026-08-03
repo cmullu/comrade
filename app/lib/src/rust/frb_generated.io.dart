@@ -60,6 +60,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PresenceDto dco_decode_box_autoadd_presence_dto(dynamic raw);
 
   @protected
+  TogetherCommandDto dco_decode_box_autoadd_together_command_dto(dynamic raw);
+
+  @protected
+  TogetherContent dco_decode_box_autoadd_together_content(dynamic raw);
+
+  @protected
+  TogetherCorrectionDto dco_decode_box_autoadd_together_correction_dto(
+      dynamic raw);
+
+  @protected
+  TogetherInviteDto dco_decode_box_autoadd_together_invite_dto(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_u_16(dynamic raw);
 
   @protected
@@ -109,6 +122,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int dco_decode_i_32(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
 
   @protected
   IceServerDto dco_decode_ice_server_dto(dynamic raw);
@@ -225,7 +241,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProfileDto dco_decode_profile_dto(dynamic raw);
 
   @protected
+  StateChange dco_decode_state_change(dynamic raw);
+
+  @protected
+  SyncVerdict dco_decode_sync_verdict(dynamic raw);
+
+  @protected
   TaraMessageDto dco_decode_tara_message_dto(dynamic raw);
+
+  @protected
+  TogetherCommandDto dco_decode_together_command_dto(dynamic raw);
+
+  @protected
+  TogetherContent dco_decode_together_content(dynamic raw);
+
+  @protected
+  TogetherCorrectionDto dco_decode_together_correction_dto(dynamic raw);
+
+  @protected
+  TogetherInviteDto dco_decode_together_invite_dto(dynamic raw);
+
+  @protected
+  TogetherSessionDto dco_decode_together_session_dto(dynamic raw);
 
   @protected
   TurnServerStatusDto dco_decode_turn_server_status_dto(dynamic raw);
@@ -300,6 +337,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PresenceDto sse_decode_box_autoadd_presence_dto(SseDeserializer deserializer);
 
   @protected
+  TogetherCommandDto sse_decode_box_autoadd_together_command_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  TogetherContent sse_decode_box_autoadd_together_content(
+      SseDeserializer deserializer);
+
+  @protected
+  TogetherCorrectionDto sse_decode_box_autoadd_together_correction_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  TogetherInviteDto sse_decode_box_autoadd_together_invite_dto(
+      SseDeserializer deserializer);
+
+  @protected
   int sse_decode_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
@@ -350,6 +403,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
 
   @protected
   IceServerDto sse_decode_ice_server_dto(SseDeserializer deserializer);
@@ -481,7 +537,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProfileDto sse_decode_profile_dto(SseDeserializer deserializer);
 
   @protected
+  StateChange sse_decode_state_change(SseDeserializer deserializer);
+
+  @protected
+  SyncVerdict sse_decode_sync_verdict(SseDeserializer deserializer);
+
+  @protected
   TaraMessageDto sse_decode_tara_message_dto(SseDeserializer deserializer);
+
+  @protected
+  TogetherCommandDto sse_decode_together_command_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  TogetherContent sse_decode_together_content(SseDeserializer deserializer);
+
+  @protected
+  TogetherCorrectionDto sse_decode_together_correction_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  TogetherInviteDto sse_decode_together_invite_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  TogetherSessionDto sse_decode_together_session_dto(
+      SseDeserializer deserializer);
 
   @protected
   TurnServerStatusDto sse_decode_turn_server_status_dto(
@@ -563,6 +644,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       PresenceDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_together_command_dto(
+      TogetherCommandDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_together_content(
+      TogetherContent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_together_correction_dto(
+      TogetherCorrectionDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_together_invite_dto(
+      TogetherInviteDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer);
 
   @protected
@@ -617,6 +714,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
 
   @protected
   void sse_encode_ice_server_dto(IceServerDto self, SseSerializer serializer);
@@ -756,8 +856,34 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_profile_dto(ProfileDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_state_change(StateChange self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_sync_verdict(SyncVerdict self, SseSerializer serializer);
+
+  @protected
   void sse_encode_tara_message_dto(
       TaraMessageDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_together_command_dto(
+      TogetherCommandDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_together_content(
+      TogetherContent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_together_correction_dto(
+      TogetherCorrectionDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_together_invite_dto(
+      TogetherInviteDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_together_session_dto(
+      TogetherSessionDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_turn_server_status_dto(

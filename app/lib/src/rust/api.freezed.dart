@@ -61,6 +61,11 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
     TResult Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult Function(BridgeEvent_ComradeNudge value)? comradeNudge,
+    TResult Function(BridgeEvent_TogetherInvited value)? togetherInvited,
+    TResult Function(BridgeEvent_TogetherJoined value)? togetherJoined,
+    TResult Function(BridgeEvent_TogetherCommand value)? togetherCommand,
+    TResult Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
+    TResult Function(BridgeEvent_TogetherEnded value)? togetherEnded,
     TResult Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
     required TResult orElse(),
@@ -87,6 +92,16 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -126,6 +141,14 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(BridgeEvent_ComradePresence value)
         comradePresence,
     required TResult Function(BridgeEvent_ComradeNudge value) comradeNudge,
+    required TResult Function(BridgeEvent_TogetherInvited value)
+        togetherInvited,
+    required TResult Function(BridgeEvent_TogetherJoined value) togetherJoined,
+    required TResult Function(BridgeEvent_TogetherCommand value)
+        togetherCommand,
+    required TResult Function(BridgeEvent_TogetherCorrection value)
+        togetherCorrection,
+    required TResult Function(BridgeEvent_TogetherEnded value) togetherEnded,
     required TResult Function(BridgeEvent_MeshStatusChanged value)
         meshStatusChanged,
     required TResult Function(BridgeEvent_LedgerUpdated value) ledgerUpdated,
@@ -150,6 +173,16 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge():
         return comradeNudge(_that);
+      case BridgeEvent_TogetherInvited():
+        return togetherInvited(_that);
+      case BridgeEvent_TogetherJoined():
+        return togetherJoined(_that);
+      case BridgeEvent_TogetherCommand():
+        return togetherCommand(_that);
+      case BridgeEvent_TogetherCorrection():
+        return togetherCorrection(_that);
+      case BridgeEvent_TogetherEnded():
+        return togetherEnded(_that);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated():
@@ -182,6 +215,11 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
     TResult? Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult? Function(BridgeEvent_ComradeNudge value)? comradeNudge,
+    TResult? Function(BridgeEvent_TogetherInvited value)? togetherInvited,
+    TResult? Function(BridgeEvent_TogetherJoined value)? togetherJoined,
+    TResult? Function(BridgeEvent_TogetherCommand value)? togetherCommand,
+    TResult? Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
+    TResult? Function(BridgeEvent_TogetherEnded value)? togetherEnded,
     TResult? Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult? Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
   }) {
@@ -207,6 +245,16 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -241,6 +289,11 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(String peer, String? name, bool online, BigInt at)?
         comradePresence,
     TResult Function(String peer, String? name)? comradeNudge,
+    TResult Function(TogetherInviteDto field0)? togetherInvited,
+    TResult Function(String sessionId, String peer)? togetherJoined,
+    TResult Function(TogetherCommandDto field0)? togetherCommand,
+    TResult Function(TogetherCorrectionDto field0)? togetherCorrection,
+    TResult Function(String sessionId, String peer, bool byPeer)? togetherEnded,
     TResult Function(MeshStatusDto field0)? meshStatusChanged,
     TResult Function(String ledger)? ledgerUpdated,
     required TResult orElse(),
@@ -267,6 +320,16 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that.field0);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that.sessionId, _that.peer);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that.field0);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that.field0);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -303,6 +366,12 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(String peer, String? name, bool online, BigInt at)
         comradePresence,
     required TResult Function(String peer, String? name) comradeNudge,
+    required TResult Function(TogetherInviteDto field0) togetherInvited,
+    required TResult Function(String sessionId, String peer) togetherJoined,
+    required TResult Function(TogetherCommandDto field0) togetherCommand,
+    required TResult Function(TogetherCorrectionDto field0) togetherCorrection,
+    required TResult Function(String sessionId, String peer, bool byPeer)
+        togetherEnded,
     required TResult Function(MeshStatusDto field0) meshStatusChanged,
     required TResult Function(String ledger) ledgerUpdated,
   }) {
@@ -326,6 +395,16 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge():
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_TogetherInvited():
+        return togetherInvited(_that.field0);
+      case BridgeEvent_TogetherJoined():
+        return togetherJoined(_that.sessionId, _that.peer);
+      case BridgeEvent_TogetherCommand():
+        return togetherCommand(_that.field0);
+      case BridgeEvent_TogetherCorrection():
+        return togetherCorrection(_that.field0);
+      case BridgeEvent_TogetherEnded():
+        return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated():
@@ -358,6 +437,12 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(String peer, String? name, bool online, BigInt at)?
         comradePresence,
     TResult? Function(String peer, String? name)? comradeNudge,
+    TResult? Function(TogetherInviteDto field0)? togetherInvited,
+    TResult? Function(String sessionId, String peer)? togetherJoined,
+    TResult? Function(TogetherCommandDto field0)? togetherCommand,
+    TResult? Function(TogetherCorrectionDto field0)? togetherCorrection,
+    TResult? Function(String sessionId, String peer, bool byPeer)?
+        togetherEnded,
     TResult? Function(MeshStatusDto field0)? meshStatusChanged,
     TResult? Function(String ledger)? ledgerUpdated,
   }) {
@@ -383,6 +468,16 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that.field0);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that.sessionId, _that.peer);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that.field0);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that.field0);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -1046,6 +1141,362 @@ class _$BridgeEvent_ComradeNudgeCopyWithImpl<$Res>
           ? _self.name
           : name // ignore: cast_nullable_to_non_nullable
               as String?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherInvited extends BridgeEvent {
+  const BridgeEvent_TogetherInvited(this.field0) : super._();
+
+  final TogetherInviteDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherInvitedCopyWith<BridgeEvent_TogetherInvited>
+      get copyWith => _$BridgeEvent_TogetherInvitedCopyWithImpl<
+          BridgeEvent_TogetherInvited>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherInvited &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherInvited(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherInvitedCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherInvitedCopyWith(
+          BridgeEvent_TogetherInvited value,
+          $Res Function(BridgeEvent_TogetherInvited) _then) =
+      _$BridgeEvent_TogetherInvitedCopyWithImpl;
+  @useResult
+  $Res call({TogetherInviteDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherInvitedCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherInvitedCopyWith<$Res> {
+  _$BridgeEvent_TogetherInvitedCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherInvited _self;
+  final $Res Function(BridgeEvent_TogetherInvited) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherInvited(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherInviteDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherJoined extends BridgeEvent {
+  const BridgeEvent_TogetherJoined(
+      {required this.sessionId, required this.peer})
+      : super._();
+
+  final String sessionId;
+  final String peer;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherJoinedCopyWith<BridgeEvent_TogetherJoined>
+      get copyWith =>
+          _$BridgeEvent_TogetherJoinedCopyWithImpl<BridgeEvent_TogetherJoined>(
+              this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherJoined &&
+            (identical(other.sessionId, sessionId) ||
+                other.sessionId == sessionId) &&
+            (identical(other.peer, peer) || other.peer == peer));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sessionId, peer);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherJoined(sessionId: $sessionId, peer: $peer)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherJoinedCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherJoinedCopyWith(BridgeEvent_TogetherJoined value,
+          $Res Function(BridgeEvent_TogetherJoined) _then) =
+      _$BridgeEvent_TogetherJoinedCopyWithImpl;
+  @useResult
+  $Res call({String sessionId, String peer});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherJoinedCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherJoinedCopyWith<$Res> {
+  _$BridgeEvent_TogetherJoinedCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherJoined _self;
+  final $Res Function(BridgeEvent_TogetherJoined) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sessionId = null,
+    Object? peer = null,
+  }) {
+    return _then(BridgeEvent_TogetherJoined(
+      sessionId: null == sessionId
+          ? _self.sessionId
+          : sessionId // ignore: cast_nullable_to_non_nullable
+              as String,
+      peer: null == peer
+          ? _self.peer
+          : peer // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherCommand extends BridgeEvent {
+  const BridgeEvent_TogetherCommand(this.field0) : super._();
+
+  final TogetherCommandDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherCommandCopyWith<BridgeEvent_TogetherCommand>
+      get copyWith => _$BridgeEvent_TogetherCommandCopyWithImpl<
+          BridgeEvent_TogetherCommand>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherCommand &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherCommand(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherCommandCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherCommandCopyWith(
+          BridgeEvent_TogetherCommand value,
+          $Res Function(BridgeEvent_TogetherCommand) _then) =
+      _$BridgeEvent_TogetherCommandCopyWithImpl;
+  @useResult
+  $Res call({TogetherCommandDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherCommandCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherCommandCopyWith<$Res> {
+  _$BridgeEvent_TogetherCommandCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherCommand _self;
+  final $Res Function(BridgeEvent_TogetherCommand) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherCommand(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherCommandDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherCorrection extends BridgeEvent {
+  const BridgeEvent_TogetherCorrection(this.field0) : super._();
+
+  final TogetherCorrectionDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherCorrectionCopyWith<BridgeEvent_TogetherCorrection>
+      get copyWith => _$BridgeEvent_TogetherCorrectionCopyWithImpl<
+          BridgeEvent_TogetherCorrection>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherCorrection &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherCorrection(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherCorrectionCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherCorrectionCopyWith(
+          BridgeEvent_TogetherCorrection value,
+          $Res Function(BridgeEvent_TogetherCorrection) _then) =
+      _$BridgeEvent_TogetherCorrectionCopyWithImpl;
+  @useResult
+  $Res call({TogetherCorrectionDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherCorrectionCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherCorrectionCopyWith<$Res> {
+  _$BridgeEvent_TogetherCorrectionCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherCorrection _self;
+  final $Res Function(BridgeEvent_TogetherCorrection) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherCorrection(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherCorrectionDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherEnded extends BridgeEvent {
+  const BridgeEvent_TogetherEnded(
+      {required this.sessionId, required this.peer, required this.byPeer})
+      : super._();
+
+  final String sessionId;
+  final String peer;
+  final bool byPeer;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherEndedCopyWith<BridgeEvent_TogetherEnded> get copyWith =>
+      _$BridgeEvent_TogetherEndedCopyWithImpl<BridgeEvent_TogetherEnded>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherEnded &&
+            (identical(other.sessionId, sessionId) ||
+                other.sessionId == sessionId) &&
+            (identical(other.peer, peer) || other.peer == peer) &&
+            (identical(other.byPeer, byPeer) || other.byPeer == byPeer));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sessionId, peer, byPeer);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherEnded(sessionId: $sessionId, peer: $peer, byPeer: $byPeer)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherEndedCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherEndedCopyWith(BridgeEvent_TogetherEnded value,
+          $Res Function(BridgeEvent_TogetherEnded) _then) =
+      _$BridgeEvent_TogetherEndedCopyWithImpl;
+  @useResult
+  $Res call({String sessionId, String peer, bool byPeer});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherEndedCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherEndedCopyWith<$Res> {
+  _$BridgeEvent_TogetherEndedCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherEnded _self;
+  final $Res Function(BridgeEvent_TogetherEnded) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sessionId = null,
+    Object? peer = null,
+    Object? byPeer = null,
+  }) {
+    return _then(BridgeEvent_TogetherEnded(
+      sessionId: null == sessionId
+          ? _self.sessionId
+          : sessionId // ignore: cast_nullable_to_non_nullable
+              as String,
+      peer: null == peer
+          ? _self.peer
+          : peer // ignore: cast_nullable_to_non_nullable
+              as String,
+      byPeer: null == byPeer
+          ? _self.byPeer
+          : byPeer // ignore: cast_nullable_to_non_nullable
+              as bool,
     ));
   }
 }
@@ -1760,6 +2211,796 @@ class _$CallSignal_HangupCopyWithImpl<$Res>
           ? _self.reason
           : reason // ignore: cast_nullable_to_non_nullable
               as HangupReason,
+    ));
+  }
+}
+
+/// @nodoc
+mixin _$SyncVerdict {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is SyncVerdict);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'SyncVerdict()';
+  }
+}
+
+/// @nodoc
+class $SyncVerdictCopyWith<$Res> {
+  $SyncVerdictCopyWith(SyncVerdict _, $Res Function(SyncVerdict) __);
+}
+
+/// Adds pattern-matching-related methods to [SyncVerdict].
+extension SyncVerdictPatterns on SyncVerdict {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(SyncVerdict_Hold value)? hold,
+    TResult Function(SyncVerdict_Adopt value)? adopt,
+    TResult Function(SyncVerdict_Nudge value)? nudge,
+    TResult Function(SyncVerdict_Seek value)? seek,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold(_that);
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(SyncVerdict_Hold value) hold,
+    required TResult Function(SyncVerdict_Adopt value) adopt,
+    required TResult Function(SyncVerdict_Nudge value) nudge,
+    required TResult Function(SyncVerdict_Seek value) seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold():
+        return hold(_that);
+      case SyncVerdict_Adopt():
+        return adopt(_that);
+      case SyncVerdict_Nudge():
+        return nudge(_that);
+      case SyncVerdict_Seek():
+        return seek(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(SyncVerdict_Hold value)? hold,
+    TResult? Function(SyncVerdict_Adopt value)? adopt,
+    TResult? Function(SyncVerdict_Nudge value)? nudge,
+    TResult? Function(SyncVerdict_Seek value)? seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold(_that);
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? hold,
+    TResult Function(BigInt posMs, bool playing, BigInt seq)? adopt,
+    TResult Function(double rate)? nudge,
+    TResult Function(BigInt posMs)? seek,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold();
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that.posMs, _that.playing, _that.seq);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that.rate);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that.posMs);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() hold,
+    required TResult Function(BigInt posMs, bool playing, BigInt seq) adopt,
+    required TResult Function(double rate) nudge,
+    required TResult Function(BigInt posMs) seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold():
+        return hold();
+      case SyncVerdict_Adopt():
+        return adopt(_that.posMs, _that.playing, _that.seq);
+      case SyncVerdict_Nudge():
+        return nudge(_that.rate);
+      case SyncVerdict_Seek():
+        return seek(_that.posMs);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? hold,
+    TResult? Function(BigInt posMs, bool playing, BigInt seq)? adopt,
+    TResult? Function(double rate)? nudge,
+    TResult? Function(BigInt posMs)? seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold();
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that.posMs, _that.playing, _that.seq);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that.rate);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that.posMs);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Hold extends SyncVerdict {
+  const SyncVerdict_Hold() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is SyncVerdict_Hold);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'SyncVerdict.hold()';
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Adopt extends SyncVerdict {
+  const SyncVerdict_Adopt(
+      {required this.posMs, required this.playing, required this.seq})
+      : super._();
+
+  final BigInt posMs;
+  final bool playing;
+  final BigInt seq;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $SyncVerdict_AdoptCopyWith<SyncVerdict_Adopt> get copyWith =>
+      _$SyncVerdict_AdoptCopyWithImpl<SyncVerdict_Adopt>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is SyncVerdict_Adopt &&
+            (identical(other.posMs, posMs) || other.posMs == posMs) &&
+            (identical(other.playing, playing) || other.playing == playing) &&
+            (identical(other.seq, seq) || other.seq == seq));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, posMs, playing, seq);
+
+  @override
+  String toString() {
+    return 'SyncVerdict.adopt(posMs: $posMs, playing: $playing, seq: $seq)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $SyncVerdict_AdoptCopyWith<$Res>
+    implements $SyncVerdictCopyWith<$Res> {
+  factory $SyncVerdict_AdoptCopyWith(
+          SyncVerdict_Adopt value, $Res Function(SyncVerdict_Adopt) _then) =
+      _$SyncVerdict_AdoptCopyWithImpl;
+  @useResult
+  $Res call({BigInt posMs, bool playing, BigInt seq});
+}
+
+/// @nodoc
+class _$SyncVerdict_AdoptCopyWithImpl<$Res>
+    implements $SyncVerdict_AdoptCopyWith<$Res> {
+  _$SyncVerdict_AdoptCopyWithImpl(this._self, this._then);
+
+  final SyncVerdict_Adopt _self;
+  final $Res Function(SyncVerdict_Adopt) _then;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? posMs = null,
+    Object? playing = null,
+    Object? seq = null,
+  }) {
+    return _then(SyncVerdict_Adopt(
+      posMs: null == posMs
+          ? _self.posMs
+          : posMs // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+      playing: null == playing
+          ? _self.playing
+          : playing // ignore: cast_nullable_to_non_nullable
+              as bool,
+      seq: null == seq
+          ? _self.seq
+          : seq // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Nudge extends SyncVerdict {
+  const SyncVerdict_Nudge({required this.rate}) : super._();
+
+  final double rate;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $SyncVerdict_NudgeCopyWith<SyncVerdict_Nudge> get copyWith =>
+      _$SyncVerdict_NudgeCopyWithImpl<SyncVerdict_Nudge>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is SyncVerdict_Nudge &&
+            (identical(other.rate, rate) || other.rate == rate));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, rate);
+
+  @override
+  String toString() {
+    return 'SyncVerdict.nudge(rate: $rate)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $SyncVerdict_NudgeCopyWith<$Res>
+    implements $SyncVerdictCopyWith<$Res> {
+  factory $SyncVerdict_NudgeCopyWith(
+          SyncVerdict_Nudge value, $Res Function(SyncVerdict_Nudge) _then) =
+      _$SyncVerdict_NudgeCopyWithImpl;
+  @useResult
+  $Res call({double rate});
+}
+
+/// @nodoc
+class _$SyncVerdict_NudgeCopyWithImpl<$Res>
+    implements $SyncVerdict_NudgeCopyWith<$Res> {
+  _$SyncVerdict_NudgeCopyWithImpl(this._self, this._then);
+
+  final SyncVerdict_Nudge _self;
+  final $Res Function(SyncVerdict_Nudge) _then;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? rate = null,
+  }) {
+    return _then(SyncVerdict_Nudge(
+      rate: null == rate
+          ? _self.rate
+          : rate // ignore: cast_nullable_to_non_nullable
+              as double,
+    ));
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Seek extends SyncVerdict {
+  const SyncVerdict_Seek({required this.posMs}) : super._();
+
+  final BigInt posMs;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $SyncVerdict_SeekCopyWith<SyncVerdict_Seek> get copyWith =>
+      _$SyncVerdict_SeekCopyWithImpl<SyncVerdict_Seek>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is SyncVerdict_Seek &&
+            (identical(other.posMs, posMs) || other.posMs == posMs));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, posMs);
+
+  @override
+  String toString() {
+    return 'SyncVerdict.seek(posMs: $posMs)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $SyncVerdict_SeekCopyWith<$Res>
+    implements $SyncVerdictCopyWith<$Res> {
+  factory $SyncVerdict_SeekCopyWith(
+          SyncVerdict_Seek value, $Res Function(SyncVerdict_Seek) _then) =
+      _$SyncVerdict_SeekCopyWithImpl;
+  @useResult
+  $Res call({BigInt posMs});
+}
+
+/// @nodoc
+class _$SyncVerdict_SeekCopyWithImpl<$Res>
+    implements $SyncVerdict_SeekCopyWith<$Res> {
+  _$SyncVerdict_SeekCopyWithImpl(this._self, this._then);
+
+  final SyncVerdict_Seek _self;
+  final $Res Function(SyncVerdict_Seek) _then;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? posMs = null,
+  }) {
+    return _then(SyncVerdict_Seek(
+      posMs: null == posMs
+          ? _self.posMs
+          : posMs // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+mixin _$TogetherContent {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TogetherContent);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TogetherContent()';
+  }
+}
+
+/// @nodoc
+class $TogetherContentCopyWith<$Res> {
+  $TogetherContentCopyWith(
+      TogetherContent _, $Res Function(TogetherContent) __);
+}
+
+/// Adds pattern-matching-related methods to [TogetherContent].
+extension TogetherContentPatterns on TogetherContent {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(TogetherContent_LocalFile value)? localFile,
+    TResult Function(TogetherContent_Youtube value)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(TogetherContent_LocalFile value) localFile,
+    required TResult Function(TogetherContent_Youtube value) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile():
+        return localFile(_that);
+      case TogetherContent_Youtube():
+        return youtube(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(TogetherContent_LocalFile value)? localFile,
+    TResult? Function(TogetherContent_Youtube value)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(BigInt durationMs, String? label)? localFile,
+    TResult Function(String videoId)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that.durationMs, _that.label);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(BigInt durationMs, String? label) localFile,
+    required TResult Function(String videoId) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile():
+        return localFile(_that.durationMs, _that.label);
+      case TogetherContent_Youtube():
+        return youtube(_that.videoId);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(BigInt durationMs, String? label)? localFile,
+    TResult? Function(String videoId)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that.durationMs, _that.label);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class TogetherContent_LocalFile extends TogetherContent {
+  const TogetherContent_LocalFile({required this.durationMs, this.label})
+      : super._();
+
+  final BigInt durationMs;
+  final String? label;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TogetherContent_LocalFileCopyWith<TogetherContent_LocalFile> get copyWith =>
+      _$TogetherContent_LocalFileCopyWithImpl<TogetherContent_LocalFile>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TogetherContent_LocalFile &&
+            (identical(other.durationMs, durationMs) ||
+                other.durationMs == durationMs) &&
+            (identical(other.label, label) || other.label == label));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, durationMs, label);
+
+  @override
+  String toString() {
+    return 'TogetherContent.localFile(durationMs: $durationMs, label: $label)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TogetherContent_LocalFileCopyWith<$Res>
+    implements $TogetherContentCopyWith<$Res> {
+  factory $TogetherContent_LocalFileCopyWith(TogetherContent_LocalFile value,
+          $Res Function(TogetherContent_LocalFile) _then) =
+      _$TogetherContent_LocalFileCopyWithImpl;
+  @useResult
+  $Res call({BigInt durationMs, String? label});
+}
+
+/// @nodoc
+class _$TogetherContent_LocalFileCopyWithImpl<$Res>
+    implements $TogetherContent_LocalFileCopyWith<$Res> {
+  _$TogetherContent_LocalFileCopyWithImpl(this._self, this._then);
+
+  final TogetherContent_LocalFile _self;
+  final $Res Function(TogetherContent_LocalFile) _then;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? durationMs = null,
+    Object? label = freezed,
+  }) {
+    return _then(TogetherContent_LocalFile(
+      durationMs: null == durationMs
+          ? _self.durationMs
+          : durationMs // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+      label: freezed == label
+          ? _self.label
+          : label // ignore: cast_nullable_to_non_nullable
+              as String?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TogetherContent_Youtube extends TogetherContent {
+  const TogetherContent_Youtube({required this.videoId}) : super._();
+
+  final String videoId;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TogetherContent_YoutubeCopyWith<TogetherContent_Youtube> get copyWith =>
+      _$TogetherContent_YoutubeCopyWithImpl<TogetherContent_Youtube>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TogetherContent_Youtube &&
+            (identical(other.videoId, videoId) || other.videoId == videoId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, videoId);
+
+  @override
+  String toString() {
+    return 'TogetherContent.youtube(videoId: $videoId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TogetherContent_YoutubeCopyWith<$Res>
+    implements $TogetherContentCopyWith<$Res> {
+  factory $TogetherContent_YoutubeCopyWith(TogetherContent_Youtube value,
+          $Res Function(TogetherContent_Youtube) _then) =
+      _$TogetherContent_YoutubeCopyWithImpl;
+  @useResult
+  $Res call({String videoId});
+}
+
+/// @nodoc
+class _$TogetherContent_YoutubeCopyWithImpl<$Res>
+    implements $TogetherContent_YoutubeCopyWith<$Res> {
+  _$TogetherContent_YoutubeCopyWithImpl(this._self, this._then);
+
+  final TogetherContent_Youtube _self;
+  final $Res Function(TogetherContent_Youtube) _then;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? videoId = null,
+  }) {
+    return _then(TogetherContent_Youtube(
+      videoId: null == videoId
+          ? _self.videoId
+          : videoId // ignore: cast_nullable_to_non_nullable
+              as String,
     ));
   }
 }

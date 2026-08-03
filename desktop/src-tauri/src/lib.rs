@@ -139,6 +139,12 @@ pub fn run() {
             commands::place_call,
             commands::send_call_signal,
             commands::hangup_call,
+            commands::together_start,
+            commands::together_join,
+            commands::together_set_state,
+            commands::together_end,
+            commands::together_report_position,
+            commands::together_session,
             commands::log_call,
             commands::call_history,
             // Journal (strictly local)

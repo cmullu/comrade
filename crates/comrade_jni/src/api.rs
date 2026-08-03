@@ -71,12 +71,14 @@ use crate::frb_generated::StreamSink;
 // no Rust downstream.)
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+pub use comrade_core::together::{StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
     BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto,
-    UiError, UpiIntentDto, WorkspaceDto,
+    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TogetherCommandDto,
+    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TurnServerStatusDto, UiError,
+    UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -361,6 +363,79 @@ pub enum _CallSignal {
     },
 }
 
+#[frb(mirror(TogetherContent))]
+pub enum _TogetherContent {
+    LocalFile {
+        duration_ms: u64,
+        label: Option<String>,
+    },
+    Youtube {
+        video_id: String,
+    },
+}
+
+#[frb(mirror(SyncVerdict))]
+pub enum _SyncVerdict {
+    Hold,
+    Adopt {
+        pos_ms: u64,
+        playing: bool,
+        seq: u64,
+    },
+    Nudge {
+        rate: f64,
+    },
+    Seek {
+        pos_ms: u64,
+    },
+}
+
+#[frb(mirror(StateChange))]
+pub enum _StateChange {
+    Played,
+    Paused,
+    Seeked,
+    PausedAndSeeked,
+    Unchanged,
+}
+
+#[frb(mirror(TogetherInviteDto))]
+pub struct _TogetherInviteDto {
+    pub session_id: String,
+    pub peer: String,
+    pub content: TogetherContent,
+    pub pos_ms: u64,
+    pub playing: bool,
+    pub created_at: u64,
+}
+
+#[frb(mirror(TogetherSessionDto))]
+pub struct _TogetherSessionDto {
+    pub session_id: String,
+    pub peer: String,
+    pub content: TogetherContent,
+    pub we_lead: bool,
+    pub joined: bool,
+    pub pos_ms: u64,
+    pub playing: bool,
+}
+
+#[frb(mirror(TogetherCommandDto))]
+pub struct _TogetherCommandDto {
+    pub session_id: String,
+    pub pos_ms: u64,
+    pub playing: bool,
+    pub change: StateChange,
+}
+
+#[frb(mirror(TogetherCorrectionDto))]
+pub struct _TogetherCorrectionDto {
+    pub session_id: String,
+    pub verdict: SyncVerdict,
+    pub drift_ms: i64,
+    pub quality_ms: u64,
+}
+
 #[frb(mirror(BridgeEvent))]
 pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
@@ -386,6 +461,18 @@ pub enum _BridgeEvent {
     ComradeNudge {
         peer: String,
         name: Option<String>,
+    },
+    TogetherInvited(TogetherInviteDto),
+    TogetherJoined {
+        session_id: String,
+        peer: String,
+    },
+    TogetherCommand(TogetherCommandDto),
+    TogetherCorrection(TogetherCorrectionDto),
+    TogetherEnded {
+        session_id: String,
+        peer: String,
+        by_peer: bool,
     },
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
@@ -887,6 +974,41 @@ pub async fn send_call_signal(
     handles
         .send_call_signal(&peer, &call_id, media.as_str(), &signal_json)
         .await
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_start(
+    peer: String,
+    content: TogetherContent,
+) -> Result<TogetherSessionDto, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.together_start(&peer, content).await
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_join() -> Result<(), UiError> {
+    let handles = runtime().read().await.handles();
+    handles.together_join().await
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_set_state(pos_ms: u64, playing: bool) -> Result<(), UiError> {
+    let handles = runtime().read().await.handles();
+    handles.together_set_state(pos_ms, playing).await
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_end() -> Result<(), UiError> {
+    let handles = runtime().read().await.handles();
+    handles.together_end().await
+}
+
+/// Report where our own player is. Synchronous and skipped under contention —
+/// see [`Comrade::together_report_position`] in this crate's uniffi half.
+pub fn together_report_position(pos_ms: u64, playing: bool) {
+    if let Ok(rt) = runtime().try_read() {
+        rt.together_report_position(pos_ms, playing);
+    }
 }
 
 /// See [`broadcast_chitthi`] for the lock discipline.

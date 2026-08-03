@@ -26,7 +26,7 @@
  *    caller's UI thread.
  */
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -62,6 +62,12 @@ use comrade_core::sabha::{
 use comrade_core::sakha::{LedgerEntry, SakhaEngine, SakhaSyncCallback};
 use comrade_core::seen::{content_key, SeenSet, CONTENT_KEY_PREFIX};
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
+use comrade_core::together::{
+    describe_state_change, parse_together_envelope, projected_peer_pos_ms, session_is_live_at,
+    signal_is_fresh, sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandStamp,
+    StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope, TogetherSignal,
+    TOGETHER_HEARTBEAT_SECS,
+};
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
 };
@@ -158,6 +164,15 @@ const OUTBOX_FLUSH_INTERVAL_SECS: u64 = 60;
 /// wrapper can arrive repeatedly, and a duplicate `Answer` or terminal `Hangup`
 /// must not be re-applied downstream.
 const CALL_SIGNAL_DEDUP_CAPACITY: usize = 512;
+
+/// Capacity of the together *invite* dedup set.
+///
+/// Only [`TogetherSignal::Start`] needs one. Every other signal is ordered by
+/// its own Lamport counter (an exact, unbounded dedup that cannot be evicted)
+/// or is idempotent, so a two-hour session adds nothing here — which is the
+/// point: sharing [`CALL_SIGNAL_DEDUP_CAPACITY`]'s set would let one film evict
+/// a live call's signals.
+const TOGETHER_START_DEDUP_CAPACITY: usize = 64;
 
 /// How long a message stays eligible for **cross-transport** dedup.
 ///
@@ -325,6 +340,133 @@ pub struct CallSignalDto {
     /// frontend apply its own freshness judgement in addition to the runtime's
     /// own staleness drop (see `CALL_SIGNAL_MAX_AGE_SECS` in `dispatch_incoming_dm`).
     pub created_at: u64,
+}
+
+/// An invitation to watch or listen to something together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TogetherInviteDto {
+    pub session_id: String,
+    pub peer: String,
+    pub content: TogetherContent,
+    pub pos_ms: u64,
+    pub playing: bool,
+    /// The invite's true send time (unix seconds), like [`CallSignalDto::created_at`].
+    pub created_at: u64,
+}
+
+/// A live shared session, as the frontend sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TogetherSessionDto {
+    pub session_id: String,
+    pub peer: String,
+    pub content: TogetherContent,
+    /// Whether *we* started it. The starter leads, and only the follower
+    /// corrects drift — see `comrade_core::together::sync_verdict`.
+    pub we_lead: bool,
+    pub joined: bool,
+    pub pos_ms: u64,
+    pub playing: bool,
+}
+
+/// The peer played, paused or seeked, and this command won the ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TogetherCommandDto {
+    pub session_id: String,
+    pub pos_ms: u64,
+    pub playing: bool,
+    pub change: StateChange,
+}
+
+/// The player should be moved to stay with the other side.
+///
+/// Emitted **only** when the verdict is not `Hold`, which is what keeps a
+/// periodic heartbeat from becoming a periodic producer on the critical event
+/// bus (see [`EVENT_BUS_CAPACITY`]). `drift_ms` and `quality_ms` are carried so
+/// a UI can report the drift it actually has rather than one we predicted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct TogetherCorrectionDto {
+    pub session_id: String,
+    pub verdict: SyncVerdict,
+    pub drift_ms: i64,
+    /// How wrong that drift figure could be — half the measured round trip.
+    pub quality_ms: u64,
+}
+
+/// The live session, as the runtime keeps it. Never persisted, never more than
+/// one — see [`ComradeRuntime::together`].
+struct TogetherSession {
+    id: String,
+    /// The other person, as an npub (what every DTO and the arbitration use).
+    peer: String,
+    /// The same key in hex, so a send does not have to re-derive it.
+    peer_hex: String,
+    content: TogetherContent,
+    we_lead: bool,
+    our_npub: String,
+    /// Whether they have answered our invitation yet.
+    joined: bool,
+    /// The last command either side applied — the Lamport position both devices
+    /// order against.
+    applied: CommandStamp,
+    local_pos_ms: u64,
+    local_playing: bool,
+    peer_pos_ms: u64,
+    peer_playing: bool,
+    /// Their clock when they last told us where they were.
+    peer_at_ms: u64,
+    /// Our clock when we last heard anything at all from them — the TTL reads
+    /// this, so a heartbeat keeps a session alive even if nothing changed.
+    last_heard_ms: u64,
+    /// Our clock when we last moved the playhead automatically.
+    last_seek_ms: u64,
+    clock: ClockFilter,
+    /// Our own recent send stamps, so an echo coming back can be matched to the
+    /// message that provoked it. Four is plenty: an echo older than that is
+    /// older than the probe window cares about.
+    sent_at_ms: std::collections::VecDeque<u64>,
+    /// What to echo back on our next message, so *they* can measure the round
+    /// trip too. Both sides probe from the same traffic.
+    echo_back: Option<ClockEcho>,
+}
+
+impl TogetherSession {
+    fn dto(&self) -> TogetherSessionDto {
+        TogetherSessionDto {
+            session_id: self.id.clone(),
+            peer: self.peer.clone(),
+            content: self.content.clone(),
+            we_lead: self.we_lead,
+            joined: self.joined,
+            pos_ms: self.local_pos_ms,
+            playing: self.local_playing,
+        }
+    }
+
+    /// Record that we sent something at `at_ms`, keeping the ring small.
+    fn note_send(&mut self, at_ms: u64) {
+        self.sent_at_ms.push_back(at_ms);
+        while self.sent_at_ms.len() > 4 {
+            self.sent_at_ms.pop_front();
+        }
+    }
+
+    /// Fold one incoming echo into the clock filter. `their_at_ms` is when they
+    /// sent the message carrying it, `our_recv_ms` when we got it — which,
+    /// together with the two stamps inside the echo, are the four timestamps a
+    /// round trip needs.
+    fn observe_clock(&mut self, echo: Option<ClockEcho>, their_at_ms: u64, our_recv_ms: u64) {
+        if let Some(echo) = echo {
+            // `echo.your_at_ms` is one of *our* sends, quoted back at us.
+            if self.sent_at_ms.contains(&echo.your_at_ms) {
+                self.clock
+                    .observe(echo.your_at_ms, echo.my_recv_ms, their_at_ms, our_recv_ms);
+            }
+        }
+        self.echo_back = Some(ClockEcho {
+            your_at_ms: their_at_ms,
+            my_recv_ms: our_recv_ms,
+        });
+    }
 }
 
 /// A voice/video call-log entry as the frontend sees it.
@@ -930,6 +1072,23 @@ pub enum BridgeEvent {
         /// so a notification can be raised without a store round-trip.
         name: Option<String>,
     },
+    /// Someone asked to watch or listen to something together.
+    TogetherInvited(TogetherInviteDto),
+    /// They accepted our invitation, so the session is live on both sides.
+    TogetherJoined { session_id: String, peer: String },
+    /// They played, paused or seeked.
+    TogetherCommand(TogetherCommandDto),
+    /// Our playhead has drifted from theirs by more than the measurement error
+    /// is worth, and here is what to do about it.
+    TogetherCorrection(TogetherCorrectionDto),
+    /// The session is over. `by_peer` distinguishes "they left" from "we stopped
+    /// hearing from them" — which is something *we* observed, never something
+    /// the wire told us, because a departing peer sends no reason.
+    TogetherEnded {
+        session_id: String,
+        peer: String,
+        by_peer: bool,
+    },
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
     MeshStatusChanged(MeshStatusDto),
@@ -1022,6 +1181,16 @@ pub struct ComradeRuntime {
     /// which runs on a detached [`RuntimeHandles`], not on `&self` — watches
     /// the same map the frontends report into.
     nudge_watch: Arc<NudgeWatch>,
+    /// The one live watch/listen-together session, or none.
+    ///
+    /// Deliberately **not** persisted, and deliberately at most one: a playhead
+    /// is a claim about right now, and a session that outlived the process would
+    /// reopen the replay hole that "after a relaunch there is no session, so
+    /// every backfilled command is dropped" closes. One at a time also keeps the
+    /// command arbitration a two-party problem, which is what makes it provable.
+    together: Arc<Mutex<Option<TogetherSession>>>,
+    /// Invitation ids already seen — see [`TOGETHER_START_DEDUP_CAPACITY`].
+    together_starts_seen: Arc<SeenSet>,
 }
 
 impl Default for ComradeRuntime {
@@ -1072,6 +1241,8 @@ impl ComradeRuntime {
             )),
             mesh_dm_task: None,
             nudge_watch: Arc::new(NudgeWatch::new()),
+            together: Arc::new(Mutex::new(None)),
+            together_starts_seen: Arc::new(SeenSet::new(TOGETHER_START_DEDUP_CAPACITY)),
         }
     }
 
@@ -1278,6 +1449,10 @@ impl ComradeRuntime {
         // A hesitation belongs to the session it happened in. Locking up is a
         // deliberate exit — the goodbye beacon above has just told the comrades
         // we are gone, and a nudge landing after it would claim the opposite.
+        // Same reason, one step further: a locked vault is not watching a film
+        // with anyone, and a command landing after the goodbye beacon would say
+        // otherwise. The peer's own TTL is what actually ends it on their side.
+        *self.together.lock().unwrap() = None;
         self.nudge_watch.clear();
         self.ui.lock();
     }
@@ -1337,6 +1512,10 @@ impl ComradeRuntime {
             let outbox = self.outbox.clone();
             let transport_dedup = self.transport_dedup.clone();
             let mesh = self.mesh_link();
+            let together_link = TogetherLink {
+                session: self.together.clone(),
+                starts_seen: self.together_starts_seen.clone(),
+            };
             // Widen the backfill window past the standard gift-wrap skew when
             // this device was last seen longer ago than that (see
             // `VaultEngine::subscribe_inbox_with_callback`'s `since_floor`).
@@ -1348,6 +1527,7 @@ impl ComradeRuntime {
                         label: TRANSPORT_RELAY,
                         dedup: &transport_dedup,
                         mesh: mesh.as_ref(),
+                        together: Some(&together_link),
                     };
                     dispatch_incoming_dm(
                         &vault_cb,
@@ -1480,6 +1660,10 @@ impl ComradeRuntime {
             engine: engine.clone(),
             keys: keys.clone(),
         };
+        let together_link = TogetherLink {
+            session: self.together.clone(),
+            starts_seen: self.together_starts_seen.clone(),
+        };
         let pay_regex = build_pay_regex().ok();
 
         self.mesh_dm_task = Some(tokio::spawn(async move {
@@ -1513,6 +1697,7 @@ impl ComradeRuntime {
                     label: TRANSPORT_MESH,
                     dedup: &transport_dedup,
                     mesh: Some(&mesh),
+                    together: Some(&together_link),
                 };
                 dispatch_incoming_dm(
                     &vault,
@@ -2155,6 +2340,53 @@ impl ComradeRuntime {
         self.handles()
             .send_call_signal(peer, call_id, media, signal_json)
             .await
+    }
+
+    /// Invite `peer` to watch or listen to something together.
+    /// Delegates to [`RuntimeHandles::together_start`] — see [`Self::send_dm`].
+    pub async fn together_start(
+        &self,
+        peer: &str,
+        content: TogetherContent,
+    ) -> Result<TogetherSessionDto, UiError> {
+        self.handles().together_start(peer, content).await
+    }
+
+    /// Accept an invitation. Delegates to [`RuntimeHandles::together_join`].
+    pub async fn together_join(&self) -> Result<(), UiError> {
+        self.handles().together_join().await
+    }
+
+    /// Play, pause or seek. Delegates to [`RuntimeHandles::together_set_state`].
+    pub async fn together_set_state(&self, pos_ms: u64, playing: bool) -> Result<(), UiError> {
+        self.handles().together_set_state(pos_ms, playing).await
+    }
+
+    /// Leave the session. Delegates to [`RuntimeHandles::together_end`].
+    pub async fn together_end(&self) -> Result<(), UiError> {
+        self.handles().together_end().await
+    }
+
+    /// Tell the runtime where our own player is, without sending anything.
+    ///
+    /// Synchronous and non-blocking by design: a player calls this several times
+    /// a second from its UI thread, and it must never wait behind a vault
+    /// unlock. It is also *not* a command — it changes nothing anyone else sees;
+    /// it only gives the next drift verdict something true to compare against,
+    /// so skipping it under contention fails in the harmless direction (the same
+    /// trade [`Self::note_draft`] makes).
+    pub fn together_report_position(&self, pos_ms: u64, playing: bool) {
+        if let Ok(mut guard) = self.together.try_lock() {
+            if let Some(session) = guard.as_mut() {
+                session.local_pos_ms = pos_ms;
+                session.local_playing = playing;
+            }
+        }
+    }
+
+    /// The live session, if there is one.
+    pub fn together_session(&self) -> Option<TogetherSessionDto> {
+        self.together.lock().unwrap().as_ref().map(|s| s.dto())
     }
 
     /// Convenience: send a `Hangup` signal with `reason` (`normal`, `declined`,
@@ -3535,6 +3767,7 @@ impl ComradeRuntime {
             prefer_local: self.ui.current_workspace().mesh_active,
             nudge_watch: self.nudge_watch.clone(),
             presence_active: self.presence_active.clone(),
+            together: self.together.clone(),
         }
     }
 
@@ -3588,6 +3821,8 @@ pub struct RuntimeHandles {
     nudge_watch: Arc<NudgeWatch>,
     /// Shared with [`ComradeRuntime::presence_active`] — see its doc comment.
     presence_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared with [`ComradeRuntime::together`] — see its doc comment.
+    together: Arc<Mutex<Option<TogetherSession>>>,
 }
 
 impl RuntimeHandles {
@@ -4281,6 +4516,233 @@ impl RuntimeHandles {
         }
     }
 
+    /// Send one together envelope, stamping it with our clock and whatever echo
+    /// we owe the peer, and remembering the stamp so their echo can be matched
+    /// back to it. The session lock is taken, used, and **dropped before the
+    /// send** — the rule that has already cost this repo two shipped deadlocks.
+    async fn send_together(&self, signal: TogetherSignal) -> Result<(), UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let at_ms = now_ms();
+        let (peer_hex, env) = {
+            let mut guard = self.together.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| UiError::Engine("no watch-together session is running".into()))?;
+            session.note_send(at_ms);
+            let env = TogetherEnvelope::new(
+                session.id.clone(),
+                session.applied.seq,
+                at_ms,
+                session.echo_back,
+                signal,
+            );
+            (session.peer_hex.clone(), env)
+        };
+        let peer_pk = parse_pubkey(&peer_hex)?;
+        let json = env.to_json().map_err(|e| UiError::Engine(e.to_string()))?;
+        vault
+            .send_dm(&peer_pk, &json)
+            .await
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Invite `peer` to watch or listen to `content` together, and become the
+    /// session's leader (the side that does not drift-correct).
+    pub async fn together_start(
+        &self,
+        peer: &str,
+        content: TogetherContent,
+    ) -> Result<TogetherSessionDto, UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        if let TogetherContent::Youtube { video_id } = &content {
+            if !valid_youtube_id(video_id) {
+                return Err(UiError::Engine("not a YouTube video link".into()));
+            }
+        }
+        let peer_pk = parse_pubkey(peer)?;
+        let peer_npub = to_npub(peer);
+        let our_npub = self
+            .keys
+            .as_ref()
+            .map(|k| to_npub(&k.public_key().to_hex()))
+            .unwrap_or_default();
+        let at_ms = now_ms();
+        let session_id = comrade_core::together::new_session_id();
+        let (dto, env) = {
+            let mut guard = self.together.lock().unwrap();
+            if guard.is_some() {
+                return Err(UiError::Engine(
+                    "already watching something together".into(),
+                ));
+            }
+            let mut session = TogetherSession {
+                id: session_id.clone(),
+                peer: peer_npub.clone(),
+                peer_hex: peer_pk.to_hex(),
+                content: content.clone(),
+                we_lead: true,
+                our_npub: our_npub.clone(),
+                joined: false,
+                applied: CommandStamp::new(1, our_npub, true),
+                local_pos_ms: 0,
+                local_playing: false,
+                peer_pos_ms: 0,
+                peer_playing: false,
+                peer_at_ms: at_ms,
+                last_heard_ms: at_ms,
+                last_seek_ms: 0,
+                clock: ClockFilter::new(),
+                sent_at_ms: std::collections::VecDeque::new(),
+                echo_back: None,
+            };
+            session.note_send(at_ms);
+            let env = TogetherEnvelope::new(
+                session_id.clone(),
+                1,
+                at_ms,
+                None,
+                TogetherSignal::Start {
+                    content,
+                    pos_ms: 0,
+                    playing: false,
+                },
+            );
+            let dto = session.dto();
+            *guard = Some(session);
+            (dto, env)
+        };
+        let json = env.to_json().map_err(|e| UiError::Engine(e.to_string()))?;
+        if let Err(e) = vault.send_dm(&peer_pk, &json).await {
+            // The invitation never left, so do not leave a session behind
+            // claiming otherwise.
+            *self.together.lock().unwrap() = None;
+            return Err(UiError::Engine(e.to_string()));
+        }
+        self.spawn_together_loop();
+        Ok(dto)
+    }
+
+    /// Accept the invitation we were sent.
+    pub async fn together_join(&self) -> Result<(), UiError> {
+        {
+            let mut guard = self.together.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| UiError::Engine("nothing to join".into()))?;
+            session.joined = true;
+        }
+        self.send_together(TogetherSignal::Join).await?;
+        self.spawn_together_loop();
+        Ok(())
+    }
+
+    /// Play, pause or seek — one signal, because all three are the same
+    /// statement. Bumps the Lamport counter, so this command outranks anything
+    /// either side had applied before it.
+    pub async fn together_set_state(&self, pos_ms: u64, playing: bool) -> Result<(), UiError> {
+        {
+            let mut guard = self.together.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| UiError::Engine("no watch-together session is running".into()))?;
+            let our_npub = session.our_npub.clone();
+            session.applied = CommandStamp::new(session.applied.seq + 1, our_npub, !playing);
+            session.local_pos_ms = pos_ms;
+            session.local_playing = playing;
+        }
+        self.send_together(TogetherSignal::State { pos_ms, playing })
+            .await
+    }
+
+    /// Leave. Best-effort on the wire — a session the other side never hears
+    /// about ending simply ages out on their TTL, which is what that exists for.
+    pub async fn together_end(&self) -> Result<(), UiError> {
+        let ended = {
+            let guard = self.together.lock().unwrap();
+            guard.as_ref().map(|s| (s.id.clone(), s.peer.clone()))
+        };
+        let Some((session_id, peer)) = ended else {
+            return Ok(());
+        };
+        let sent = self.send_together(TogetherSignal::End).await;
+        *self.together.lock().unwrap() = None;
+        let _ = self.events.send(BridgeEvent::TogetherEnded {
+            session_id,
+            peer,
+            by_peer: false,
+        });
+        sent
+    }
+
+    /// One pass of the session loop: expire a session we have stopped hearing
+    /// from, or tell the other side where we are.
+    async fn together_tick(&self) {
+        let at = now_ms();
+        let expired = {
+            let mut guard = self.together.lock().unwrap();
+            match guard.as_ref() {
+                Some(s) if !session_is_live_at(s.last_heard_ms, at) => {
+                    let ended = Some((s.id.clone(), s.peer.clone()));
+                    *guard = None;
+                    ended
+                }
+                _ => None,
+            }
+        };
+        if let Some((session_id, peer)) = expired {
+            let _ = self.events.send(BridgeEvent::TogetherEnded {
+                session_id,
+                peer,
+                by_peer: false,
+            });
+            return;
+        }
+        // A paused session drifts by exactly nothing, so it says nothing: a
+        // heartbeat is a persistent gift wrap, and one carrying no news is pure
+        // metadata on someone else's relay.
+        let beat = {
+            let guard = self.together.lock().unwrap();
+            guard
+                .as_ref()
+                .filter(|s| s.joined && s.local_playing)
+                .map(|s| TogetherSignal::Heartbeat {
+                    pos_ms: s.local_pos_ms,
+                    playing: s.local_playing,
+                    applied_seq: s.applied.seq,
+                })
+        };
+        if let Some(beat) = beat {
+            let _ = self.send_together(beat).await;
+        }
+    }
+
+    /// Run the session loop until the session is gone.
+    ///
+    /// Detached rather than tracked, and self-terminating rather than aborted:
+    /// once [`ComradeRuntime::lock_vault`] has cleared the session there is
+    /// nothing left to cancel, because the very next tick finds nothing and
+    /// stops. A tracked handle would buy an earlier exit for a loop that is
+    /// already doing nothing.
+    fn spawn_together_loop(&self) {
+        let handles = self.clone();
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(TOGETHER_HEARTBEAT_SECS));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately; skip it, since whoever spawned
+            // this has just sent the message that started the session.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if handles.together.lock().unwrap().is_none() {
+                    return;
+                }
+                handles.together_tick().await;
+            }
+        });
+    }
+
     pub async fn hangup_call(
         &self,
         peer: &str,
@@ -4572,6 +5034,16 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// Wall clock in milliseconds. The together channel needs this resolution: a
+/// DM's own `created_at` is whole seconds, which is a full second of noise in a
+/// system trying to hold a fraction of one.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or_default()
 }
 
@@ -5192,6 +5664,222 @@ fn handle_nudge(
     });
 }
 
+/// Apply one incoming together envelope to the live session.
+///
+/// Every replay guard this feature has meets here. In order: the **age gate**,
+/// which is the only thing standing between a two-day-old backfilled invitation
+/// and a fresh one; the **session lookup**, which drops every other signal that
+/// does not name a session this process is actually in (and after a relaunch it
+/// is in none, so the whole backfill is inert); and the **Lamport order**, which
+/// makes a redelivered command an exact no-op without needing a dedup set that
+/// could be evicted.
+fn handle_together_envelope(
+    tx: &broadcast::Sender<BridgeEvent>,
+    link: &TogetherLink,
+    peer_npub: &str,
+    sender_hex: &str,
+    created_at: u64,
+    env: TogetherEnvelope,
+) {
+    if !signal_is_fresh(created_at, now_secs()) {
+        tracing::debug!(peer = %peer_npub, created_at, "dropping stale together signal");
+        return;
+    }
+    let at = now_ms();
+    let mut guard = link.session.lock().unwrap();
+
+    // An invitation is the only signal that may create state from nothing.
+    if let TogetherSignal::Start {
+        content,
+        pos_ms,
+        playing,
+    } = env.signal
+    {
+        if guard.is_some() {
+            // One session at a time — that is what keeps the arbitration a
+            // two-party problem. We answer nothing: the inviter's own invite
+            // simply times out, and "they didn't pick up" is the honest reading.
+            tracing::debug!(peer = %peer_npub, "together invite while already in a session");
+            return;
+        }
+        if link.starts_seen.already_seen(&env.session_id) {
+            tracing::debug!(session = %env.session_id, "dropping duplicate together invite");
+            return;
+        }
+        // A peer-supplied video id ends up in an `<iframe src>`. Refuse a
+        // malformed one here so no frontend has to remember to.
+        if let TogetherContent::Youtube { video_id } = &content {
+            if !valid_youtube_id(video_id) {
+                tracing::warn!(peer = %peer_npub, "dropping together invite with a bad video id");
+                return;
+            }
+        }
+        *guard = Some(TogetherSession {
+            id: env.session_id.clone(),
+            peer: peer_npub.to_string(),
+            peer_hex: sender_hex.to_string(),
+            content: content.clone(),
+            // They invited us, so they lead and we are the side that corrects.
+            we_lead: false,
+            our_npub: String::new(),
+            joined: false,
+            applied: CommandStamp::new(env.seq, peer_npub, !playing),
+            local_pos_ms: pos_ms,
+            local_playing: false,
+            peer_pos_ms: pos_ms,
+            peer_playing: playing,
+            peer_at_ms: env.at_ms,
+            last_heard_ms: at,
+            last_seek_ms: 0,
+            clock: ClockFilter::new(),
+            sent_at_ms: std::collections::VecDeque::new(),
+            echo_back: Some(ClockEcho {
+                your_at_ms: env.at_ms,
+                my_recv_ms: at,
+            }),
+        });
+        drop(guard);
+        let _ = tx.send(BridgeEvent::TogetherInvited(TogetherInviteDto {
+            session_id: env.session_id,
+            peer: peer_npub.to_string(),
+            content,
+            pos_ms,
+            playing,
+            created_at,
+        }));
+        return;
+    }
+
+    // Everything else needs a session this device is already in, with this peer.
+    let Some(session) = guard.as_mut() else {
+        tracing::debug!(session = %env.session_id, "together signal for no live session");
+        return;
+    };
+    if session.id != env.session_id || session.peer != peer_npub {
+        return;
+    }
+    session.last_heard_ms = at;
+    session.observe_clock(env.echo, env.at_ms, at);
+
+    match env.signal {
+        TogetherSignal::Start { .. } => unreachable!("handled above"),
+        TogetherSignal::Join => {
+            if session.joined {
+                return;
+            }
+            session.joined = true;
+            let (session_id, peer) = (session.id.clone(), session.peer.clone());
+            drop(guard);
+            let _ = tx.send(BridgeEvent::TogetherJoined { session_id, peer });
+        }
+        TogetherSignal::End => {
+            let (session_id, peer) = (session.id.clone(), session.peer.clone());
+            *guard = None;
+            drop(guard);
+            let _ = tx.send(BridgeEvent::TogetherEnded {
+                session_id,
+                peer,
+                by_peer: true,
+            });
+        }
+        TogetherSignal::State { pos_ms, playing } => {
+            let incoming = CommandStamp::new(env.seq, peer_npub, !playing);
+            if !incoming.wins_over(&session.applied) {
+                // Either a redelivered copy, or our own command outranks theirs
+                // and they will follow our next heartbeat. Either way: silence,
+                // which is what stops the two devices arguing.
+                tracing::debug!(session = %env.session_id, "together command did not win");
+                return;
+            }
+            let expected = projected_peer_pos_ms(&SyncSample {
+                local_pos_ms: session.local_pos_ms,
+                local_playing: session.local_playing,
+                local_seq: session.applied.seq,
+                peer_pos_ms: session.peer_pos_ms,
+                peer_playing: session.peer_playing,
+                peer_seq: env.seq,
+                peer_at_ms: session.peer_at_ms,
+                now_ms: at,
+                last_seek_ms: session.last_seek_ms,
+                clock: session.clock.estimate(at),
+                we_lead: session.we_lead,
+            })
+            .max(0) as u64;
+            let change = describe_state_change(session.peer_playing, playing, expected, pos_ms);
+            session.applied = incoming;
+            session.peer_pos_ms = pos_ms;
+            session.peer_playing = playing;
+            session.peer_at_ms = env.at_ms;
+            // A command is not a correction: we take it wholesale.
+            session.local_pos_ms = pos_ms;
+            session.local_playing = playing;
+            let session_id = session.id.clone();
+            drop(guard);
+            let _ = tx.send(BridgeEvent::TogetherCommand(TogetherCommandDto {
+                session_id,
+                pos_ms,
+                playing,
+                change,
+            }));
+        }
+        TogetherSignal::Heartbeat {
+            pos_ms,
+            playing,
+            applied_seq,
+        } => {
+            session.peer_pos_ms = pos_ms;
+            session.peer_playing = playing;
+            session.peer_at_ms = env.at_ms;
+            let clock = session.clock.estimate(at);
+            let sample = SyncSample {
+                local_pos_ms: session.local_pos_ms,
+                local_playing: session.local_playing,
+                local_seq: session.applied.seq,
+                peer_pos_ms: pos_ms,
+                peer_playing: playing,
+                peer_seq: applied_seq,
+                peer_at_ms: env.at_ms,
+                now_ms: at,
+                last_seek_ms: session.last_seek_ms,
+                clock,
+                we_lead: session.we_lead,
+            };
+            let verdict = sync_verdict(&sample, session.content.tuning());
+            if matches!(verdict, SyncVerdict::Hold) {
+                // The steady state, and the reason a ten-second heartbeat is not
+                // a periodic producer on the critical bus: nothing is emitted.
+                return;
+            }
+            let drift_ms = sample.local_pos_ms as i64 - projected_peer_pos_ms(&sample);
+            match verdict {
+                SyncVerdict::Seek { pos_ms } => {
+                    session.last_seek_ms = at;
+                    session.local_pos_ms = pos_ms;
+                }
+                SyncVerdict::Adopt {
+                    pos_ms,
+                    playing,
+                    seq,
+                } => {
+                    session.applied = CommandStamp::new(seq, peer_npub, !playing);
+                    session.local_pos_ms = pos_ms;
+                    session.local_playing = playing;
+                    session.peer_pos_ms = pos_ms;
+                }
+                _ => {}
+            }
+            let session_id = session.id.clone();
+            drop(guard);
+            let _ = tx.send(BridgeEvent::TogetherCorrection(TogetherCorrectionDto {
+                session_id,
+                verdict,
+                drift_ms,
+                quality_ms: clock.uncertainty_ms(),
+            }));
+        }
+    }
+}
+
 /// Fire a delivered receipt back to `sender_hex` for `message_id` (best-effort;
 /// only ever called for accepted conversations).
 fn send_delivered_receipt(
@@ -5359,6 +6047,21 @@ struct DmRoute<'a> {
     dedup: &'a SeenSet,
     /// The local mesh, when one is running.
     mesh: Option<&'a MeshLink>,
+    /// The live watch-together session, when the caller has one to offer.
+    ///
+    /// It rides here rather than as a ninth positional parameter because it is
+    /// per-ingress context of exactly the same kind as `dedup` and `mesh` — the
+    /// state this delivery may act on — and because a parameter would have to be
+    /// threaded through thirty-odd call sites that have nothing to do with it.
+    /// `None` in the tests that are not about together at all.
+    together: Option<&'a TogetherLink>,
+}
+
+/// The together state one ingress path may touch: the single live session, and
+/// the small set of invitation ids already seen.
+struct TogetherLink {
+    session: Arc<Mutex<Option<TogetherSession>>>,
+    starts_seen: Arc<SeenSet>,
 }
 
 impl DmRoute<'_> {
@@ -5548,7 +6251,28 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 6) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 6) Watch/listen together. Gated exactly like a call signal — a stranger
+    //    must not be able to move your playhead — and returning either way, so
+    //    an ungated control message is dropped rather than surfacing as a
+    //    message request full of JSON. Everything else about replay safety is
+    //    inside `handle_together_envelope`.
+    if let Some(env) = parse_together_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            if let Some(link) = route.together {
+                handle_together_envelope(
+                    tx,
+                    link,
+                    &peer_npub,
+                    &msg.sender_pubkey,
+                    msg.created_at,
+                    env,
+                );
+            }
+        }
+        return;
+    }
+
+    // 7) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         // Everything in the envelope is chosen by the peer. The MIME type
@@ -5616,7 +6340,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 7) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 8) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
     // A message can reach us twice by two routes — sealed over the local mesh
@@ -7834,6 +8558,7 @@ mod tests {
             label: TRANSPORT_RELAY,
             dedup,
             mesh: None,
+            together: None,
         }
     }
 
@@ -8707,6 +9432,406 @@ mod tests {
 
     // ── T1: call-signal freshness + dedup ────────────────────────────────────
 
+    /// A relay route carrying a live together session.
+    fn together_route<'a>(dedup: &'a SeenSet, link: &'a TogetherLink) -> DmRoute<'a> {
+        DmRoute {
+            label: TRANSPORT_RELAY,
+            dedup,
+            mesh: None,
+            together: Some(link),
+        }
+    }
+
+    fn together_link() -> TogetherLink {
+        TogetherLink {
+            session: Arc::new(Mutex::new(None)),
+            starts_seen: Arc::new(SeenSet::new(TOGETHER_START_DEDUP_CAPACITY)),
+        }
+    }
+
+    fn together_json(session_id: &str, seq: u64, signal: TogetherSignal) -> String {
+        TogetherEnvelope::new(session_id, seq, now_ms(), None, signal)
+            .to_json()
+            .unwrap()
+    }
+
+    fn a_film() -> TogetherContent {
+        TogetherContent::local_file(7_200_000, Some("Solaris".into()))
+    }
+
+    /// The two-day inbox backfill is the case this exists for: an invitation is
+    /// the only signal that can create a session from nothing, so the age gate
+    /// is the only thing standing behind it.
+    #[tokio::test]
+    async fn dispatch_drops_a_two_day_old_invitation_and_dedups_a_fresh_one() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s1",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+
+        let mut stale = incoming(&hex, "e1", &invite);
+        stale.created_at = now_secs().saturating_sub(172_800);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, stale);
+        assert!(
+            rx.try_recv().is_err(),
+            "a two-day-old invitation must not open a session"
+        );
+        assert!(link.session.lock().unwrap().is_none());
+
+        let mut fresh = incoming(&hex, "e2", &invite);
+        fresh.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, fresh);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherInvited(_)
+        ));
+
+        // The same invitation, redelivered after we left: the invite dedup set
+        // must stop it re-inviting us.
+        *link.session.lock().unwrap() = None;
+        let mut again = incoming(&hex, "e3", &invite);
+        again.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, again);
+        assert!(
+            rx.try_recv().is_err(),
+            "a redelivered invitation must not re-invite"
+        );
+    }
+
+    /// The scenario the whole replay story exists for: a backfilled "seek to
+    /// 42:00" must be unable to move anyone's playhead. It dies twice over —
+    /// once on age, and again because after a relaunch there is no session for
+    /// it to name.
+    #[tokio::test]
+    async fn a_two_day_old_seek_or_play_moves_nothing() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        for signal in [
+            TogetherSignal::State {
+                pos_ms: 2_520_000,
+                playing: false,
+            },
+            TogetherSignal::State {
+                pos_ms: 0,
+                playing: true,
+            },
+        ] {
+            let body = together_json("s1", 9, signal);
+            let mut old = incoming(&hex, "old", &body);
+            old.created_at = now_secs().saturating_sub(172_800);
+            dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, old);
+            assert!(rx.try_recv().is_err(), "a replayed command reached the bus");
+            assert!(link.session.lock().unwrap().is_none());
+        }
+    }
+
+    /// Even a perfectly fresh command is inert without a session naming it —
+    /// which is what makes "sessions never outlive the process" load-bearing
+    /// rather than merely tidy.
+    #[tokio::test]
+    async fn a_command_for_an_unknown_session_reaches_nothing() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let body = together_json(
+            "never-heard-of-it",
+            4,
+            TogetherSignal::State {
+                pos_ms: 1_000,
+                playing: true,
+            },
+        );
+        let mut msg = incoming(&hex, "e1", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The call channel's gate, restated for a playhead: a stranger must not be
+    /// able to drive your player, and their JSON must not surface as a message
+    /// request either.
+    #[tokio::test]
+    async fn a_stranger_cannot_start_a_session_or_leave_a_message_request() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger(); // deliberately never accepted
+
+        let invite = together_json(
+            "s1",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        let mut msg = incoming(&hex, "e1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+
+        assert!(rx.try_recv().is_err(), "a stranger reached the event bus");
+        assert!(link.session.lock().unwrap().is_none());
+        assert!(
+            store.get_conversation_meta(&peer).unwrap().is_none(),
+            "a control envelope must not leave a message request behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invitation_naming_a_malformed_video_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s1",
+            1,
+            TogetherSignal::Start {
+                content: TogetherContent::Youtube {
+                    video_id: "\"><script>".into(),
+                },
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        let mut msg = incoming(&hex, "e1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(
+            rx.try_recv().is_err(),
+            "a video id no frontend could safely embed must not reach one"
+        );
+    }
+
+    /// Relays deliver at least once. The Lamport order is what makes that a
+    /// no-op — no dedup set, and so nothing that could be evicted by a long
+    /// session.
+    #[tokio::test]
+    async fn a_redelivered_command_is_applied_exactly_once() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s1",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        let mut msg = incoming(&hex, "e1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherInvited(_)
+        ));
+
+        let play = together_json(
+            "s1",
+            2,
+            TogetherSignal::State {
+                pos_ms: 5_000,
+                playing: true,
+            },
+        );
+        // Two different wrapper ids carrying the same command — which is what a
+        // relay redelivery and the backfill both look like.
+        for id in ["e2", "e3"] {
+            let mut m = incoming(&hex, id, &play);
+            m.created_at = now_secs();
+            dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, m);
+        }
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherCommand(_)
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "the same command must not be applied twice"
+        );
+    }
+
+    /// The claim that a ten-second heartbeat is not a periodic producer on the
+    /// critical bus. If someone later makes a `Hold` verdict emit, this fails.
+    #[tokio::test]
+    async fn a_steady_heartbeat_produces_no_bus_traffic() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s1",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: true,
+            },
+        );
+        let mut msg = incoming(&hex, "e1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherInvited(_)
+        ));
+
+        // Both playing, in step. Ten heartbeats in a row must say nothing.
+        {
+            let mut guard = link.session.lock().unwrap();
+            let session = guard.as_mut().unwrap();
+            session.joined = true;
+            session.local_playing = true;
+            session.local_pos_ms = 60_000;
+        }
+        for i in 0..10 {
+            let beat = together_json(
+                "s1",
+                1,
+                TogetherSignal::Heartbeat {
+                    pos_ms: 60_000,
+                    playing: true,
+                    applied_seq: 1,
+                },
+            );
+            let mut m = incoming(&hex, &format!("hb{i}"), &beat);
+            m.created_at = now_secs();
+            dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, m);
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "a steady session must not put a single event on the critical bus"
+        );
+    }
+
+    /// Locking up ends the session for the same reason it sends a farewell
+    /// beacon: a locked vault is not watching anything with anyone.
+    #[tokio::test]
+    async fn locking_the_vault_ends_any_together_session() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path().to_str().unwrap(), "pin-1234")
+            .await
+            .unwrap();
+        *rt.together.lock().unwrap() = Some(TogetherSession {
+            id: "s1".into(),
+            peer: "npub1peer".into(),
+            peer_hex: "ff".into(),
+            content: a_film(),
+            we_lead: true,
+            our_npub: "npub1us".into(),
+            joined: true,
+            applied: CommandStamp::new(1, "npub1us", false),
+            local_pos_ms: 0,
+            local_playing: true,
+            peer_pos_ms: 0,
+            peer_playing: true,
+            peer_at_ms: now_ms(),
+            last_heard_ms: now_ms(),
+            last_seek_ms: 0,
+            clock: ClockFilter::new(),
+            sent_at_ms: std::collections::VecDeque::new(),
+            echo_back: None,
+        });
+        assert!(rt.together_session().is_some());
+        rt.lock_vault().await;
+        assert!(
+            rt.together_session().is_none(),
+            "a locked vault must not still be in a session"
+        );
+    }
+
     #[tokio::test]
     async fn dispatch_drops_a_stale_call_signal_and_dedups_a_fresh_one() {
         let dir = TempDir::new().unwrap();
@@ -9353,6 +10478,7 @@ mod tests {
             label: TRANSPORT_MESH,
             dedup: &transport_dedup,
             mesh: None,
+            together: None,
         };
         dispatch_incoming_dm(
             &vault,
