@@ -469,6 +469,16 @@ object ChatEventRouter {
             // Sakha/ledger sync isn't wired into the Android UI yet
             // (desktop-only via Tauri commands) — drop, like before.
             is BridgeEvent.LedgerUpdated -> Unit
+            // Watch/listen together has no Android surface yet: the engine, the
+            // view-model and both bridges are in place, but no screen consumes
+            // these. Dropped deliberately rather than half-handled — a
+            // notification about a session nobody can see or leave would be
+            // worse than silence. See docs/TOGETHER.md.
+            is BridgeEvent.TogetherInvited,
+            is BridgeEvent.TogetherJoined,
+            is BridgeEvent.TogetherCommand,
+            is BridgeEvent.TogetherCorrection,
+            is BridgeEvent.TogetherEnded -> Unit
         }
     }
 }

@@ -370,6 +370,86 @@ pub async fn send_call_signal(
         .map_err(|e| e.to_string())
 }
 
+/// Invite `peer` to watch or listen to something together.
+///
+/// `content_json` is a `comrade_core::together::TogetherContent` — either
+/// `{"kind":"local_file","duration_ms":N}` or `{"kind":"youtube","video_id":"…"}`.
+/// The video id is validated in core, on send *and* receive, so no UI can put an
+/// unchecked peer-supplied string into an `<iframe src>`.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_start(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    content_json: String,
+) -> Result<comrade_ui::TogetherSessionDto, String> {
+    let content: comrade_ui::TogetherContent =
+        serde_json::from_str(&content_json).map_err(|e| format!("invalid content: {e}"))?;
+    let handles = state.read().await.handles();
+    handles
+        .together_start(&peer, content)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Accept the invitation we were sent.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_join(state: tauri::State<'_, Runtime>) -> Result<(), String> {
+    let handles = state.read().await.handles();
+    handles.together_join().await.map_err(|e| e.to_string())
+}
+
+/// Play, pause or seek — one command, because all three are one statement.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_set_state(
+    state: tauri::State<'_, Runtime>,
+    pos_ms: u64,
+    playing: bool,
+) -> Result<(), String> {
+    let handles = state.read().await.handles();
+    handles
+        .together_set_state(pos_ms, playing)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Leave the session.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_end(state: tauri::State<'_, Runtime>) -> Result<(), String> {
+    let handles = state.read().await.handles();
+    handles.together_end().await.map_err(|e| e.to_string())
+}
+
+/// Report where our own player is, without sending anything.
+///
+/// The player calls this on a timer while it plays, so it must not queue behind
+/// a vault unlock; it is skipped under contention like `note_draft`, which fails
+/// in the harmless direction (the next report is a second away).
+#[tauri::command]
+pub async fn together_report_position(
+    state: tauri::State<'_, Runtime>,
+    pos_ms: u64,
+    playing: bool,
+) -> Result<(), String> {
+    state.read().await.together_report_position(pos_ms, playing);
+    Ok(())
+}
+
+/// The live session, if there is one.
+#[tauri::command]
+pub async fn together_session(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Option<comrade_ui::TogetherSessionDto>, String> {
+    Ok(state.read().await.together_session())
+}
+
 /// Send a `Hangup` with `reason` to end/reject a call.
 ///
 /// See [`sync_ledger`]'s doc comment for the lock discipline.

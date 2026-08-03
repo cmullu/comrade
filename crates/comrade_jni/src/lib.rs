@@ -70,13 +70,14 @@ use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
+use comrade_core::together::TogetherContent;
 use comrade_state::AppWorkspace;
 use comrade_ui::{
     AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto,
     ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
     FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
     MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReadingDto,
-    TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -937,6 +938,54 @@ impl Comrade {
         media: CallMediaKind,
     ) -> Result<CallSessionDto, UiError> {
         self.inner.blocking_read().place_call(&peer, media.as_str())
+    }
+
+    /// Invite `peer` to watch or listen to something together.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn together_start(
+        &self,
+        peer: String,
+        content: TogetherContent,
+    ) -> Result<TogetherSessionDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_start(&peer, content).await
+    }
+
+    /// Accept the invitation we were sent.
+    pub async fn together_join(&self) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_join().await
+    }
+
+    /// Play, pause or seek — one call, because all three are one statement.
+    pub async fn together_set_state(&self, pos_ms: u64, playing: bool) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_set_state(pos_ms, playing).await
+    }
+
+    /// Leave the session.
+    pub async fn together_end(&self) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_end().await
+    }
+
+    /// Report where our own player is, without sending anything.
+    ///
+    /// Synchronous and skipped under contention, exactly like
+    /// [`Comrade::note_draft`]: a player calls this several times a second from
+    /// its UI thread, and a position report is not worth waiting on a vault
+    /// unlock for. Missing one only means the next drift verdict compares
+    /// against a slightly older number.
+    pub fn together_report_position(&self, pos_ms: u64, playing: bool) {
+        if let Ok(rt) = self.inner.try_read() {
+            rt.together_report_position(pos_ms, playing);
+        }
+    }
+
+    /// The live session, if there is one.
+    pub fn together_session(&self) -> Option<TogetherSessionDto> {
+        self.inner.blocking_read().together_session()
     }
 
     /// `signal` crosses as the real [`CallSignal`] enum, not a JSON blob —

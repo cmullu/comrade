@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1710719079;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1544937958;
 
 // Section: executor
 
@@ -2320,6 +2320,187 @@ fn wire__crate__api__tara_thread_impl(
         },
     )
 }
+fn wire__crate__api__together_end_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "together_end",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::UiError>(
+                    (move || async move {
+                        let output_ok = crate::api::together_end().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__together_join_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "together_join",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::UiError>(
+                    (move || async move {
+                        let output_ok = crate::api::together_join().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__together_report_position_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "together_report_position",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_pos_ms = <u64>::sse_decode(&mut deserializer);
+            let api_playing = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::together_report_position(api_pos_ms, api_playing);
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__together_set_state_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "together_set_state",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_pos_ms = <u64>::sse_decode(&mut deserializer);
+            let api_playing = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::UiError>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::together_set_state(api_pos_ms, api_playing).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__together_start_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "together_start",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_peer = <String>::sse_decode(&mut deserializer);
+            let api_content = <crate::api::TogetherContent>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::UiError>(
+                    (move || async move {
+                        let output_ok = crate::api::together_start(api_peer, api_content).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__toggle_workspace_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2610,6 +2791,28 @@ const _: fn() = || {
             let _: String = peer;
             let _: Option<String> = name;
         }
+        crate::api::BridgeEvent::TogetherInvited(field0) => {
+            let _: crate::api::TogetherInviteDto = field0;
+        }
+        crate::api::BridgeEvent::TogetherJoined { session_id, peer } => {
+            let _: String = session_id;
+            let _: String = peer;
+        }
+        crate::api::BridgeEvent::TogetherCommand(field0) => {
+            let _: crate::api::TogetherCommandDto = field0;
+        }
+        crate::api::BridgeEvent::TogetherCorrection(field0) => {
+            let _: crate::api::TogetherCorrectionDto = field0;
+        }
+        crate::api::BridgeEvent::TogetherEnded {
+            session_id,
+            peer,
+            by_peer,
+        } => {
+            let _: String = session_id;
+            let _: String = peer;
+            let _: bool = by_peer;
+        }
         crate::api::BridgeEvent::MeshStatusChanged(field0) => {
             let _: crate::api::MeshStatusDto = field0;
         }
@@ -2792,6 +2995,24 @@ const _: fn() = || {
         let _: String = ProfileDto.npub;
         let _: Option<String> = ProfileDto.username;
     }
+    match None::<crate::api::SyncVerdict>.unwrap() {
+        crate::api::SyncVerdict::Hold => {}
+        crate::api::SyncVerdict::Adopt {
+            pos_ms,
+            playing,
+            seq,
+        } => {
+            let _: u64 = pos_ms;
+            let _: bool = playing;
+            let _: u64 = seq;
+        }
+        crate::api::SyncVerdict::Nudge { rate } => {
+            let _: f64 = rate;
+        }
+        crate::api::SyncVerdict::Seek { pos_ms } => {
+            let _: u64 = pos_ms;
+        }
+    }
     {
         let TaraMessageDto = None::<crate::api::TaraMessageDto>.unwrap();
         let _: String = TaraMessageDto.id;
@@ -2799,6 +3020,48 @@ const _: fn() = || {
         let _: bool = TaraMessageDto.from_tara;
         let _: bool = TaraMessageDto.crisis;
         let _: u64 = TaraMessageDto.created_at;
+    }
+    {
+        let TogetherCommandDto = None::<crate::api::TogetherCommandDto>.unwrap();
+        let _: String = TogetherCommandDto.session_id;
+        let _: u64 = TogetherCommandDto.pos_ms;
+        let _: bool = TogetherCommandDto.playing;
+        let _: crate::api::StateChange = TogetherCommandDto.change;
+    }
+    match None::<crate::api::TogetherContent>.unwrap() {
+        crate::api::TogetherContent::LocalFile { duration_ms, label } => {
+            let _: u64 = duration_ms;
+            let _: Option<String> = label;
+        }
+        crate::api::TogetherContent::Youtube { video_id } => {
+            let _: String = video_id;
+        }
+    }
+    {
+        let TogetherCorrectionDto = None::<crate::api::TogetherCorrectionDto>.unwrap();
+        let _: String = TogetherCorrectionDto.session_id;
+        let _: crate::api::SyncVerdict = TogetherCorrectionDto.verdict;
+        let _: i64 = TogetherCorrectionDto.drift_ms;
+        let _: u64 = TogetherCorrectionDto.quality_ms;
+    }
+    {
+        let TogetherInviteDto = None::<crate::api::TogetherInviteDto>.unwrap();
+        let _: String = TogetherInviteDto.session_id;
+        let _: String = TogetherInviteDto.peer;
+        let _: crate::api::TogetherContent = TogetherInviteDto.content;
+        let _: u64 = TogetherInviteDto.pos_ms;
+        let _: bool = TogetherInviteDto.playing;
+        let _: u64 = TogetherInviteDto.created_at;
+    }
+    {
+        let TogetherSessionDto = None::<crate::api::TogetherSessionDto>.unwrap();
+        let _: String = TogetherSessionDto.session_id;
+        let _: String = TogetherSessionDto.peer;
+        let _: crate::api::TogetherContent = TogetherSessionDto.content;
+        let _: bool = TogetherSessionDto.we_lead;
+        let _: bool = TogetherSessionDto.joined;
+        let _: u64 = TogetherSessionDto.pos_ms;
+        let _: bool = TogetherSessionDto.playing;
     }
     {
         let TurnServerStatusDto = None::<crate::api::TurnServerStatusDto>.unwrap();
@@ -2941,10 +3204,40 @@ impl SseDecode for crate::api::BridgeEvent {
                 };
             }
             9 => {
+                let mut var_field0 = <crate::api::TogetherInviteDto>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::TogetherInvited(var_field0);
+            }
+            10 => {
+                let mut var_sessionId = <String>::sse_decode(deserializer);
+                let mut var_peer = <String>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::TogetherJoined {
+                    session_id: var_sessionId,
+                    peer: var_peer,
+                };
+            }
+            11 => {
+                let mut var_field0 = <crate::api::TogetherCommandDto>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::TogetherCommand(var_field0);
+            }
+            12 => {
+                let mut var_field0 = <crate::api::TogetherCorrectionDto>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::TogetherCorrection(var_field0);
+            }
+            13 => {
+                let mut var_sessionId = <String>::sse_decode(deserializer);
+                let mut var_peer = <String>::sse_decode(deserializer);
+                let mut var_byPeer = <bool>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::TogetherEnded {
+                    session_id: var_sessionId,
+                    peer: var_peer,
+                    by_peer: var_byPeer,
+                };
+            }
+            14 => {
                 let mut var_field0 = <crate::api::MeshStatusDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::MeshStatusChanged(var_field0);
             }
-            10 => {
+            15 => {
                 let mut var_ledger = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::LedgerUpdated { ledger: var_ledger };
             }
@@ -3217,6 +3510,13 @@ impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for i64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i64::<NativeEndian>().unwrap()
     }
 }
 
@@ -3693,6 +3993,54 @@ impl SseDecode for crate::api::ProfileDto {
     }
 }
 
+impl SseDecode for crate::api::StateChange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::StateChange::Played,
+            1 => crate::api::StateChange::Paused,
+            2 => crate::api::StateChange::Seeked,
+            3 => crate::api::StateChange::PausedAndSeeked,
+            4 => crate::api::StateChange::Unchanged,
+            _ => unreachable!("Invalid variant for StateChange: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::SyncVerdict {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::api::SyncVerdict::Hold;
+            }
+            1 => {
+                let mut var_posMs = <u64>::sse_decode(deserializer);
+                let mut var_playing = <bool>::sse_decode(deserializer);
+                let mut var_seq = <u64>::sse_decode(deserializer);
+                return crate::api::SyncVerdict::Adopt {
+                    pos_ms: var_posMs,
+                    playing: var_playing,
+                    seq: var_seq,
+                };
+            }
+            2 => {
+                let mut var_rate = <f64>::sse_decode(deserializer);
+                return crate::api::SyncVerdict::Nudge { rate: var_rate };
+            }
+            3 => {
+                let mut var_posMs = <u64>::sse_decode(deserializer);
+                return crate::api::SyncVerdict::Seek { pos_ms: var_posMs };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseDecode for crate::api::TaraMessageDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3707,6 +4055,106 @@ impl SseDecode for crate::api::TaraMessageDto {
             from_tara: var_fromTara,
             crisis: var_crisis,
             created_at: var_createdAt,
+        };
+    }
+}
+
+impl SseDecode for crate::api::TogetherCommandDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <String>::sse_decode(deserializer);
+        let mut var_posMs = <u64>::sse_decode(deserializer);
+        let mut var_playing = <bool>::sse_decode(deserializer);
+        let mut var_change = <crate::api::StateChange>::sse_decode(deserializer);
+        return crate::api::TogetherCommandDto {
+            session_id: var_sessionId,
+            pos_ms: var_posMs,
+            playing: var_playing,
+            change: var_change,
+        };
+    }
+}
+
+impl SseDecode for crate::api::TogetherContent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_durationMs = <u64>::sse_decode(deserializer);
+                let mut var_label = <Option<String>>::sse_decode(deserializer);
+                return crate::api::TogetherContent::LocalFile {
+                    duration_ms: var_durationMs,
+                    label: var_label,
+                };
+            }
+            1 => {
+                let mut var_videoId = <String>::sse_decode(deserializer);
+                return crate::api::TogetherContent::Youtube {
+                    video_id: var_videoId,
+                };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseDecode for crate::api::TogetherCorrectionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <String>::sse_decode(deserializer);
+        let mut var_verdict = <crate::api::SyncVerdict>::sse_decode(deserializer);
+        let mut var_driftMs = <i64>::sse_decode(deserializer);
+        let mut var_qualityMs = <u64>::sse_decode(deserializer);
+        return crate::api::TogetherCorrectionDto {
+            session_id: var_sessionId,
+            verdict: var_verdict,
+            drift_ms: var_driftMs,
+            quality_ms: var_qualityMs,
+        };
+    }
+}
+
+impl SseDecode for crate::api::TogetherInviteDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <String>::sse_decode(deserializer);
+        let mut var_peer = <String>::sse_decode(deserializer);
+        let mut var_content = <crate::api::TogetherContent>::sse_decode(deserializer);
+        let mut var_posMs = <u64>::sse_decode(deserializer);
+        let mut var_playing = <bool>::sse_decode(deserializer);
+        let mut var_createdAt = <u64>::sse_decode(deserializer);
+        return crate::api::TogetherInviteDto {
+            session_id: var_sessionId,
+            peer: var_peer,
+            content: var_content,
+            pos_ms: var_posMs,
+            playing: var_playing,
+            created_at: var_createdAt,
+        };
+    }
+}
+
+impl SseDecode for crate::api::TogetherSessionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <String>::sse_decode(deserializer);
+        let mut var_peer = <String>::sse_decode(deserializer);
+        let mut var_content = <crate::api::TogetherContent>::sse_decode(deserializer);
+        let mut var_weLead = <bool>::sse_decode(deserializer);
+        let mut var_joined = <bool>::sse_decode(deserializer);
+        let mut var_posMs = <u64>::sse_decode(deserializer);
+        let mut var_playing = <bool>::sse_decode(deserializer);
+        return crate::api::TogetherSessionDto {
+            session_id: var_sessionId,
+            peer: var_peer,
+            content: var_content,
+            we_lead: var_weLead,
+            joined: var_joined,
+            pos_ms: var_posMs,
+            playing: var_playing,
         };
     }
 }
@@ -3908,11 +4356,16 @@ fn pde_ffi_dispatcher_primary_impl(
         64 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
         65 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
         66 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__together_end_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__together_join_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__together_report_position_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__together_set_state_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__together_start_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3928,8 +4381,8 @@ fn pde_ffi_dispatcher_sync_impl(
         5 => wire__crate__api__all_workspaces_impl(ptr, rust_vec_len, data_len),
         27 => wire__crate__api__generate_keypair_impl(ptr, rust_vec_len, data_len),
         45 => wire__crate__api__npub_from_nsec_impl(ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3991,11 +4444,37 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::BridgeEvent> {
                 name.into_into_dart().into_dart(),
             ]
             .into_dart(),
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+            crate::api::BridgeEvent::TogetherInvited(field0) => {
                 [9.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::BridgeEvent::TogetherJoined { session_id, peer } => [
+                10.into_dart(),
+                session_id.into_into_dart().into_dart(),
+                peer.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::BridgeEvent::TogetherCommand(field0) => {
+                [11.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::BridgeEvent::TogetherCorrection(field0) => {
+                [12.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::BridgeEvent::TogetherEnded {
+                session_id,
+                peer,
+                by_peer,
+            } => [
+                13.into_dart(),
+                session_id.into_into_dart().into_dart(),
+                peer.into_into_dart().into_dart(),
+                by_peer.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                [14.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                [10.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
+                [15.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -4631,6 +5110,69 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::ProfileDto>>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::StateChange> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::StateChange::Played => 0.into_dart(),
+            crate::api::StateChange::Paused => 1.into_dart(),
+            crate::api::StateChange::Seeked => 2.into_dart(),
+            crate::api::StateChange::PausedAndSeeked => 3.into_dart(),
+            crate::api::StateChange::Unchanged => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::StateChange>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::StateChange>>
+    for crate::api::StateChange
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::StateChange> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::SyncVerdict> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::SyncVerdict::Hold => [0.into_dart()].into_dart(),
+            crate::api::SyncVerdict::Adopt {
+                pos_ms,
+                playing,
+                seq,
+            } => [
+                1.into_dart(),
+                pos_ms.into_into_dart().into_dart(),
+                playing.into_into_dart().into_dart(),
+                seq.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::SyncVerdict::Nudge { rate } => {
+                [2.into_dart(), rate.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::SyncVerdict::Seek { pos_ms } => {
+                [3.into_dart(), pos_ms.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::SyncVerdict>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::SyncVerdict>>
+    for crate::api::SyncVerdict
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::SyncVerdict> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TaraMessageDto> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -4651,6 +5193,133 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TaraMessageDto>>
     for crate::api::TaraMessageDto
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::TaraMessageDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherCommandDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.session_id.into_into_dart().into_dart(),
+            self.0.pos_ms.into_into_dart().into_dart(),
+            self.0.playing.into_into_dart().into_dart(),
+            self.0.change.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TogetherCommandDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherCommandDto>>
+    for crate::api::TogetherCommandDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherCommandDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherContent> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::TogetherContent::LocalFile { duration_ms, label } => [
+                0.into_dart(),
+                duration_ms.into_into_dart().into_dart(),
+                label.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::TogetherContent::Youtube { video_id } => {
+                [1.into_dart(), video_id.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TogetherContent>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherContent>>
+    for crate::api::TogetherContent
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherContent> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherCorrectionDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.session_id.into_into_dart().into_dart(),
+            self.0.verdict.into_into_dart().into_dart(),
+            self.0.drift_ms.into_into_dart().into_dart(),
+            self.0.quality_ms.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TogetherCorrectionDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherCorrectionDto>>
+    for crate::api::TogetherCorrectionDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherCorrectionDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherInviteDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.session_id.into_into_dart().into_dart(),
+            self.0.peer.into_into_dart().into_dart(),
+            self.0.content.into_into_dart().into_dart(),
+            self.0.pos_ms.into_into_dart().into_dart(),
+            self.0.playing.into_into_dart().into_dart(),
+            self.0.created_at.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TogetherInviteDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherInviteDto>>
+    for crate::api::TogetherInviteDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherInviteDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherSessionDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.session_id.into_into_dart().into_dart(),
+            self.0.peer.into_into_dart().into_dart(),
+            self.0.content.into_into_dart().into_dart(),
+            self.0.we_lead.into_into_dart().into_dart(),
+            self.0.joined.into_into_dart().into_dart(),
+            self.0.pos_ms.into_into_dart().into_dart(),
+            self.0.playing.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TogetherSessionDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherSessionDto>>
+    for crate::api::TogetherSessionDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherSessionDto> {
         self.into()
     }
 }
@@ -4862,12 +5531,39 @@ impl SseEncode for crate::api::BridgeEvent {
                 <String>::sse_encode(peer, serializer);
                 <Option<String>>::sse_encode(name, serializer);
             }
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+            crate::api::BridgeEvent::TogetherInvited(field0) => {
                 <i32>::sse_encode(9, serializer);
+                <crate::api::TogetherInviteDto>::sse_encode(field0, serializer);
+            }
+            crate::api::BridgeEvent::TogetherJoined { session_id, peer } => {
+                <i32>::sse_encode(10, serializer);
+                <String>::sse_encode(session_id, serializer);
+                <String>::sse_encode(peer, serializer);
+            }
+            crate::api::BridgeEvent::TogetherCommand(field0) => {
+                <i32>::sse_encode(11, serializer);
+                <crate::api::TogetherCommandDto>::sse_encode(field0, serializer);
+            }
+            crate::api::BridgeEvent::TogetherCorrection(field0) => {
+                <i32>::sse_encode(12, serializer);
+                <crate::api::TogetherCorrectionDto>::sse_encode(field0, serializer);
+            }
+            crate::api::BridgeEvent::TogetherEnded {
+                session_id,
+                peer,
+                by_peer,
+            } => {
+                <i32>::sse_encode(13, serializer);
+                <String>::sse_encode(session_id, serializer);
+                <String>::sse_encode(peer, serializer);
+                <bool>::sse_encode(by_peer, serializer);
+            }
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                <i32>::sse_encode(14, serializer);
                 <crate::api::MeshStatusDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                <i32>::sse_encode(10, serializer);
+                <i32>::sse_encode(15, serializer);
                 <String>::sse_encode(ledger, serializer);
             }
             _ => {
@@ -5075,6 +5771,13 @@ impl SseEncode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for i64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i64::<NativeEndian>(self).unwrap();
     }
 }
 
@@ -5447,6 +6150,57 @@ impl SseEncode for crate::api::ProfileDto {
     }
 }
 
+impl SseEncode for crate::api::StateChange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::StateChange::Played => 0,
+                crate::api::StateChange::Paused => 1,
+                crate::api::StateChange::Seeked => 2,
+                crate::api::StateChange::PausedAndSeeked => 3,
+                crate::api::StateChange::Unchanged => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::SyncVerdict {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::SyncVerdict::Hold => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::api::SyncVerdict::Adopt {
+                pos_ms,
+                playing,
+                seq,
+            } => {
+                <i32>::sse_encode(1, serializer);
+                <u64>::sse_encode(pos_ms, serializer);
+                <bool>::sse_encode(playing, serializer);
+                <u64>::sse_encode(seq, serializer);
+            }
+            crate::api::SyncVerdict::Nudge { rate } => {
+                <i32>::sse_encode(2, serializer);
+                <f64>::sse_encode(rate, serializer);
+            }
+            crate::api::SyncVerdict::Seek { pos_ms } => {
+                <i32>::sse_encode(3, serializer);
+                <u64>::sse_encode(pos_ms, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseEncode for crate::api::TaraMessageDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5455,6 +6209,71 @@ impl SseEncode for crate::api::TaraMessageDto {
         <bool>::sse_encode(self.from_tara, serializer);
         <bool>::sse_encode(self.crisis, serializer);
         <u64>::sse_encode(self.created_at, serializer);
+    }
+}
+
+impl SseEncode for crate::api::TogetherCommandDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.session_id, serializer);
+        <u64>::sse_encode(self.pos_ms, serializer);
+        <bool>::sse_encode(self.playing, serializer);
+        <crate::api::StateChange>::sse_encode(self.change, serializer);
+    }
+}
+
+impl SseEncode for crate::api::TogetherContent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::TogetherContent::LocalFile { duration_ms, label } => {
+                <i32>::sse_encode(0, serializer);
+                <u64>::sse_encode(duration_ms, serializer);
+                <Option<String>>::sse_encode(label, serializer);
+            }
+            crate::api::TogetherContent::Youtube { video_id } => {
+                <i32>::sse_encode(1, serializer);
+                <String>::sse_encode(video_id, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseEncode for crate::api::TogetherCorrectionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.session_id, serializer);
+        <crate::api::SyncVerdict>::sse_encode(self.verdict, serializer);
+        <i64>::sse_encode(self.drift_ms, serializer);
+        <u64>::sse_encode(self.quality_ms, serializer);
+    }
+}
+
+impl SseEncode for crate::api::TogetherInviteDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.session_id, serializer);
+        <String>::sse_encode(self.peer, serializer);
+        <crate::api::TogetherContent>::sse_encode(self.content, serializer);
+        <u64>::sse_encode(self.pos_ms, serializer);
+        <bool>::sse_encode(self.playing, serializer);
+        <u64>::sse_encode(self.created_at, serializer);
+    }
+}
+
+impl SseEncode for crate::api::TogetherSessionDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.session_id, serializer);
+        <String>::sse_encode(self.peer, serializer);
+        <crate::api::TogetherContent>::sse_encode(self.content, serializer);
+        <bool>::sse_encode(self.we_lead, serializer);
+        <bool>::sse_encode(self.joined, serializer);
+        <u64>::sse_encode(self.pos_ms, serializer);
+        <bool>::sse_encode(self.playing, serializer);
     }
 }
 
