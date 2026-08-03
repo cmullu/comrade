@@ -35,8 +35,9 @@ use comrade_core::attention::{
     self, FocusOutcome, UsageSignal, FOCUS_MAX_MINUTES, FOCUS_MIN_MINUTES,
 };
 use comrade_core::call::{
-    derive_sas, ice_servers_for, new_call_id, parse_call_envelope, validate_turn_url, CallEnvelope,
-    CallMediaKind, CallSignal, HangupReason, IceServer, IceStrategy,
+    call_signal_retry_delay_ms, derive_sas, ice_servers_for, new_call_id, parse_call_envelope,
+    validate_turn_url, CallEnvelope, CallMediaKind, CallSignal, HangupReason, IceServer,
+    IceStrategy,
 };
 use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
@@ -4237,11 +4238,47 @@ impl RuntimeHandles {
             signal,
         );
         let json = env.to_json().map_err(|e| UiError::Engine(e.to_string()))?;
-        vault
-            .send_dm(&peer_pk, &json)
-            .await
-            .map_err(|e| UiError::Engine(e.to_string()))?;
-        Ok(())
+        let kind = env.signal.kind_str();
+
+        // Retry a refused signal rather than dropping it. `send_dm` errors when
+        // no relay *accepted* the event, and the case that matters is a relay
+        // rate-limiting trickled ICE: a call publishes one gift-wrapped event
+        // per candidate, so ten to thirty land within a couple of seconds while
+        // the offer and answer — one each, seconds apart — sail through. Losing
+        // only the candidates leaves both ends on "Connecting…" until the
+        // connect timeout, which is the shape of the bug this guards.
+        //
+        // See `call_signal_retry_delay_ms` for why the budget is ~1.5s: long
+        // enough to outlast a rate-limit window, short enough that a signal is
+        // never delivered after the peer has already given up on the call.
+        let mut attempt = 1u32;
+        loop {
+            let err = match vault.send_dm(&peer_pk, &json).await {
+                Ok(_) => {
+                    if attempt > 1 {
+                        tracing::info!(kind, call_id, attempt, "call signal sent after a retry");
+                    }
+                    return Ok(());
+                }
+                Err(e) => e,
+            };
+            let Some(delay_ms) = call_signal_retry_delay_ms(attempt) else {
+                // Loud, and specific about which signal was lost: a dropped
+                // candidate used to be a debug line nobody would ever correlate
+                // with a call that would not connect.
+                tracing::warn!(
+                    kind,
+                    call_id,
+                    attempts = attempt,
+                    error = %err,
+                    "call signal could not be delivered to any relay",
+                );
+                return Err(UiError::Engine(err.to_string()));
+            };
+            tracing::debug!(kind, call_id, attempt, error = %err, "call signal refused; retrying");
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            attempt += 1;
+        }
     }
 
     pub async fn hangup_call(
