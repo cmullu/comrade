@@ -1,0 +1,1450 @@
+/*!
+ * Together — listening and watching in step, over the DM channel we already have.
+ *
+ * `AUDIT.md` §8.2 asks for shared media consumption with a loved one. The
+ * content problem is the real constraint, not the sync problem: re-streaming or
+ * proxying licensed audio/video between two people is both a copyright problem
+ * and a bandwidth problem, and DRM'd platform content cannot be frame-synced
+ * inside our app at all. So Comrade moves **no media**. Each side plays *their
+ * own copy* — a local file they already have, or the same public video — and all
+ * that travels is a small control envelope saying where the playhead is.
+ *
+ * That envelope rides the same NIP-44/NIP-17 gift-wrapped DM channel as
+ * receipts, profile shares, call signals, presence beacons and nudges
+ * ([`crate::dm`], [`crate::call`], [`crate::presence`], [`crate::nudge`]).
+ *
+ * Pure and framework-free like its neighbours: the wire shape, the clock
+ * arithmetic and every timing rule live here and are unit-tested. The players,
+ * the session bookkeeping and the UI live in `comrade_ui` and the frontends.
+ *
+ * ## The clock problem, and why the heartbeat is the answer
+ * To compare two playheads you need to know how far apart the two *clocks* are.
+ * Nothing in the transport tells you: a gift wrap's outer timestamp is
+ * deliberately randomised, and the rumor's own timestamp is the sender's claim,
+ * in whole seconds. So each heartbeat carries [`ClockEcho`] — the `at_ms` of the
+ * last message we heard and our clock when we heard it — which turns the
+ * heartbeat we were already sending into the classic four-timestamp NTP probe at
+ * **zero extra messages**. [`ClockFilter`] keeps the recent probes and reports
+ * the one with the lowest round trip, because the least-queued sample is the one
+ * whose symmetry assumption holds best.
+ *
+ * ## What is actually achievable — §8.2's "< 300 ms" is not
+ * Measuring the offset also measures how *wrong* it might be
+ * ([`ClockEstimate::uncertainty_ms`]), and the rule that falls out is the one
+ * this module is built around: **never correct by less than your own measurement
+ * error** ([`sync_verdict`], rule 6). Half the round trip of a public relay
+ * exceeds 300 ms in the common case, so a 300 ms target sits *below the noise
+ * floor of the measurement* — we could not tell a 300 ms error from zero, let
+ * alone correct it. What this design does hold, honestly:
+ *
+ * | | typical steady-state drift |
+ * |---|---|
+ * | local file (rate trim available) | ±0.3–0.8 s |
+ * | an embedded player that only seeks | ±1.2–2.5 s |
+ * | over a future WebRTC data channel (§8.1) | ±20–60 ms plausible |
+ *
+ * The clock estimate is an *input* to [`sync_verdict`], not baked into it, so a
+ * lower-latency transport tightens all of this with no policy change.
+ *
+ * One more honesty point, because it decides what the UI may claim: **listening
+ * together is perceptually much harder than watching together.** Two people in
+ * one room half a second apart is unlistenable; two people in different cities
+ * half a second apart are fine. The goal here is reacting to the same moment
+ * together — laughing at the same joke inside a second — not phase-locked audio,
+ * and no UI on top of this should imply otherwise.
+ */
+
+use std::collections::VecDeque;
+
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+
+/// Envelope marker for a together payload riding inside a DM body — the same
+/// detection pattern [`crate::call::CALL_ENVELOPE_MARKER`] and
+/// [`crate::presence::PRESENCE_ENVELOPE_MARKER`] use, so
+/// [`parse_together_envelope`] accepts only its own shape and the inbox
+/// dispatcher can fall through to its other handlers.
+pub const TOGETHER_ENVELOPE_MARKER: u8 = 1;
+
+// ── Cadence and lifetime ─────────────────────────────────────────────────────
+
+/// How often a playing session tells the other side where it is.
+///
+/// Every heartbeat is a persistent gift-wrapped event, and the vault inbox
+/// rewinds two days on **every** launch, so this number decides how much each
+/// later app start re-downloads and re-decrypts — that, not bandwidth, is the
+/// binding cost. Ten seconds is the balance: crystal drift between two players
+/// is negligible (~50 ppm, well under a second across a whole film), so the
+/// heartbeat is not there to steer — it is there to notice a stall or a lost
+/// command, and to keep [`ClockFilter`] supplied with probes. Slower than ~15 s
+/// starves the filter; faster buys nothing the correction window would use.
+pub const TOGETHER_HEARTBEAT_SECS: u64 = 10;
+
+/// How long a session survives hearing nothing before we call it over.
+///
+/// Deliberately more than four heartbeats, so a couple of dropped or slow
+/// beacons cannot end a session someone is still watching. A phone that dies
+/// mid-film sends no goodbye, which is what this exists for.
+pub const TOGETHER_SESSION_TTL_SECS: u64 = 45;
+
+/// [`TOGETHER_SESSION_TTL_SECS`] in milliseconds — the session clock is
+/// millisecond-based throughout, and one conversion in one place beats the same
+/// multiplication scattered over three frontends.
+pub const TOGETHER_SESSION_TTL_MS: u64 = TOGETHER_SESSION_TTL_SECS * 1000;
+
+/// A together signal older than this is meaningless and is dropped on arrival.
+///
+/// Relays redeliver at-least-once and the vault inbox backfills up to two days
+/// on every launch. This is the **only** guard that protects
+/// [`TogetherSignal::Start`], which is the sole signal that can create session
+/// state from nothing — every other signal additionally needs a live session
+/// with a matching id, and sessions never outlive the process.
+///
+/// Tighter than the call channel's 90 s on purpose: a replayed call offer
+/// produces a ring a human can decline, while a replayed playhead moves someone
+/// else's player with no confirmation step. A more disruptive failure earns a
+/// tighter bound. Not tighter still, because a phone that briefly lost signal
+/// must be able to drain its inbox on reconnect without every in-flight command
+/// being discarded.
+pub const TOGETHER_SIGNAL_MAX_AGE_SECS: u64 = 60;
+
+/// The floor on how often a command goes out while someone drags a scrubber.
+/// A drag emits positions at ~10 Hz; sending all of them would be a burst of
+/// gift wraps describing a position the user never stopped at.
+pub const TOGETHER_COMMAND_MIN_INTERVAL_MS: u64 = 400;
+
+// ── The drift ladder ─────────────────────────────────────────────────────────
+
+/// Deadband floor for a player with an accurate clock and a free playback rate
+/// (an HTML5 media element on a local file).
+pub const TOGETHER_DEADBAND_FINE_MS: u64 = 250;
+
+/// Deadband floor for a player that reports position coarsely, cannot be trimmed
+/// to an arbitrary rate, and rebuffers visibly on a seek — an embedded
+/// third-party player. Correcting such a player often is worse than the drift.
+pub const TOGETHER_DEADBAND_COARSE_MS: u64 = 1200;
+
+/// Past this, closing the gap by trimming the rate would take longer than the
+/// gap is worth; jump instead.
+pub const TOGETHER_SEEK_THRESHOLD_MS: u64 = 2500;
+
+/// How much the playback rate may be trimmed, either way. Four percent is under
+/// the point where a pitch shift is noticeable, and invisible on video.
+pub const TOGETHER_MAX_TRIM: f64 = 0.04;
+
+/// The window a rate trim aims to close the gap over. Larger means gentler.
+pub const TOGETHER_CORRECTION_WINDOW_MS: u64 = 10_000;
+
+/// The floor between two automatic seeks. Seeking is the most disruptive thing
+/// this feature can do to someone who is watching; doing it twice inside a few
+/// seconds is worse than being a couple of seconds out.
+pub const TOGETHER_MIN_SEEK_INTERVAL_MS: u64 = 5_000;
+
+/// The uncertainty we assume before any round trip has been measured.
+/// Deliberately pessimistic and deliberately **not zero**: "we have not
+/// measured" must never read as "we are certain".
+pub const TOGETHER_UNMEASURED_UNCERTAINTY_MS: u64 = 1_500;
+
+/// How long a clock probe stays usable. Long enough to hold a dozen probes at
+/// the heartbeat cadence, short enough that an NTP step on either device ages
+/// out of the estimate within two windows.
+pub const CLOCK_PROBE_WINDOW_MS: u64 = 120_000;
+
+/// How many probes [`ClockFilter`] keeps. The minimum filter needs candidates;
+/// it does not need history.
+pub const CLOCK_PROBE_RING: usize = 8;
+
+// The invariants the constants above exist for, enforced at compile time.
+// A session must survive several dropped heartbeats; the age gate must be wider
+// than the TTL so the TTL stays the *single* authority on when a session ends
+// (two rules disagreeing about that is how a UI ends up claiming someone is
+// still watching); and the ladder has to be ordered or a verdict is unreachable.
+const _: () = assert!(TOGETHER_SESSION_TTL_SECS > 4 * TOGETHER_HEARTBEAT_SECS);
+const _: () = assert!(TOGETHER_SIGNAL_MAX_AGE_SECS > TOGETHER_SESSION_TTL_SECS);
+const _: () = assert!(TOGETHER_SEEK_THRESHOLD_MS > TOGETHER_DEADBAND_COARSE_MS);
+const _: () = assert!(TOGETHER_DEADBAND_COARSE_MS > TOGETHER_DEADBAND_FINE_MS);
+
+// ── What is being played ─────────────────────────────────────────────────────
+
+/// What the two people are watching or listening to.
+///
+/// Carried on [`TogetherSignal::Start`] only — the session id binds every later
+/// message, so repeating this would be bytes spent on a chance for the two sides
+/// to disagree about what they are watching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TogetherContent {
+    /// A file both sides already have. Identified by **its length and nothing
+    /// else**.
+    ///
+    /// Not by a hash: a digest of the bytes would identify the exact release
+    /// someone holds, and computing one over a multi-gigabyte file is seconds to
+    /// minutes of work on the device for an answer we do not need. Not by
+    /// filename either — a filename carries release group, language, sometimes a
+    /// path fragment, and it does not actually answer the question (two files
+    /// called `movie.mkv` are not the same film).
+    ///
+    /// Length is enough to warn *"their copy runs four seconds longer than
+    /// yours"*, and is deliberately not enough to claim "same file" — which we
+    /// cannot know and must not imply. It is needed anyway, to clamp an incoming
+    /// position against something.
+    LocalFile {
+        duration_ms: u64,
+        /// What the sender chose to call it. Optional, and the sending UI shows
+        /// it in an editable field before it goes out, so naming the film is a
+        /// deliberate act rather than a side effect of picking a file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// A public video, by its id. Unlike a local file this **is** fully
+    /// disclosing — the id is publicly resolvable, so the invite says exactly
+    /// what is being watched. That asymmetry is a property of the two sources,
+    /// and the inviting UI should name it rather than hide it.
+    Youtube { video_id: String },
+}
+
+impl TogetherContent {
+    /// A local file of `duration_ms`, with an optional label.
+    pub fn local_file(duration_ms: u64, label: Option<String>) -> Self {
+        Self::LocalFile { duration_ms, label }
+    }
+
+    /// A YouTube session from a link or a bare id, or `None` if it is neither.
+    pub fn youtube(input: &str) -> Option<Self> {
+        youtube_id_from_url(input).map(|video_id| Self::Youtube { video_id })
+    }
+
+    /// How long the content runs, when we know. A YouTube duration is the
+    /// player's to report, not the inviter's to claim.
+    pub fn duration_ms(&self) -> Option<u64> {
+        match self {
+            Self::LocalFile { duration_ms, .. } => Some(*duration_ms),
+            Self::Youtube { .. } => None,
+        }
+    }
+
+    /// The correction policy this source can actually support.
+    ///
+    /// An HTML5 media element on a local file reports an accurate position and
+    /// accepts any `playbackRate`, so the full ladder is available. An embedded
+    /// YouTube player accepts only the discrete rates it advertises — a 4% trim
+    /// is not expressible — reports position coarsely, and rebuffers visibly on
+    /// a seek. Its ladder collapses to deadband-or-seek, so the deadband has to
+    /// be wide enough not to thrash.
+    pub fn tuning(&self) -> SyncTuning {
+        match self {
+            Self::LocalFile { .. } => SyncTuning {
+                min_deadband_ms: TOGETHER_DEADBAND_FINE_MS,
+                can_rate_trim: true,
+            },
+            Self::Youtube { .. } => SyncTuning {
+                min_deadband_ms: TOGETHER_DEADBAND_COARSE_MS,
+                can_rate_trim: false,
+            },
+        }
+    }
+}
+
+/// Whether `id` is a well-formed YouTube video id.
+///
+/// This is not decoration. A video id arrives from the peer and goes straight
+/// into an `<iframe src>` on the desktop webview; a value carrying a quote or an
+/// angle bracket is an injection if any frontend ever builds that URL by
+/// concatenation. Checking it once here — on send *and* on receive — is the same
+/// "do it where no UI can forget" argument the media branch already makes for
+/// MIME types.
+pub fn valid_youtube_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Pull a video id out of a bare id or any of the usual link shapes
+/// (`watch?v=`, `youtu.be/`, `shorts/`, `embed/`). In core rather than in three
+/// frontends, so there is one parser and one answer.
+pub fn youtube_id_from_url(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if valid_youtube_id(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    // Strip scheme and host, then look for the id in the shapes YouTube uses.
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+
+    let candidate = if let Some(q) = rest.find("v=") {
+        &rest[q + 2..]
+    } else {
+        let path = rest.split_once('/').map(|(_, p)| p)?;
+        for marker in ["shorts/", "embed/", "v/"] {
+            if let Some(idx) = path.find(marker) {
+                let start = idx + marker.len();
+                return take_id(&path[start..]);
+            }
+        }
+        // `youtu.be/<id>` — the id is the whole first path segment.
+        path
+    };
+    take_id(candidate)
+}
+
+/// The leading id-shaped run of `s`, if it is exactly an id's worth.
+fn take_id(s: &str) -> Option<String> {
+    let id: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    valid_youtube_id(&id).then_some(id)
+}
+
+// ── The wire ─────────────────────────────────────────────────────────────────
+
+/// One statement about a shared session.
+///
+/// Note what is *not* here. There is no separate play, pause and seek: all three
+/// reduce to a position and whether it is running, so they are one
+/// [`TogetherSignal::State`] and the receiver derives which happened
+/// ([`describe_state_change`]) in one tested place rather than three frontends
+/// each guessing. And [`TogetherSignal::End`] carries no reason — bored, phone
+/// rang, app closed is not the other person's to learn, and "they left" is the
+/// whole signal. (Whether *we* saw an `End` or merely stopped hearing them is
+/// something we observed, not something they told us, so it stays local.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TogetherSignal {
+    /// "Watch this with me, and here is where I am." Invitation and opening
+    /// position in one, so the joiner never joins to nowhere.
+    Start {
+        content: TogetherContent,
+        pos_ms: u64,
+        playing: bool,
+    },
+    /// "I'm in." Carries no position: the joiner adopts the leader's, and
+    /// reporting one would only tempt the leader to correct toward it.
+    Join,
+    /// Play, pause and seek — see the note above.
+    State { pos_ms: u64, playing: bool },
+    /// Where I am now, and the last command I had applied when I said so.
+    ///
+    /// `applied_seq` is what lets the receiver tell "their position follows from
+    /// a command I never received" (repair it) from "we simply drifted"
+    /// (correct it) — and it is what stops a peer who is *behind* dragging a
+    /// peer who is right backwards.
+    Heartbeat {
+        pos_ms: u64,
+        playing: bool,
+        applied_seq: u64,
+    },
+    /// "I'm leaving." Also the decline: a `Start` answered with `End` is a no,
+    /// and the initiator deliberately cannot tell the two apart.
+    End,
+}
+
+impl TogetherSignal {
+    /// Stable discriminant string, for logging.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Start { .. } => "start",
+            Self::Join => "join",
+            Self::State { .. } => "state",
+            Self::Heartbeat { .. } => "heartbeat",
+            Self::End => "end",
+        }
+    }
+
+    /// Whether this signal is a command — something a person did, which the
+    /// arbitration in [`CommandStamp`] has to order. Heartbeats and joins are
+    /// not: applying one twice changes nothing.
+    pub fn is_command(&self) -> bool {
+        matches!(self, Self::Start { .. } | Self::State { .. })
+    }
+}
+
+/// The two timestamps that turn an ordinary heartbeat into an NTP probe.
+/// Both names are from the point of view of whoever *sends* the message
+/// carrying it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockEcho {
+    /// The `at_ms` of the last message I received from you — your clock.
+    pub your_at_ms: u64,
+    /// My clock when I received it.
+    pub my_recv_ms: u64,
+}
+
+/// The JSON envelope carried inside an E2E DM that drives a shared session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TogetherEnvelope {
+    /// Format marker / version; must equal [`TOGETHER_ENVELOPE_MARKER`].
+    pub comrade_together: u8,
+    /// Groups every signal of one session. Also the primary replay guard: a
+    /// command naming a session this device does not have is dropped.
+    pub session_id: String,
+    /// The Lamport counter behind [`CommandStamp`].
+    pub seq: u64,
+    /// The sender's own clock, in milliseconds, when this was composed.
+    ///
+    /// The DM's own timestamp cannot do this job: it is in whole seconds, which
+    /// is a full second of noise in a system trying to hold a fraction of one.
+    pub at_ms: u64,
+    /// The probe half of the clock estimate. Absent on the first message of a
+    /// session, when there is nothing yet to echo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<ClockEcho>,
+    pub signal: TogetherSignal,
+}
+
+impl TogetherEnvelope {
+    pub fn new(
+        session_id: impl Into<String>,
+        seq: u64,
+        at_ms: u64,
+        echo: Option<ClockEcho>,
+        signal: TogetherSignal,
+    ) -> Self {
+        Self {
+            comrade_together: TOGETHER_ENVELOPE_MARKER,
+            session_id: session_id.into(),
+            seq,
+            at_ms,
+            echo,
+            signal,
+        }
+    }
+
+    /// Serialise to the JSON string that becomes the DM body.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+/// Detect and parse a together envelope out of a decrypted DM body. Returns
+/// `None` for chat text, receipts, profile shares, presence beacons, nudges,
+/// call or media envelopes — so the runtime falls through to its other handlers.
+pub fn parse_together_envelope(content: &str) -> Option<TogetherEnvelope> {
+    let env: TogetherEnvelope = serde_json::from_str(content).ok()?;
+    (env.comrade_together == TOGETHER_ENVELOPE_MARKER).then_some(env)
+}
+
+/// Mint a fresh, unguessable session id (128 bits of randomness, hex-encoded).
+pub fn new_session_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Whether a signal sent at `created_at` (seconds) is still worth acting on.
+/// The age gate described on [`TOGETHER_SIGNAL_MAX_AGE_SECS`].
+pub fn signal_is_fresh(created_at: u64, now: u64) -> bool {
+    now.saturating_sub(created_at) <= TOGETHER_SIGNAL_MAX_AGE_SECS
+}
+
+/// Whether a session last heard from at `last_heard_ms` is still live at
+/// `now_ms`. Every read recomputes this against the current clock, so a session
+/// can never outlive its own deadline just because nothing swept it yet.
+pub fn session_is_live_at(last_heard_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_heard_ms) < TOGETHER_SESSION_TTL_MS
+}
+
+// ── Command arbitration ──────────────────────────────────────────────────────
+
+/// One command's place in the total order both devices compute independently.
+///
+/// The counter is a Lamport clock, deliberately **not** a timestamp: a device
+/// whose clock runs a few seconds slow would lose every tie forever, and the
+/// person holding it would experience "my pause button doesn't work". A counter
+/// is skew-free by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandStamp {
+    pub seq: u64,
+    /// Who issued it — the DM sender, so it costs nothing on the wire.
+    pub actor: String,
+    /// Whether this command *stops* playback. Only used to break a tie.
+    pub pausing: bool,
+}
+
+impl CommandStamp {
+    pub fn new(seq: u64, actor: impl Into<String>, pausing: bool) -> Self {
+        Self {
+            seq,
+            actor: actor.into(),
+            pausing,
+        }
+    }
+
+    /// Whether this command should displace `applied`.
+    ///
+    /// A strict total order, so the two devices always agree on the winner:
+    /// higher counter first; then **a pause beats a play**, because the person
+    /// reaching for pause has a reason and the one reaching for play can simply
+    /// press it again; then the greater actor id, which is arbitrary but
+    /// symmetric and needs no round trip.
+    ///
+    /// Identical stamps return `false`, which is what makes a redelivered
+    /// command an exact no-op — no dedup set required, and none that could be
+    /// evicted.
+    pub fn wins_over(&self, applied: &CommandStamp) -> bool {
+        if self.seq != applied.seq {
+            return self.seq > applied.seq;
+        }
+        if self.pausing != applied.pausing {
+            return self.pausing;
+        }
+        self.actor > applied.actor
+    }
+}
+
+/// Whether a fresh command may go out yet, given when the last one did.
+/// Coalesces a scrub drag into the position the user actually settled on.
+pub fn command_is_due(last_sent_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_sent_ms) >= TOGETHER_COMMAND_MIN_INTERVAL_MS
+}
+
+// ── The clock estimate ───────────────────────────────────────────────────────
+
+/// One round-trip measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockProbe {
+    /// Peer clock minus our clock, in milliseconds.
+    pub offset_ms: i64,
+    /// Round trip with the peer's own turnaround removed.
+    pub rtt_ms: u64,
+    /// Our clock when this probe landed, so it can be aged out.
+    pub at_ms: u64,
+}
+
+/// What we currently believe about the peer's clock, and how sure we are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockEstimate {
+    pub offset_ms: i64,
+    /// `None` until a round trip has actually been measured.
+    pub rtt_ms: Option<u64>,
+}
+
+impl ClockEstimate {
+    /// What we believe before measuring anything: nothing, pessimistically.
+    pub fn unmeasured() -> Self {
+        Self {
+            offset_ms: 0,
+            rtt_ms: None,
+        }
+    }
+
+    /// How wrong the projection built on this could be.
+    ///
+    /// Half the round trip when we have one — the one-way delay we cannot
+    /// observe directly — and a deliberately pessimistic constant when we do
+    /// not. Never zero: [`sync_verdict`] refuses to correct inside this figure,
+    /// so a zero here would mean "correct on any evidence at all".
+    pub fn uncertainty_ms(&self) -> u64 {
+        self.rtt_ms
+            .map(|rtt| rtt / 2)
+            .unwrap_or(TOGETHER_UNMEASURED_UNCERTAINTY_MS)
+    }
+}
+
+/// A bounded ring of recent probes, reporting the least-delayed one.
+///
+/// The minimum filter is the standard NTP trick and it earns its place twice
+/// here: the probe that queued least is the one whose "both directions took the
+/// same time" assumption holds best, and a clock *step* on either device shows
+/// up as an outlier that ages out of the window rather than poisoning an average
+/// forever.
+///
+/// Plain `&mut self`, no interior mutability: one of these belongs to exactly
+/// one session, which already sits behind a lock.
+#[derive(Debug, Clone, Default)]
+pub struct ClockFilter {
+    probes: VecDeque<ClockProbe>,
+}
+
+impl ClockFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold in one four-timestamp observation:
+    /// `t1` our send, `t2` their receive, `t3` their send, `t4` our receive.
+    ///
+    /// Returns the probe if it was usable. A measurement where either side's
+    /// clock appears to run backwards is discarded rather than clamped — it
+    /// means an assumption broke, and a fabricated zero would be worse than no
+    /// sample at all.
+    pub fn observe(&mut self, t1: u64, t2: u64, t3: u64, t4: u64) -> Option<ClockProbe> {
+        if t4 < t1 || t3 < t2 {
+            return None;
+        }
+        let (t1, t2, t3, t4) = (t1 as i64, t2 as i64, t3 as i64, t4 as i64);
+        let rtt = (t4 - t1) - (t3 - t2);
+        if rtt < 0 {
+            return None;
+        }
+        let probe = ClockProbe {
+            offset_ms: ((t2 - t1) + (t3 - t4)) / 2,
+            rtt_ms: rtt as u64,
+            at_ms: t4 as u64,
+        };
+        self.probes.push_back(probe);
+        while self.probes.len() > CLOCK_PROBE_RING {
+            self.probes.pop_front();
+        }
+        Some(probe)
+    }
+
+    /// The best estimate at `now_ms`, ignoring probes that have aged out.
+    pub fn estimate(&self, now_ms: u64) -> ClockEstimate {
+        self.probes
+            .iter()
+            .filter(|p| now_ms.saturating_sub(p.at_ms) <= CLOCK_PROBE_WINDOW_MS)
+            .min_by_key(|p| p.rtt_ms)
+            .map(|p| ClockEstimate {
+                offset_ms: p.offset_ms,
+                rtt_ms: Some(p.rtt_ms),
+            })
+            .unwrap_or_else(ClockEstimate::unmeasured)
+    }
+
+    /// How many probes are being kept. Bounded by [`CLOCK_PROBE_RING`].
+    pub fn len(&self) -> usize {
+        self.probes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.probes.is_empty()
+    }
+}
+
+// ── The verdict ──────────────────────────────────────────────────────────────
+
+/// What a given player can be asked to do about drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncTuning {
+    pub min_deadband_ms: u64,
+    pub can_rate_trim: bool,
+}
+
+/// Everything [`sync_verdict`] needs, gathered by the caller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SyncSample {
+    pub local_pos_ms: u64,
+    pub local_playing: bool,
+    /// The counter of the last command *we* have applied.
+    pub local_seq: u64,
+    pub peer_pos_ms: u64,
+    pub peer_playing: bool,
+    /// The counter the peer said they had applied when they sent this.
+    pub peer_seq: u64,
+    /// The peer's clock when they sent it.
+    pub peer_at_ms: u64,
+    /// Our clock now.
+    pub now_ms: u64,
+    /// Our clock when we last moved the playhead automatically.
+    pub last_seek_ms: u64,
+    pub clock: ClockEstimate,
+    /// Whether *we* started this session. The starter leads.
+    pub we_lead: bool,
+}
+
+/// What to do about the peer's reported position.
+///
+/// Internally tagged (`{"kind":"seek","pos_ms":…}`) like
+/// [`crate::call::CallSignal`], so a frontend switches on `kind` and uniffi —
+/// which has no "arbitrary JSON" type — hands over a closed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SyncVerdict {
+    /// Leave the player alone.
+    Hold,
+    /// Take their state wholesale — we missed a command. A repair, not drift.
+    Adopt {
+        pos_ms: u64,
+        playing: bool,
+        seq: u64,
+    },
+    /// Trim the playback rate to close a small gap. An absolute multiplier.
+    Nudge { rate: f64 },
+    /// Too far out to trim; jump.
+    Seek { pos_ms: u64 },
+}
+
+/// The whole correction policy, in one pure function so every frontend inherits
+/// the same answer and a test can pin it.
+///
+/// The rules are ordered, and each exists for a case that actually happens:
+///  1. **They are behind our latest command.** Their position follows from state
+///     we have already superseded, so correcting toward it would undo our own
+///     command. We hold, and our next heartbeat brings them up. *This is the
+///     ping-pong guard: the side that is right stays silent rather than
+///     answering, which is [`crate::presence`]'s `reply: false` rule in another
+///     shape.*
+///  2. **They are ahead of us.** A command reached them and not us; the
+///     heartbeat is the repair path for a lost DM.
+///  3. **We lead.** Exactly one side corrects, so the loop provably cannot
+///     oscillate. Both sides may still *command* freely — only the automatic
+///     correction is one-sided.
+///  4. **Either side is paused.** Correcting a paused player is jarring and
+///     means nothing.
+///  5. **Project and compare** through the clock offset.
+///  6. **Never correct by less than the measurement error.** If the round trip
+///     is 700 ms, a 200 ms "drift" is indistinguishable from zero and acting on
+///     it is chasing noise.
+///  7. Inside the deadband, hold.
+///  8. Small gap and a player that can be trimmed: trim.
+///  9. Otherwise jump — unless we jumped moments ago.
+pub fn sync_verdict(s: &SyncSample, t: SyncTuning) -> SyncVerdict {
+    if s.peer_seq < s.local_seq {
+        return SyncVerdict::Hold;
+    }
+    if s.peer_seq > s.local_seq {
+        return SyncVerdict::Adopt {
+            pos_ms: s.peer_pos_ms,
+            playing: s.peer_playing,
+            seq: s.peer_seq,
+        };
+    }
+    if s.we_lead || !s.local_playing || !s.peer_playing {
+        return SyncVerdict::Hold;
+    }
+
+    let peer_pos_now = projected_peer_pos_ms(s);
+    let drift_ms = s.local_pos_ms as i64 - peer_pos_now;
+    let deadband = t.min_deadband_ms.max(s.clock.uncertainty_ms()) as i64;
+    if drift_ms.abs() <= deadband {
+        return SyncVerdict::Hold;
+    }
+
+    if drift_ms.unsigned_abs() <= TOGETHER_SEEK_THRESHOLD_MS && t.can_rate_trim {
+        return SyncVerdict::Nudge {
+            rate: trim_rate(drift_ms),
+        };
+    }
+
+    if s.now_ms.saturating_sub(s.last_seek_ms) < TOGETHER_MIN_SEEK_INTERVAL_MS {
+        // We have just yanked this player. Trimming is the gentler option if it
+        // is available at all; otherwise wait rather than seek twice in a breath.
+        return if t.can_rate_trim {
+            SyncVerdict::Nudge {
+                rate: trim_rate(drift_ms),
+            }
+        } else {
+            SyncVerdict::Hold
+        };
+    }
+
+    SyncVerdict::Seek {
+        pos_ms: peer_pos_now.max(0) as u64,
+    }
+}
+
+/// Where the peer's playhead is *now*, in our clock, given what they told us and
+/// how long ago that was. Exposed because a UI wants the same number to show a
+/// drift figure.
+pub fn projected_peer_pos_ms(s: &SyncSample) -> i64 {
+    let sent_in_our_clock = s.peer_at_ms as i64 - s.clock.offset_ms;
+    let elapsed = (s.now_ms as i64 - sent_in_our_clock).max(0);
+    s.peer_pos_ms as i64 + if s.peer_playing { elapsed } else { 0 }
+}
+
+/// The rate that closes `drift_ms` over [`TOGETHER_CORRECTION_WINDOW_MS`],
+/// clamped so a correction is never audible. Ahead of them means slow down.
+fn trim_rate(drift_ms: i64) -> f64 {
+    let raw = 1.0 - (drift_ms as f64 / TOGETHER_CORRECTION_WINDOW_MS as f64);
+    raw.clamp(1.0 - TOGETHER_MAX_TRIM, 1.0 + TOGETHER_MAX_TRIM)
+}
+
+// ── Reading a state change back ──────────────────────────────────────────────
+
+/// What a [`TogetherSignal::State`] turned out to mean, for the UI to narrate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum StateChange {
+    Played,
+    Paused,
+    Seeked,
+    /// Both at once — someone scrubbed while paused, or paused after jumping.
+    PausedAndSeeked,
+    /// Nothing worth telling anyone about.
+    Unchanged,
+}
+
+/// Derive which of play / pause / seek a state message was, by comparing it with
+/// where the playhead was expected to be.
+///
+/// One tested function rather than three frontends each guessing. The honest
+/// imprecision, stated rather than hidden: a pause that happens to coincide with
+/// more than [`TOGETHER_SEEK_THRESHOLD_MS`] of accrued drift reads as "paused and
+/// skipped". A `was_seek` bit on the wire would remove the ambiguity and was
+/// judged not worth a field.
+pub fn describe_state_change(
+    was_playing: bool,
+    now_playing: bool,
+    expected_pos_ms: u64,
+    actual_pos_ms: u64,
+) -> StateChange {
+    let jumped = expected_pos_ms.abs_diff(actual_pos_ms) > TOGETHER_SEEK_THRESHOLD_MS;
+    match (was_playing, now_playing, jumped) {
+        (false, true, _) => StateChange::Played,
+        (true, false, true) => StateChange::PausedAndSeeked,
+        (true, false, false) => StateChange::Paused,
+        (_, _, true) => StateChange::Seeked,
+        _ => StateChange::Unchanged,
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_json(signal: TogetherSignal) -> String {
+        TogetherEnvelope::new("abc123", 1, 1_700_000_000_000, None, signal)
+            .to_json()
+            .unwrap()
+    }
+
+    // ── Wire shape ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn every_signal_round_trips_through_json() {
+        let signals = vec![
+            TogetherSignal::Start {
+                content: TogetherContent::local_file(7_200_000, Some("Solaris".into())),
+                pos_ms: 0,
+                playing: false,
+            },
+            TogetherSignal::Start {
+                content: TogetherContent::Youtube {
+                    video_id: "dQw4w9WgXcQ".into(),
+                },
+                pos_ms: 12_000,
+                playing: true,
+            },
+            TogetherSignal::Join,
+            TogetherSignal::State {
+                pos_ms: 2_520_000,
+                playing: true,
+            },
+            TogetherSignal::Heartbeat {
+                pos_ms: 2_530_000,
+                playing: true,
+                applied_seq: 4,
+            },
+            TogetherSignal::End,
+        ];
+        for signal in signals {
+            let json = env_json(signal.clone());
+            let back = parse_together_envelope(&json).expect("parses");
+            assert_eq!(back.signal, signal);
+            assert_eq!(back.session_id, "abc123");
+            assert_eq!(back.comrade_together, TOGETHER_ENVELOPE_MARKER);
+        }
+    }
+
+    #[test]
+    fn the_clock_echo_round_trips_and_is_absent_when_unset() {
+        let with = TogetherEnvelope::new(
+            "s",
+            2,
+            1_000,
+            Some(ClockEcho {
+                your_at_ms: 900,
+                my_recv_ms: 950,
+            }),
+            TogetherSignal::Join,
+        );
+        let json = with.to_json().unwrap();
+        assert!(json.contains("\"echo\""));
+        assert_eq!(parse_together_envelope(&json).unwrap(), with);
+
+        let without = TogetherEnvelope::new("s", 2, 1_000, None, TogetherSignal::Join);
+        assert!(!without.to_json().unwrap().contains("echo"));
+    }
+
+    /// The privacy claim, asserted rather than promised in a comment: a local
+    /// file is described by its length and an optional chosen label, and by
+    /// nothing else. Adding a filename, path, size or hash fails this test.
+    #[test]
+    fn a_local_file_is_identified_by_its_duration_and_nothing_else() {
+        let bare = serde_json::to_value(TogetherContent::local_file(7_200_000, None)).unwrap();
+        let mut keys: Vec<_> = bare.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["duration_ms", "kind"]);
+
+        let labelled =
+            serde_json::to_value(TogetherContent::local_file(7_200_000, Some("x".into()))).unwrap();
+        let mut keys: Vec<_> = labelled.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["duration_ms", "kind", "label"]);
+    }
+
+    /// `End` says someone left and deliberately not why.
+    #[test]
+    fn leaving_carries_no_reason() {
+        let value = serde_json::to_value(TogetherSignal::End).unwrap();
+        let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, vec!["kind"]);
+    }
+
+    #[test]
+    fn parse_rejects_chat_text_and_every_sibling_envelope() {
+        let not_ours = [
+            "hello there",
+            "",
+            "{}",
+            r#"{"comrade_nudge":1,"ttl_secs":480}"#,
+            r#"{"comrade_presence":1,"state":"online","ttl_secs":480,"reply":false}"#,
+            r#"{"comrade_call":1,"call_id":"x","media":"audio","signal":{"kind":"ringing"}}"#,
+            r#"{"comrade_receipt":1}"#,
+            // Right shape, wrong marker value — a future version must not be
+            // silently reinterpreted as this one.
+            r#"{"comrade_together":2,"session_id":"s","seq":1,"at_ms":1,"signal":{"kind":"join"}}"#,
+        ];
+        for candidate in not_ours {
+            assert!(
+                parse_together_envelope(candidate).is_none(),
+                "should not parse: {candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_together_envelope_is_not_mistaken_for_a_sibling() {
+        let json = env_json(TogetherSignal::Join);
+        assert!(crate::nudge::parse_nudge(&json).is_none());
+        assert!(crate::presence::parse_presence_beacon(&json).is_none());
+        assert!(crate::call::parse_call_envelope(&json).is_none());
+    }
+
+    #[test]
+    fn session_ids_are_unguessable_and_distinct() {
+        let a = new_session_id();
+        let b = new_session_id();
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, b);
+    }
+
+    // ── YouTube ids ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn youtube_id_rejects_injection_shaped_input() {
+        for bad in [
+            "",
+            "short",
+            "waytoolongforanid",
+            "dQw4w9WgXc",                   // ten
+            "dQw4w9WgXcQ\"",                // quote
+            "\"><script>alert(1)</script>", // the shape that matters
+            "dQw4w9WgX<Q",
+            "dQw4w9Wg XcQ",
+        ] {
+            assert!(!valid_youtube_id(bad), "should be invalid: {bad:?}");
+            assert!(TogetherContent::youtube(bad).is_none(), "accepted: {bad:?}");
+        }
+        assert!(valid_youtube_id("dQw4w9WgXcQ"));
+        assert!(valid_youtube_id("_-aB3cD4eF5"));
+    }
+
+    #[test]
+    fn youtube_id_is_found_in_every_link_shape_we_accept() {
+        for input in [
+            "dQw4w9WgXcQ",
+            "  dQw4w9WgXcQ  ",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
+            "http://youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ?t=42",
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(
+                youtube_id_from_url(input).as_deref(),
+                Some("dQw4w9WgXcQ"),
+                "failed for {input}"
+            );
+        }
+        assert_eq!(youtube_id_from_url("https://example.com/"), None);
+        assert_eq!(youtube_id_from_url("not a link"), None);
+    }
+
+    // ── Freshness ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_signal_from_the_backfill_window_is_never_fresh() {
+        let now = 1_800_000_000;
+        assert!(signal_is_fresh(now, now));
+        assert!(signal_is_fresh(now - TOGETHER_SIGNAL_MAX_AGE_SECS, now));
+        assert!(!signal_is_fresh(
+            now - TOGETHER_SIGNAL_MAX_AGE_SECS - 1,
+            now
+        ));
+        // The two-day inbox backfill, which is the case this exists for.
+        assert!(!signal_is_fresh(now - 172_800, now));
+    }
+
+    #[test]
+    fn a_session_survives_a_few_dropped_heartbeats_but_not_silence() {
+        let t0 = 1_000_000u64;
+        let beat = TOGETHER_HEARTBEAT_SECS * 1000;
+        assert!(session_is_live_at(t0, t0 + 4 * beat));
+        assert!(!session_is_live_at(t0, t0 + TOGETHER_SESSION_TTL_MS));
+        assert!(!session_is_live_at(t0, t0 + 10 * beat));
+    }
+
+    // ── Arbitration ──────────────────────────────────────────────────────────
+
+    fn stamp(seq: u64, actor: &str, pausing: bool) -> CommandStamp {
+        CommandStamp::new(seq, actor, pausing)
+    }
+
+    #[test]
+    fn a_higher_counter_wins() {
+        assert!(stamp(6, "npub1a", false).wins_over(&stamp(5, "npub1b", true)));
+        assert!(!stamp(4, "npub1b", true).wins_over(&stamp(5, "npub1a", false)));
+    }
+
+    #[test]
+    fn a_replayed_command_never_wins_twice() {
+        let applied = stamp(5, "npub1a", false);
+        assert!(!applied.wins_over(&applied));
+    }
+
+    /// The property the whole design rests on: whichever side evaluates it, the
+    /// two devices name the same winner. Asserted from both directions.
+    #[test]
+    fn a_tie_is_resolved_identically_on_both_devices() {
+        let cases = [
+            (stamp(5, "npub1a", true), stamp(5, "npub1b", false)),
+            (stamp(5, "npub1a", false), stamp(5, "npub1b", false)),
+            (stamp(5, "npub1b", true), stamp(5, "npub1a", true)),
+            (stamp(7, "npub1a", false), stamp(5, "npub1b", true)),
+        ];
+        for (x, y) in cases {
+            assert_ne!(
+                x.wins_over(&y),
+                y.wins_over(&x),
+                "the two devices disagreed about {x:?} vs {y:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pause_beats_a_play_issued_at_the_same_moment() {
+        let pause = stamp(5, "npub1a", true);
+        let play = stamp(5, "npub1z", false);
+        assert!(pause.wins_over(&play));
+        assert!(!play.wins_over(&pause));
+    }
+
+    #[test]
+    fn a_scrub_drag_is_coalesced_into_one_command() {
+        let t = 10_000u64;
+        assert!(command_is_due(0, t));
+        assert!(!command_is_due(t, t + TOGETHER_COMMAND_MIN_INTERVAL_MS - 1));
+        assert!(command_is_due(t, t + TOGETHER_COMMAND_MIN_INTERVAL_MS));
+    }
+
+    // ── The clock ────────────────────────────────────────────────────────────
+
+    /// Synthesise a round trip with a known offset and delay, and demand the
+    /// filter recover both exactly.
+    #[test]
+    fn the_filter_recovers_a_known_offset_and_round_trip() {
+        let offset = 4_000i64; // peer's clock is four seconds ahead
+        let one_way = 120i64;
+        let think = 30i64;
+
+        let t1 = 1_000_000i64;
+        let t2 = t1 + one_way + offset;
+        let t3 = t2 + think;
+        let t4 = t3 - offset + one_way;
+
+        let mut filter = ClockFilter::new();
+        let probe = filter
+            .observe(t1 as u64, t2 as u64, t3 as u64, t4 as u64)
+            .expect("usable probe");
+        assert_eq!(probe.offset_ms, offset);
+        assert_eq!(probe.rtt_ms, (2 * one_way) as u64);
+
+        let estimate = filter.estimate(t4 as u64);
+        assert_eq!(estimate.offset_ms, offset);
+        assert_eq!(estimate.uncertainty_ms(), one_way as u64);
+    }
+
+    #[test]
+    fn the_filter_prefers_the_least_delayed_probe() {
+        let mut filter = ClockFilter::new();
+        // A noisy probe: 2s each way, and a badly skewed apparent offset.
+        filter.observe(0, 5_000, 5_010, 4_010).unwrap();
+        // A clean one: 50ms each way, true offset 1000.
+        let t1 = 10_000i64;
+        let t2 = t1 + 50 + 1_000;
+        let t3 = t2 + 5;
+        let t4 = t3 - 1_000 + 50;
+        filter
+            .observe(t1 as u64, t2 as u64, t3 as u64, t4 as u64)
+            .unwrap();
+
+        let estimate = filter.estimate(t4 as u64);
+        assert_eq!(estimate.offset_ms, 1_000);
+        assert_eq!(estimate.rtt_ms, Some(100));
+    }
+
+    #[test]
+    fn the_filter_forgets_probes_older_than_its_window() {
+        let mut filter = ClockFilter::new();
+        filter.observe(0, 1_000, 1_010, 20).unwrap();
+        assert!(filter.estimate(1_000).rtt_ms.is_some());
+        assert!(filter
+            .estimate(CLOCK_PROBE_WINDOW_MS + 1_000)
+            .rtt_ms
+            .is_none());
+    }
+
+    #[test]
+    fn the_filter_ring_stays_bounded_however_long_a_session_runs() {
+        let mut filter = ClockFilter::new();
+        for i in 0..720u64 {
+            let t1 = i * 10_000;
+            filter.observe(t1, t1 + 60, t1 + 65, t1 + 125);
+        }
+        assert_eq!(filter.len(), CLOCK_PROBE_RING);
+    }
+
+    #[test]
+    fn a_measurement_whose_clocks_run_backwards_is_discarded_not_clamped() {
+        let mut filter = ClockFilter::new();
+        assert!(filter.observe(1_000, 500, 400, 900).is_none());
+        assert!(filter.observe(1_000, 2_000, 1_500, 2_500).is_none());
+        assert!(filter.is_empty());
+    }
+
+    #[test]
+    fn an_unmeasured_clock_never_reports_certainty() {
+        let estimate = ClockEstimate::unmeasured();
+        assert_eq!(estimate.rtt_ms, None);
+        assert_eq!(
+            estimate.uncertainty_ms(),
+            TOGETHER_UNMEASURED_UNCERTAINTY_MS
+        );
+        assert!(estimate.uncertainty_ms() > 0);
+        assert_eq!(ClockFilter::new().estimate(0), estimate);
+    }
+
+    // ── The verdict ──────────────────────────────────────────────────────────
+
+    fn measured(rtt_ms: u64) -> ClockEstimate {
+        ClockEstimate {
+            offset_ms: 0,
+            rtt_ms: Some(rtt_ms),
+        }
+    }
+
+    /// A follower, both playing, clocks agreed, nothing seeked recently.
+    fn follower(local_pos_ms: u64, peer_pos_ms: u64, clock: ClockEstimate) -> SyncSample {
+        SyncSample {
+            local_pos_ms,
+            local_playing: true,
+            local_seq: 3,
+            peer_pos_ms,
+            peer_playing: true,
+            peer_seq: 3,
+            peer_at_ms: 1_000_000,
+            now_ms: 1_000_000,
+            last_seek_ms: 0,
+            clock,
+            we_lead: false,
+        }
+    }
+
+    fn fine() -> SyncTuning {
+        TogetherContent::local_file(1, None).tuning()
+    }
+
+    fn coarse() -> SyncTuning {
+        TogetherContent::Youtube {
+            video_id: "dQw4w9WgXcQ".into(),
+        }
+        .tuning()
+    }
+
+    #[test]
+    fn a_gap_inside_the_deadband_is_left_alone() {
+        let s = follower(60_000, 60_100, measured(100));
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+    }
+
+    /// The central honesty claim of this module, pinned: with a two-second round
+    /// trip, a 400 ms disagreement is indistinguishable from none, and acting on
+    /// it would be chasing noise. This is also why §8.2's "< 300 ms" target is
+    /// unreachable over a relay — 300 ms sits under the measurement error.
+    #[test]
+    fn never_corrects_below_its_own_measurement_error() {
+        let s = follower(60_400, 60_000, measured(2_000));
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+        // The very same drift, measured well, is worth correcting.
+        let s = follower(60_400, 60_000, measured(100));
+        assert!(matches!(
+            sync_verdict(&s, fine()),
+            SyncVerdict::Nudge { .. }
+        ));
+    }
+
+    #[test]
+    fn a_small_gap_is_trimmed_and_never_audibly_so() {
+        // We are 1s ahead: slow down, but only within the trim band.
+        let ahead = follower(61_000, 60_000, measured(100));
+        match sync_verdict(&ahead, fine()) {
+            SyncVerdict::Nudge { rate } => {
+                assert!(rate < 1.0, "should slow down, got {rate}");
+                assert!(rate >= 1.0 - TOGETHER_MAX_TRIM);
+            }
+            other => panic!("expected a trim, got {other:?}"),
+        }
+        // We are 1s behind: speed up, still bounded.
+        let behind = follower(59_000, 60_000, measured(100));
+        match sync_verdict(&behind, fine()) {
+            SyncVerdict::Nudge { rate } => {
+                assert!(rate > 1.0, "should speed up, got {rate}");
+                assert!(rate <= 1.0 + TOGETHER_MAX_TRIM);
+            }
+            other => panic!("expected a trim, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_gap_past_trimming_is_jumped() {
+        let s = follower(90_000, 60_000, measured(100));
+        assert_eq!(
+            sync_verdict(&s, fine()),
+            SyncVerdict::Seek { pos_ms: 60_000 }
+        );
+    }
+
+    #[test]
+    fn a_player_that_cannot_be_trimmed_only_ever_holds_or_seeks() {
+        // Inside the coarse deadband: hold.
+        let near = follower(60_000, 60_900, measured(100));
+        assert_eq!(sync_verdict(&near, coarse()), SyncVerdict::Hold);
+        // Outside it: a seek, never a trim it could not perform.
+        let far = follower(62_000, 60_000, measured(100));
+        assert_eq!(
+            sync_verdict(&far, coarse()),
+            SyncVerdict::Seek { pos_ms: 60_000 }
+        );
+    }
+
+    #[test]
+    fn a_seek_storm_is_capped_by_the_cooldown() {
+        let mut s = follower(90_000, 60_000, measured(100));
+        s.last_seek_ms = s.now_ms - 1_000;
+        // A trimmable player rides it out gently rather than jumping again.
+        assert!(matches!(
+            sync_verdict(&s, fine()),
+            SyncVerdict::Nudge { .. }
+        ));
+        // One that cannot trim simply waits, rather than yanking twice.
+        assert_eq!(sync_verdict(&s, coarse()), SyncVerdict::Hold);
+    }
+
+    #[test]
+    fn nothing_is_corrected_while_either_side_is_paused() {
+        let mut s = follower(90_000, 60_000, measured(100));
+        s.local_playing = false;
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+
+        let mut s = follower(90_000, 60_000, measured(100));
+        s.peer_playing = false;
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+    }
+
+    #[test]
+    fn the_leader_never_corrects_toward_the_follower() {
+        let mut s = follower(90_000, 60_000, measured(100));
+        s.we_lead = true;
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+    }
+
+    /// The ping-pong guard. A peer still on an older command is describing state
+    /// we have already superseded; correcting toward it would undo our own
+    /// command and start the two devices arguing.
+    #[test]
+    fn a_peer_still_on_an_older_command_is_ignored() {
+        let mut s = follower(90_000, 60_000, measured(100));
+        s.local_seq = 5;
+        s.peer_seq = 4;
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+        // …and it holds even for the leader-shaped case, i.e. rule order.
+        s.we_lead = true;
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+    }
+
+    /// The repair path: a command DM never reached us, so their heartbeat is the
+    /// only way we learn about it.
+    #[test]
+    fn a_peer_ahead_of_us_is_adopted_wholesale() {
+        let mut s = follower(90_000, 60_000, measured(100));
+        s.local_seq = 4;
+        s.peer_seq = 5;
+        s.peer_playing = false;
+        assert_eq!(
+            sync_verdict(&s, fine()),
+            SyncVerdict::Adopt {
+                pos_ms: 60_000,
+                playing: false,
+                seq: 5,
+            }
+        );
+    }
+
+    /// A repair outranks the leader rule — otherwise a leader that missed a
+    /// command would sit on stale state forever, and only the follower would
+    /// ever heal.
+    #[test]
+    fn even_the_leader_adopts_a_command_it_missed() {
+        let mut s = follower(90_000, 60_000, measured(100));
+        s.we_lead = true;
+        s.local_seq = 4;
+        s.peer_seq = 9;
+        assert!(matches!(
+            sync_verdict(&s, fine()),
+            SyncVerdict::Adopt { .. }
+        ));
+    }
+
+    #[test]
+    fn a_peers_playhead_is_projected_forward_by_how_long_the_message_took() {
+        let mut s = follower(0, 60_000, measured(400));
+        s.peer_at_ms = 1_000_000;
+        s.now_ms = 1_000_500; // half a second later on our clock
+        assert_eq!(projected_peer_pos_ms(&s), 60_500);
+
+        // A paused peer has not moved, however long the message took.
+        s.peer_playing = false;
+        assert_eq!(projected_peer_pos_ms(&s), 60_000);
+    }
+
+    #[test]
+    fn a_peers_playhead_is_projected_through_the_clock_offset() {
+        let mut s = follower(0, 60_000, ClockEstimate::unmeasured());
+        // Their clock reads four seconds ahead of ours.
+        s.clock = ClockEstimate {
+            offset_ms: 4_000,
+            rtt_ms: Some(100),
+        };
+        s.peer_at_ms = 1_004_000; // = our 1_000_000
+        s.now_ms = 1_000_250;
+        assert_eq!(projected_peer_pos_ms(&s), 60_250);
+    }
+
+    /// The frontends switch on these strings, so the shape is pinned here
+    /// rather than trusted to stay put.
+    #[test]
+    fn the_verdict_crosses_to_a_frontend_as_a_tagged_object() {
+        let cases = [
+            (SyncVerdict::Hold, r#"{"kind":"hold"}"#),
+            (
+                SyncVerdict::Nudge { rate: 1.04 },
+                r#"{"kind":"nudge","rate":1.04}"#,
+            ),
+            (
+                SyncVerdict::Seek { pos_ms: 60_000 },
+                r#"{"kind":"seek","pos_ms":60000}"#,
+            ),
+            (
+                SyncVerdict::Adopt {
+                    pos_ms: 1,
+                    playing: true,
+                    seq: 2,
+                },
+                r#"{"kind":"adopt","pos_ms":1,"playing":true,"seq":2}"#,
+            ),
+        ];
+        for (verdict, wire) in cases {
+            assert_eq!(serde_json::to_string(&verdict).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<SyncVerdict>(wire).unwrap(), verdict);
+        }
+        assert_eq!(
+            serde_json::to_string(&StateChange::PausedAndSeeked).unwrap(),
+            r#""paused_and_seeked""#
+        );
+    }
+
+    // ── Narrating a state change ─────────────────────────────────────────────
+
+    #[test]
+    fn a_state_change_is_named_from_what_the_playhead_did() {
+        assert_eq!(
+            describe_state_change(false, true, 1_000, 1_000),
+            StateChange::Played
+        );
+        assert_eq!(
+            describe_state_change(true, false, 1_000, 1_000),
+            StateChange::Paused
+        );
+        assert_eq!(
+            describe_state_change(true, true, 1_000, 500_000),
+            StateChange::Seeked
+        );
+        assert_eq!(
+            describe_state_change(true, false, 1_000, 500_000),
+            StateChange::PausedAndSeeked
+        );
+        assert_eq!(
+            describe_state_change(true, true, 1_000, 1_200),
+            StateChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn ordinary_drift_is_never_mistaken_for_a_seek() {
+        // Anything inside the seek threshold is drift, not a jump.
+        assert_eq!(
+            describe_state_change(true, true, 60_000, 60_000 + TOGETHER_SEEK_THRESHOLD_MS),
+            StateChange::Unchanged
+        );
+        assert_eq!(
+            describe_state_change(true, true, 60_000, 60_001 + TOGETHER_SEEK_THRESHOLD_MS),
+            StateChange::Seeked
+        );
+    }
+
+    // ── Tuning ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn each_source_is_tuned_to_what_its_player_can_actually_do() {
+        assert!(fine().can_rate_trim);
+        assert!(!coarse().can_rate_trim);
+        assert!(coarse().min_deadband_ms > fine().min_deadband_ms);
+        assert_eq!(
+            TogetherContent::local_file(42, None).duration_ms(),
+            Some(42)
+        );
+        assert_eq!(
+            TogetherContent::youtube("dQw4w9WgXcQ")
+                .unwrap()
+                .duration_ms(),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_command_is_ordered() {
+        assert!(TogetherSignal::State {
+            pos_ms: 0,
+            playing: true
+        }
+        .is_command());
+        assert!(!TogetherSignal::Heartbeat {
+            pos_ms: 0,
+            playing: true,
+            applied_seq: 1
+        }
+        .is_command());
+        assert!(!TogetherSignal::Join.is_command());
+        assert_eq!(TogetherSignal::End.kind_str(), "end");
+    }
+}
