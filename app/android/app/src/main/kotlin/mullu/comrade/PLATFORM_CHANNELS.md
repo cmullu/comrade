@@ -791,7 +791,8 @@ untouched by this phase and Dart has no way to create a channel.
 | `unskip` | — | `null` |
 | `download` | — | `null` (the service owns the transfer from here) |
 | `cancelDownload` | — | `null` |
-| `install` | — | `null` |
+| `install` | — | `null` (the outcome arrives on the state channel) |
+| `retryInstall` | — | `null` |
 | `refreshDownloadState` | — | `null` |
 | `openInstallPermissionSettings` | — | `null` |
 | `openRelease` | — | `null` |
@@ -815,15 +816,44 @@ opens that release's page. An update path is code execution, so every one of
 those is a place a caller-supplied string would be a way to run someone else's
 APK — and none of them accept one.
 
+**The install runs on a worker thread, and the confirmation dialog is started
+from an Activity.** Both are load-bearing, and the first shipped version had
+neither. Copying a release APK into a `PackageInstaller` session is tens of
+megabytes of I/O; doing it on the thread the method call arrives on froze the app
+long enough for an ANR. And `STATUS_PENDING_USER_ACTION` — the platform handing
+back an Intent for its own confirmation dialog, expecting the app to start it —
+came back to a `BroadcastReceiver`, which is the one context that may not
+reliably start an activity: a notification whose `contentIntent` is a broadcast
+that starts an activity is a *notification trampoline*, blocked since Android 12,
+and a background activity start from a receiver has been blocked since Android
+10. Neither throws. The dialog simply never appeared and the card sat on
+"Waiting for Android to install it…" forever. `UpdateInstallActivity` (invisible,
+translucent, its own excluded-from-recents task) is now both the entry point and
+the callback target, and `retryInstall` exists because the app *still* cannot
+distinguish "the dialog is up" from "the platform dropped it" — a dropped
+activity start reports nothing at all.
+
+**The confirmation dialog is asked to stand aside.** From API 31 the session
+requests `USER_ACTION_NOT_REQUIRED`, so on a device that allows it the update
+applies with no dialog: the process is replaced and a notification
+(`UpdateInstaller.notifyInstalled`) is the only thing the user sees, offering to
+reopen the app. This is an owner decision, taken after the dialog turned out to
+be the part that silently failed. **It is a request, not a guarantee** — update
+ownership (Android 14+), OEM policy, or an older release all end with the
+platform answering `STATUS_PENDING_USER_ACTION` instead, so the dialog path is
+the live fallback and no code here may assume which one happened. A Dart caller
+sees the consequence in one place: after `install` succeeds, *no further event
+may arrive*, because the engine's process may be gone.
+
 **The install is gated twice, and the app owns only one of the gates.**
 `UpdateInstall.verify` (pure, host-tested) refuses a download whose package name,
 version code or signing certificate disagrees with the running app, deleting it
 with a reason rather than handing it to a system dialog that says only "app not
 installed"; `canInstall` reports the per-source "install unknown apps" grant,
 which cannot be requested in-app — `openInstallPermissionSettings` is the whole
-of that flow. Android then shows its own confirmation for every install and
-applies its own same-signature rule, and that enforcement, not ours, is what
-finally protects the upgrade.
+of that flow. Android then applies its own same-signature rule, and that
+enforcement, not ours, is what finally protects the upgrade. Note that it is
+*enforcement, not a dialog*: skipping the confirmation does not weaken it.
 
 **Where the certificates cannot be read**, `UpdateInstall` allows the install and
 records that the signature was *not* checked (`Ok(signatureChecked = false)`)

@@ -18,8 +18,12 @@ sealed class UpdateDownloadState {
     /** Verified and sitting in the cache, ready for the installer. */
     data class Ready(val version: String, val path: String) : UpdateDownloadState()
 
-    /** Handed to the system installer — the OS is asking the user to confirm. */
-    data class Installing(val version: String) : UpdateDownloadState()
+    /**
+     * Handed to the system installer — the OS is asking the user to confirm.
+     * Carries [path] as well as [version] so this can be walked back to [Ready]
+     * if the hand-off never comes back (see [UpdateDownloads.dismissInstalling]).
+     */
+    data class Installing(val version: String, val path: String) : UpdateDownloadState()
 
     data class Failed(val message: String) : UpdateDownloadState()
 }
@@ -60,14 +64,51 @@ object UpdateDownloads {
     }
 
     /**
-     * Forget a downloaded-and-ready APK that is no longer there (the OS reaped
-     * the cache, or the install succeeded and it was deleted) so the card offers
-     * the download again instead of an "Install" button pointing at nothing.
+     * Bring the state back in line with the cache. Called whenever a settings
+     * card resumes, which is the moment all three of these can be true:
+     *
+     * - a "ready to install" whose APK is no longer there (the OS reaped the
+     *   cache, or the install went through and it was deleted) has to stop
+     *   offering an Install button that points at nothing;
+     * - so does an "installing" whose APK has gone;
+     * - and, the other way round, a *fresh process* starts at [Idle] while a
+     *   perfectly good verified APK is still sitting in the cache from before it
+     *   was killed. Without [cached] the card would cheerfully ask the user to
+     *   download the same hundred megabytes again.
      */
-    fun forgetIfGone(exists: (String) -> Boolean) {
-        val current = _state.value
-        if (current is UpdateDownloadState.Ready && !exists(current.path)) {
-            _state.value = UpdateDownloadState.Idle
+    fun reconcile(exists: (String) -> Boolean, cached: UpdateDownloadState.Ready?) {
+        _state.value = reconciled(_state.value, exists, cached)
+    }
+
+    /** The rule behind [reconcile], pure so `UpdateDownloadsTest` can drive it. */
+    internal fun reconciled(
+        current: UpdateDownloadState,
+        exists: (String) -> Boolean,
+        cached: UpdateDownloadState.Ready?,
+    ): UpdateDownloadState = when {
+        current is UpdateDownloadState.Ready && !exists(current.path) -> UpdateDownloadState.Idle
+        current is UpdateDownloadState.Installing && !exists(current.path) -> UpdateDownloadState.Idle
+        // Only ever *promotes* a resting state. An in-flight download or a live
+        // hand-off to the installer is the newer truth and is left alone.
+        cached != null && (current is UpdateDownloadState.Idle || current is UpdateDownloadState.Failed) -> cached
+        else -> current
+    }
+
+    /**
+     * Walk an [UpdateDownloadState.Installing] back to [UpdateDownloadState.Ready].
+     *
+     * The escape hatch for a hand-off that never came back. The app cannot know
+     * that the system installer failed to show its dialog — a dropped activity
+     * start reports nothing — so the user gets a "Try again" that returns the
+     * card to a state where Install can be tapped, rather than a screen that
+     * says "Waiting for Android…" forever.
+     */
+    fun dismissInstalling(exists: (String) -> Boolean) {
+        val current = _state.value as? UpdateDownloadState.Installing ?: return
+        _state.value = if (exists(current.path)) {
+            UpdateDownloadState.Ready(current.version, current.path)
+        } else {
+            UpdateDownloadState.Idle
         }
     }
 }

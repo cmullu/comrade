@@ -85,6 +85,8 @@
     <string name="call_restore">Back to the call</string>
     <string name="call_screen_share">Share screen</string>
     <string name="call_screen_share_stop">Stop sharing</string>
+    <string name="call_more">More</string>
+    <string name="call_more_options">More call options</string>
 
     <!-- Call history -->
     <string name="call_history_title">Call history</string>
@@ -230,7 +232,7 @@
     <string name="settings_updates_skipped">Skipped %1$s — you\'ll be told about anything newer.</string>
     <string name="settings_updates_unskip">Stop skipping</string>
     <string name="settings_updates_never_checked">Not checked yet</string>
-    <string name="settings_updates_sideload_note">Comrade is installed by sideload, so the update is fetched here rather than from a store. Android still shows its own install confirmation, and still refuses an APK signed with a different key than the copy you already have.</string>
+    <string name="settings_updates_sideload_note">Comrade is installed by sideload, so the update is fetched here rather than from a store. On Android 12 and newer it usually installs without a confirmation dialog — Comrade closes, the new version goes in, and a notification offers to reopen it. Some devices still ask you to confirm; either way Android refuses an APK signed with a different key than the copy you already have.</string>
 
     <!-- Downloading and installing an update in-app -->
     <string name="settings_updates_download">Download update</string>
@@ -239,6 +241,7 @@
     <string name="settings_updates_verifying">Checking the download…</string>
     <string name="settings_updates_install">Install %1$s</string>
     <string name="settings_updates_installing">Waiting for Android to install it…</string>
+    <string name="settings_updates_install_retry">Nothing happened? Try again</string>
     <string name="settings_updates_cancel_download">Cancel download</string>
     <string name="settings_updates_open_page">Open the release page instead</string>
     <string name="settings_updates_install_permission_title">Allow Comrade to install updates</string>
@@ -255,6 +258,10 @@
     <string name="update_gone_before_install">The downloaded update is no longer there — download it again</string>
     <string name="update_install_permission_needed">Comrade needs your permission to install apps — grant it in Settings, then tap Install again</string>
     <string name="update_install_failed_generic">Android could not install the update</string>
+    <string name="update_install_no_space">There is not enough free space to install the update — free some up and try again</string>
+    <string name="update_installed_title">Comrade %1$s is installed</string>
+    <string name="update_installed_title_generic">The update is installed</string>
+    <string name="update_installed_text">Tap to open Comrade again</string>
     <string name="update_install_cancelled">Install cancelled</string>
     <string name="update_refused_wrong_package">That download is not Comrade — refusing to install it</string>
     <string name="update_refused_not_newer">That download is not newer than the version you are running</string>

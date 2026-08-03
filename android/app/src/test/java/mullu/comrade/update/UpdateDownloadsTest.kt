@@ -7,9 +7,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The process-wide download state: the cancel flag the service polls, and the
+ * The process-wide download state: the cancel flag the service polls, the
  * self-healing that keeps an "Install" button from pointing at a file the OS
- * reaped out of the cache.
+ * reaped out of the cache, and the escape hatch from an install hand-off that
+ * never came back.
  */
 class UpdateDownloadsTest {
 
@@ -35,26 +36,96 @@ class UpdateDownloadsTest {
 
     @Test
     fun aReadyApkThatVanishedGoesBackToOfferingTheDownload() {
-        UpdateDownloads.update(UpdateDownloadState.Ready("0.0.9", "/cache/updates/comrade-0.0.9.apk"))
-        UpdateDownloads.forgetIfGone { false }
+        UpdateDownloads.update(UpdateDownloadState.Ready("0.0.9", APK))
+        UpdateDownloads.reconcile(exists = { false }, cached = null)
         assertEquals(UpdateDownloadState.Idle, UpdateDownloads.state.value)
     }
 
     @Test
     fun aReadyApkThatIsStillThereIsLeftAlone() {
-        val ready = UpdateDownloadState.Ready("0.0.9", "/cache/updates/comrade-0.0.9.apk")
+        val ready = UpdateDownloadState.Ready("0.0.9", APK)
         UpdateDownloads.update(ready)
-        UpdateDownloads.forgetIfGone { true }
+        UpdateDownloads.reconcile(exists = { true }, cached = ready)
         assertEquals(ready, UpdateDownloads.state.value)
     }
 
     @Test
     fun anInFlightDownloadIsNeverForgottenByTheFileCheck() {
-        // Only a Ready state names a file; clearing a Downloading one here would
-        // abandon a live transfer's progress in the UI while it kept running.
+        // Clearing a Downloading state here would abandon a live transfer's
+        // progress in the UI while it kept running — and promoting a stale
+        // cached APK over it would be worse still.
         val downloading = UpdateDownloadState.Downloading(1_000L, 5_000L)
         UpdateDownloads.update(downloading)
-        UpdateDownloads.forgetIfGone { false }
+        UpdateDownloads.reconcile(exists = { false }, cached = UpdateDownloadState.Ready("0.0.9", APK))
         assertEquals(downloading, UpdateDownloads.state.value)
+    }
+
+    @Test
+    fun aFreshProcessPicksUpAnApkItAlreadyDownloaded() {
+        // The state is in memory and the APK is on disk, so every process
+        // restart starts at Idle with a perfectly good download sitting in the
+        // cache. Without this the card asks for the same fifty megabytes again.
+        val cached = UpdateDownloadState.Ready("0.0.9", APK)
+        UpdateDownloads.update(UpdateDownloadState.Idle)
+        UpdateDownloads.reconcile(exists = { true }, cached = cached)
+        assertEquals(cached, UpdateDownloads.state.value)
+    }
+
+    @Test
+    fun aFailedInstallAlsoPicksUpTheApkItAlreadyHas() {
+        // "Install cancelled" leaves the APK in place; coming back to the card
+        // should offer to install it, not to download it again.
+        val cached = UpdateDownloadState.Ready("0.0.9", APK)
+        UpdateDownloads.update(UpdateDownloadState.Failed("Install cancelled"))
+        UpdateDownloads.reconcile(exists = { true }, cached = cached)
+        assertEquals(cached, UpdateDownloads.state.value)
+    }
+
+    @Test
+    fun anInstallWhoseApkVanishedStopsClaimingToBeInstalling() {
+        UpdateDownloads.update(UpdateDownloadState.Installing("0.0.9", APK))
+        UpdateDownloads.reconcile(exists = { false }, cached = null)
+        assertEquals(UpdateDownloadState.Idle, UpdateDownloads.state.value)
+    }
+
+    @Test
+    fun aLiveInstallSurvivesReconciliation() {
+        // Resuming the settings card while the OS confirmation dialog is up must
+        // not rewrite the state behind it.
+        val installing = UpdateDownloadState.Installing("0.0.9", APK)
+        UpdateDownloads.update(installing)
+        UpdateDownloads.reconcile(exists = { true }, cached = UpdateDownloadState.Ready("0.0.9", APK))
+        assertEquals(installing, UpdateDownloads.state.value)
+    }
+
+    // ── The way out of a hand-off that never came back ───────────────────────
+
+    @Test
+    fun givingUpOnAnInstallGoesBackToReady() {
+        // The bug this exists for: Android silently declines to show the install
+        // confirmation, no status ever arrives, and the card would otherwise say
+        // "Waiting for Android to install it…" until the app is force-stopped.
+        UpdateDownloads.update(UpdateDownloadState.Installing("0.0.9", APK))
+        UpdateDownloads.dismissInstalling { true }
+        assertEquals(UpdateDownloadState.Ready("0.0.9", APK), UpdateDownloads.state.value)
+    }
+
+    @Test
+    fun givingUpOnAnInstallWhoseApkWentGoesBackToIdle() {
+        UpdateDownloads.update(UpdateDownloadState.Installing("0.0.9", APK))
+        UpdateDownloads.dismissInstalling { false }
+        assertEquals(UpdateDownloadState.Idle, UpdateDownloads.state.value)
+    }
+
+    @Test
+    fun givingUpDoesNothingWhenNothingIsInstalling() {
+        val ready = UpdateDownloadState.Ready("0.0.9", APK)
+        UpdateDownloads.update(ready)
+        UpdateDownloads.dismissInstalling { true }
+        assertEquals(ready, UpdateDownloads.state.value)
+    }
+
+    private companion object {
+        const val APK = "/cache/updates/comrade-0.0.9.apk"
     }
 }

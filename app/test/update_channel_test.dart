@@ -239,6 +239,7 @@ void main() {
       await channel.download();
       await channel.cancelDownload();
       await channel.install();
+      await channel.retryInstall();
       await channel.refreshDownloadState();
       await channel.openInstallPermissionSettings();
       expect(
@@ -247,6 +248,7 @@ void main() {
           'download',
           'cancelDownload',
           'install',
+          'retryInstall',
           'refreshDownloadState',
           'openInstallPermissionSettings',
         ],

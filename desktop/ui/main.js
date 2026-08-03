@@ -2050,10 +2050,41 @@
     minimizeCall();
   }
 
+  // ── The ⋮ dock ─────────────────────────────────────────────────────────────
+  //
+  // The bar holds camera, mic, ⋮ and End; everything else is in here. The split
+  // itself is `layoutCallControls` in call_decisions.mjs — this is only the
+  // open/shut of the panel that holds the second half.
+
+  function toggleCallDock() {
+    const dock = $("#call-dock");
+    if (dock.hidden) openCallDock();
+    else closeCallDock();
+  }
+
+  function openCallDock() {
+    const dock = $("#call-dock");
+    dock.hidden = false;
+    $("#call-more").setAttribute("aria-expanded", "true");
+    // Move focus in, so the dock is usable from the keyboard and Escape has
+    // somewhere obvious to return from.
+    const first = dock.querySelector(".call-dock-item:not([hidden])");
+    if (first) first.focus();
+  }
+
+  function closeCallDock() {
+    const dock = $("#call-dock");
+    if (dock.hidden) return;
+    dock.hidden = true;
+    $("#call-more").setAttribute("aria-expanded", "false");
+  }
+
   /** Shrink the in-call overlay into the corner tile (see `.is-minimized`). */
   function minimizeCall() {
     const c = state.call;
     if (!c) return;
+    // A dock left open would be wider than the tile it hangs off.
+    closeCallDock();
     c.minimized = true;
     const el = $("#call-active");
     el.classList.add("is-minimized");
@@ -2313,7 +2344,13 @@
       btn.classList.toggle("is-on", sharing);
       btn.title = sharing ? "Stop sharing your screen" : "Share your screen";
       btn.setAttribute("aria-label", btn.title);
+      const label = $("#call-screen-share-label");
+      if (label) label.textContent = sharing ? "Stop sharing" : "Share screen";
     }
+    // Sharing is the one dock item whose state matters while the dock is shut,
+    // so it also lights the ⋮ that hides it.
+    const more = $("#call-more");
+    if (more) more.classList.toggle("is-on", sharing);
     // A voice call that is sharing has a picture to show, so the stage stops
     // being just an avatar.
     const avatar = $("#call-avatar");
@@ -2367,6 +2404,7 @@
     // The camera button only exists on a video call; screen share exists on
     // both, which is the point of it.
     $("#call-camera").hidden = c.media !== "video";
+    closeCallDock(); // a new call starts with the overflow shut
     renderScreenShare();
     attachLocalMedia();
     attachRemoteMedia();
@@ -2376,6 +2414,7 @@
   function hideCallOverlay() {
     $("#call-active").hidden = true;
     restoreCall(); // a tile must never outlive its call
+    closeCallDock(); // nor an open dock
     resetCallQuality();
     exitPictureInPicture();
     const mb = $("#call-mute");
@@ -2386,6 +2425,7 @@
     cb.hidden = true;
     const sb = $("#call-screen-share");
     if (sb) sb.classList.remove("is-on");
+    $("#call-more").classList.remove("is-on");
   }
 
   function showRingingOverlay() {
@@ -2436,7 +2476,33 @@
       rv.srcObject = c.remoteStream;
       rv.play().catch(() => {}); // best-effort; user gesture (the call) already occurred
     }
-    $("#call-avatar").hidden = c.media === "video";
+    // A voice call that the peer is sharing a screen on does have a picture,
+    // so the avatar must get out of its way.
+    $("#call-avatar").hidden = c.media === "video" || !!c.screenSharing;
+    applyRemoteFit();
+  }
+
+  /**
+   * Fill the stage with the remote frame — unless filling would throw most of
+   * the picture away, which is what a shared 16:9 screen on a narrow window
+   * does. Then letterbox instead.
+   *
+   * Driven by geometry rather than by "is the peer sharing a screen", which
+   * would need a wire-format field the protocol does not have. See
+   * `shouldLetterbox` for why a third is the threshold.
+   */
+  function applyRemoteFit() {
+    const rv = $("#call-remote-video");
+    if (!rv || !callDecisions) return;
+    rv.classList.toggle(
+      "is-letterboxed",
+      callDecisions.shouldLetterbox({
+        frameWidth: rv.videoWidth,
+        frameHeight: rv.videoHeight,
+        boxWidth: rv.clientWidth,
+        boxHeight: rv.clientHeight,
+      }),
+    );
   }
 
   function setCallStatusText(text) {
@@ -3272,11 +3338,23 @@
     $("#ring-decline").addEventListener("click", declineIncoming);
     $("#call-mute").addEventListener("click", toggleMute);
     $("#call-camera").addEventListener("click", toggleCamera);
+    $("#call-more").addEventListener("click", toggleCallDock);
     $("#call-screen-share").addEventListener("click", () => {
+      closeCallDock();
       toggleScreenShare().catch(() => {});
     });
-    $("#call-chat").addEventListener("click", openChatDuringCall);
+    $("#call-chat").addEventListener("click", () => {
+      closeCallDock();
+      openChatDuringCall();
+    });
     $("#call-hangup").addEventListener("click", hangupByUser);
+    // Anywhere outside the dock shuts it — including the call stage, whose own
+    // click handler is unaffected because this only ever closes.
+    document.addEventListener("click", (e) => {
+      if ($("#call-dock").hidden) return;
+      if (e.target.closest("#call-dock") || e.target.closest("#call-more")) return;
+      closeCallDock();
+    });
     // Clicking the minimised tile restores the call — but not when the click
     // was meant for one of the two controls the tile still shows.
     $("#call-active").addEventListener("click", (e) => {
@@ -3293,6 +3371,12 @@
     installTileDragging();
     // Nothing displaying the call means nothing should be captured for it.
     document.addEventListener("visibilitychange", applyVideoVisibility);
+    // The frame's own dimensions only exist once metadata has loaded, and they
+    // change when the peer rotates or starts sharing a screen; the box changes
+    // when the window does or the tile is minimised.
+    $("#call-remote-video").addEventListener("loadedmetadata", applyRemoteFit);
+    $("#call-remote-video").addEventListener("resize", applyRemoteFit);
+    window.addEventListener("resize", applyRemoteFit);
     $("#call-remote-video").addEventListener("leavepictureinpicture", applyVideoVisibility);
     $("#call-remote-video").addEventListener("enterpictureinpicture", applyVideoVisibility);
 
@@ -3304,7 +3388,11 @@
     });
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
-      if (!$("#modal-partner").hidden) closePartnerModal();
+      // Innermost thing first: an open call dock is above both modals.
+      if (!$("#call-dock").hidden) {
+        closeCallDock();
+        $("#call-more").focus();
+      } else if (!$("#modal-partner").hidden) closePartnerModal();
       else if (!$("#modal-turn").hidden) closeTurnModal();
     });
 

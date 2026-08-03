@@ -28,6 +28,10 @@ import {
   shouldSendLocalVideo,
   clampTilePosition,
   snapTileToEdge,
+  shouldLetterbox,
+  CALL_CONTROL,
+  MAX_PRIMARY_CALL_CONTROLS,
+  layoutCallControls,
 } from "./call_decisions.mjs";
 
 // ── decideOfferDisposition ───────────────────────────────────────────────────
@@ -658,4 +662,169 @@ test("snapTileToEdge decides by centre, not by left edge", () => {
   // thrown rather than springing back.
   assert.equal(snapTileToEdge({ x: 427, y: 0, ...box }).x, 1000 - 148 - 12);
   assert.equal(snapTileToEdge({ x: 425, y: 0, ...box }).x, 12);
+});
+
+// ── How a remote frame should fill its box ───────────────────────────────────
+
+test("shouldLetterbox fills for camera-shaped video", () => {
+  // Portrait phone camera in a portrait box — no mismatch at all.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 720, frameHeight: 1280, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+  // 4:3 camera on a tall phone loses 25% — still fills, as every call app does.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 960, frameHeight: 1280, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+  // A 16:9 screen in a 16:9 window: nothing to crop.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1920, frameHeight: 1080, boxWidth: 1280, boxHeight: 720 }),
+    false,
+  );
+});
+
+test("shouldLetterbox letterboxes a shared screen on a phone", () => {
+  // 16:9 desktop screen in a portrait phone box loses ~68% to the crop.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1920, frameHeight: 1080, boxWidth: 720, boxHeight: 1280 }),
+    true,
+  );
+  // An ultrawide monitor is worse still.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 3440, frameHeight: 1440, boxWidth: 720, boxHeight: 1280 }),
+    true,
+  );
+});
+
+test("shouldLetterbox fills rather than guessing when it has nothing to go on", () => {
+  // No frame yet, and a zero-height box mid-layout.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 0, frameHeight: 0, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1920, frameHeight: 1080, boxWidth: 720, boxHeight: 0 }),
+    false,
+  );
+  assert.equal(
+    shouldLetterbox({ frameWidth: NaN, frameHeight: 1080, boxWidth: 720, boxHeight: 1280 }),
+    false,
+  );
+});
+
+test("shouldLetterbox is symmetric — a tall frame in a wide box crops too", () => {
+  // A portrait phone screen shared onto a wide desktop window.
+  assert.equal(
+    shouldLetterbox({ frameWidth: 1080, frameHeight: 1920, boxWidth: 1600, boxHeight: 900 }),
+    true,
+  );
+});
+
+// ── layoutCallControls ───────────────────────────────────────────────────────
+// The regression these exist for: the control bar used to be a straight list
+// of every control, and on a video call that list was six buttons wide on a
+// screen that fits five. A non-wrapping row clips its last children, and the
+// last child was End call — so a video call could not be hung up from the call
+// screen. Every case below is really one assertion: the bar fits, and End is
+// in it.
+
+const CONTROL_CASES = [
+  { name: "video call, camera on", input: { video: true, cameraOn: true } },
+  { name: "video call, camera off", input: { video: true, cameraOn: false } },
+  { name: "voice call", input: { video: false, cameraOn: true } },
+  {
+    name: "desktop video call (no routes, no camera flip)",
+    input: { video: true, cameraOn: true, hasAudioRoutes: false, hasCameraSwitch: false },
+  },
+  {
+    name: "desktop voice call",
+    input: { video: false, cameraOn: true, hasAudioRoutes: false, hasCameraSwitch: false },
+  },
+];
+
+for (const { name, input } of CONTROL_CASES) {
+  test(`layoutCallControls keeps End call in a bar that fits — ${name}`, () => {
+    const { primary, dock } = layoutCallControls(input);
+    assert.equal(
+      primary.at(-1),
+      CALL_CONTROL.HANGUP,
+      "End call must be the last control in the bar, never in the dock",
+    );
+    assert.ok(
+      primary.length <= MAX_PRIMARY_CALL_CONTROLS,
+      `bar holds ${primary.length} controls, more than the ${MAX_PRIMARY_CALL_CONTROLS} that fit`,
+    );
+    // Nothing may be in both places: a control shown twice is a control whose
+    // two copies can disagree about their own state.
+    for (const control of primary) {
+      assert.ok(!dock.includes(control), `${control} is in both the bar and the dock`);
+    }
+    assert.equal(new Set(primary).size, primary.length, "duplicate control in the bar");
+    assert.equal(new Set(dock).size, dock.length, "duplicate control in the dock");
+  });
+}
+
+test("layoutCallControls orders the bar the way Telegram does", () => {
+  assert.deepEqual(layoutCallControls({ video: true }).primary, [
+    CALL_CONTROL.CAMERA,
+    CALL_CONTROL.MIC,
+    CALL_CONTROL.SPEAKER,
+    CALL_CONTROL.MORE,
+    CALL_CONTROL.HANGUP,
+  ]);
+  // A voice call simply drops the camera; everything else keeps its place, so
+  // muting does not move under your thumb when a call gains video.
+  assert.deepEqual(layoutCallControls({ video: false }).primary, [
+    CALL_CONTROL.MIC,
+    CALL_CONTROL.SPEAKER,
+    CALL_CONTROL.MORE,
+    CALL_CONTROL.HANGUP,
+  ]);
+});
+
+test("layoutCallControls puts screen share in the dock on voice calls too", () => {
+  // The point of screen share here: a voice call that starts sharing grows a
+  // picture it did not have.
+  assert.ok(layoutCallControls({ video: false }).dock.includes(CALL_CONTROL.SCREEN_SHARE));
+  assert.ok(layoutCallControls({ video: true }).dock.includes(CALL_CONTROL.SCREEN_SHARE));
+});
+
+test("layoutCallControls only offers a camera flip when there is a camera running", () => {
+  assert.ok(
+    layoutCallControls({ video: true, cameraOn: true }).dock.includes(CALL_CONTROL.SWITCH_CAMERA),
+  );
+  // Camera off, voice call, or a platform with one camera: nothing to flip.
+  assert.ok(
+    !layoutCallControls({ video: true, cameraOn: false }).dock.includes(CALL_CONTROL.SWITCH_CAMERA),
+  );
+  assert.ok(
+    !layoutCallControls({ video: false, cameraOn: true }).dock.includes(CALL_CONTROL.SWITCH_CAMERA),
+  );
+  assert.ok(
+    !layoutCallControls({ video: true, cameraOn: true, hasCameraSwitch: false })
+      .dock.includes(CALL_CONTROL.SWITCH_CAMERA),
+  );
+});
+
+test("layoutCallControls hides the audio-route button where there are no routes", () => {
+  const desktop = layoutCallControls({ video: true, hasAudioRoutes: false });
+  assert.ok(!desktop.primary.includes(CALL_CONTROL.SPEAKER));
+  assert.deepEqual(desktop.primary, [
+    CALL_CONTROL.CAMERA,
+    CALL_CONTROL.MIC,
+    CALL_CONTROL.MORE,
+    CALL_CONTROL.HANGUP,
+  ]);
+});
+
+test("layoutCallControls shows the ⋮ exactly when there is something behind it", () => {
+  for (const { input } of CONTROL_CASES) {
+    const { primary, dock } = layoutCallControls(input);
+    assert.equal(
+      primary.includes(CALL_CONTROL.MORE),
+      dock.length > 0,
+      "a ⋮ that opens nothing, or a dock nothing opens",
+    );
+  }
 });
