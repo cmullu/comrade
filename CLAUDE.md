@@ -125,6 +125,21 @@ plugin cache. On a brand-new container that repair lands one session late — ru
 `/reload-plugins`, or put `claude plugin marketplace update caveman` in the cloud
 environment's setup script, which runs before the session boots.
 
+### User-scope settings
+
+`statusLine` and `teammateMode` are honoured only at user scope, so they cannot
+live in `.claude/settings.json` — and the cloud container wipes `~/.claude` every
+session, so setting them by hand lasts one session.
+`.claude/user-settings.template.json` is tracked instead, and
+`hooks/seed-user-settings.sh` installs it to `~/.claude/settings.json` on
+SessionStart **when that file is absent**. It never overwrites, so anything you
+set by hand wins.
+
+The status line shows model · branch · `↓N` commits behind `origin/main` · `*` for
+a dirty tree, then delegates the caveman badge to the plugin's own hardened
+script. It renders on a keystroke cadence, so it never fetches and caches the
+drift count for 30s.
+
 ### Agent teams
 
 Enabled via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.json`
