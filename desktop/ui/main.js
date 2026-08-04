@@ -2956,8 +2956,7 @@
       showToast("No recipient selected", "warn");
       return;
     }
-    const { captionForAttachment, captionConsumesDraft, attachmentRejection } =
-      await attachmentCaptionReady;
+    const { captionForAttachment, captionConsumesDraft } = await attachmentCaptionReady;
     const { attachmentSendPlan, handoffPresencePlan } = await handoffReady;
     // Which road, from the core. Not a 10 MB comparison here: the threshold *is*
     // the hosted ceiling, and a frontend holding its own copy is a frontend that
@@ -2972,13 +2971,10 @@
     }
     // Before the preview, not after the upload: composing a caption for a file
     // that was never going to be sent is the one bit of work worth not wasting.
-    // The shared 10 MB rule still decides the hosted road and only that road —
-    // over the cap the question is no longer "may this be sent" but "which way".
-    const plan = attachmentSendPlan({
-      bytes: file.size,
-      route,
-      hostedRefusal: attachmentRejection(file.name, file.size),
-    });
+    // Each road's refusal comes from the mirrored rule for that road — the shared
+    // 10 MB cap still governs the hosted one and only it, since over the cap the
+    // question stops being "may this be sent" and becomes "which way".
+    const plan = attachmentSendPlan({ bytes: file.size, route, name: file.name });
     if (plan.refusal) {
       showToast(plan.refusal, "warn");
       return;

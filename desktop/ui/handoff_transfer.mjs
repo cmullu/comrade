@@ -40,10 +40,12 @@
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_CAPTION_LENGTH,
+  attachmentRejection,
   formatAttachmentSize,
   mediaKindGlyph,
   mediaKindLabel,
   normalizeCaption,
+  peerToPeerAttachmentRejection,
 } from "./attachment_caption.mjs";
 import { describeVerdict } from "./share_transfer.mjs";
 
@@ -310,18 +312,21 @@ export function offerCardPlan(attachment, { ceiling = MAX_HANDOFF_BYTES } = {}) 
  * `route` comes from the core (`attachment_route_for_bytes`) rather than from a
  * comparison here, because the threshold *is* the hosted ceiling and a frontend
  * holding its own copy of 10 MB is a frontend that disagrees the day it moves.
- * `hostedRefusal` is the shared `attachmentRejection` — passed in rather than
- * called here so this stays the one decision it claims to be, and so the
- * mirrored rule keeps its single home.
  *
- * The empty-file case belongs to both roads, so it is checked before the split.
+ * **Each road's refusal comes from the mirrored trio, not from a second spelling
+ * of it here.** `attachmentRejection` owns the hosted road's rules and
+ * `peerToPeerAttachmentRejection` the direct road's — both of them live in
+ * `attachment_caption.mjs` beside their Kotlin and Dart twins, so an empty file
+ * is refused in the same words on every frontend. What this function adds is the
+ * routing and the one rule that is *not* shared: `ceiling`, which exists because
+ * this window has no disk (see MAX_HANDOFF_BYTES) and which must therefore never
+ * migrate into the mirrored rule, where it would wrongly cap Android too.
  */
-export function attachmentSendPlan({ bytes, route, hostedRefusal = null, ceiling = MAX_HANDOFF_BYTES }) {
+export function attachmentSendPlan({ bytes, route, name = "", ceiling = MAX_HANDOFF_BYTES }) {
   const n = Number(bytes) || 0;
-  if (n <= 0) {
-    return { road: null, refusal: "That file is empty — there is nothing to send." };
-  }
   if (route === "peer_to_peer") {
+    const shared = peerToPeerAttachmentRejection(name, n);
+    if (shared) return { road: null, refusal: shared };
     if (n > ceiling) {
       return {
         road: null,
@@ -334,7 +339,8 @@ export function attachmentSendPlan({ bytes, route, hostedRefusal = null, ceiling
     return { road: "peer_to_peer", refusal: null };
   }
   if (route === "hosted") {
-    return { road: hostedRefusal ? null : "hosted", refusal: hostedRefusal };
+    const shared = attachmentRejection(name, n);
+    return { road: shared ? null : "hosted", refusal: shared };
   }
   // No route from the core is not "probably hosted": the two roads have
   // different failure modes and guessing one would tell the person the wrong

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MAX_ATTACHMENT_BYTES, MAX_CAPTION_LENGTH } from "./attachment_caption.mjs";
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_CAPTION_LENGTH,
+  attachmentRejection,
+  peerToPeerAttachmentRejection,
+} from "./attachment_caption.mjs";
 import { chunkCount } from "./share_transfer.mjs";
 import {
   MAX_DISPLAY_NAME_CHARS,
@@ -287,22 +292,30 @@ test("no answer from the core is not quietly treated as the hosted road", () => 
 });
 
 test("the shared 10 MB rule still refuses on the hosted road, and only there", () => {
-  const hostedRefusal = '"a.png" is 11 MB — attachments are limited to 10 MB.';
-  assert.deepEqual(attachmentSendPlan({ bytes: 11 * 1024 * 1024, route: "hosted", hostedRefusal }), {
+  // The refusal is the mirrored rule's own words, not a second spelling of them
+  // here — this asserts the wiring, so moving the message in attachment_caption.mjs
+  // (and its Kotlin and Dart twins) cannot leave the desktop saying the old thing.
+  const args = { bytes: 11 * 1024 * 1024, name: "a.png" };
+  assert.deepEqual(attachmentSendPlan({ ...args, route: "hosted" }), {
     road: null,
-    refusal: hostedRefusal,
+    refusal: attachmentRejection("a.png", args.bytes),
   });
   // The same file on the peer-to-peer road is exactly what this feature exists
-  // for, so the mirrored rule must not be consulted there.
-  assert.deepEqual(
-    attachmentSendPlan({ bytes: 11 * 1024 * 1024, route: "peer_to_peer", hostedRefusal }),
-    { road: "peer_to_peer", refusal: null },
-  );
+  // for, so the hosted rule must not be consulted there.
+  assert.deepEqual(attachmentSendPlan({ ...args, route: "peer_to_peer" }), {
+    road: "peer_to_peer",
+    refusal: null,
+  });
 });
 
-test("an empty file is refused on either road", () => {
+test("an empty file is refused on either road, in the shared words", () => {
   for (const route of ["hosted", "peer_to_peer"]) {
-    assert.match(attachmentSendPlan({ bytes: 0, route }).refusal, /empty/);
+    const plan = attachmentSendPlan({ bytes: 0, route, name: "cap.jpg" });
+    assert.equal(plan.road, null);
+    // Named, because the mirrored rule names the file — a plan that invented its
+    // own sentence would drop that and diverge from the other two frontends.
+    assert.equal(plan.refusal, peerToPeerAttachmentRejection("cap.jpg", 0));
+    assert.match(plan.refusal, /"cap\.jpg" is empty/);
   }
 });
 
