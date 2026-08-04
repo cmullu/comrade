@@ -40,13 +40,13 @@ pub use comrade_core::share::transport::{RefusalReason, RelayPolicy};
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
 pub use comrade_core::together::{StateChange, SyncVerdict, TogetherContent};
 pub use runtime::{
-    AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
-    CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
-    CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto, IceServerDto,
-    JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    MetricDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto, RuntimeHandles, SakhaStatusDto,
-    ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
-    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
+    AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto,
+    CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
+    ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto,
+    IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
+    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto, RuntimeHandles,
+    SakhaStatusDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto,
+    TogetherInviteDto, TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

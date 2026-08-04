@@ -3018,6 +3018,19 @@ fn wire__crate__api__workspaces_impl(
 
 #[allow(clippy::unnecessary_literal_unwrap)]
 const _: fn() = || {
+    {
+        let AttachmentHandoff = None::<crate::api::AttachmentHandoff>.unwrap();
+        let _: crate::api::ShareOffer = AttachmentHandoff.shape;
+        let _: String = AttachmentHandoff.mime_type;
+        let _: String = AttachmentHandoff.file_name;
+        let _: String = AttachmentHandoff.caption;
+    }
+    {
+        let AttachmentHandoffDto = None::<crate::api::AttachmentHandoffDto>.unwrap();
+        let _: String = AttachmentHandoffDto.transfer_id;
+        let _: String = AttachmentHandoffDto.peer;
+        let _: crate::api::HandoffSignal = AttachmentHandoffDto.signal;
+    }
     match None::<crate::api::BridgeEvent>.unwrap() {
         crate::api::BridgeEvent::IncomingChitthi(field0) => {
             let _: crate::api::ChitthiDto = field0;
@@ -3089,6 +3102,9 @@ const _: fn() = || {
         }
         crate::api::BridgeEvent::TogetherShare(field0) => {
             let _: crate::api::TogetherShareDto = field0;
+        }
+        crate::api::BridgeEvent::AttachmentHandoff(field0) => {
+            let _: crate::api::AttachmentHandoffDto = field0;
         }
         crate::api::BridgeEvent::MeshStatusChanged(field0) => {
             let _: crate::api::MeshStatusDto = field0;
@@ -3199,6 +3215,20 @@ const _: fn() = || {
         let _: String = FoundProfileDto.npub;
         let _: Option<String> = FoundProfileDto.name;
         let _: Option<String> = FoundProfileDto.about;
+    }
+    match None::<crate::api::HandoffSignal>.unwrap() {
+        crate::api::HandoffSignal::Offer { attachment } => {
+            let _: crate::api::AttachmentHandoff = attachment;
+        }
+        crate::api::HandoffSignal::Accept => {}
+        crate::api::HandoffSignal::Decline => {}
+        crate::api::HandoffSignal::Refuse { reason } => {
+            let _: crate::api::RefusalReason = reason;
+        }
+        crate::api::HandoffSignal::Withdraw => {}
+        crate::api::HandoffSignal::Transport { signal } => {
+            let _: crate::api::TransferSignal = signal;
+        }
     }
     {
         let IceServerDto = None::<crate::api::IceServerDto>.unwrap();
@@ -3512,6 +3542,36 @@ impl SseDecode for String {
     }
 }
 
+impl SseDecode for crate::api::AttachmentHandoff {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_shape = <crate::api::ShareOffer>::sse_decode(deserializer);
+        let mut var_mimeType = <String>::sse_decode(deserializer);
+        let mut var_fileName = <String>::sse_decode(deserializer);
+        let mut var_caption = <String>::sse_decode(deserializer);
+        return crate::api::AttachmentHandoff {
+            shape: var_shape,
+            mime_type: var_mimeType,
+            file_name: var_fileName,
+            caption: var_caption,
+        };
+    }
+}
+
+impl SseDecode for crate::api::AttachmentHandoffDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_transferId = <String>::sse_decode(deserializer);
+        let mut var_peer = <String>::sse_decode(deserializer);
+        let mut var_signal = <crate::api::HandoffSignal>::sse_decode(deserializer);
+        return crate::api::AttachmentHandoffDto {
+            transfer_id: var_transferId,
+            peer: var_peer,
+            signal: var_signal,
+        };
+    }
+}
+
 impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3621,10 +3681,14 @@ impl SseDecode for crate::api::BridgeEvent {
                 return crate::api::BridgeEvent::TogetherShare(var_field0);
             }
             16 => {
+                let mut var_field0 = <crate::api::AttachmentHandoffDto>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::AttachmentHandoff(var_field0);
+            }
+            17 => {
                 let mut var_field0 = <crate::api::MeshStatusDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::MeshStatusChanged(var_field0);
             }
-            17 => {
+            18 => {
                 let mut var_ledger = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::LedgerUpdated { ledger: var_ledger };
             }
@@ -3873,6 +3937,41 @@ impl SseDecode for crate::api::FoundProfileDto {
             name: var_name,
             about: var_about,
         };
+    }
+}
+
+impl SseDecode for crate::api::HandoffSignal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_attachment = <crate::api::AttachmentHandoff>::sse_decode(deserializer);
+                return crate::api::HandoffSignal::Offer {
+                    attachment: var_attachment,
+                };
+            }
+            1 => {
+                return crate::api::HandoffSignal::Accept;
+            }
+            2 => {
+                return crate::api::HandoffSignal::Decline;
+            }
+            3 => {
+                let mut var_reason = <crate::api::RefusalReason>::sse_decode(deserializer);
+                return crate::api::HandoffSignal::Refuse { reason: var_reason };
+            }
+            4 => {
+                return crate::api::HandoffSignal::Withdraw;
+            }
+            5 => {
+                let mut var_signal = <crate::api::TransferSignal>::sse_decode(deserializer);
+                return crate::api::HandoffSignal::Transport { signal: var_signal };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 
@@ -5082,6 +5181,51 @@ fn pde_ffi_dispatcher_sync_impl(
 // Section: rust2dart
 
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::AttachmentHandoff> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.shape.into_into_dart().into_dart(),
+            self.0.mime_type.into_into_dart().into_dart(),
+            self.0.file_name.into_into_dart().into_dart(),
+            self.0.caption.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::AttachmentHandoff>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::AttachmentHandoff>>
+    for crate::api::AttachmentHandoff
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::AttachmentHandoff> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::AttachmentHandoffDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.transfer_id.into_into_dart().into_dart(),
+            self.0.peer.into_into_dart().into_dart(),
+            self.0.signal.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::AttachmentHandoffDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::AttachmentHandoffDto>>
+    for crate::api::AttachmentHandoffDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::AttachmentHandoffDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::BridgeEvent> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self.0 {
@@ -5168,11 +5312,14 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::BridgeEvent> {
             crate::api::BridgeEvent::TogetherShare(field0) => {
                 [15.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+            crate::api::BridgeEvent::AttachmentHandoff(field0) => {
                 [16.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                [17.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                [17.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
+                [18.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -5493,6 +5640,39 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::FoundProfileDto>>
     for crate::api::FoundProfileDto
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::FoundProfileDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::HandoffSignal> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::HandoffSignal::Offer { attachment } => {
+                [0.into_dart(), attachment.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::HandoffSignal::Accept => [1.into_dart()].into_dart(),
+            crate::api::HandoffSignal::Decline => [2.into_dart()].into_dart(),
+            crate::api::HandoffSignal::Refuse { reason } => {
+                [3.into_dart(), reason.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::HandoffSignal::Withdraw => [4.into_dart()].into_dart(),
+            crate::api::HandoffSignal::Transport { signal } => {
+                [5.into_dart(), signal.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::HandoffSignal>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::HandoffSignal>>
+    for crate::api::HandoffSignal
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::HandoffSignal> {
         self.into()
     }
 }
@@ -6473,6 +6653,25 @@ impl SseEncode for String {
     }
 }
 
+impl SseEncode for crate::api::AttachmentHandoff {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::ShareOffer>::sse_encode(self.shape, serializer);
+        <String>::sse_encode(self.mime_type, serializer);
+        <String>::sse_encode(self.file_name, serializer);
+        <String>::sse_encode(self.caption, serializer);
+    }
+}
+
+impl SseEncode for crate::api::AttachmentHandoffDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.transfer_id, serializer);
+        <String>::sse_encode(self.peer, serializer);
+        <crate::api::HandoffSignal>::sse_encode(self.signal, serializer);
+    }
+}
+
 impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6571,12 +6770,16 @@ impl SseEncode for crate::api::BridgeEvent {
                 <i32>::sse_encode(15, serializer);
                 <crate::api::TogetherShareDto>::sse_encode(field0, serializer);
             }
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+            crate::api::BridgeEvent::AttachmentHandoff(field0) => {
                 <i32>::sse_encode(16, serializer);
+                <crate::api::AttachmentHandoffDto>::sse_encode(field0, serializer);
+            }
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                <i32>::sse_encode(17, serializer);
                 <crate::api::MeshStatusDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                <i32>::sse_encode(17, serializer);
+                <i32>::sse_encode(18, serializer);
                 <String>::sse_encode(ledger, serializer);
             }
             _ => {
@@ -6756,6 +6959,38 @@ impl SseEncode for crate::api::FoundProfileDto {
         <String>::sse_encode(self.npub, serializer);
         <Option<String>>::sse_encode(self.name, serializer);
         <Option<String>>::sse_encode(self.about, serializer);
+    }
+}
+
+impl SseEncode for crate::api::HandoffSignal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::HandoffSignal::Offer { attachment } => {
+                <i32>::sse_encode(0, serializer);
+                <crate::api::AttachmentHandoff>::sse_encode(attachment, serializer);
+            }
+            crate::api::HandoffSignal::Accept => {
+                <i32>::sse_encode(1, serializer);
+            }
+            crate::api::HandoffSignal::Decline => {
+                <i32>::sse_encode(2, serializer);
+            }
+            crate::api::HandoffSignal::Refuse { reason } => {
+                <i32>::sse_encode(3, serializer);
+                <crate::api::RefusalReason>::sse_encode(reason, serializer);
+            }
+            crate::api::HandoffSignal::Withdraw => {
+                <i32>::sse_encode(4, serializer);
+            }
+            crate::api::HandoffSignal::Transport { signal } => {
+                <i32>::sse_encode(5, serializer);
+                <crate::api::TransferSignal>::sse_encode(signal, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 

@@ -10,7 +10,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `pump_bridge_events`, `runtime`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ShareVerdictDto`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AttachmentRoute`, `ShareVerdictDto`
 
 /// The comrade_jni crate version (e.g. "0.1.0").
 String version() => RustLib.instance.api.crateApiVersion();
@@ -516,6 +516,58 @@ Future<String> syncLedger() => RustLib.instance.api.crateApiSyncLedger();
 Stream<BridgeEvent> bridgeEventStream() =>
     RustLib.instance.api.crateApiBridgeEventStream();
 
+class AttachmentHandoff {
+  final ShareOffer shape;
+  final String mimeType;
+  final String fileName;
+  final String caption;
+
+  const AttachmentHandoff({
+    required this.shape,
+    required this.mimeType,
+    required this.fileName,
+    required this.caption,
+  });
+
+  @override
+  int get hashCode =>
+      shape.hashCode ^ mimeType.hashCode ^ fileName.hashCode ^ caption.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentHandoff &&
+          runtimeType == other.runtimeType &&
+          shape == other.shape &&
+          mimeType == other.mimeType &&
+          fileName == other.fileName &&
+          caption == other.caption;
+}
+
+class AttachmentHandoffDto {
+  final String transferId;
+  final String peer;
+  final HandoffSignal signal;
+
+  const AttachmentHandoffDto({
+    required this.transferId,
+    required this.peer,
+    required this.signal,
+  });
+
+  @override
+  int get hashCode => transferId.hashCode ^ peer.hashCode ^ signal.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentHandoffDto &&
+          runtimeType == other.runtimeType &&
+          transferId == other.transferId &&
+          peer == other.peer &&
+          signal == other.signal;
+}
+
 @freezed
 sealed class BridgeEvent with _$BridgeEvent {
   const BridgeEvent._();
@@ -578,6 +630,9 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.togetherShare(
     TogetherShareDto field0,
   ) = BridgeEvent_TogetherShare;
+  const factory BridgeEvent.attachmentHandoff(
+    AttachmentHandoffDto field0,
+  ) = BridgeEvent_AttachmentHandoff;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;
@@ -954,6 +1009,24 @@ class FoundProfileDto {
           npub == other.npub &&
           name == other.name &&
           about == other.about;
+}
+
+@freezed
+sealed class HandoffSignal with _$HandoffSignal {
+  const HandoffSignal._();
+
+  const factory HandoffSignal.offer({
+    required AttachmentHandoff attachment,
+  }) = HandoffSignal_Offer;
+  const factory HandoffSignal.accept() = HandoffSignal_Accept;
+  const factory HandoffSignal.decline() = HandoffSignal_Decline;
+  const factory HandoffSignal.refuse({
+    required RefusalReason reason,
+  }) = HandoffSignal_Refuse;
+  const factory HandoffSignal.withdraw() = HandoffSignal_Withdraw;
+  const factory HandoffSignal.transport({
+    required TransferSignal signal,
+  }) = HandoffSignal_Transport;
 }
 
 enum HangupReason {

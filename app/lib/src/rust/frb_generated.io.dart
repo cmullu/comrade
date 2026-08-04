@@ -30,7 +30,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  AttachmentHandoff dco_decode_attachment_handoff(dynamic raw);
+
+  @protected
+  AttachmentHandoffDto dco_decode_attachment_handoff_dto(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AttachmentHandoff dco_decode_box_autoadd_attachment_handoff(dynamic raw);
+
+  @protected
+  AttachmentHandoffDto dco_decode_box_autoadd_attachment_handoff_dto(
+      dynamic raw);
 
   @protected
   CallSignal dco_decode_box_autoadd_call_signal(dynamic raw);
@@ -140,6 +153,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FoundProfileDto dco_decode_found_profile_dto(dynamic raw);
+
+  @protected
+  HandoffSignal dco_decode_handoff_signal(dynamic raw);
 
   @protected
   HangupReason dco_decode_hangup_reason(dynamic raw);
@@ -374,7 +390,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
+  AttachmentHandoff sse_decode_attachment_handoff(SseDeserializer deserializer);
+
+  @protected
+  AttachmentHandoffDto sse_decode_attachment_handoff_dto(
+      SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AttachmentHandoff sse_decode_box_autoadd_attachment_handoff(
+      SseDeserializer deserializer);
+
+  @protected
+  AttachmentHandoffDto sse_decode_box_autoadd_attachment_handoff_dto(
+      SseDeserializer deserializer);
 
   @protected
   CallSignal sse_decode_box_autoadd_call_signal(SseDeserializer deserializer);
@@ -496,6 +527,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FoundProfileDto sse_decode_found_profile_dto(SseDeserializer deserializer);
+
+  @protected
+  HandoffSignal sse_decode_handoff_signal(SseDeserializer deserializer);
 
   @protected
   HangupReason sse_decode_hangup_reason(SseDeserializer deserializer);
@@ -754,7 +788,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
+  void sse_encode_attachment_handoff(
+      AttachmentHandoff self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_attachment_handoff_dto(
+      AttachmentHandoffDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_attachment_handoff(
+      AttachmentHandoff self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_attachment_handoff_dto(
+      AttachmentHandoffDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_call_signal(
@@ -889,6 +939,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_found_profile_dto(
       FoundProfileDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_handoff_signal(HandoffSignal self, SseSerializer serializer);
 
   @protected
   void sse_encode_hangup_reason(HangupReason self, SseSerializer serializer);

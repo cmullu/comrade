@@ -47,6 +47,7 @@ use comrade_core::dm::{
     parse_profile_share, parse_reaction, parse_receipt, ProfileShare, ReactionEnvelope, Receipt,
     ReceiptKind, MAX_REACTION_BYTES,
 };
+use comrade_core::handoff::{parse_handoff_envelope, HandoffEnvelope, HandoffSignal};
 use comrade_core::media::{
     build_file_metadata_event, encrypt_media, fetch_and_decrypt_media, FileMetadata,
     MAX_MEDIA_BYTES,
@@ -484,6 +485,22 @@ pub struct TogetherShareDto {
     pub session_id: String,
     pub peer: String,
     pub signal: ShareSignal,
+}
+
+/// One step of handing a large attachment over, on its way to the frontend that
+/// owns the peer connection.
+///
+/// Same division of labour as [`TogetherShareDto`], for the same reason: WebRTC
+/// lives in the frontend, and mirroring the negotiation here as well would mean
+/// two state machines that have to agree — the shape of both call bugs this repo
+/// has already fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AttachmentHandoffDto {
+    /// Scopes every signal of one transfer. A signal naming a transfer the
+    /// frontend does not have is its to drop.
+    pub transfer_id: String,
+    pub peer: String,
+    pub signal: HandoffSignal,
 }
 
 /// Whether a transfer may run over the path ICE actually chose.
@@ -1221,6 +1238,8 @@ pub enum BridgeEvent {
     /// protocol tweak, which is exactly the tax that keeps protocols from being
     /// tweaked.
     TogetherShare(TogetherShareDto),
+    /// One step of a large-attachment handoff from `peer`.
+    AttachmentHandoff(AttachmentHandoffDto),
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
     MeshStatusChanged(MeshStatusDto),
@@ -5134,6 +5153,42 @@ impl RuntimeHandles {
         self.send_together(TogetherSignal::Share { signal }).await
     }
 
+    /// Carry one step of a large-attachment handoff to `peer`.
+    ///
+    /// Deliberately **not** routed through [`Self::send_together`]: that refuses
+    /// outside a live session, which is right for a playhead and wrong for an
+    /// attachment — nobody starts a watch-together session to send a video file.
+    /// The gate a handoff gets instead is the one on receipt
+    /// ([`IncomingGate::Accepted`]), which is the same bar a call signal has to
+    /// clear, and for the same reason: both open a peer connection and both leak
+    /// ICE candidates to whoever is on the other end. A stranger cannot get that
+    /// far, and an accepted contact still has to be told and still has to agree —
+    /// [`HandoffSignal::Accept`] comes from a person pressing a button, not from
+    /// this runtime.
+    ///
+    /// Relay-first, unlike a together signal. A handoff is a handful of messages
+    /// over the life of one transfer rather than a heartbeat every ten seconds,
+    /// so the mesh's latency advantage buys nothing here — and the mesh reaches
+    /// only the local network, where a large file would have found a `host`
+    /// candidate anyway.
+    pub async fn attachment_handoff_send(
+        &self,
+        peer: &str,
+        transfer_id: &str,
+        signal: HandoffSignal,
+    ) -> Result<(), UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer_pk = parse_pubkey(peer)?;
+        let json = HandoffEnvelope::new(transfer_id, signal)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        vault
+            .send_dm(&peer_pk, &json)
+            .await
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        Ok(())
+    }
+
     /// One pass of the session loop: expire a session we have stopped hearing
     /// from, or tell the other side where we are.
     async fn together_tick(&self) {
@@ -6780,6 +6835,29 @@ fn dispatch_incoming_dm(
                     env,
                 );
             }
+        }
+        return;
+    }
+
+    // 6a) Handing a large attachment over. Gated identically to the together
+    //     envelope above and to a call signal — both of those also end in a peer
+    //     connection, and a stranger must not be able to make this device gather
+    //     ICE candidates for them. Returning either way, so an ungated one is
+    //     dropped rather than surfacing as a message request full of JSON.
+    //
+    //     No session to check against and no replay window to enforce here: the
+    //     `transfer_id` is the scope, and the frontend that owns the transfer is
+    //     the only thing that knows which ids are live. A signal for an id it
+    //     never started is its to ignore — which is also why a *sender-only*
+    //     signal arriving for a transfer this side started is checked there and
+    //     not here.
+    if let Some(env) = parse_handoff_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            let _ = tx.send(BridgeEvent::AttachmentHandoff(AttachmentHandoffDto {
+                transfer_id: env.transfer_id,
+                peer: peer_npub.clone(),
+                signal: env.signal,
+            }));
         }
         return;
     }
@@ -10711,6 +10789,170 @@ mod tests {
             rx.try_recv().is_err(),
             "an SDP offer for no session reached the frontend"
         );
+    }
+
+    // ── Handing a large attachment over ─────────────────────────────────────
+
+    fn handoff_json(transfer_id: &str, signal: HandoffSignal) -> String {
+        HandoffEnvelope::new(transfer_id, signal).to_json().unwrap()
+    }
+
+    fn an_attachment_offer() -> HandoffSignal {
+        HandoffSignal::Offer {
+            attachment: comrade_core::handoff::AttachmentHandoff {
+                shape: comrade_core::share::ShareOffer {
+                    total_bytes: 400 * 1024 * 1024,
+                    chunk_bytes: comrade_core::share::SHARE_CHUNK_BYTES,
+                    sha256: "c".repeat(64),
+                    duration_ms: 0,
+                },
+                mime_type: "video/mp4".into(),
+                file_name: "holiday.mp4".into(),
+                caption: "the last morning".into(),
+            },
+        }
+    }
+
+    /// The gate. A handoff has no session to hide behind, so the *only* thing
+    /// standing between a stranger and this device gathering ICE candidates for
+    /// them is the accepted-conversation check — the same one a call signal gets.
+    #[tokio::test]
+    async fn a_handoff_from_someone_not_accepted_negotiates_nothing() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        // Deliberately *not* `accepted_peer`: a pending request is the case.
+        let (hex, _peer) = stranger();
+
+        let body = handoff_json("t-stranger", an_attachment_offer());
+        let mut msg = incoming(&hex, "h1", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(
+            rx.try_recv().is_err(),
+            "an offer from a stranger reached the frontend"
+        );
+    }
+
+    /// And it must not fall through into the message-request bucket either: a
+    /// person should never see a chat request whose body is a wall of JSON.
+    #[tokio::test]
+    async fn an_ungated_handoff_is_dropped_rather_than_shown_as_a_request() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, _peer) = stranger();
+
+        let body = handoff_json("t-x", HandoffSignal::Accept);
+        let mut msg = incoming(&hex, "h2", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        match rx.try_recv() {
+            Err(_) => {}
+            Ok(BridgeEvent::IncomingMessageRequest(r)) => {
+                panic!("surfaced as a message request: {}", r.last_message)
+            }
+            Ok(other) => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// From an accepted contact it goes straight through, unchanged and with no
+    /// runtime-side transfer state — the frontend owns the peer connection, so it
+    /// owns which transfer ids are live.
+    #[tokio::test]
+    async fn a_handoff_from_an_accepted_contact_reaches_the_frontend_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let body = handoff_json("t-live", an_attachment_offer());
+        let mut msg = incoming(&hex, "h3", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+
+        let mut seen = None;
+        while let Ok(event) = rx.try_recv() {
+            if let BridgeEvent::AttachmentHandoff(dto) = event {
+                seen = Some(dto);
+            }
+        }
+        let dto = seen.expect("the handoff never reached the frontend");
+        assert_eq!(dto.transfer_id, "t-live");
+        assert_eq!(dto.peer, peer);
+        match dto.signal {
+            HandoffSignal::Offer { attachment } => {
+                // The whole point of the offer arriving first: 400 MB is a
+                // decision, and it is answerable before a byte moves.
+                assert_eq!(attachment.shape.total_bytes, 400 * 1024 * 1024);
+                assert_eq!(attachment.file_name, "holiday.mp4");
+                assert_eq!(attachment.caption, "the last morning");
+            }
+            other => panic!("signal changed in transit: {other:?}"),
+        }
+    }
+
+    /// A together envelope and a handoff envelope must not shadow each other:
+    /// both are JSON DM bodies, and whichever is parsed first would swallow the
+    /// other if the markers were not distinct.
+    #[tokio::test]
+    async fn a_together_envelope_is_not_mistaken_for_a_handoff() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s-not-a-handoff",
+            1,
+            TogetherSignal::Share {
+                signal: a_transfer_offer(),
+            },
+        );
+        let mut msg = incoming(&hex, "h4", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, BridgeEvent::AttachmentHandoff(_)),
+                "a together share was routed as an attachment handoff"
+            );
+        }
     }
 
     /// Inside a session it goes straight through, unchanged. The runtime keeps
