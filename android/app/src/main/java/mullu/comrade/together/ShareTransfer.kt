@@ -2,27 +2,15 @@ package mullu.comrade.together
 
 import android.content.Context
 import android.util.Log
-import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.security.MessageDigest
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import mullu.comrade.ComradeCore
-import mullu.comrade.call.CallManager
-import org.webrtc.DataChannel
-import org.webrtc.IceCandidate
-import org.webrtc.MediaConstraints
-import org.webrtc.MediaStream
-import org.webrtc.PeerConnection
-import org.webrtc.RtpReceiver
-import org.webrtc.SdpObserver
-import org.webrtc.SessionDescription
+import mullu.comrade.transfer.FileTransfer
+import mullu.comrade.transfer.ShareDecisions
 import uniffi.comrade_core.RefusalReason
 import uniffi.comrade_core.ShareOffer
 import uniffi.comrade_core.ShareSignal
@@ -31,89 +19,66 @@ import uniffi.comrade_core.TransferSignal
 /**
  * Handing the file over, when only one of you has what you are playing.
  *
- * ## Why this is its own PeerConnection
+ * The bytes are moved by [FileTransfer], which is the same engine an attachment
+ * handoff drives. What lives here is only what is *about a session*: the four
+ * facts that used to be baked into the engine —
  *
- * A transfer never shares the call's connection, for two reasons that both
- * matter on their own:
+ *  * signals ride the session envelope ([ComradeCore.togetherShareTyped]), which
+ *    is what stops this being a way to open a peer-to-peer connection to someone
+ *    who never agreed to watch anything,
+ *  * the file we can send is the one the player has open,
+ *  * incoming bytes stage in `cache/together-share/`,
+ *  * a finished file goes to [TogetherManager] to be played.
  *
- * - **Congestion.** One connection means one SCTP association under one
- *   congestion controller, where a multi-gigabyte push and a voice stream
- *   compete and the voice loses. A second connection costs one extra ICE
- *   negotiation and buys complete isolation: a call cannot be degraded by a
- *   transfer it knows nothing about.
- * - **Policy.** This connection is built from its own ICE server list. Under
- *   the default relay policy it is given **no TURN at all**, so a relay
- *   candidate is never gathered and the rule holds structurally rather than by
- *   later inspection. The call keeps its TURN fallback, because a relayed
- *   *call* is a few tens of kilobits and entirely reasonable while a relayed
- *   film is gigabytes through a machine that volunteered for neither.
- *
- * The [org.webrtc.PeerConnectionFactory] *is* shared (see
- * [CallManager.sharedFactory]) because its native initialisation is
- * process-global and must happen once. Sharing a factory is not sharing a
- * connection.
- *
- * ## Flow control
- *
- * `DataChannel.send` accepts writes long after it has stopped putting them on
- * the wire; the bytes queue in the SCTP send buffer and `bufferedAmount`
- * climbs. A naive loop over a 2 GB file queues the whole thing in memory in
- * milliseconds — and it looks fine on a 50 MB test file, which is how that bug
- * reaches production. So the sender fills to a high-water mark and then waits
- * for `onBufferedAmountChange` to drop it under the low-water mark, and the
- * budget arithmetic comes from `comrade_core::share::transport` via
- * [ComradeCore.shareChunksToSend] rather than being guessed here.
- *
- * ## What this does not own
- *
- * The chunking, the resume arithmetic and the "can we play yet" question are
- * [ShareDecisions] (pure, unit-tested, ported from the same Rust the desktop
- * ports). Which paths may carry a transfer is core's. This file is the wiring.
+ * The sequence is `together`'s four steps and not the handoff's three: the side
+ * *lacking* the file discovers that first, so it [ask]s.
  */
 object ShareTransfer {
 
     private const val TAG = "ShareTransfer"
-    private const val LOW_WATER_BYTES = 256L * 1024
 
     private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Which side of one handover this device is. */
-    private enum class Role { SENDER, RECEIVER }
+    // The type is spelled out because [FileTransfer.Wiring.onReceived] refers
+    // back to `engine`, and inference cannot close that loop.
+    private val engine: FileTransfer = FileTransfer(
+        object : FileTransfer.Wiring {
+            override fun sendTransport(signal: TransferSignal) = send(ShareSignal.Transport(signal))
 
-    private class Session(
-        val role: Role,
-        val offer: ShareOffer,
-        /** Sender: the file being read. Receiver: where the bytes are landing. */
-        val path: String,
-    ) {
-        var pc: PeerConnection? = null
-        var channel: DataChannel? = null
-        var tracker: ShareDecisions.Tracker? = null
-        val pendingIce = mutableListOf<IceCandidate>()
-        var remoteSet = false
-        var judged = false
-        var stopped = false
-        /**
-         * Set only by [grantShareConsent], and only ever passed to core as the
-         * answer to a question core asked. Core treats it as an answer, not an
-         * override: it can turn `needs_consent` into `allow` and nothing else.
-         */
-        var consentGranted = false
-        var stoppedForConsent = false
-        /** Sender: the half-open range the receiver last asked for. */
-        var cursorNext = 0
-        var cursorEnd = 0
-    }
+            override fun sendRefuse(reason: RefusalReason) = send(ShareSignal.Refuse(reason))
 
-    @Volatile private var session: Session? = null
+            override fun stagingDir(context: Context): File = File(context.cacheDir, "together-share")
+
+            /**
+             * The hash is peer-supplied and this is a path — see
+             * [ShareDecisions.incomingFileName]'s own tests. Never null here:
+             * a hash that survives sanitising as nothing at all still gets a
+             * name, because refusing a handover over a cosmetic detail would
+             * strand a session that is otherwise fine.
+             */
+            override fun stagedName(sha256: String): String =
+                ShareDecisions.incomingFileName(sha256)
+
+            /**
+             * Requests are anchored at the playhead, so a seek costs one request
+             * rather than a re-download.
+             */
+            override fun playheadMs(): Long = TogetherManager.currentPositionMs()
+
+            // Through a method rather than inline, because the body reads
+            // `engine` and this literal is `engine`'s own initialiser.
+            override fun onReceived(path: String) = onIncomingReady(path)
+        },
+    )
 
     /** What the screen shows about the handover, if anything. */
-    @Volatile var status: String? = null
-        private set
+    val status: String? get() = engine.status
 
     /** Progress 0..1 while receiving, or null. */
-    @Volatile var progress: Float? = null
-        private set
+    val progress: Float? get() = engine.progress
+
+    /** The relay question the screen is showing, or null when there is none. */
+    val consentQuestion: StateFlow<String?> get() = engine.consentQuestion
 
     // ── Entry points ────────────────────────────────────────────────────────
 
@@ -121,7 +86,7 @@ object ShareTransfer {
     fun ask() {
         runCatching { ComradeCore.togetherShareTyped(ShareSignal.Ask) }
             .onFailure { Log.w(TAG, "ask failed", it) }
-        status = "Asking them to send it…"
+        engine.note("Asking them to send it…")
     }
 
     /**
@@ -132,508 +97,59 @@ object ShareTransfer {
         when (signal) {
             is ShareSignal.Ask -> io.launch { offerOurCopy(localPath, durationMs) }
             is ShareSignal.Offer -> io.launch { acceptTheirCopy(context, signal.offer) }
-            is ShareSignal.Accept -> io.launch { beginNegotiation(context, localPath) }
-            is ShareSignal.Refuse -> {
-                status = ShareDecisions.describeVerdict(
-                    uniffi.comrade_ui.ShareVerdictDto("refuse", "relay", signal.reason, null),
-                ).message
-                end()
-            }
-            is ShareSignal.Transport -> io.launch { onTransport(context, signal.signal) }
+            is ShareSignal.Accept -> io.launch { engine.beginNegotiation(context) }
+            is ShareSignal.Refuse -> engine.onRefused(signal.reason)
+            is ShareSignal.Transport -> io.launch { engine.onTransport(context, signal.signal) }
         }
     }
 
-    /**
-     * The relay question the screen is showing, or null when there is none.
-     *
-     * A flow rather than a `@Volatile` like [status], because this one has to
-     * *arrive* — a question nobody is told about is a transfer that stalls in
-     * silence, which is the failure this whole change exists to remove.
-     */
-    private val _consentQuestion = MutableStateFlow<String?>(null)
-    val consentQuestion: StateFlow<String?> = _consentQuestion.asStateFlow()
-
     /** They said yes to this transfer. Re-judge; nothing is assumed from here. */
-    fun grantShareConsent() {
-        val s = session ?: return
-        if (!s.stoppedForConsent) return
-        s.consentGranted = true
-        s.stoppedForConsent = false
-        _consentQuestion.value = null
-        // Re-ask rather than proceed: the path may have changed while the
-        // question was on screen, and the answer that matters is the one for
-        // the route we actually have now.
-        io.launch { judgePath(s) }
-    }
+    fun grantShareConsent() = engine.grantConsent()
 
     /** They said no. That is a real outcome, and the far side is told. */
-    fun refuseShareConsent() {
-        val s = session ?: return
-        if (!s.stoppedForConsent) return
-        s.stoppedForConsent = false
-        _consentQuestion.value = null
-        send(ShareSignal.Refuse(RefusalReason.RelayForbidden))
-        status = "Didn't send it."
-        end()
-    }
+    fun refuseShareConsent() = engine.refuseConsent()
 
     /** Tear everything down. Safe to call twice, and from any thread. */
-    fun end() {
-        val s = session ?: return
-        session = null
-        s.stopped = true
-        runCatching { s.channel?.close() }
-        runCatching { s.pc?.close() }
-        progress = null
-        // Answering a question about a transfer that no longer exists would act
-        // on a session that is already gone.
-        _consentQuestion.value = null
-    }
+    fun end() = engine.end()
 
     // ── Sender ──────────────────────────────────────────────────────────────
 
     private fun offerOurCopy(localPath: String?, durationMs: Long) {
         if (localPath == null) return // we do not have it either; nothing to offer
-        val file = java.io.File(localPath)
+        val file = File(localPath)
         if (!file.isFile) return
-        val sha = runCatching { sha256(file) }.getOrNull() ?: return
+        val sha = runCatching { FileTransfer.sha256(file) }.getOrNull() ?: return
         val offer = ShareOffer(
             totalBytes = file.length().toULong(),
-            chunkBytes = CHUNK_BYTES.toUInt(),
+            chunkBytes = FileTransfer.CHUNK_BYTES.toUInt(),
             sha256 = sha,
             durationMs = durationMs.toULong(),
         )
-        session = Session(Role.SENDER, offer, localPath)
-        status = "Waiting for them to accept…"
+        engine.armSend(offer) { FileTransfer.PathSource(localPath) }
+        engine.note("Waiting for them to accept…")
         runCatching { ComradeCore.togetherShareTyped(ShareSignal.Offer(offer)) }
             .onFailure { Log.w(TAG, "offer failed", it) }
-    }
-
-    private fun beginNegotiation(context: Context, localPath: String?) {
-        val s = session ?: return
-        if (s.role != Role.SENDER || s.pc != null || localPath == null) return
-        val pc = newTransferPeer(context, s) ?: run {
-            status = "Couldn't start the transfer."
-            return
-        }
-        s.pc = pc
-        // Ordered and reliable: the receiver asks for ranges and expects them
-        // whole. Unreliable delivery would mean re-implementing retransmission
-        // on top of a stack that already has it.
-        s.channel = pc.createDataChannel("comrade-share", DataChannel.Init().apply { ordered = true })
-        s.channel?.registerObserver(senderChannelObserver(s))
-        pc.createOffer(
-            onCreated("create offer") { sdp ->
-                pc.setLocalDescription(onSet("set local offer"), sdp)
-                send(ShareSignal.Transport(TransferSignal.Offer(sdp.description)))
-            },
-            MediaConstraints(),
-        )
-    }
-
-    private fun senderChannelObserver(s: Session) = object : DataChannel.Observer {
-        override fun onBufferedAmountChange(previous: Long) {
-            // The drain event, not a poll. Resuming on every few bytes would be
-            // an event per chunk, which is the busy loop the threshold exists
-            // to prevent — so only wake when it has actually drained.
-            if ((s.channel?.bufferedAmount() ?: 0L) <= LOW_WATER_BYTES) io.launch { pump(s) }
-        }
-
-        override fun onStateChange() {
-            if (s.channel?.state() == DataChannel.State.OPEN) io.launch { pump(s) }
-        }
-
-        override fun onMessage(buffer: DataChannel.Buffer) {
-            // The receiver's request, as `from:count`. Deliberately not JSON:
-            // this is two integers on a hot path, and a parser here is a
-            // parser a peer controls.
-            val raw = ByteArray(buffer.data.remaining())
-            buffer.data.get(raw)
-            val text = String(raw).trim()
-            val parts = text.split(':')
-            val from = parts.getOrNull(0)?.toIntOrNull() ?: return
-            val count = parts.getOrNull(1)?.toIntOrNull() ?: return
-            s.cursorNext = from
-            s.cursorEnd = from + count
-            io.launch { pump(s) }
-        }
-    }
-
-    /**
-     * Push what the receiver asked for, stopping at the high-water mark.
-     *
-     * `@Synchronized` because two triggers — the drain callback and a fresh
-     * request — can arrive on different threads, and two pumps sharing one
-     * cursor would send the same chunk twice and skip the next.
-     */
-    @Synchronized
-    private fun pump(s: Session) {
-        val channel = s.channel ?: return
-        if (s.stopped || channel.state() != DataChannel.State.OPEN) return
-        // The policy gate, and it belongs *here* rather than only at the call
-        // sites. The receiver asks the moment the channel opens, which is while
-        // [judgePath] is still running, so a request can reach the pump before
-        // the path has been judged. Refusing to send until it has is what makes
-        // "never relay bulk" true rather than merely intended; the cursor is
-        // already recorded, so the pump picks it up when the verdict lands.
-        if (!s.judged) return
-        val file = runCatching { RandomAccessFile(s.path, "r") }.getOrNull() ?: return
-        file.use {
-            while (!s.stopped && s.cursorNext < s.cursorEnd) {
-                val budget = ComradeCore.shareChunksToSend(channel.bufferedAmount())
-                if (budget <= 0) return // wait for the drain callback
-                var sent = 0
-                while (sent < budget && s.cursorNext < s.cursorEnd) {
-                    val index = s.cursorNext
-                    val range = ShareDecisions.chunkRange(
-                        s.offer.totalBytes.toLong(),
-                        s.offer.chunkBytes.toInt(),
-                        index,
-                    ) ?: return
-                    val bytes = ByteArray(range.second)
-                    it.seek(range.first)
-                    it.readFully(bytes)
-                    channel.send(
-                        DataChannel.Buffer(
-                            ByteBuffer.wrap(ShareDecisions.frameChunk(index, bytes)),
-                            true,
-                        ),
-                    )
-                    s.cursorNext += 1
-                    sent += 1
-                    // Re-check inside the batch: `bufferedAmount` moves as we
-                    // write, and a batch sized against a stale reading is how
-                    // the ceiling gets overshot on a slow link.
-                    if (ComradeCore.shareChunksToSend(channel.bufferedAmount()) <= 0) return
-                }
-            }
-        }
     }
 
     // ── Receiver ────────────────────────────────────────────────────────────
 
     /**
-     * Where an incoming file lands.
-     *
-     * Named after the offer's content hash, in a directory of its own, for two
-     * reasons. A single fixed name meant a second handover silently overwrote
-     * whatever the first left behind — including a file the player still had
-     * open. And decrypted media on disk is exactly what S-4 is about, so having
-     * one directory to purge is what makes purging possible at all.
+     * Accepted without asking a person, unlike an attachment handoff: this side
+     * *asked* for the file, so the offer is the answer to its own question.
      */
-    private fun incomingFile(context: Context, offer: ShareOffer): java.io.File {
-        val dir = java.io.File(context.cacheDir, "together-share")
-        dir.mkdirs()
-        // The name is [ShareDecisions.incomingFileName] rather than inline here
-        // because the hash is peer-supplied and this is a path — see its tests.
-        return java.io.File(dir, ShareDecisions.incomingFileName(offer.sha256))
-    }
-
-    /** Drop every incoming file except `keep`, which is the live one. */
-    private fun purgeIncoming(context: Context, keep: java.io.File?) {
-        val dir = java.io.File(context.cacheDir, "together-share")
-        dir.listFiles()?.forEach { f ->
-            if (f.absolutePath != keep?.absolutePath) runCatching { f.delete() }
-        }
-    }
-
     private fun acceptTheirCopy(context: Context, offer: ShareOffer) {
-        val target = incomingFile(context, offer)
-        runCatching { target.delete() }
-        // Anything left by an earlier handover goes now rather than lingering
-        // until the next one needs the space.
-        purgeIncoming(context, target)
-        val s = Session(Role.RECEIVER, offer, target.absolutePath)
-        s.tracker = ShareDecisions.Tracker(
-            offer.totalBytes.toLong(),
-            offer.chunkBytes.toInt(),
-            offer.durationMs.toLong(),
-        )
-        session = s
-        progress = 0f
-        status = "They can send it — ${offer.totalBytes.toLong() / 1_048_576} MB."
+        if (engine.armReceive(context, offer) == null) return
+        engine.note("They can send it — ${offer.totalBytes.toLong() / 1_048_576} MB.")
         send(ShareSignal.Accept)
     }
 
-    private fun receiverChannelObserver(s: Session) = object : DataChannel.Observer {
-        override fun onBufferedAmountChange(previous: Long) = Unit
-
-        override fun onStateChange() {
-            if (s.channel?.state() == DataChannel.State.OPEN) requestNext(s, 0)
-        }
-
-        override fun onMessage(buffer: DataChannel.Buffer) {
-            val bytes = ByteArray(buffer.data.remaining())
-            buffer.data.get(bytes)
-            onChunk(s, bytes)
-        }
-    }
-
-    private fun onChunk(s: Session, message: ByteArray) {
-        val tracker = s.tracker ?: return
-        val frame = ShareDecisions.parseChunkFrame(message) ?: return
-        val (index, payload) = frame
-        // A peer can put anything on this channel. A wrong index writes bytes
-        // into the wrong place in the file and a wrong length silently shifts
-        // everything after it, so both are checked now rather than left to the
-        // whole-file hash at the very end.
-        if (!ShareDecisions.chunkFrameFits(
-                s.offer.totalBytes.toLong(),
-                s.offer.chunkBytes.toInt(),
-                index,
-                payload.size,
-            )
-        ) {
-            return
-        }
-        if (!tracker.accept(index)) return
-        val range = ShareDecisions.chunkRange(
-            s.offer.totalBytes.toLong(),
-            s.offer.chunkBytes.toInt(),
-            index,
-        ) ?: return
-        runCatching {
-            RandomAccessFile(s.path, "rw").use {
-                it.setLength(s.offer.totalBytes.toLong())
-                it.seek(range.first)
-                it.write(payload)
-            }
-        }.onFailure {
-            status = "Couldn't write the file."
-            end()
-            return
-        }
-        progress = tracker.fraction()
-        status = "Receiving — ${(tracker.fraction() * 100).toInt()}%"
-        if (tracker.isComplete()) {
-            finishReceive(s)
-        } else {
-            requestNext(s, TogetherManager.currentPositionMs())
-        }
-    }
-
-    private fun requestNext(s: Session, posMs: Long) {
-        val request = s.tracker?.nextRequest(posMs, ShareDecisions.REQUEST_WINDOW) ?: return
-        val channel = s.channel ?: return
-        if (channel.state() != DataChannel.State.OPEN) return
-        runCatching {
-            channel.send(
-                DataChannel.Buffer(
-                    ByteBuffer.wrap("${request.from}:${request.count}".toByteArray()),
-                    false,
-                ),
-            )
-        }
-    }
-
-    private fun finishReceive(s: Session) {
-        // Integrity, once, at the end. This is why the per-chunk checks above
-        // exist: they catch the failures a whole-file hash would only report
-        // after the whole file.
-        val actual = runCatching { sha256(java.io.File(s.path)) }.getOrNull()
-        if (actual == null || !actual.equals(s.offer.sha256, ignoreCase = true)) {
-            status = "The file that arrived isn't the one that was sent."
-            runCatching { java.io.File(s.path).delete() }
-            end()
-            return
-        }
-        status = "Ready — you both have it now."
-        progress = 1f
-        TogetherManager.onSharedFileReady(s.path)
-    }
-
-    // ── Negotiation ─────────────────────────────────────────────────────────
-
-    private fun onTransport(context: Context, signal: TransferSignal) {
-        val s = session ?: return
-        when (signal) {
-            is TransferSignal.Offer -> {
-                val pc = s.pc ?: newTransferPeer(context, s) ?: return
-                s.pc = pc
-                pc.setRemoteDescription(
-                    onSet("set remote offer") {
-                        s.remoteSet = true
-                        flushIce(s)
-                        pc.createAnswer(
-                            onCreated("create answer") { answer ->
-                                pc.setLocalDescription(onSet("set local answer"), answer)
-                                send(ShareSignal.Transport(TransferSignal.Answer(answer.description)))
-                            },
-                            MediaConstraints(),
-                        )
-                    },
-                    SessionDescription(SessionDescription.Type.OFFER, signal.sdp),
-                )
-            }
-            is TransferSignal.Answer -> {
-                val pc = s.pc ?: return
-                pc.setRemoteDescription(
-                    onSet("set remote answer") {
-                        s.remoteSet = true
-                        flushIce(s)
-                    },
-                    SessionDescription(SessionDescription.Type.ANSWER, signal.sdp),
-                )
-            }
-            is TransferSignal.Ice -> {
-                val candidate = IceCandidate(
-                    signal.sdpMid ?: "",
-                    signal.sdpMLineIndex?.toInt() ?: 0,
-                    signal.candidate,
-                )
-                // Buffer until the remote description exists — an early
-                // candidate is dropped otherwise, exactly as on the call path.
-                if (!s.remoteSet) s.pendingIce.add(candidate) else s.pc?.addIceCandidate(candidate)
-            }
-        }
-    }
-
-    private fun flushIce(s: Session) {
-        val queued = s.pendingIce.toList()
-        s.pendingIce.clear()
-        for (c in queued) runCatching { s.pc?.addIceCandidate(c) }
-    }
-
-    private fun newTransferPeer(context: Context, s: Session): PeerConnection? {
-        val factory = CallManager.sharedFactory(context) ?: return null
-        // The structural half of the policy: a direct-only device gets a
-        // STUN-only list, so a relay candidate is never gathered at all.
-        val strategy = if (ComradeCore.shareIceServersAllowed()) {
-            uniffi.comrade_core.IceStrategy.STUN_AND_TURN
-        } else {
-            uniffi.comrade_core.IceStrategy.STUN_ONLY
-        }
-        val servers = ComradeCore.callIceServersForTyped(strategy).map {
-            // Same shape as CallManager's `toWebRtc`: leave the auth fields
-            // untouched when they are absent rather than setting them empty,
-            // which some stacks read as "authenticate with a blank password".
-            PeerConnection.IceServer.builder(it.urls)
-                .apply {
-                    it.username?.let { u -> setUsername(u) }
-                    it.credential?.let { c -> setPassword(c) }
-                }
-                .createIceServer()
-        }
-        val config = PeerConnection.RTCConfiguration(servers).apply {
-            sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
-            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-        }
-        return factory.createPeerConnection(config, transferObserver(s))
-    }
-
-    private fun transferObserver(s: Session) = object : PeerConnection.Observer {
-        override fun onIceCandidate(candidate: IceCandidate) {
-            send(
-                ShareSignal.Transport(
-                    TransferSignal.Ice(
-                        candidate.sdp,
-                        candidate.sdpMid,
-                        candidate.sdpMLineIndex.toUShort(),
-                    ),
-                ),
-            )
-        }
-
-        override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
-            when (newState) {
-                PeerConnection.PeerConnectionState.CONNECTED -> io.launch { judgePath(s) }
-                PeerConnection.PeerConnectionState.FAILED -> {
-                    status = "Couldn't open a route to send the file."
-                    end()
-                }
-                else -> Unit
-            }
-        }
-
-        override fun onDataChannel(channel: DataChannel) {
-            // The receiver's side: the sender opens the channel.
-            s.channel = channel
-            channel.registerObserver(receiverChannelObserver(s))
-        }
-
-        override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
-        override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) = Unit
-        override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
-        override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) = Unit
-        override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
-        override fun onAddStream(stream: MediaStream) = Unit
-        override fun onRemoveStream(stream: MediaStream) = Unit
-        override fun onRenegotiationNeeded() = Unit
-        override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) = Unit
-    }
-
     /**
-     * Inspect the path ICE actually chose and ask core whether it may carry
-     * this. The second line of the policy: even with no TURN configured, a
-     * peer-reflexive path can be relayed at the far end, and core classifies a
-     * pair as relayed if *either* end is.
+     * The file finished arriving and its hash checked out. The session does not
+     * restart; it simply stops being one-sided.
      */
-    private suspend fun judgePath(s: Session) {
-        if (s.judged || s.stopped) return
-        val pc = s.pc ?: return
-        repeat(RETRY_WHILE_UNSETTLED) {
-            if (s.judged || s.stopped) return
-            val types = selectedPairTypes(pc)
-            val verdict = runCatching {
-                ComradeCore.shareTransferVerdict(
-                    types?.first.orEmpty(),
-                    types?.second.orEmpty(),
-                    s.offer.totalBytes.toLong(),
-                    s.consentGranted,
-                )
-            }.getOrNull()
-            val plan = ShareDecisions.describeVerdict(verdict)
-            if (plan.proceed) {
-                s.judged = true
-                status = "Sending over a direct connection…"
-                if (s.role == Role.SENDER) pump(s)
-                return
-            }
-            if (plan.needsConsent) {
-                // The policy wants a person to agree to this specific transfer.
-                // Stop here and wait: no bytes move, and no refusal is sent,
-                // because neither has been decided yet. [grantShareConsent] or
-                // [refuseShareConsent] restarts or ends this.
-                s.stoppedForConsent = true
-                _consentQuestion.value = plan.message
-                status = plan.message
-                return
-            }
-            if (!plan.retryable) {
-                // Tell them why too — they are watching a progress bar that
-                // would otherwise sit at zero forever.
-                verdict?.reason?.let { send(ShareSignal.Refuse(it)) }
-                status = plan.message
-                end()
-                return
-            }
-            delay(1000)
-        }
-        status = "Couldn't work out a route to them."
-        end()
-    }
-
-    /**
-     * The candidate types on the selected pair, or null if ICE has not settled.
-     *
-     * Null reads as *unknown*, which core refuses — never as direct.
-     */
-    private suspend fun selectedPairTypes(pc: PeerConnection): Pair<String, String>? {
-        val report = kotlinx.coroutines.suspendCancellableCoroutine<org.webrtc.RTCStatsReport?> { cont ->
-            runCatching { pc.getStats { cont.resumeWith(Result.success(it)) } }
-                .onFailure { cont.resumeWith(Result.success(null)) }
-        } ?: return null
-        val stats = report.statsMap
-        val pair = stats.values.firstOrNull {
-            it.type == "candidate-pair" && it.members["nominated"] == true &&
-                it.members["state"] == "succeeded"
-        } ?: return null
-        val localId = pair.members["localCandidateId"] as? String ?: return null
-        val remoteId = pair.members["remoteCandidateId"] as? String ?: return null
-        val local = stats[localId] ?: return null
-        val remote = stats[remoteId] ?: return null
-        return (local.members["candidateType"] as? String).orEmpty() to
-            (remote.members["candidateType"] as? String).orEmpty()
+    private fun onIncomingReady(path: String) {
+        engine.note("Ready — you both have it now.")
+        TogetherManager.onSharedFileReady(path)
     }
 
     // ── Plumbing ────────────────────────────────────────────────────────────
@@ -644,47 +160,4 @@ object ShareTransfer {
                 .onFailure { Log.w(TAG, "share signal failed", it) }
         }
     }
-
-    /**
-     * Two observers, not one with both callbacks wired to the same lambda.
-     * `SdpObserver` covers create *and* set, and a single shared lambda fires
-     * on whichever lands — which for `setLocalDescription` means re-sending the
-     * offer, and for `createOffer` means acting on an SDP that was never set.
-     */
-    private fun onCreated(what: String, then: (SessionDescription) -> Unit) = object : SdpObserver {
-        override fun onCreateSuccess(sdp: SessionDescription) = then(sdp)
-        override fun onSetSuccess() = Unit
-        override fun onCreateFailure(error: String?) = fail(what, error)
-        override fun onSetFailure(error: String?) = fail(what, error)
-    }
-
-    private fun onSet(what: String, then: () -> Unit = {}) = object : SdpObserver {
-        override fun onCreateSuccess(sdp: SessionDescription) = Unit
-        override fun onSetSuccess() = then()
-        override fun onCreateFailure(error: String?) = fail(what, error)
-        override fun onSetFailure(error: String?) = fail(what, error)
-    }
-
-    private fun fail(what: String, error: String?) {
-        Log.w(TAG, "$what failed: $error")
-    }
-
-    private fun sha256(file: java.io.File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { stream ->
-            val buffer = ByteArray(CHUNK_BYTES)
-            while (true) {
-                val read = stream.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    /** Mirrors `comrade_core::share::SHARE_CHUNK_BYTES`. */
-    private const val CHUNK_BYTES = 16 * 1024
-
-    /** How many one-second looks to take before giving up on ICE settling. */
-    private const val RETRY_WHILE_UNSETTLED = 10
 }
