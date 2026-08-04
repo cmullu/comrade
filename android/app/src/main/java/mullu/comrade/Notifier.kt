@@ -1,12 +1,14 @@
 package mullu.comrade
 
 import android.annotation.SuppressLint
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
@@ -144,8 +146,60 @@ object Notifier {
         )
     }
 
+    private const val TAG = "Notifier"
+
     private fun canPost(context: Context): Boolean =
         NotificationManagerCompat.from(context).areNotificationsEnabled()
+
+    /**
+     * Post [notification] under [id], absorbing a platform refusal.
+     *
+     * Every post in this file goes through here, and the reason is the caller
+     * rather than the post: these run on [EventPump]'s drain loop, the
+     * process's only consumer of the native event queue. `notify` throws under
+     * conditions that are ordinary rather than exotic — `POST_NOTIFICATIONS`
+     * revoked while the app was running (`call/CallService.kt` has guarded its
+     * own post for this reason for some time), or a `CallStyle` the platform
+     * declines — and an escaping throw used to end that loop, so failing to
+     * show one notification silently cost every later message and call too.
+     *
+     * [drainLoop] now catches this class of failure as well. This is the inner
+     * of the two guards and the one that keeps the loop from ever having to:
+     * losing a single notification is a small, local failure, and it should
+     * read as one in the log rather than disappear.
+     */
+    private fun post(context: Context, id: Int, notification: Notification) {
+        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+            .onFailure { Log.w(TAG, "notification $id was refused by the platform", it) }
+    }
+
+    /**
+     * Whether the platform will honour a full-screen intent right now.
+     *
+     * From Android 14 `USE_FULL_SCREEN_INTENT` is no longer granted at install
+     * to apps the system does not recognise as calling or alarm apps —
+     * declaring it in the manifest (which this app does, and must) stopped
+     * being sufficient, and a sideloaded build has no store listing to be
+     * categorised from. The user can grant it under Settings → Special app
+     * access → Full screen intents, and until they do, `canUseFullScreenIntent`
+     * is the only way to find out.
+     *
+     * Attaching one we may not use buys nothing and risks the whole post: at
+     * best the platform ignores it, at worst it rejects a `CallStyle`
+     * notification whose only claim to taking over the screen was that intent.
+     * Asking first makes the outcome the same either way — the call still
+     * arrives as a heads-up with Answer and Decline, which is a worse incoming
+     * call than a ringing screen and a far better one than silence.
+     *
+     * Exit condition: a settings affordance that sends the user to that screen
+     * would turn this from a graceful degradation into a fixable state; noted
+     * in `AUDIT.md` rather than built here.
+     */
+    private fun mayUseFullScreenIntent(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true
+        val mgr = context.getSystemService(NotificationManager::class.java) ?: return false
+        return runCatching { mgr.canUseFullScreenIntent() }.getOrDefault(false)
+    }
 
     /**
      * The id of the message group's summary. Posted alongside per-peer message
@@ -213,9 +267,8 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(openAppIntent(context, peer = peer))
             .build()
-        val mgr = NotificationManagerCompat.from(context)
         // Stable per-peer id so repeated messages from one peer collapse.
-        mgr.notify(peer.hashCode(), n)
+        post(context, peer.hashCode(), n)
         postMessageSummary(context)
     }
 
@@ -234,7 +287,7 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(openAppIntent(context))
             .build()
-        NotificationManagerCompat.from(context).notify(MESSAGE_SUMMARY_ID, n)
+        post(context, MESSAGE_SUMMARY_ID, n)
     }
 
     /**
@@ -266,7 +319,7 @@ object Notifier {
             .setAutoCancel(true)
             .setContentIntent(openAppIntent(context, screen = AppNavigation.SCREEN_REQUESTS))
             .build()
-        NotificationManagerCompat.from(context).notify("req:$peer".hashCode(), n)
+        post(context, "req:$peer".hashCode(), n)
     }
 
     /**
@@ -291,7 +344,7 @@ object Notifier {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(openAppIntent(context, screen = AppNavigation.SCREEN_SETTINGS))
             .build()
-        NotificationManagerCompat.from(context).notify(UPDATE_ID, n)
+        post(context, UPDATE_ID, n)
     }
 
     /** Drop the update notice — it was skipped, or the update has been installed. */
@@ -325,7 +378,7 @@ object Notifier {
         )
         val caller = Person.Builder().setName(title.ifBlank { shortNpub(peer) }).build()
         val style = NotificationCompat.CallStyle.forIncomingCall(caller, declineIntent, openApp)
-        val n = NotificationCompat.Builder(context, CHANNEL_CALLS)
+        val builder = NotificationCompat.Builder(context, CHANNEL_CALLS)
             .setSmallIcon(android.R.drawable.sym_action_call)
             .setContentTitle("Incoming $kind call")
             .setContentText(title.ifBlank { shortNpub(peer) })
@@ -336,10 +389,13 @@ object Notifier {
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setFullScreenIntent(openApp, true)
             .setContentIntent(openApp)
-            .build()
-        NotificationManagerCompat.from(context).notify("call:$peer".hashCode(), n)
+        // Only when the platform says it will honour one — see
+        // [mayUseFullScreenIntent]. A ringing call that arrives as a heads-up is
+        // a degradation; one the platform refused to post at all is a missed
+        // call the user never knew about.
+        if (mayUseFullScreenIntent(context)) builder.setFullScreenIntent(openApp, true)
+        post(context, "call:$peer".hashCode(), builder.build())
     }
 
     /**
@@ -360,7 +416,7 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setContentIntent(openAppIntent(context))
             .build()
-        NotificationManagerCompat.from(context).notify("missed:$peer".hashCode(), n)
+        post(context, "missed:$peer".hashCode(), n)
     }
 
     /**
@@ -389,7 +445,7 @@ object Notifier {
             .setTimeoutAfter(ONLINE_TIMEOUT_MS)
             .setContentIntent(openAppIntent(context))
             .build()
-        NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+        post(context, "online:$peer".hashCode(), n)
     }
 
     /**
@@ -426,7 +482,7 @@ object Notifier {
             // about (WP11, the same rule message notifications follow).
             .setContentIntent(openAppIntent(context, peer = peer))
             .build()
-        NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+        post(context, "online:$peer".hashCode(), n)
     }
 
     /**

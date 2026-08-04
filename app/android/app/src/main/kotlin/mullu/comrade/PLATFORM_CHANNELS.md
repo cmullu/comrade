@@ -91,12 +91,19 @@ This is not stylistic. `ChatEventRouter` already publishes `chatTick`/`requestTi
 than message payloads, precisely so there is one source of truth. Putting DM content on a
 channel would create a second copy of the store in a second language.
 
-The corollary the services depend on: **`ComradeCore.pollEvent()` is drained by
-`RelayConnectionService` and by nothing else, ever.** Dart has no method that reaches it.
-`EventBus`'s three-tier priority discipline (critical never-dropped / coalesced
-latest-per-key / feed bounded-lossy — `ComradeCore.kt:627-739`, AUDIT COMMS-04) is only
-correct with a single consumer; a second drainer in Dart would silently steal call
-signals from the router that raises the ringing notification.
+The corollary the services depend on: **`ComradeCore.pollEvent()` is drained by `EventPump`
+and by nothing else, ever.** Dart has no method that reaches it. `EventBus`'s three-tier
+priority discipline (critical never-dropped / coalesced latest-per-key / feed bounded-lossy
+— `ComradeCore.kt:627-739`, AUDIT COMMS-04) is only correct with a single consumer; a
+second drainer in Dart would silently steal call signals from the router that raises the
+ringing notification.
+
+`EventPump` rather than `RelayConnectionService`, and the difference is load-bearing. The
+service is gated on the user's "stay connected in the background" preference, so while it
+owned the loop, switching that off stopped delivery *while the app was open* too. The pump
+is held by whoever needs draining — the service while it runs, `MainActivity` while it is
+visible (`onStart`/`onStop`) — and still guarantees exactly one loop across all holders.
+A frontend whose Activity does not acquire it has no delivery of its own to fall back on.
 
 ---
 

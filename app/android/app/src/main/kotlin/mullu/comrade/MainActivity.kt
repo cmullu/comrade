@@ -106,11 +106,27 @@ class MainActivity : FlutterActivity() {
     override fun onStop() {
         super.onStop()
         PipController.onWindowVisibilityChanged(visible = false)
+        // Nothing visible any more: RelayConnectionService keeps the drain loop
+        // alive if the user wants background delivery, and EventPump stops it if
+        // not. Mirrors the Compose Activity exactly.
+        EventPump.release(PumpHolder.FOREGROUND)
     }
 
     override fun onStart() {
         super.onStart()
         PipController.onWindowVisibilityChanged(visible = true)
+        // Being visible is reason enough to drain the native event queue, and
+        // this Activity is the only thing that can say so for this frontend.
+        //
+        // Without it, delivery here depended entirely on
+        // RelayConnectionService, which is gated on the user's "stay connected
+        // in the background" preference — so turning that off stopped events
+        // *while the app was open*: no notifications, no chat-list updates, and
+        // no incoming call ringing, which is the opposite of what the setting
+        // says. That is the precise bug EventPump was split out of the service
+        // to prevent (see its doc comment); the Compose Activity has held this
+        // holder since, and this one never did.
+        EventPump.acquire(this, PumpHolder.FOREGROUND)
         // At most one request a day, and none at all with the preference off
         // (see UpdateChecker) — the same trigger point the Compose app uses, so
         // both frontends check on exactly the same schedule.

@@ -15,7 +15,7 @@ import mullu.comrade.RelayConnectionService
 
 /**
  * Control + state for `RelayConnectionService` — the foreground `dataSync`
- * service that is the **sole** consumer of `ComradeCore.pollEvent()`.
+ * service that buys the process a priority floor while nothing is visible.
  *
  * See `../PLATFORM_CHANNELS.md` §8. The load-bearing property of this channel
  * is what it cannot do: **there is no method that drains the event queue.**
@@ -23,8 +23,14 @@ import mullu.comrade.RelayConnectionService
  * latest-per-key, feed bounded-lossy — `ComradeCore.kt:627-739`, AUDIT
  * COMMS-04) is only correct with one consumer, and that consumer routes
  * incoming call signals into `CallManager` and raises the ringing notification
- * (`RelayConnectionService.kt:342-363`). A second drainer in Dart would
- * silently steal call offers from the code that makes the phone ring.
+ * (`ChatEventRouter.route`). A second drainer in Dart would silently steal call
+ * offers from the code that makes the phone ring.
+ *
+ * The single consumer is `EventPump`, not this service. That distinction is not
+ * pedantry: the service is gated on a user preference, so while it owned the
+ * loop, turning the preference off stopped delivery even with the app open.
+ * `EventPump` is held by whoever needs it — this service while it runs,
+ * `MainActivity` while it is visible — and still guarantees exactly one loop.
  *
  * What crosses instead is what `ChatEventRouter` already publishes: ticks that
  * say "re-read from Rust", not the data itself.

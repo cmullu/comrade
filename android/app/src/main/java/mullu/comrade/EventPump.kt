@@ -2,6 +2,7 @@ package mullu.comrade
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,11 +35,16 @@ enum class PumpHolder {
  * [acquire], or a [release] with no matching [acquire], is a harmless no-op —
  * the same shape (and the same reasoning) as
  * [mullu.comrade.voice.MicHolder]'s holder set. See `EventPumpTest`.
+ *
+ * Note what [acquire]'s answer does and does not mean: it says whether this
+ * holder is the *first*, which is the right question for "should a second loop
+ * be started?" and the wrong one for "is there a loop at all?". Conflating the
+ * two is what [PumpRevival] exists to prevent.
  */
 internal class PumpHolders {
     private val holders = mutableSetOf<PumpHolder>()
 
-    /** Returns `true` iff [holder] just became the *first* holder — the caller should start the loop. */
+    /** Returns `true` iff [holder] just became the *first* holder. */
     @Synchronized
     fun acquire(holder: PumpHolder): Boolean = holders.add(holder) && holders.size == 1
 
@@ -48,6 +54,85 @@ internal class PumpHolders {
 
     @Synchronized
     fun isHeld(): Boolean = holders.isNotEmpty()
+}
+
+/**
+ * Whether [EventPump] should start a drain loop right now.
+ *
+ * A one-line rule with its own name because the rule it replaces was half of a
+ * delivery outage. [EventPump.acquire] used to gate this decision behind
+ * [PumpHolders.acquire]'s answer — start the loop only if this holder was the
+ * first — which silently made "a loop is needed" mean "no loop existed a moment
+ * ago". Once a loop had died, every later acquire returned before ever looking
+ * at the job, and with [PumpHolder.SERVICE] holding a slot that included
+ * *reopening the app*: a second holder is never the first one. Delivery stayed
+ * dead until the process did.
+ *
+ * Only the loop's own liveness may decide whether to start one. The holder set
+ * still decides when to stop.
+ */
+internal object PumpRevival {
+    fun shouldStart(loopAlive: Boolean): Boolean = !loopAlive
+}
+
+/**
+ * The drain loop itself — generic over the event type and free of both Android
+ * and the FFI, so `EventPumpTest` can drive it with plain values.
+ *
+ * ## The try/catch is the whole point
+ * This loop is the process's *only* consumer of the native event queue, and
+ * [ChatEventRouter.route] reaches straight into notification posting and the
+ * WebRTC layer. Both throw under ordinary conditions:
+ * `NotificationManagerCompat.notify` throws once `POST_NOTIFICATIONS` has been
+ * revoked mid-session — `call/CallService.kt` already wraps its own post in
+ * `runCatching` for exactly this reason — and a `CallStyle` notification can be
+ * refused outright by the platform.
+ *
+ * Before this, one such throw ended the loop for the life of the process. That
+ * failure was invisible from every angle a user or a developer would look at:
+ * `EventPump.isRunning` reported `true` because it read the holder set rather
+ * than the job, the foreground service's own notification kept saying
+ * "Comrade is staying connected", and reopening the app did not restart
+ * anything (see [PumpRevival]). Messages and calls simply stopped arriving
+ * until the app was force-stopped. So handling one event badly must cost that
+ * event and nothing else.
+ *
+ * [CancellationException] is re-thrown rather than caught: it is not a failure
+ * but [EventPump.release]'s stop signal, and swallowing it here would make the
+ * loop unstoppable — the mirror image of the bug above, and the reason this is
+ * a `catch (Throwable)` after an explicit cancellation re-throw rather than a
+ * `runCatching`.
+ */
+internal suspend fun <T> drainLoop(
+    poll: () -> T?,
+    route: (T) -> Unit,
+    idle: suspend () -> Unit,
+    onError: (Throwable) -> Unit,
+) {
+    while (currentCoroutineContext().isActive) {
+        val event = try {
+            poll()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // A queue read that failed is not a reason to stop reading. Back
+            // off first, so a persistently failing read cannot spin hot.
+            onError(e)
+            idle()
+            continue
+        }
+        if (event == null) {
+            idle()
+            continue
+        }
+        try {
+            route(event)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            onError(e)
+        }
+    }
 }
 
 /**
@@ -79,50 +164,95 @@ internal class PumpHolders {
  * a call or DM would sit behind — and only backs off to [POLL_IDLE_MS] once
  * the queue is actually empty. The loop itself is safe to run with a locked
  * vault: nothing produces events then, so it is an idle tick.
+ *
+ * ## Liveness
+ * Two separate questions, kept separate after conflating them cost every
+ * notification for the life of a process: [isHeld] is whether anyone wants a
+ * loop, [isRunning] is whether one is actually alive. Every [acquire], and
+ * every [ensureRunning] tick from the service, revives a loop that is not.
  */
 object EventPump {
 
     private const val TAG = "EventPump"
     private const val POLL_IDLE_MS = 200L
 
+    /**
+     * Guarded by this object's monitor, along with [job].
+     *
+     * One lock for both, and always taken in that order: the alternative
+     * (checking the holder set outside the lock) races a concurrent [release]
+     * into leaving a loop running that nobody holds, and taking the two locks
+     * in opposite orders on different paths is how that race becomes a
+     * deadlock instead.
+     */
     private val holders = PumpHolders()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** The live loop, guarded by this object's monitor (not by [holders]). */
     private var job: Job? = null
 
-    /** Start draining for [holder] if nobody was already. Idempotent per holder. */
+    /**
+     * Start draining for [holder], reviving a loop that has stopped for any
+     * reason. Idempotent, and safe to call for a holder that already holds —
+     * "am I registered" and "is a loop alive" are answered independently.
+     */
     fun acquire(context: Context, holder: PumpHolder) {
-        if (!holders.acquire(holder)) return
         val appContext = context.applicationContext
         synchronized(this) {
-            if (job?.isActive == true) return
-            Log.i(TAG, "event drain started (holder=$holder)")
-            job = scope.launch { drain(appContext) }
+            holders.acquire(holder)
+            startIfNeededLocked(appContext)
         }
+    }
+
+    /**
+     * Restart the loop if it is not running and somebody still needs it.
+     *
+     * Public so [RelayConnectionService] can re-check on a timer. [acquire]
+     * already revives a dead loop, but the next acquire may be hours away:
+     * nothing acquires while the app stays closed, which is precisely the
+     * stretch the service exists to cover. [drainLoop] is written so the loop
+     * cannot die of a bad event any more; this is the insurance that if it dies
+     * some other way, the stall lasts one interval rather than until the user
+     * next opens the app.
+     */
+    fun ensureRunning(context: Context) {
+        val appContext = context.applicationContext
+        synchronized(this) { startIfNeededLocked(appContext) }
+    }
+
+    /** Caller must hold this object's monitor. */
+    private fun startIfNeededLocked(appContext: Context) {
+        if (!holders.isHeld()) return
+        if (!PumpRevival.shouldStart(job?.isActive == true)) return
+        Log.i(TAG, "event drain starting")
+        job = scope.launch { drain(appContext) }
     }
 
     /** Stop draining once [holder] was the last one needing it. */
     fun release(holder: PumpHolder) {
-        if (!holders.release(holder)) return
         synchronized(this) {
+            if (!holders.release(holder)) return
             Log.i(TAG, "event drain stopped (last holder=$holder)")
             job?.cancel()
             job = null
         }
     }
 
-    /** Whether anything currently needs the queue drained — for diagnostics and tests. */
-    fun isRunning(): Boolean = holders.isHeld()
+    /**
+     * Whether a drain loop is **actually alive**.
+     *
+     * This used to report the holder set instead, which made it useless for the
+     * one question worth asking of it: a dead loop with a live holder answered
+     * "running" while nothing was being delivered.
+     */
+    fun isRunning(): Boolean = synchronized(this) { job?.isActive == true }
 
-    private suspend fun drain(context: Context) {
-        while (currentCoroutineContext().isActive) {
-            val event = ComradeCore.pollEvent()
-            if (event == null) {
-                delay(POLL_IDLE_MS)
-                continue
-            }
-            ChatEventRouter.route(context, event)
-        }
-    }
+    /** Whether anyone currently needs the queue drained. */
+    fun isHeld(): Boolean = synchronized(this) { holders.isHeld() }
+
+    private suspend fun drain(context: Context) = drainLoop(
+        poll = { ComradeCore.pollEvent() },
+        route = { ChatEventRouter.route(context, it) },
+        idle = { delay(POLL_IDLE_MS) },
+        onError = { Log.e(TAG, "event drain step failed; delivery continues", it) },
+    )
 }
