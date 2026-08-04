@@ -656,7 +656,20 @@ fun ConversationScreen(
      * user can try again.
      */
     fun runCommand(text: String): Boolean {
-        val command = runCatching { ComradeCore.parseChatCommand(text) }.getOrNull() ?: return false
+        val command = runCatching { ComradeCore.parseChatCommand(text) }.getOrNull()
+        if (command == null) {
+            // **Fail closed.** Returning false here would hand the text to
+            // [send], and for `@tara i can't stand my brother` that means
+            // sending somebody their own private thought. So anything that
+            // *looks* like a command is refused rather than delivered when the
+            // grammar is unreachable — `isAsideDraft` is pure Kotlin and cannot
+            // itself fail, which is why it can be trusted at this point.
+            if (ChatCommands.isAsideDraft(text) || text.startsWith("/")) {
+                commandNote = "Couldn't read that command — nothing was sent."
+                return true
+            }
+            return false
+        }
         if (command is uniffi.comrade_core.ChatCommand.Plain ||
             command is uniffi.comrade_core.ChatCommand.Pay
         ) {
@@ -665,9 +678,11 @@ fun ConversationScreen(
         val mentions = runCatching { ComradeCore.resolveMentions(text) }.getOrDefault(emptyList())
         val plan = ChatCommands.planFor(command, mentions)
 
-        fun clear() {
+        // Empties the composer. Deliberately does **not** touch [commandNote]:
+        // it used to, and every `/task` confirmation was erased on the line
+        // after it was set, so the command appeared to do nothing at all.
+        fun clearDraft() {
             editDraft(TextFieldValue())
-            commandNote = null
         }
 
         when (plan) {
@@ -709,8 +724,9 @@ fun ConversationScreen(
                         }
                     }
                         .onSuccess {
-                            commandNote = if (plan.peer != null) "Asked them." else "Added to your list."
-                            clear()
+                            commandNote =
+                                if (plan.peer != null) "Asked them." else "Added to your list."
+                            clearDraft()
                             sending = false
                         }
                         .onFailure {
@@ -728,16 +744,19 @@ fun ConversationScreen(
                             ComradeCore.offerActionTyped(plan.action, plan.peers)
                         }
                     }
-                        .onSuccess { told ->
+                        .onSuccess { outcome ->
                             // A deliberate command that silently did nothing
-                            // reads as a bug, so the count is reported — the
-                            // shared nudge cooldown is why it can be zero.
-                            commandNote = if (told == 0L) {
-                                "They were told recently — leaving them be for now."
-                            } else {
-                                null
+                            // reads as a bug, so say which of the three reasons
+                            // applied rather than guessing at the friendliest.
+                            commandNote = when {
+                                outcome.sent.isNotEmpty() -> null
+                                outcome.notComrades.isNotEmpty() ->
+                                    "Mark them a comrade first — this only goes to comrades."
+                                outcome.onCooldown.isNotEmpty() ->
+                                    "They were told recently — leaving them be for now."
+                                else -> "Couldn't reach them just now."
                             }
-                            if (told > 0L) clear()
+                            if (outcome.sent.isNotEmpty()) clearDraft()
                             sending = false
                         }
                         .onFailure {

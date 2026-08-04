@@ -19,7 +19,8 @@ use comrade_ui::{
     ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MessageDto,
-    MessageRequestDto, MusicService, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto,
+    MessageRequestDto, MusicService, OfferOutcomeDto, PlayTargetDto, PresenceDto, ProfileDto,
+    ReadingDto,
     SakhaStatusDto, TaraMessageDto, TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto,
     WorkspaceDto,
 };
@@ -1005,13 +1006,15 @@ pub async fn set_task_state(
         .map_err(|e| e.to_string())
 }
 
-/// Offer an in-app action to comrades; returns how many were actually told.
+/// Offer an in-app action to comrades. The outcome names who was told and why
+/// the others were not — a bare count could not tell "the cooldown is running"
+/// from "that person is not your comrade".
 #[tauri::command]
 pub async fn offer_action(
     state: tauri::State<'_, Runtime>,
     action: AppAction,
     peers: Vec<String>,
-) -> Result<u64, String> {
+) -> Result<OfferOutcomeDto, String> {
     let handles = state.read().await.handles();
     handles
         .offer_action(action, peers)

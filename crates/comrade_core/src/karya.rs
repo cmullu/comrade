@@ -36,8 +36,11 @@
  * | decline it | no | yes |
  * | reopen it | no | no |
  *
- * *except on a task with no assignee, which is a note to self — there the two
- * roles are the same person and [`may_transition`] says so.
+ * *A task with no assignee is a note to self, and there the two roles are the
+ * same person: [`Task::party`] reports [`Party::Assignee`], so the holder may
+ * mark it done or decline it — **and withdraw it**, which is the one place the
+ * table above does not apply. Withdrawing your own private note is deleting it,
+ * and refusing that with "that is not yours to change" would be absurd.
  *
  * Nothing reopens. A task that comes back is a new task, because "done, no
  * wait, not done" is an argument the two devices would have to arbitrate and
@@ -217,6 +220,11 @@ impl Task {
         None
     }
 
+    /// Whether this task is one person's alone, so both powers are theirs.
+    fn holder_is_sole_party(&self, npub: &str) -> bool {
+        self.is_self_assigned() && self.assigner_npub == npub
+    }
+
     /// Move to `to` on `npub`'s say-so, or leave it alone and return `false`.
     ///
     /// Returns `false` for all three ways this can be wrong — a peer who is not
@@ -228,7 +236,16 @@ impl Task {
         let Some(party) = self.party(npub) else {
             return false;
         };
-        if !may_transition(self.state, to, party) {
+        // On a note to self the two roles are one person, so they hold both
+        // powers — including withdraw, which `may_transition` reserves for an
+        // assigner and `party` never reports for a solitary task. Without this
+        // you could not delete your own note.
+        let allowed = if self.holder_is_sole_party(npub) {
+            to != TaskState::Open && self.state == TaskState::Open
+        } else {
+            may_transition(self.state, to, party)
+        };
+        if !allowed {
             return false;
         }
         self.state = to;
@@ -433,6 +450,36 @@ mod tests {
         assert!(t.is_self_assigned());
         assert!(t.apply(TaskState::Done, ANA, 200));
         assert_eq!(t.state, TaskState::Done);
+    }
+
+    #[test]
+    fn a_note_to_self_can_also_be_withdrawn() {
+        // Withdrawing your own private note is deleting it. `may_transition`
+        // reserves withdraw for an assigner and `party` reports `Assignee` for a
+        // solitary task, so without the sole-party rule this returned "that is
+        // not yours to change" for a note nobody else can even see.
+        for to in [TaskState::Done, TaskState::Declined, TaskState::Withdrawn] {
+            let mut t = note_to_self();
+            assert!(t.apply(to, ANA, 200), "{to:?}");
+            assert_eq!(t.state, to);
+        }
+    }
+
+    #[test]
+    fn a_sole_party_still_cannot_reopen_or_touch_a_finished_note() {
+        let mut t = note_to_self();
+        assert!(t.apply(TaskState::Done, ANA, 200));
+        assert!(!t.apply(TaskState::Open, ANA, 300));
+        assert!(!t.apply(TaskState::Withdrawn, ANA, 300));
+        assert_eq!(t.state, TaskState::Done);
+    }
+
+    #[test]
+    fn a_stranger_cannot_touch_a_note_to_self() {
+        let mut t = note_to_self();
+        assert!(t.party(EVE).is_none());
+        assert!(!t.apply(TaskState::Withdrawn, EVE, 200));
+        assert_eq!(t.state, TaskState::Open);
     }
 
     #[test]

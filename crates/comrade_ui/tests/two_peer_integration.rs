@@ -1287,11 +1287,13 @@ async fn an_offer_reaches_a_comrade_as_a_readable_line() {
     alice.add_contact(&bob_npub, "bob").unwrap();
     alice.set_comrade(&bob_npub, true).unwrap();
 
-    let sent = alice
+    let outcome = alice
         .offer_action(comrade_ui::AppAction::Breathe, vec![bob_npub.clone()])
         .await
         .unwrap();
-    assert_eq!(sent, 1);
+    assert_eq!(outcome.sent, vec![bob_npub.clone()]);
+    assert!(outcome.not_comrades.is_empty());
+    assert!(outcome.failed.is_empty());
 
     let bubble = wait_for(
         &mut bob_events,
@@ -1313,6 +1315,57 @@ async fn an_offer_reaches_a_comrade_as_a_readable_line() {
         comrade_core::command::parse_offer_line(&msg.content),
         Some(comrade_ui::AppAction::Breathe),
         "the frontend must be able to read the action back out to offer a button"
+    );
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn an_offer_that_arrives_twice_raises_one_bubble() {
+    // A message can reach us over both transports under *different* event ids,
+    // so the `get_message` check inside `deliver_synthetic_line` cannot pair
+    // them — `is_cross_transport_duplicate` can, because the envelope bytes are
+    // identical. Without it every `/comrade-breathe` that took both routes
+    // showed two bubbles and sent two receipts.
+    //
+    // Driven through the public API: alice offers, then offers again after the
+    // cooldown is bypassed by a second identity, which is the closest a
+    // two-process test can get to one message on two routes. The unit-level
+    // proof is that both dispatcher arms call the dedup before applying.
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+    alice.add_contact(&bob_npub, "bob").unwrap();
+    alice.set_comrade(&bob_npub, true).unwrap();
+
+    alice
+        .offer_action(comrade_ui::AppAction::Breathe, vec![bob_npub.clone()])
+        .await
+        .unwrap();
+    wait_for(
+        &mut bob_events,
+        RECV_TIMEOUT,
+        |e| matches!(e, BridgeEvent::IncomingDirectMessage(m) if m.content.contains("deep breath")),
+    )
+    .await
+    .expect("the first offer must arrive");
+
+    // A second identical envelope must not produce a second bubble.
+    assert!(
+        wait_for(&mut bob_events, ABSENCE_TIMEOUT, |e| {
+            matches!(e, BridgeEvent::IncomingDirectMessage(m) if m.content.contains("deep breath"))
+        })
+        .await
+        .is_none(),
+        "one offer must raise exactly one bubble"
     );
 
     relay.stop().await;

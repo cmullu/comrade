@@ -79,9 +79,9 @@ use comrade_ui::{
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, MusicService, PlayTargetDto, PresenceDto, ProfileDto,
-    ReadingDto, ShareVerdictDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto,
-    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PlayTargetDto,
+    PresenceDto, ProfileDto, ReadingDto, ShareVerdictDto, TaraMessageDto, TaskDto, TaskState,
+    TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -850,13 +850,14 @@ impl Comrade {
         handles.set_task_state(&id, state).await
     }
 
-    /// Offer an in-app action to comrades, returning how many were told —
-    /// fewer than asked for when the shared nudge cooldown is still running.
+    /// Offer an in-app action to comrades. The outcome names who was told and
+    /// why the others were not — a bare count could not tell "the cooldown is
+    /// running" from "that person is not your comrade".
     pub async fn offer_action(
         &self,
         action: AppAction,
         peers: Vec<String>,
-    ) -> Result<u64, UiError> {
+    ) -> Result<OfferOutcomeDto, UiError> {
         let handles = self.inner.read().await.handles();
         handles.offer_action(action, peers).await
     }

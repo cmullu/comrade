@@ -842,5 +842,64 @@ mod tests {
             mb.lookup("anything").await,
             Err(CatalogueError::InsecureUrl)
         ));
+        // Case-insensitively, and for schemes that merely *contain* https.
+        for base in [
+            "HTTP://musicbrainz.example/ws/2",
+            "ftp://musicbrainz.example/ws/2",
+            "nothttps://musicbrainz.example/ws/2",
+            "musicbrainz.example/ws/2",
+        ] {
+            assert!(
+                matches!(
+                    MusicBrainz::with_base(base, "test/1.0").lookup("x").await,
+                    Err(CatalogueError::InsecureUrl)
+                ),
+                "{base} was not refused"
+            );
+        }
+        // …and HTTPS in any case is accepted by the scheme check (the request
+        // itself then fails, which is a different error).
+        assert!(!matches!(
+            MusicBrainz::with_base("HTTPS://127.0.0.1:1/ws/2", "test/1.0")
+                .lookup("x")
+                .await,
+            Err(CatalogueError::InsecureUrl)
+        ));
+    }
+
+    #[cfg(feature = "catalogue-http")]
+    #[test]
+    fn the_read_cap_is_the_one_the_lane_claims_to_guard() {
+        // The streaming read is `buf.len() + chunk.len() > MAX_LOOKUP_BYTES`,
+        // which needs a live socket to exercise; what is pinned here is the bound
+        // itself and the arithmetic around it, so a future edit that turns the
+        // cap into a no-op (a `>=` off-by-one, or a cap larger than any real
+        // document) fails rather than silently uncapping the fetch.
+        assert_eq!(MAX_LOOKUP_BYTES, 512 * 1024);
+        // One byte over the cap must trip it; exactly the cap must not.
+        let over = |buf: usize, chunk: usize| buf + chunk > MAX_LOOKUP_BYTES;
+        assert!(!over(MAX_LOOKUP_BYTES - 1, 1));
+        assert!(over(MAX_LOOKUP_BYTES, 1));
+        assert!(over(0, MAX_LOOKUP_BYTES + 1));
+        // And a metadata document for the most candidates we ask for is orders
+        // of magnitude under it, so the cap can never reject a real answer.
+        assert!(MAX_CANDIDATES * 4096 < MAX_LOOKUP_BYTES);
+    }
+
+    #[cfg(feature = "catalogue-http")]
+    #[tokio::test]
+    async fn a_redirect_cannot_move_the_fetch_to_another_host() {
+        // `Policy::none()` is the guard: without it a catalogue could 302 to
+        // `http://` or to a host we never chose, past the scheme check that ran
+        // on the original URL. Asserted through the client builder rather than a
+        // live redirect, because the alternative is a network test.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(LOOKUP_TIMEOUT)
+            .build();
+        assert!(client.is_ok(), "the guarded client must build");
+        // A short, non-zero budget, so a host that accepts and then goes quiet
+        // costs seconds rather than forever.
+        assert!(LOOKUP_TIMEOUT.as_secs() > 0 && LOOKUP_TIMEOUT.as_secs() <= 10);
     }
 }

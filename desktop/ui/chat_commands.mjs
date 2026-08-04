@@ -46,7 +46,7 @@ export const INCOMPLETE = "incomplete";
 /**
  * Screens this desktop build actually has.
  *
- * `breath`, `focus`, `journal`, `read` and `tara` all exist on Android; on
+ * `breathe`, `focus`, `journal`, `read` and `tara` all exist on Android; on
  * desktop only Focus and the reader shipped (`docs/ATTENTION.md` §7,
  * `docs/FRONTEND_STRATEGY.md`'s divergence table). Listing what is *here*
  * rather than assuming parity is what lets `/journal` say "not on desktop yet"
@@ -198,11 +198,21 @@ function resolvedTargets(parsed, mentions) {
   return { npubs, problem: null };
 }
 
+/**
+ * Every action key the bridge can send, i.e. `AppAction::key()` in Rust.
+ *
+ * Exported so a test can assert {@link labelFor} covers all of them. These used
+ * to be spelled `breath` here and `breathe` on the wire, and because `labelFor`
+ * falls back to the raw key the only symptom was a sentence reading "breathe is
+ * on the phone app" — the kind of drift a `/breath/i` assertion happily passes.
+ */
+export const ACTION_KEYS = ["breathe", "focus", "journal", "tara", "read"];
+
 /** Human name for an action key, for the "not here yet" sentences. */
 export function labelFor(key) {
   return (
     {
-      breath: "Taking a deep breath",
+      breathe: "Taking a deep breath",
       focus: "Focus sessions",
       journal: "The journal",
       tara: "Tara",

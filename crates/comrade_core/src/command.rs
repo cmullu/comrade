@@ -188,9 +188,16 @@ pub enum AppAction {
 impl AppAction {
     /// Stable wire key. Never localise this — it is what
     /// [`parse_offer_envelope`] matches on and what a frontend switches over.
+    ///
+    /// **Deliberately identical to the serde name.** These used to differ
+    /// (`"breath"` here, `"breathe"` from `rename_all`), which gave one action
+    /// two strings: the offer envelope said one and a `ChatCommand` crossing the
+    /// FFI said the other, so a frontend keying a label map on either got the
+    /// wrong answer for half its inputs. `the_wire_key_matches_the_serde_name`
+    /// pins them together.
     pub fn key(self) -> &'static str {
         match self {
-            Self::Breathe => "breath",
+            Self::Breathe => "breathe",
             Self::Focus => "focus",
             Self::Journal => "journal",
             Self::Tara => "tara",
@@ -202,7 +209,7 @@ impl AppAction {
     /// naming an action this one does not have is ignored rather than guessed at.
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
-            "breath" => Some(Self::Breathe),
+            "breathe" => Some(Self::Breathe),
             "focus" => Some(Self::Focus),
             "journal" => Some(Self::Journal),
             "tara" => Some(Self::Tara),
@@ -1206,6 +1213,28 @@ mod tests {
             for name in std::iter::once(&spec.name).chain(spec.aliases.iter()) {
                 assert!(is_command_shaped(name), "{name} could never be typed");
             }
+        }
+    }
+
+    #[test]
+    fn the_wire_key_matches_the_serde_name() {
+        // One action, one string. When these differed, an offer envelope said
+        // "breath" while a `ChatCommand` crossing the FFI said "breathe", and a
+        // frontend keying a label map on either was wrong half the time.
+        for action in [
+            AppAction::Breathe,
+            AppAction::Focus,
+            AppAction::Journal,
+            AppAction::Tara,
+            AppAction::Read,
+        ] {
+            let serde_name = serde_json::to_string(&action).unwrap();
+            assert_eq!(
+                serde_name,
+                format!("\"{}\"", action.key()),
+                "{:?} disagrees with itself",
+                action
+            );
         }
     }
 

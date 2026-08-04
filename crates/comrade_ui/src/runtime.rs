@@ -470,6 +470,31 @@ pub struct TaskDto {
     pub mine_to_do: bool,
 }
 
+/// The result of offering an in-app action: who was told, and why the others
+/// were not.
+///
+/// **A bare count was not enough, and the reason is a bug this replaced.**
+/// `offer_action` can reach zero three ways — nobody named was a comrade, the
+/// shared cooldown was still running, or every send failed — and a frontend
+/// holding only `0` said *"they were told recently"* for all three. Telling
+/// somebody their message was throttled when the truth is "that person is not
+/// your comrade" is worse than saying nothing: it names a cause that is not
+/// real, and the actual fix (mark them a comrade) is never suggested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct OfferOutcomeDto {
+    /// Comrades who were actually told.
+    pub sent: Vec<String>,
+    /// Named peers who are not comrades — the offer never applied to them.
+    /// Marking them a comrade is the fix, and the UI should say so.
+    pub not_comrades: Vec<String>,
+    /// Comrades left alone because the shared nudge cooldown is still running.
+    pub on_cooldown: Vec<String>,
+    /// Comrades the send failed for outright — no relay took it, and unlike a
+    /// chat message a control envelope is not queued (see
+    /// `RuntimeHandles::send_control_envelope`).
+    pub failed: Vec<String>,
+}
+
 /// What can actually be done with a `/play` query, decided once.
 ///
 /// The decision rather than the prose: each frontend renders its own words from
@@ -3427,18 +3452,17 @@ impl ComradeRuntime {
 
     /// Offer an in-app action to `peers` — "I thought this might help".
     ///
-    /// Returns how many were actually told, which will be fewer than asked for
-    /// when the shared nudge cooldown is still running. **The count is the point
-    /// of the return value**: a deliberate command that silently did nothing
-    /// would read as a bug, so the caller can say "already told them recently"
-    /// instead.
+    /// Returns [`OfferOutcomeDto`] rather than a count, because a deliberate
+    /// command that silently did nothing reads as a bug and the *reason* it did
+    /// nothing is the part a UI has to say out loud. See that type for why a
+    /// bare number was actively misleading.
     ///
     /// Delegates to [`RuntimeHandles::offer_action`].
     pub async fn offer_action(
         &self,
         action: AppAction,
         peers: Vec<String>,
-    ) -> Result<u64, UiError> {
+    ) -> Result<OfferOutcomeDto, UiError> {
         self.handles().offer_action(action, peers).await
     }
 
@@ -4893,6 +4917,32 @@ impl RuntimeHandles {
 
     // ── Tasks and offers (see `comrade_core::karya`, `comrade_core::command`) ─
 
+    /// Send a control envelope to `target` without it becoming a chat message.
+    ///
+    /// [`Self::send_dm`] is the *chat* path: it persists a `StoredMessage`,
+    /// queues in the outbox, drives the chat-list preview and cancels the draft
+    /// nudge. Putting an envelope through it puts raw JSON in the sender's own
+    /// thread and in their chat list — the exact defect `AUDIT.md`'s 2026-07-29
+    /// entry records for media references ("a chat bubble full of
+    /// machine-readable noise, and the chat list's preview").
+    ///
+    /// So this goes straight to the vault, the way every other control envelope
+    /// here already does ([`Self::send_call_signal`], `deliver_nudges`,
+    /// [`Self::together_start`], the receipt sender). The cost is deliberate and
+    /// worth naming: **no outbox retry**. A task or an offer no relay accepts is
+    /// not queued for later, because a "would you do this?" that silently
+    /// arrives an hour after the conversation moved on is worse than one the
+    /// sender was told to re-send — and the local row exists either way.
+    async fn send_control_envelope(&self, target: &str, json: &str) -> Result<(), UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer = parse_pubkey(target)?;
+        vault
+            .send_dm(&peer, json)
+            .await
+            .map(|_| ())
+            .map_err(|e| UiError::Engine(e.to_string()))
+    }
+
     /// Name a piece of work. `peer` of `None` is a note to self.
     ///
     /// A note to self never reaches a relay — it is stored and returned, and
@@ -4931,13 +4981,11 @@ impl RuntimeHandles {
             let json = envelope
                 .to_json()
                 .map_err(|e| UiError::Engine(e.to_string()))?;
-            // One message, not two. Sent as a DM like every other control
-            // envelope, so it inherits gift wrapping, the mesh fallback and the
-            // outbox for free — and the receiver renders its own chat bubble
+            // One message, not two: the receiver renders its own chat bubble
             // from the envelope (`apply_karya_signal`) rather than us sending a
             // second, human-readable copy. Two events per assignment would
             // double the relay traffic and let the bubble disagree with the row.
-            self.send_dm(&target, &json).await?;
+            self.send_control_envelope(&target, &json).await?;
         }
         task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
     }
@@ -4983,7 +5031,7 @@ impl RuntimeHandles {
             })
             .to_json()
             .map_err(|e| UiError::Engine(e.to_string()))?;
-            if let Err(e) = self.send_dm(&target, &json).await {
+            if let Err(e) = self.send_control_envelope(&target, &json).await {
                 // The local row already moved, and it is the copy this device
                 // trusts. A peer who never hears will see it next time they act
                 // on the task and are told it is already finished.
@@ -4993,28 +5041,31 @@ impl RuntimeHandles {
         task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
     }
 
-    /// Offer an in-app action to `peers`, returning how many were told.
+    /// Offer an in-app action to `peers`, reporting who was told and who was not.
     ///
     /// Three gates, and each one is a lesson this repo already paid for:
     ///
     /// 1. **Comrades only.** Marking someone a comrade is the existing
     ///    "this person may reach me" grant ([`ComradeRuntime::set_comrade`]);
     ///    an offer is a notification, so it lives inside that grant rather
-    ///    than beside it.
+    ///    than beside it. Anyone named who is not one comes back in
+    ///    [`OfferOutcomeDto::not_comrades`] so the UI can say which.
     /// 2. **The shared nudge cooldown.** `comrade_core::nudge::nudged_recently`
     ///    is a floor on *notifications*, not on any one reason for them — the
     ///    reasoning `AUDIT.md` records for the breathing screen's own trigger.
     ///    Someone told twenty minutes ago that a comrade might need them learns
     ///    nothing from being told to breathe now, and being able to send this
     ///    repeatedly would make it a way to needle somebody.
-    /// 3. **The envelope, then a readable line**, exactly as a task does.
+    /// 3. **A control envelope, not a chat message** — see
+    ///    [`Self::send_control_envelope`] for why, and for what that costs.
     ///
-    /// Never partially fails: an unreachable peer is simply not counted.
+    /// Never partially fails in the sense of erroring: an unreachable comrade
+    /// lands in [`OfferOutcomeDto::failed`] and the rest still go.
     pub async fn offer_action(
         &self,
         action: AppAction,
         peers: Vec<String>,
-    ) -> Result<u64, UiError> {
+    ) -> Result<OfferOutcomeDto, UiError> {
         let store = self.store.clone().ok_or(UiError::VaultLocked)?;
         let now = now_secs();
         // Everything that reads the store, and the cooldown claim, happen before
@@ -5025,30 +5076,49 @@ impl RuntimeHandles {
             .into_iter()
             .map(|c| c.npub)
             .collect();
-        let wanted: Vec<String> = peers
-            .iter()
-            .map(|p| to_npub(p))
-            .filter(|npub| comrades.contains(npub))
-            .collect();
-        if wanted.is_empty() {
-            return Ok(0);
+
+        let mut outcome = OfferOutcomeDto {
+            sent: Vec::new(),
+            not_comrades: Vec::new(),
+            on_cooldown: Vec::new(),
+            failed: Vec::new(),
+        };
+        let mut wanted: Vec<String> = Vec::new();
+        for npub in peers.iter().map(|p| to_npub(p)) {
+            if comrades.contains(&npub) {
+                wanted.push(npub);
+            } else {
+                outcome.not_comrades.push(npub);
+            }
         }
+        if wanted.is_empty() {
+            return Ok(outcome);
+        }
+        // `due_among` claims the cooldown for everyone it returns, so whoever it
+        // leaves out is on cooldown by definition.
         let due = self.nudge_watch.due_among(&wanted, now);
+        outcome.on_cooldown = wanted
+            .iter()
+            .filter(|npub| !due.contains(npub))
+            .cloned()
+            .collect();
         if due.is_empty() {
-            return Ok(0);
+            return Ok(outcome);
         }
 
         let json = OfferEnvelope::new(action)
             .to_json()
             .map_err(|e| UiError::Engine(e.to_string()))?;
-        let mut sent = 0u64;
         for target in due {
-            match self.send_dm(&target, &json).await {
-                Ok(_) => sent += 1,
-                Err(e) => tracing::debug!(%target, "offer not sent: {e}"),
+            match self.send_control_envelope(&target, &json).await {
+                Ok(()) => outcome.sent.push(target),
+                Err(e) => {
+                    tracing::debug!(%target, "offer not sent: {e}");
+                    outcome.failed.push(target);
+                }
             }
         }
-        Ok(sent)
+        Ok(outcome)
     }
 
     pub async fn broadcast_chitthi(
@@ -6216,10 +6286,13 @@ fn apply_karya_signal(
 /// Persist and surface a chat line this device generated from a control
 /// envelope, so a task or an offer reads as the message it is.
 ///
-/// Deliberately reuses the incoming event's real id, so the plain-chat dedup
-/// (`get_message`) catches a redelivered envelope and no second bubble appears.
-/// Sends a delivered receipt for the same reason the plain-chat path does: the
-/// message *did* arrive.
+/// Reuses the incoming event's real id, so a wrapper redelivered by the *same*
+/// transport is caught by the `get_message` check below. That is **not** enough
+/// on its own: the same envelope arriving over the other transport carries a
+/// different event id, and pairing those is the caller's job — both arms of the
+/// dispatcher run `is_cross_transport_duplicate` on the envelope bytes before
+/// reaching here. Sends a delivered receipt for the same reason the plain-chat
+/// path does: the message *did* arrive.
 #[allow(clippy::too_many_arguments)]
 fn deliver_synthetic_line(
     vault: &Arc<VaultEngine>,
@@ -7189,7 +7262,14 @@ fn dispatch_incoming_dm(
     //    the feature is good. Returns either way, so an ungated one is dropped
     //    rather than surfacing as a message request full of JSON.
     if let Some(env) = parse_karya_envelope(&msg.content) {
-        if matches!(gate, IncomingGate::Accepted) {
+        if matches!(gate, IncomingGate::Accepted)
+            // A control envelope reaches us twice when a message travels both
+            // routes — sealed over the mesh now, over a relay when the internet
+            // returns — and the two copies carry *different* event ids, so the
+            // id check inside `deliver_synthetic_line` cannot pair them. This
+            // can, because the envelope bytes are identical.
+            && !route.is_cross_transport_duplicate(&peer_npub, &msg.content)
+        {
             let me = vault.our_npub();
             if let Some(line) =
                 apply_karya_signal(store, &peer_npub, &me, msg.created_at, &env.signal)
@@ -7205,7 +7285,13 @@ fn dispatch_incoming_dm(
     //    naming a destination that does not exist here would be a button that
     //    goes nowhere.
     if let Some(env) = parse_offer_envelope(&msg.content) {
-        if matches!(gate, IncomingGate::Accepted) {
+        // Same two-route pairing as a task, and unlike a task an offer has no
+        // id of its own to fall back on — every `/comrade-breathe` sends byte-
+        // identical JSON — so this check is the only thing between one offer and
+        // two bubbles.
+        if matches!(gate, IncomingGate::Accepted)
+            && !route.is_cross_transport_duplicate(&peer_npub, &msg.content)
+        {
             match env.app_action() {
                 Some(action) => deliver_synthetic_line(
                     vault,
@@ -12163,25 +12249,26 @@ mod tests {
         let (_hex, ana) = stranger();
         rt.add_contact(&ana, "ana").unwrap();
 
-        assert_eq!(
-            rt.offer_action(AppAction::Breathe, vec![ana.clone()])
-                .await
-                .unwrap(),
-            0,
-            "a contact is not yet a comrade"
-        );
-        assert_eq!(
-            rt.offer_action(AppAction::Breathe, vec![]).await.unwrap(),
-            0
-        );
+        // …and it must be reported as "not a comrade", not as a cooldown: the UI
+        // has to be able to suggest the actual fix.
+        let outcome = rt
+            .offer_action(AppAction::Breathe, vec![ana.clone()])
+            .await
+            .unwrap();
+        assert!(outcome.sent.is_empty(), "a contact is not yet a comrade");
+        assert_eq!(outcome.not_comrades, vec![ana.clone()]);
+        assert!(outcome.on_cooldown.is_empty());
+
+        let none = rt.offer_action(AppAction::Breathe, vec![]).await.unwrap();
+        assert!(none.sent.is_empty() && none.not_comrades.is_empty());
     }
 
     #[tokio::test]
     async fn a_second_offer_inside_the_cooldown_tells_nobody_twice() {
         // The cooldown is a floor on notifications, shared with the nudge —
         // being able to send this repeatedly would make it a way to needle
-        // somebody. There is no relay in this test, so nothing actually
-        // delivers; what is pinned is that the second call claims nobody.
+        // somebody. What is pinned is that the *second* call reaches nobody and
+        // says why.
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
@@ -12189,16 +12276,22 @@ mod tests {
         rt.add_contact(&ana, "ana").unwrap();
         rt.set_comrade(&ana, true).unwrap();
 
-        // First call claims the cooldown for ana (the send itself fails with no
-        // relay, which is why the count is 0 rather than 1).
+        // The first call claims the cooldown for ana.
         let _ = rt.offer_action(AppAction::Breathe, vec![ana.clone()]).await;
-        assert_eq!(
-            rt.offer_action(AppAction::Breathe, vec![ana.clone()])
-                .await
-                .unwrap(),
-            0,
-            "the cooldown must swallow the second attempt"
+        let second = rt
+            .offer_action(AppAction::Breathe, vec![ana.clone()])
+            .await
+            .unwrap();
+        assert!(
+            second.sent.is_empty(),
+            "the cooldown must swallow the second"
         );
+        assert_eq!(
+            second.on_cooldown,
+            vec![ana.clone()],
+            "and it must say the cooldown is why, not that ana is a stranger"
+        );
+        assert!(second.not_comrades.is_empty());
     }
 
     #[tokio::test]

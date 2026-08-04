@@ -958,7 +958,18 @@
    * here is the third thing — actually doing it.
    */
   async function handleChatCommand(text) {
-    if (!chatCommands) return false;
+    if (!chatCommands) {
+      // **Fail closed.** The module is loaded with a dynamic import whose
+      // `.catch` swallows failure, so `chatCommands` can stay null for the whole
+      // session — and returning false here hands the text to `send_dm`. For
+      // `@tara i can't stand my brother` that means sending somebody their own
+      // private thought, so anything command-shaped is refused instead.
+      if (/^\s*[/@]/.test(text)) {
+        showToast("Couldn't load the command list — nothing was sent.", "warn");
+        return true;
+      }
+      return false;
+    }
     const command = await safeInvoke("parse_chat_command", { text }, { silent: true });
     if (!command || command.kind === "plain" || command.kind === "pay") return false;
 
@@ -1017,25 +1028,34 @@
       }
 
       case chatCommands.OFFER: {
-        const sent = await safeInvoke("offer_action", {
+        const outcome = await safeInvoke("offer_action", {
           action: plan.appAction,
           peers: plan.peers,
         });
-        if (sent === 0) {
-          // A deliberate command that silently did nothing reads as a bug, so
-          // the count is reported rather than swallowed — see
-          // `RuntimeHandles::offer_action`.
-          showToast("They were told recently — leaving them be for now.", "info");
-        } else if (sent != null) {
-          showToast("Sent.", "info");
-          input.value = "";
-          clearComposerCommandUi();
+        if (outcome) {
+          // A deliberate command that silently did nothing reads as a bug, and
+          // *which* of the three reasons applied is the part worth saying — a
+          // bare count used to make "not your comrade" read as "throttled".
+          if (outcome.sent.length) {
+            showToast("Sent.", "info");
+            input.value = "";
+            clearComposerCommandUi();
+          } else if (outcome.not_comrades.length) {
+            showToast("Mark them a comrade first — this only goes to comrades.", "warn");
+          } else if (outcome.on_cooldown.length) {
+            showToast("They were told recently — leaving them be for now.", "info");
+          } else {
+            showToast("Couldn't reach them just now.", "warn");
+          }
         }
         return true;
       }
 
       case chatCommands.OPEN:
-        switchTab(plan.appAction === "read" ? "focus" : "focus");
+        // Both the focus timer and the reader live in the Focus tab on desktop,
+        // and `planFor` has already refused every other action for this window,
+        // so there is exactly one destination to reach.
+        switchTab("focus");
         input.value = "";
         clearComposerCommandUi();
         return true;
@@ -4628,8 +4648,8 @@
           }));
           if (head === "task") return { kind: "task", text: body.replace(/(?:^|\s)@[a-z0-9_]{3,24}/gi, "").trim(), assignees: at };
           if (head === "tara") return { kind: "ask_tara", text: body };
-          if (head === "breathe" || head === "breath") return { kind: "open", action: "breath" };
-          if (head === "comrade-breathe") return { kind: "offer_to", action: "breath", targets: at };
+          if (head === "breathe" || head === "breath") return { kind: "open", action: "breathe" };
+          if (head === "comrade-breathe") return { kind: "offer_to", action: "breathe", targets: at };
           if (head === "help" || head === "commands") return { kind: "help" };
           if (head === "pay") return { kind: "pay" };
           return { kind: "unknown", name: head };
@@ -4657,7 +4677,12 @@
             mine_to_do: !args.peer,
           };
         case "offer_action":
-          return args.peers?.length || 0;
+          return {
+            sent: args.peers || [],
+            not_comrades: [],
+            on_cooldown: [],
+            failed: [],
+          };
         case "tara_aside":
           return {
             id: "mock-aside",

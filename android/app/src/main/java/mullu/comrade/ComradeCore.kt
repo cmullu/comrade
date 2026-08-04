@@ -665,14 +665,33 @@ object ComradeCore {
         rethrowing("Task") { runBlocking { ffi.setTaskState(id, state) }.toInfo() }
 
     /**
-     * Offer an in-app action to comrades. Returns how many were actually told —
-     * fewer than asked for when the shared nudge cooldown is still running, and
-     * the caller must say so rather than let a deliberate command look broken.
+     * Who was told when an action was offered, and why the others were not.
+     *
+     * A bare count could not tell "the cooldown is running" from "that person is
+     * not your comrade", so the UI said the first for both — naming a cause that
+     * was not real and never suggesting the fix.
      */
+    data class OfferOutcome(
+        val sent: List<String>,
+        val notComrades: List<String>,
+        val onCooldown: List<String>,
+        val failed: List<String>,
+    )
+
+    private fun uniffi.comrade_ui.OfferOutcomeDto.toInfo() = OfferOutcome(
+        sent = sent,
+        notComrades = notComrades,
+        onCooldown = onCooldown,
+        failed = failed,
+    )
+
+    /** Offer an in-app action to comrades. See [OfferOutcome]. */
     fun offerActionTyped(
         action: uniffi.comrade_core.AppAction,
         peers: List<String>,
-    ): Long = rethrowing("Offer") { runBlocking { ffi.offerAction(action, peers) }.toLong() }
+    ): OfferOutcome = rethrowing("Offer") {
+        runBlocking { ffi.offerAction(action, peers) }.toInfo()
+    }
 
     /**
      * Say something to Tara from inside a conversation — a private aside. Never

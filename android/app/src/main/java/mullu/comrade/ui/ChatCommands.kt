@@ -21,9 +21,13 @@ import uniffi.comrade_core.CommandSpec
  * text becomes a recording are all Rust's answers, reached through
  * [ComradeCore.parseChatCommand] / [ComradeCore.resolveMentions]. Nothing in
  * this file re-parses composer text: a second grammar is precisely the drift
- * `/pay` already suffered across four implementations, and this app already
- * carries one command parser ([mullu.comrade.voice.VoiceCommand]) that now
- * delegates here rather than growing its own second copy.
+ * `/pay` already suffered across four implementations.
+ *
+ * [mullu.comrade.voice.VoiceCommand] **still has its own grammar** and has not
+ * been folded into core. That is a known follow-up, recorded in
+ * `docs/CHAT_ACTIONS.md` §7 — not a claim that it already happened. It is a
+ * refactor of a parser with its own passing tests, and was left alone rather
+ * than done blind.
  */
 
 /** What the composer should do once a command has been parsed. */

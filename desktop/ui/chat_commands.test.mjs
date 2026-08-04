@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ACTION_KEYS,
   ASIDE,
   BLOCKED,
   DESKTOP_CAN_PLAY,
@@ -13,6 +14,7 @@ import {
   TASK,
   completionFor,
   isAsideDraft,
+  labelFor,
   offerAffordance,
   pickerRows,
   planFor,
@@ -132,22 +134,22 @@ test("two contacts answering to one handle becomes a question, not a coin flip",
 // ── Offers ───────────────────────────────────────────────────────────────────
 
 test("an offer to a known comrade carries the action and the npub", () => {
-  const p = planFor(offer("breath", [mention("ana")]), {
+  const p = planFor(offer("breathe", [mention("ana")]), {
     mentions: [resolved("ana", "npub1ana")],
   });
   assert.equal(p.action, OFFER);
-  assert.equal(p.appAction, "breath");
+  assert.equal(p.appAction, "breathe");
   assert.deepEqual(p.peers, ["npub1ana"]);
 });
 
 test("an offer with nobody named asks who it is for", () => {
-  const p = planFor(offer("breath", []));
+  const p = planFor(offer("breathe", []));
   assert.equal(p.action, INCOMPLETE);
   assert.match(p.message, /Name the comrade/);
 });
 
 test("an offer to an unresolvable handle does not silently go nowhere", () => {
-  const p = planFor(offer("breath", [mention("ghost")]), {
+  const p = planFor(offer("breathe", [mention("ghost")]), {
     mentions: [{ handle: "ghost", npub: null, candidates: [] }],
   });
   assert.equal(p.action, INCOMPLETE);
@@ -231,13 +233,37 @@ test("completion leaves the caret where the next word goes, or submits", () => {
 
 // ── Received offers ──────────────────────────────────────────────────────────
 
+test("every action key the bridge can send has a real label", () => {
+  // The drift this catches: `labelFor` falls back to the raw key, so a
+  // mismatched spelling produced "breathe is on the phone app, not here yet"
+  // and nothing failed. Assert the exact strings, not a loose /breath/i.
+  for (const key of ACTION_KEYS) {
+    assert.notEqual(labelFor(key), key, `${key} fell through to the raw key`);
+  }
+  assert.equal(labelFor("breathe"), "Taking a deep breath");
+  assert.equal(labelFor("read"), "The reader");
+});
+
+test("every action key is either a desktop screen or honestly refused", () => {
+  for (const key of ACTION_KEYS) {
+    const plan = planFor({ kind: "open", action: key });
+    if (DESKTOP_SCREENS.has(key)) {
+      assert.equal(plan.action, OPEN, key);
+    } else {
+      assert.equal(plan.action, BLOCKED, key);
+      // The sentence must name the thing, not echo a wire key at the user.
+      assert.ok(!plan.message.startsWith(`${key} is`), `${key} leaked its wire key`);
+    }
+  }
+});
+
 test("a received offer is shown even when this window lacks the screen", () => {
   // The sentence is the point; hiding a comrade's message because our build has
   // no screen would be the wrong trade.
   const here = offerAffordance("focus");
   assert.equal(here.actionable, true);
-  const elsewhere = offerAffordance("breath");
+  const elsewhere = offerAffordance("breathe");
   assert.equal(elsewhere.actionable, false);
-  assert.match(elsewhere.label, /breath/i);
+  assert.equal(elsewhere.label, "Taking a deep breath");
   assert.equal(offerAffordance(null), null);
 });

@@ -13,7 +13,7 @@ This brings four of those into the composer.
 
 ## 1. The grammar
 
-`comrade_core::command`. Pure, no I/O, no clock, 43 unit tests.
+`comrade_core::command`. Pure, no I/O, no clock, 44 unit tests.
 
 | Type this | It does |
 |---|---|
@@ -113,7 +113,10 @@ nothing lets an assigner mark someone else's task done.
 | decline | no | yes |
 | reopen | no | no |
 
-*except a note to self, where one person holds both roles.
+*A note to self is the exception to the whole table: one person holds both roles,
+so they may do all three, **including withdraw** — deleting your own private note
+is not somebody else's business, and refusing it with "that is not yours to
+change" would be absurd. `Task::apply` special-cases it and three tests pin it.
 
 **Nothing reopens.** A task that comes back is a new task: "done, no wait, not
 done" is an argument two devices would have to arbitrate and neither has the
@@ -153,9 +156,14 @@ Three gates, each a lesson already paid for:
    *notifications*, not on any one reason for them — the reasoning `AUDIT.md`
    records for the breathing screen's own trigger. Being able to send this
    repeatedly would make it a way to needle somebody.
-3. **The count comes back.** A deliberate command that silently did nothing reads
-   as a bug, so `offer_action` returns how many were told and every frontend says
-   *"they were told recently"* rather than nothing.
+3. **The *reason* comes back.** A deliberate command that silently did nothing
+   reads as a bug — but a bare count was worse than nothing, because
+   `offer_action` reaches zero three ways (nobody named is a comrade, the
+   cooldown is running, every send failed) and a frontend holding only `0` said
+   *"they were told recently"* for all three. That named a cause that was not
+   real and never suggested the fix. It returns `OfferOutcomeDto` now, and each
+   frontend says which applied — *"mark them a comrade first"* when that is the
+   truth.
 
 It deliberately does **not** reuse the `comrade_nudge` envelope, whose guarantee
 is that it carries *no reason at all* — a key-set test enforces the absence. An
@@ -225,11 +233,24 @@ threads. So the envelope is the wire, the rendered line is stable English that
 `parse_task_line` / `parse_offer_line` read back, and each frontend localises
 from the parsed `AppAction` — never from the words.
 
+Both envelopes go out through `send_control_envelope`, **not** `send_dm`. That
+distinction is load-bearing: `send_dm` is the *chat* path, so it persists a
+`StoredMessage`, drives the chat-list preview and queues in the outbox — putting
+an envelope through it puts raw JSON in the **sender's own** thread and chat
+list, which is exactly the defect `AUDIT.md`'s 2026-07-29 entry records for media
+references. The cost is deliberate: no outbox retry, because a "would you do
+this?" arriving an hour after the conversation moved on is worse than one the
+sender was told to re-send.
+
 **No new `BridgeEvent` variant.** A rendered line is surfaced through the
-existing `IncomingDirectMessage`, reusing the incoming event's real id so the
-plain-chat dedup catches a redelivery. Adding a variant would have meant an
-exhaustive Kotlin `when`, two exhaustive Dart switches, and regenerating
-`frb_generated.rs` — see `CLAUDE.md`'s traps.
+existing `IncomingDirectMessage`, reusing the incoming event's real id so a
+same-transport redelivery is caught by the plain-chat dedup. That is not enough
+on its own — the same envelope over the *other* transport carries a different
+event id — so both dispatcher arms run `is_cross_transport_duplicate` on the
+envelope bytes first. Without it every offer that took both routes raised two
+bubbles. Adding a variant instead would have meant an exhaustive Kotlin `when`,
+two exhaustive Dart switches, and regenerating `frb_generated.rs` — see
+`CLAUDE.md`'s traps.
 
 ## 7. What is built, and what is not
 
@@ -269,12 +290,12 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
 
 | Layer | What it owns |
 |---|---|
-| `comrade_core::command` | The grammar, mentions, the catalogue of commands, `AppAction` and the offer wire. Pure; 43 tests. |
-| `comrade_core::karya` | Task shape, the state machine, the envelope, the rendered line. Pure; 18 tests. |
-| `comrade_core::catalogue` | `CatalogueResolver`, `choose_audio_plan`, the tier ladder, the licence gate, MusicBrainz. 15 tests, 19 under `catalogue-http`. |
+| `comrade_core::command` | The grammar, mentions, the catalogue of commands, `AppAction` and the offer wire. Pure; 44 tests. |
+| `comrade_core::karya` | Task shape, the state machine, the envelope, the rendered line. Pure; 21 tests. |
+| `comrade_core::catalogue` | `CatalogueResolver`, `choose_audio_plan`, the tier ladder, the licence gate, MusicBrainz. 15 tests, 21 under `catalogue-http`. |
 | `comrade_core::tara` | `mentions_third_party` and the reframing reply, in front of the engine. |
 | `comrade_storage` | The `karya` tree; ciphertext-at-rest and panic-wipe pinned. |
 | `comrade_ui::runtime` | `parse_chat_command`, `resolve_mentions`, `play_query`, `assign_task` / `tasks` / `set_task_state`, `offer_action`, `tara_aside`, and two arms in `dispatch_incoming_dm`. |
 | `comrade_jni` (uniffi), `desktop/src-tauri` | The same calls. **No `api.rs` change**, so no bridge regeneration. |
-| `desktop/ui/chat_commands.mjs` | What the composer does with a parsed command, the `/` picker, and the honest "not here yet" sentences. 26 `node --test` cases. |
+| `desktop/ui/chat_commands.mjs` | What the composer does with a parsed command, the `/` picker, and the honest "not here yet" sentences. 28 `node --test` cases. |
 | `android/…/ui/ChatCommands.kt` | The same decisions, mirroring the desktop vectors case for case. 22 JVM cases; Compose-free. **Never compiled here** — no Android SDK in the container that wrote it. |
