@@ -37,27 +37,34 @@ void main() {
         ProfileRowKind.key,
       ]);
 
-      expect(kinds(infoRows(const ProfileFields(npub: npub))), [ProfileRowKind.key]);
-      expect(kinds(infoRows(const ProfileFields(npub: ''))), [ProfileRowKind.key]);
+      expect(kinds(infoRows(const ProfileFields(npub: npub))),
+          [ProfileRowKind.key]);
+      expect(
+          kinds(infoRows(const ProfileFields(npub: ''))), [ProfileRowKind.key]);
     });
 
     test('the key row is last, because it is the least scannable line', () {
-      final rows = infoRows(const ProfileFields(npub: npub, name: 'bob', about: 'hi'));
+      final rows =
+          infoRows(const ProfileFields(npub: npub, name: 'bob', about: 'hi'));
       expect(rows.last.kind, ProfileRowKind.key);
     });
 
     test('a blank field produces no row rather than an empty one', () {
       // "We know they have no bio" and "we have not fetched a bio" are different
       // facts, and a blank row states the first when only the second is true.
-      final rows = infoRows(const ProfileFields(npub: npub, about: '   ', name: ''));
+      final rows =
+          infoRows(const ProfileFields(npub: npub, about: '   ', name: ''));
       expect(kinds(rows), [ProfileRowKind.key]);
     });
 
-    test('your own empty bio still gets a row, because that is how you fill it in', () {
+    test(
+        'your own empty bio still gets a row, because that is how you fill it in',
+        () {
       final mine = infoRows(const ProfileFields(npub: npub), isSelf: true);
       expect(kinds(mine), [ProfileRowKind.bio, ProfileRowKind.key]);
       expect(mine.first.value, '');
-      expect(kinds(infoRows(const ProfileFields(npub: npub))), [ProfileRowKind.key]);
+      expect(kinds(infoRows(const ProfileFields(npub: npub))),
+          [ProfileRowKind.key]);
     });
 
     test('a bio cannot smuggle control characters onto the page', () {
@@ -70,7 +77,8 @@ void main() {
       expect(rows.first.value, ('line ' * 40).trim());
     });
 
-    test('the key is never truncated, because a shortened key is not a key', () {
+    test('the key is never truncated, because a shortened key is not a key',
+        () {
       expect(infoRows(const ProfileFields(npub: npub)).last.value, npub);
     });
 
@@ -110,15 +118,25 @@ void main() {
   });
 
   group('shared-media buckets', () {
-    test('photos and videos share the grid, voice notes get their own list', () {
+    test('photos and videos share the grid, voice notes get their own list',
+        () {
       expect(mediaTabFor('image/png'), MediaTab.media);
       expect(mediaTabFor('video/mp4'), MediaTab.media);
       expect(mediaTabFor('audio/ogg'), MediaTab.voice);
       expect(mediaTabFor('application/pdf'), MediaTab.files);
     });
 
-    test('no mime type is ever dropped, because a dropped attachment is unreachable', () {
-      for (final mime in ['', 'garbage', '/', 'image', 'IMAGE/PNG', '  image/png  ']) {
+    test(
+        'no mime type is ever dropped, because a dropped attachment is unreachable',
+        () {
+      for (final mime in [
+        '',
+        'garbage',
+        '/',
+        'image',
+        'IMAGE/PNG',
+        '  image/png  '
+      ]) {
         expect(MediaTab.values, contains(mediaTabFor(mime)));
       }
       expect(mediaTabFor('IMAGE/PNG'), MediaTab.media);
@@ -136,13 +154,16 @@ void main() {
   });
 
   group('the collapsing header', () {
-    test('the avatar shrinks from expanded to collapsed across the fraction', () {
+    test('the avatar shrinks from expanded to collapsed across the fraction',
+        () {
       expect(collapsedAvatarSize(0, 96, 36), closeTo(96, 0.001));
       expect(collapsedAvatarSize(1, 96, 36), closeTo(36, 0.001));
       expect(collapsedAvatarSize(0.5, 96, 36), closeTo(66, 0.001));
     });
 
-    test('an overscroll fraction outside the range cannot invert or oversize it', () {
+    test(
+        'an overscroll fraction outside the range cannot invert or oversize it',
+        () {
       // All three platforms report a fraction slightly outside 0..1 at some
       // point during an overscroll.
       expect(collapsedAvatarSize(-0.5, 96, 36), closeTo(96, 0.001));
@@ -155,7 +176,8 @@ void main() {
       for (var i = 0; i <= 100; i++) {
         final size = collapsedAvatarSize(i / 100, 96, 36);
         expect(size, lessThanOrEqualTo(previous),
-            reason: 'size grew at fraction ${i / 100}, which reads as a stutter');
+            reason:
+                'size grew at fraction ${i / 100}, which reads as a stutter');
         previous = size;
       }
     });
@@ -167,8 +189,11 @@ void main() {
       // end — the same bar the accepted-conversation gate holds a signal to.
       final actions = actionRow();
       expect(actions, isNot(contains(ProfileAction.call)));
-      expect(actions,
-          [ProfileAction.message, ProfileAction.addContact, ProfileAction.block]);
+      expect(actions, [
+        ProfileAction.message,
+        ProfileAction.addContact,
+        ProfileAction.block
+      ]);
     });
 
     test('a contact gets a call, a mute and the comrade toggle', () {
@@ -194,7 +219,8 @@ void main() {
       // here would be the fake switch the settings screen's own rule forbids.
       // When an unblock command exists, this is the test that says so by failing.
       expect(actionRow(isBlocked: true), isEmpty);
-      expect(actionRow(isBlocked: true, isContact: true, isComrade: true), isEmpty);
+      expect(actionRow(isBlocked: true, isContact: true, isComrade: true),
+          isEmpty);
     });
 
     test('your own profile offers neither a message nor a block', () {
@@ -204,7 +230,8 @@ void main() {
       expect(mine, isNot(contains(ProfileAction.block)));
     });
 
-    test('self outranks every other flag, so no block leaks onto your own page', () {
+    test('self outranks every other flag, so no block leaks onto your own page',
+        () {
       expect(
         actionRow(
           isSelf: true,
@@ -219,7 +246,9 @@ void main() {
   });
 
   group('publishing your own picture', () {
-    test('an avatar has to be one of the three formats the core will fetch back', () {
+    test(
+        'an avatar has to be one of the three formats the core will fetch back',
+        () {
       expect(avatarRejection('image/png', 1024), isNull);
       expect(avatarRejection('image/jpeg', 1024), isNull);
       expect(avatarRejection('image/webp', 1024), isNull);
@@ -228,7 +257,8 @@ void main() {
       expect(avatarRejection('application/zip', 1024), AvatarRefusal.wrongType);
     });
 
-    test('SVG is refused, because it is a document that can fetch and script', () {
+    test('SVG is refused, because it is a document that can fetch and script',
+        () {
       expect(avatarMimeAllowlist, isNot(contains('image/svg+xml')));
     });
 
@@ -238,7 +268,8 @@ void main() {
     });
 
     test('an oversize image is refused and one exactly at the cap is not', () {
-      expect(avatarRejection('image/png', maxAvatarBytes + 1), AvatarRefusal.tooLarge);
+      expect(avatarRejection('image/png', maxAvatarBytes + 1),
+          AvatarRefusal.tooLarge);
       expect(avatarRejection('image/png', maxAvatarBytes), isNull);
     });
 
@@ -269,13 +300,15 @@ void main() {
 
     test("a blocked peer's picture is not fetched even if still a contact", () {
       expect(
-        mayFetchAvatar('https://x.example/a.png', isContact: true, isBlocked: true),
+        mayFetchAvatar('https://x.example/a.png',
+            isContact: true, isBlocked: true),
         isFalse,
       );
     });
 
     test('a contact with a picture is fetched, and so is your own', () {
-      expect(mayFetchAvatar('https://x.example/a.png', isContact: true), isTrue);
+      expect(
+          mayFetchAvatar('https://x.example/a.png', isContact: true), isTrue);
       expect(mayFetchAvatar('https://x.example/a.png', isSelf: true), isTrue);
     });
 
@@ -287,14 +320,17 @@ void main() {
   });
 
   group('the shared text sanitiser', () {
-    test('a stripped control becomes a space, so two words never silently merge', () {
+    test(
+        'a stripped control becomes a space, so two words never silently merge',
+        () {
       // The failure this pins: \n is itself a control, so deleting outright
       // turns a two-line name into one word nobody is called.
       expect(sanitizeDisplayText('Bob\nSmith', 0), 'Bob Smith');
       expect(sanitizeDisplayText('holiday${rlo}gnp.exe', 0), 'holiday gnp.exe');
     });
 
-    test('text longer than the bound is truncated with an ellipsis inside it', () {
+    test('text longer than the bound is truncated with an ellipsis inside it',
+        () {
       final out = sanitizeDisplayText('abcdefghij', 5);
       expect(out, 'abcd…');
       expect(out.length, 5);

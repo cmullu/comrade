@@ -176,7 +176,8 @@ MediaTab mediaTabFor(String mimeType) {
 /// state, a Flutter `FlexibleSpaceBar`, a scroll listener over a CSS custom
 /// property — so what is shared is the *curve*, which is the part a user would
 /// notice drifting between platforms.
-double collapsedAvatarSize(double fraction, double expandedPx, double collapsedPx) {
+double collapsedAvatarSize(
+    double fraction, double expandedPx, double collapsedPx) {
   // `num.clamp` is declared to return `num`, so make the double explicit rather
   // than leaning on the arithmetic to widen it back.
   final double f = fraction.isNaN ? 0.0 : fraction.clamp(0.0, 1.0).toDouble();
@@ -212,7 +213,8 @@ List<ProfileAction> actionRow({
   if (isContact) {
     actions.add(ProfileAction.call);
     actions.add(isMuted ? ProfileAction.unmute : ProfileAction.mute);
-    actions.add(isComrade ? ProfileAction.removeComrade : ProfileAction.addComrade);
+    actions.add(
+        isComrade ? ProfileAction.removeComrade : ProfileAction.addComrade);
   } else {
     actions.add(ProfileAction.addContact);
   }
