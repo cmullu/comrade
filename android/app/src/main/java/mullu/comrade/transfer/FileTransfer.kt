@@ -139,11 +139,9 @@ class FileTransfer(private val wiring: Wiring) {
      * into the cache first would mean a second 400 MB on disk, in plaintext, for
      * no gain.
      */
-    interface Source {
+    interface Source : java.io.Closeable {
         /** Exactly [length] bytes at [offset], or a throw. */
         fun read(offset: Long, length: Int): ByteArray
-
-        fun close()
     }
 
     /** A file this device can open by name. `together`'s case. */

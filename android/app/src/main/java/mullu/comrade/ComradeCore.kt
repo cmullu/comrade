@@ -1002,6 +1002,15 @@ object ComradeCore {
         uniffi.comrade.attachmentRouteForBytes(totalBytes.toULong())
 
     /**
+     * A fresh id scoping every signal of one handoff.
+     *
+     * Minted by the core rather than here because the id *is* the replay guard —
+     * 128 bits from the same CSPRNG on every frontend, so an id a third party
+     * could predict never becomes an injected `Accept`.
+     */
+    fun newAttachmentTransferId(): String = uniffi.comrade.newAttachmentTransferId()
+
+    /**
      * Whether a *transfer* connection may be given TURN at all. Under the
      * default policy it may not, so a relay candidate is never gathered and
      * the rule holds structurally rather than by later inspection. A *call*
