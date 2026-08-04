@@ -53,7 +53,7 @@ pub use error::StorageError;
 pub use repository::{
     AttentionDay, AttentionPrefs, CallRecord, Chitthi, ChitthiCache, Contact, ConversationMeta,
     FocusSession, JournalEntry, LedgerState, PeerPresence, ReadingState, StoredIdentity,
-    StoredMessage, TaraMessage, VaultCache,
+    StoredMessage, StoredTask, TaraMessage, VaultCache,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────

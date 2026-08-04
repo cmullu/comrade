@@ -339,6 +339,14 @@
     <string name="reader_title_label">Title (optional)</string>
 
     <!-- Attention: breathing (phase 2) -->
+    <!-- In-chat commands (grammar in `comrade_core::command`). The *offer* copy a
+         comrade receives is rendered in Rust (`AppAction::offer_line`), not here:
+         it is also the wire format, so translating it would stop two phones in
+         different languages reading each other's threads. These are the local
+         composer's own words. -->
+    <string name="aside_only_you">Only you will see this — it goes to Tara, not to them.</string>
+    <string name="aside_placeholder">Think out loud…</string>
+
     <string name="breathe_title">Take a deep breath</string>
     <string name="breathe_in">Breathe in</string>
     <string name="breathe_hold">Hold</string>

@@ -38,15 +38,24 @@ pub mod runtime;
 // bridge depends on `comrade_ui` alone, exactly as it does for every DTO.
 pub use comrade_core::share::transport::{RefusalReason, RelayPolicy};
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
-pub use comrade_core::together::{StateChange, SyncVerdict, TogetherContent};
+pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
+
+// The in-chat command grammar a bridge has to name: a composer calls
+// `parse_chat_command` on every keystroke and switches on the result, and the
+// `/`-autocomplete reads `chat_command_catalog`. Re-exported here for the same
+// reason the together wire types are — so a bridge depends on `comrade_ui` alone.
+pub use comrade_core::command::{AppAction, ChatCommand, CommandSpec, Mention, MusicService};
+pub use comrade_core::karya::TaskState;
+
 pub use runtime::{
     AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto, IceServerDto,
-    JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    MetricDto, PresenceDto, ProfileDto, ReadingDto, RuntimeHandles, SakhaStatusDto,
-    ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
-    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
+    JournalEntryDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto, MessageDto,
+    MessageRequestDto, MetricDto, PlayPlan, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto,
+    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraMessageDto, TaskDto, TogetherCommandDto,
+    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
+    TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

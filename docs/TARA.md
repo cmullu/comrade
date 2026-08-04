@@ -88,6 +88,47 @@ Sequence-numbered store ids (`{timestamp}-{seq}`) keep user/reply pairs in
 exact send order even within the same second — random id tails would let
 pairs interleave.
 
+## Reaching Tara from a conversation
+
+`@tara <text>` in a chat composer opens a **private aside** — the same thread,
+the same store, the same engine, and above all the same locality: it never sends,
+and the peer never sees it. `comrade_ui`'s `tara_aside` exists as a separate name
+from `tara_send` purely so a frontend reaching it from a chat composer cannot
+also reach `send_dm` with that text. The composer looks different from the moment
+`@tara ` is typed, before there is anything to parse, because a private thing
+that looks like a message is how somebody sends one by accident.
+
+**It is seeded with only what the user typed** — never the chat history, never the
+peer's messages. Otherwise "reflect on this conversation" quietly makes the other
+person a participant in something they never opted into.
+
+### The third-party gate
+
+`mentions_third_party` sits in front of the engine, exactly where
+`detect_distress` sits, and **must stay in front of any model** for the same
+reason (see OQ9 below). An aside naming another person does not get a
+characterisation of them; it gets the askable question back — *"what's coming up
+for you about @xyz?"*.
+
+Two reasons, and both are gate 1. Inferring what a named person thinks of
+themselves is a psychological assessment of somebody who has not consented, is
+not in the room, and cannot correct it. And the shipped engine is a cue-word
+template matcher: asked about a third party it would emit a fluent, confident
+sentence with no information in it, about a human being the reader knows — worse
+than refusing, and worse than being wrong about a fact, because the reader may act
+on it.
+
+The rule is deliberately blunt: **any** aside naming a person turns around. No cue
+list decides which questions about somebody count as assessments, because a fuzzy
+matcher guarding a hard boundary fails on exactly the cases that matter. That
+costs almost nothing, because the redirect is *also* the right reflective move —
+"I'm worried about @ana" is legitimate material here, and "what's coming up for
+you about ana?" is what a good listener says to it. The safety property and the
+product behaviour are the same sentence.
+
+`detect_distress` still runs **first**, and a test pins the ordering: somebody in
+crisis who names a friend needs the helplines, not a reflective question.
+
 ## Privacy posture
 
 - The thread exists only inside the encrypted store (Argon2id + AES-256-GCM);

@@ -60,6 +60,11 @@ const LEDGER_TREE: &str = "ledger";
 const JOURNAL_TREE: &str = "journal";
 /// The Tara reflective-companion conversation (strictly local, like the journal).
 const TARA_TREE: &str = "tara_companion";
+/// Tasks named in a conversation, keyed by task id. Unlike the journal and the
+/// Tara thread this one *has* a networked twin — the other party holds their own
+/// row for the same id — but the copy here is still the only one this device
+/// trusts, and it is sealed like everything else.
+const KARYA_TREE: &str = "karya";
 /// Per-peer conversation gate: request / accepted / blocked (message requests).
 const CONVERSATIONS_TREE: &str = "conversation_meta";
 /// Daily usage rollups for the attention mirror (strictly local, like the journal).
@@ -253,6 +258,33 @@ pub struct FocusSession {
     /// See `comrade_core::attention::FocusOutcome`.
     #[serde(default)]
     pub outcome: Option<String>,
+}
+
+/// One task named in a conversation — yours, or one a comrade asked of you.
+///
+/// `state` is a string rather than an enum for the same reason
+/// [`FocusSession::outcome`] is: this crate stays free of `comrade_core`, so the
+/// state machine lives there ([`comrade_core::karya::TaskState`]) and a row
+/// carrying a state this build does not recognise is skipped on read rather than
+/// failing the whole tree's deserialisation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTask {
+    /// Store key — 128 random bits, hex, minted by whoever named the task, so
+    /// both devices key the same row.
+    pub id: String,
+    /// What needs doing. Bounded and stripped before it gets here; see
+    /// `comrade_core::karya::bound_text`.
+    pub text: String,
+    pub assigner_npub: String,
+    /// `None` for a note to self, which never reaches a relay.
+    #[serde(default)]
+    pub assignee_npub: Option<String>,
+    pub created_at: u64,
+    /// `"open"`, `"done"`, `"declined"` or `"withdrawn"`. See
+    /// `comrade_core::karya::TaskState`.
+    pub state: String,
+    /// When the state last moved; equals `created_at` until it does.
+    pub updated_at: u64,
 }
 
 /// The one saved long-read for the distraction-free reader: user-supplied
@@ -698,6 +730,36 @@ impl EncryptedStore {
         Ok(sessions)
     }
 
+    // Tasks (karya) -----------------------------------------------------------
+
+    /// Persist one task, keyed by its id. Upserts, so applying a state change is
+    /// the same call as creating it.
+    pub fn save_task(&self, task: &StoredTask) -> Result<(), StorageError> {
+        self.put(KARYA_TREE, &task.id, task)
+    }
+
+    /// One task by id.
+    pub fn task(&self, id: &str) -> Result<Option<StoredTask>, StorageError> {
+        self.get(KARYA_TREE, id)
+    }
+
+    /// Every task, newest first — the order a list wants, and the same ordering
+    /// rule [`Self::focus_sessions`] uses so the two lists agree.
+    pub fn tasks(&self) -> Result<Vec<StoredTask>, StorageError> {
+        let mut tasks: Vec<StoredTask> = self.values(KARYA_TREE)?;
+        tasks.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(tasks)
+    }
+
+    /// Forget one task. `true` if there was one.
+    pub fn delete_task(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete(KARYA_TREE, id)
+    }
+
     /// Persist the current long-read (there is exactly one slot).
     pub fn save_reading_state(&self, state: &ReadingState) -> Result<(), StorageError> {
         self.put(READING_TREE, READING_KEY, state)
@@ -1027,6 +1089,117 @@ mod tests {
         assert_eq!(s.clear_tara_messages().unwrap(), 3);
         assert!(s.tara_messages().unwrap().is_empty());
         assert_eq!(s.clear_tara_messages().unwrap(), 0);
+    }
+
+    #[test]
+    fn tasks_round_trip_newest_first() {
+        let (_d, s) = store();
+        assert!(s.tasks().unwrap().is_empty());
+        assert!(s.task("nope").unwrap().is_none());
+
+        for (id, text, assignee, at) in [
+            ("aa", "water the plants", None, 10u64),
+            (
+                "bb",
+                "get some work done",
+                Some("npub1bina".to_string()),
+                30,
+            ),
+            ("cc", "ship the thing", Some("npub1bina".to_string()), 20),
+        ] {
+            s.save_task(&StoredTask {
+                id: id.into(),
+                text: text.into(),
+                assigner_npub: "npub1ana".into(),
+                assignee_npub: assignee,
+                created_at: at,
+                state: "open".into(),
+                updated_at: at,
+            })
+            .unwrap();
+        }
+        let all = s.tasks().unwrap();
+        assert_eq!(
+            all.iter().map(|t| t.created_at).collect::<Vec<_>>(),
+            [30, 20, 10],
+            "list order: newest first"
+        );
+        assert_eq!(s.task("aa").unwrap().unwrap().text, "water the plants");
+        assert!(
+            all[2].assignee_npub.is_none(),
+            "a note to self has no assignee"
+        );
+
+        // Saving the same id again is how a state change lands — an upsert, not
+        // a second row, or a list would grow a duplicate every time.
+        let mut done = s.task("bb").unwrap().unwrap();
+        done.state = "done".into();
+        done.updated_at = 99;
+        s.save_task(&done).unwrap();
+        assert_eq!(s.tasks().unwrap().len(), 3);
+        assert_eq!(s.task("bb").unwrap().unwrap().state, "done");
+
+        assert!(s.delete_task("bb").unwrap());
+        assert!(!s.delete_task("bb").unwrap());
+        assert_eq!(s.tasks().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn task_text_never_plaintext_at_rest() {
+        // A task can name anything — a person, a diagnosis, a deadline nobody
+        // else should learn. Same ciphertext-on-disk guarantee as the journal.
+        let dir = TempDir::new().unwrap();
+        let secret = "collect-the-biopsy-results-0123456789";
+        {
+            let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+            s.save_task(&StoredTask {
+                id: "aa".into(),
+                text: secret.into(),
+                assigner_npub: "npub1ana".into(),
+                assignee_npub: None,
+                created_at: 1,
+                state: "open".into(),
+                updated_at: 1,
+            })
+            .unwrap();
+            s.flush().unwrap();
+        }
+        let mut leaked = false;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if bytes.windows(secret.len()).any(|w| w == secret.as_bytes()) {
+                        leaked = true;
+                    }
+                }
+            }
+        }
+        assert!(!leaked, "tasks must never be written in plaintext");
+
+        let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+        assert_eq!(s.tasks().unwrap()[0].text, secret);
+    }
+
+    #[test]
+    fn panic_wipe_reaches_the_task_tree() {
+        // The wipe enumerates the database's actual tables, so this holds by
+        // construction — pin it anyway, for the same reason the attention trees
+        // are pinned: a wipe that left someone's task list behind would name the
+        // people and the obligations they were trying to erase.
+        let (_d, s) = store();
+        s.save_task(&StoredTask {
+            id: "aa".into(),
+            text: "something private".into(),
+            assigner_npub: "npub1ana".into(),
+            assignee_npub: Some("npub1bina".into()),
+            created_at: 1,
+            state: "open".into(),
+            updated_at: 1,
+        })
+        .unwrap();
+        s.panic_wipe().unwrap();
+        assert!(s.tasks().unwrap().is_empty());
     }
 
     #[test]

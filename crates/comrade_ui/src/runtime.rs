@@ -39,11 +39,19 @@ use comrade_core::call::{
     validate_turn_url, CallEnvelope, CallMediaKind, CallSignal, HangupReason, IceServer,
     IceStrategy,
 };
+use comrade_core::command::{
+    self, parse_offer_envelope, render_offer_line, AppAction, ChatCommand, CommandSpec, Mention,
+    MusicService, OfferEnvelope,
+};
 use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
 use comrade_core::dak::{open_dm, seal_dm, MeshDm};
 use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
 use comrade_core::dm::{parse_profile_share, parse_receipt, ProfileShare, Receipt, ReceiptKind};
+use comrade_core::karya::{
+    new_task_id, parse_karya_envelope, render_task_line, KaryaEnvelope, Party, Task, TaskSignal,
+    TaskState,
+};
 use comrade_core::media::{
     build_file_metadata_event, encrypt_media, fetch_and_decrypt_media, FileMetadata,
     MAX_MEDIA_BYTES,
@@ -416,6 +424,89 @@ pub struct TogetherShareDto {
     pub session_id: String,
     pub peer: String,
     pub signal: ShareSignal,
+}
+
+// ── In-chat commands (see `comrade_core::command`) ───────────────────────────
+
+/// One `@handle` from a composer, resolved against the saved contacts.
+///
+/// Three outcomes, and the middle one is the point: `npub` set is a match,
+/// `candidates` non-empty is **more than one contact answering to that handle**,
+/// and both empty means nobody does. A handle is a self-declared alias, not an
+/// identifier ([`ContactDto`]), so picking one of two silently is how a private
+/// message reaches the wrong person — the ambiguity is returned for the UI to
+/// ask about rather than resolved by guessing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct MentionMatchDto {
+    /// Lowercased handle, without the `@`.
+    pub handle: String,
+    /// Byte span in the text that was parsed, so a composer can draw a chip.
+    pub start: u32,
+    pub end: u32,
+    /// The single contact this names, when exactly one does.
+    pub npub: Option<String>,
+    /// Every contact answering to the handle when more than one does. Empty
+    /// otherwise.
+    pub candidates: Vec<ContactDto>,
+}
+
+/// One task, as a list wants it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TaskDto {
+    pub id: String,
+    pub text: String,
+    pub assigner: String,
+    /// `None` for a note to self, which never reached a relay.
+    pub assignee: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub state: TaskState,
+    /// Whether the local user named this task. With [`Self::assignee`] this is
+    /// everything a UI needs to know which buttons to offer — computed here so
+    /// three frontends do not each re-derive it from npub comparisons.
+    pub assigned_by_me: bool,
+    /// Whether the local user is the one being asked, and so may finish or
+    /// decline it. True for a note to self.
+    pub mine_to_do: bool,
+}
+
+/// What can actually be done with a `/play` query, decided once.
+///
+/// The decision rather than the prose: each frontend renders its own words from
+/// this, which is what lets desktop say "no player here yet"
+/// (`docs/TOGETHER.md` §9) while Android opens a session, without either
+/// sentence living in core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayPlan {
+    /// A session can open right now — [`PlayTargetDto::content`] is set.
+    OpenNow,
+    /// We know what recording is meant; look for it in this device's own
+    /// library ([`comrade_core::together::match_score`]), and fall back to
+    /// `comrade_core::share` if it is not there.
+    FindLocally,
+    /// The link names something we may not play ourselves — Spotify and Apple
+    /// Music serve DRM audio no third-party client may decode
+    /// ([`comrade_core::together::MusicLink::playable_in_place`]). All we can
+    /// honestly do is say where to open it.
+    NameOnly,
+    /// Nothing usable in the query.
+    Empty,
+}
+
+/// A `/play` query, resolved as far as it can be without a network or a library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct PlayTargetDto {
+    pub plan: PlayPlan,
+    /// Where to open it, when the command or the link said.
+    pub service: Option<MusicService>,
+    /// Set when the query was a service link we recognised.
+    pub link: Option<comrade_core::together::MusicLink>,
+    /// Set when a session can open immediately, i.e. [`PlayPlan::OpenNow`].
+    pub content: Option<TogetherContent>,
+    /// The recording the query names by words. `None` for a link, whose id
+    /// names the thing and whose title is the player's to report.
+    pub recording: Option<comrade_core::together::Recording>,
 }
 
 /// Whether a transfer may run over the path ICE actually chose.
@@ -3166,6 +3257,215 @@ impl ComradeRuntime {
             .collect()
     }
 
+    // ── In-chat commands (see `comrade_core::command`) ───────────────────────
+    //
+    // The grammar itself is pure and lives in core, so these are thin: parse,
+    // resolve `@handles` against the saved contacts, and act. The one rule worth
+    // restating here is that **nothing in this section guesses who somebody
+    // meant** — see [`Self::resolve_mentions`].
+
+    /// What the text in a composer means. Pure; no vault needed, so a composer
+    /// can call it on every keystroke before anything is unlocked.
+    pub fn parse_chat_command(&self, text: &str) -> ChatCommand {
+        command::parse(text)
+    }
+
+    /// Every command a composer should offer, for `/`-autocomplete and `/help`.
+    ///
+    /// One list for every frontend — the failure `/pay` demonstrates, having
+    /// shipped a live composer preview on desktop and never on Flutter.
+    pub fn chat_command_catalog(&self) -> Vec<CommandSpec> {
+        command::catalog()
+    }
+
+    /// Every `@handle` in `text`, unresolved. Pure — for drawing chips while
+    /// typing, before it is worth touching the store.
+    pub fn chat_mentions(&self, text: &str) -> Vec<Mention> {
+        command::mentions(text)
+    }
+
+    /// Every `@handle` in `text`, resolved against the saved contacts.
+    ///
+    /// Matching follows [`ContactDto`]'s display precedence — the user's own
+    /// alias first, then the peer's published handle — and **never the published
+    /// handle alone when an alias matched**, because a handle is self-declared
+    /// and non-unique while an alias is the local user's own word for somebody.
+    ///
+    /// Two contacts answering to one handle is a real state, not an edge case:
+    /// anyone may publish any name. It comes back as
+    /// [`MentionMatchDto::candidates`] for the UI to ask about. Resolving it by
+    /// picking the first is how `/task … @ana` reaches the wrong Ana.
+    pub fn resolve_mentions(&self, text: &str) -> Result<Vec<MentionMatchDto>, UiError> {
+        let contacts = self.list_contacts()?;
+        Ok(command::mentions(text)
+            .into_iter()
+            .map(|m| {
+                // Alias first. A contact the user named themself outranks a
+                // handle anybody could claim, so an exact alias match is taken
+                // as decisive even if some other contact publishes that name.
+                let by_alias: Vec<&ContactDto> = contacts
+                    .iter()
+                    .filter(|c| c.alias.to_lowercase() == m.handle)
+                    .collect();
+                let matched = if by_alias.is_empty() {
+                    contacts
+                        .iter()
+                        .filter(|c| {
+                            c.name.as_deref().is_some_and(|n| {
+                                n.trim_start_matches('@').to_lowercase() == m.handle
+                            })
+                        })
+                        .collect()
+                } else {
+                    by_alias
+                };
+                let (npub, candidates) = match matched.len() {
+                    1 => (Some(matched[0].npub.clone()), Vec::new()),
+                    0 => (None, Vec::new()),
+                    _ => (None, matched.into_iter().cloned().collect()),
+                };
+                MentionMatchDto {
+                    handle: m.handle,
+                    start: m.start,
+                    end: m.end,
+                    npub,
+                    candidates,
+                }
+            })
+            .collect())
+    }
+
+    /// How far a `/play` query gets without a network or a library.
+    ///
+    /// Pure. A link resolves to what it identifies
+    /// ([`comrade_core::together::parse_music_link`]); free text resolves to the
+    /// [`Recording`] it names ([`comrade_core::command::recording_from_query`]),
+    /// which is what a library resolver then searches for. **Nothing here
+    /// contacts a service** — turning a query into a catalogue id is
+    /// `comrade_core::catalogue`'s job, behind a feature and a disclosure.
+    ///
+    /// [`Recording`]: comrade_core::together::Recording
+    pub fn play_query(&self, query: &str, service: Option<MusicService>) -> PlayTargetDto {
+        use comrade_core::together::{parse_music_link, MusicLink};
+
+        let q = query.trim();
+        if q.is_empty() {
+            return PlayTargetDto {
+                plan: PlayPlan::Empty,
+                service,
+                link: None,
+                content: None,
+                recording: None,
+            };
+        }
+        if let Some(link) = parse_music_link(q) {
+            // Only YouTube can be driven by us, and only through its embed.
+            let content = match &link {
+                MusicLink::Youtube { video_id } => Some(TogetherContent::Youtube {
+                    video_id: video_id.clone(),
+                }),
+                _ => None,
+            };
+            let plan = if content.is_some() {
+                PlayPlan::OpenNow
+            } else {
+                PlayPlan::NameOnly
+            };
+            // A link's own service wins over the alias that was typed: a
+            // Spotify URL pasted after `/youtube` is still a Spotify URL.
+            let service = Some(match &link {
+                MusicLink::Spotify { .. } => MusicService::Spotify,
+                MusicLink::AppleMusic { .. } => MusicService::AppleMusic,
+                MusicLink::Youtube { .. } => MusicService::Youtube,
+            });
+            return PlayTargetDto {
+                plan,
+                service,
+                link: Some(link),
+                content,
+                recording: None,
+            };
+        }
+        PlayTargetDto {
+            plan: PlayPlan::FindLocally,
+            service,
+            link: None,
+            content: None,
+            recording: Some(command::recording_from_query(q)),
+        }
+    }
+
+    // ── Tasks (see `comrade_core::karya`) ────────────────────────────────────
+
+    /// Name a piece of work. `peer` of `None` is a note to self, which never
+    /// touches a relay.
+    ///
+    /// Delegates to [`RuntimeHandles::assign_task`] — see [`Self::send_dm`] for
+    /// why the network half never runs under the runtime lock.
+    pub async fn assign_task(&self, peer: Option<String>, text: &str) -> Result<TaskDto, UiError> {
+        self.handles().assign_task(peer, text).await
+    }
+
+    /// Every task this device knows about, newest first.
+    pub fn tasks(&self) -> Result<Vec<TaskDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let me = self.my_npub()?;
+        Ok(store
+            .tasks()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .filter_map(|row| task_dto(row, &me))
+            .collect())
+    }
+
+    /// Move a task to `state`, and tell the other party if there is one.
+    ///
+    /// Delegates to [`RuntimeHandles::set_task_state`].
+    pub async fn set_task_state(&self, id: &str, state: TaskState) -> Result<TaskDto, UiError> {
+        self.handles().set_task_state(id, state).await
+    }
+
+    /// Offer an in-app action to `peers` — "I thought this might help".
+    ///
+    /// Returns how many were actually told, which will be fewer than asked for
+    /// when the shared nudge cooldown is still running. **The count is the point
+    /// of the return value**: a deliberate command that silently did nothing
+    /// would read as a bug, so the caller can say "already told them recently"
+    /// instead.
+    ///
+    /// Delegates to [`RuntimeHandles::offer_action`].
+    pub async fn offer_action(
+        &self,
+        action: AppAction,
+        peers: Vec<String>,
+    ) -> Result<u64, UiError> {
+        self.handles().offer_action(action, peers).await
+    }
+
+    /// Say something to Tara from inside a conversation — a **private aside**.
+    ///
+    /// Identical to [`Self::tara_send`] and deliberately so: it is the same
+    /// thread, the same store, the same engine, and above all the same
+    /// locality. The separate name exists because the *call site* is different
+    /// and that difference is the whole feature — a frontend reaching this from
+    /// a chat composer must never be able to reach `send_dm` with the same text.
+    ///
+    /// What is **not** passed: the conversation. Not the peer's messages, not
+    /// the history, not who the chat is with. Seeding a companion with the other
+    /// person's words would make them a participant in something they never
+    /// opted into, and the peer is not a party to this at all.
+    pub fn tara_aside(&self, text: &str) -> Result<TaraMessageDto, UiError> {
+        self.tara_send(text)
+    }
+
+    /// This device's own npub, for deciding which side of a task we are on.
+    fn my_npub(&self) -> Result<String, UiError> {
+        self.ui
+            .current_identity()
+            .map(|i| i.npub)
+            .ok_or(UiError::NoIdentity)
+    }
+
     // ── Attention (wellbeing pillar #5 — strictly local, never networked) ─────
     //
     // The same locality guarantee as the journal and Tara: no relay, no
@@ -4591,6 +4891,166 @@ impl RuntimeHandles {
         deliver_nudges(&vault, recipients).await
     }
 
+    // ── Tasks and offers (see `comrade_core::karya`, `comrade_core::command`) ─
+
+    /// Name a piece of work. `peer` of `None` is a note to self.
+    ///
+    /// A note to self never reaches a relay — it is stored and returned, and
+    /// that is the whole operation. An assignment stores the row *first* and
+    /// then sends, so a relay that refuses does not lose the task the user
+    /// typed; the assigner has a record of having asked either way, and the
+    /// outbox is not used because a task nobody received is better re-asked than
+    /// delivered silently an hour later.
+    pub async fn assign_task(&self, peer: Option<String>, text: &str) -> Result<TaskDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+        let task = Task::new(
+            new_task_id(),
+            text,
+            me.clone(),
+            peer.as_deref().map(to_npub),
+            now_secs(),
+        );
+        if task.text.is_empty() {
+            return Err(UiError::Engine("a task needs to say what to do".into()));
+        }
+        store
+            .save_task(&stored_task(&task))
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        if let Some(target) = peer {
+            let envelope = KaryaEnvelope::new(TaskSignal::Assign {
+                id: task.id.clone(),
+                text: task.text.clone(),
+            });
+            let json = envelope
+                .to_json()
+                .map_err(|e| UiError::Engine(e.to_string()))?;
+            // One message, not two. Sent as a DM like every other control
+            // envelope, so it inherits gift wrapping, the mesh fallback and the
+            // outbox for free — and the receiver renders its own chat bubble
+            // from the envelope (`apply_karya_signal`) rather than us sending a
+            // second, human-readable copy. Two events per assignment would
+            // double the relay traffic and let the bubble disagree with the row.
+            self.send_dm(&target, &json).await?;
+        }
+        task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
+    }
+
+    /// Move a task to `state` on this device's say-so, and tell the other party.
+    ///
+    /// The permission check is [`Task::apply`]'s, which is where the table
+    /// lives; a refusal comes back as one error rather than three, because a
+    /// caller learning *which* rule stopped them learns about a task that may
+    /// not be theirs.
+    pub async fn set_task_state(&self, id: &str, state: TaskState) -> Result<TaskDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+        let row = store
+            .task(id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .ok_or_else(|| UiError::Engine("no such task".into()))?;
+        let mut task =
+            task_from_stored(&row).ok_or_else(|| UiError::Engine("bad task row".into()))?;
+        if !task.apply(state, &me, now_secs()) {
+            return Err(UiError::Engine("that is not yours to change".into()));
+        }
+        store
+            .save_task(&stored_task(&task))
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        // Whoever is on the other side needs to hear it. On a note to self there
+        // is nobody, and no relay is touched.
+        let other = if task.assigner_npub == me {
+            task.assignee_npub.clone()
+        } else {
+            Some(task.assigner_npub.clone())
+        };
+        if let Some(target) = other.filter(|t| *t != me) {
+            let json = KaryaEnvelope::new(TaskSignal::State {
+                id: task.id.clone(),
+                state,
+            })
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+            if let Err(e) = self.send_dm(&target, &json).await {
+                // The local row already moved, and it is the copy this device
+                // trusts. A peer who never hears will see it next time they act
+                // on the task and are told it is already finished.
+                tracing::debug!("task state not sent: {e}");
+            }
+        }
+        task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
+    }
+
+    /// Offer an in-app action to `peers`, returning how many were told.
+    ///
+    /// Three gates, and each one is a lesson this repo already paid for:
+    ///
+    /// 1. **Comrades only.** Marking someone a comrade is the existing
+    ///    "this person may reach me" grant ([`ComradeRuntime::set_comrade`]);
+    ///    an offer is a notification, so it lives inside that grant rather
+    ///    than beside it.
+    /// 2. **The shared nudge cooldown.** `comrade_core::nudge::nudged_recently`
+    ///    is a floor on *notifications*, not on any one reason for them — the
+    ///    reasoning `AUDIT.md` records for the breathing screen's own trigger.
+    ///    Someone told twenty minutes ago that a comrade might need them learns
+    ///    nothing from being told to breathe now, and being able to send this
+    ///    repeatedly would make it a way to needle somebody.
+    /// 3. **The envelope, then a readable line**, exactly as a task does.
+    ///
+    /// Never partially fails: an unreachable peer is simply not counted.
+    pub async fn offer_action(
+        &self,
+        action: AppAction,
+        peers: Vec<String>,
+    ) -> Result<u64, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        // Everything that reads the store, and the cooldown claim, happen before
+        // the first await — the discipline every send path here follows.
+        let comrades: std::collections::HashSet<String> = store
+            .list_comrades()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|c| c.npub)
+            .collect();
+        let wanted: Vec<String> = peers
+            .iter()
+            .map(|p| to_npub(p))
+            .filter(|npub| comrades.contains(npub))
+            .collect();
+        if wanted.is_empty() {
+            return Ok(0);
+        }
+        let due = self.nudge_watch.due_among(&wanted, now);
+        if due.is_empty() {
+            return Ok(0);
+        }
+
+        let json = OfferEnvelope::new(action)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        let mut sent = 0u64;
+        for target in due {
+            match self.send_dm(&target, &json).await {
+                Ok(_) => sent += 1,
+                Err(e) => tracing::debug!(%target, "offer not sent: {e}"),
+            }
+        }
+        Ok(sent)
+    }
+
     pub async fn broadcast_chitthi(
         &self,
         content: &str,
@@ -5681,6 +6141,178 @@ async fn deliver_nudges(vault: &Arc<VaultEngine>, recipients: Vec<PublicKey>) ->
     sent
 }
 
+/// Apply an incoming task signal to the local store, returning the chat line to
+/// show for it — or `None` when nothing should be shown.
+///
+/// `None` covers every case where the signal changed nothing: a redelivered
+/// assignment (relays deliver at-least-once and the inbox backfills two days on
+/// every launch, so this *will* happen), a state change for a task we have never
+/// heard of, and a state change the sender has no standing to make. That last
+/// one is the forgery check, and it is [`Task::apply`]'s table doing the work:
+/// `peer_npub` is the authenticated sender of a gift-wrapped DM, so a peer who
+/// is not party to the task, or is the wrong party for that transition, moves
+/// nothing.
+fn apply_karya_signal(
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    peer_npub: &str,
+    me: &str,
+    created_at: u64,
+    signal: &TaskSignal,
+) -> Option<String> {
+    let store = store?;
+    match signal {
+        TaskSignal::Assign { id, text } => {
+            // Already have it: a redelivery, not a new ask.
+            if store.task(id).ok().flatten().is_some() {
+                return None;
+            }
+            // The sender is the assigner and we are the assignee — the only
+            // shape an incoming assignment can have. A peer cannot assign a
+            // task to somebody else through us.
+            let task = Task::new(
+                id.clone(),
+                text,
+                peer_npub.to_string(),
+                Some(me.to_string()),
+                created_at,
+            );
+            if task.text.is_empty() {
+                return None;
+            }
+            let line = render_task_line(TaskState::Open, &task.text);
+            if let Err(e) = store
+                .save_task(&stored_task(&task))
+                .and_then(|()| store.flush())
+            {
+                warn!("failed to persist incoming task: {e}");
+                return None;
+            }
+            Some(line)
+        }
+        TaskSignal::State { id, state } => {
+            let row = store.task(id).ok().flatten()?;
+            let mut task = task_from_stored(&row)?;
+            if !task.apply(*state, peer_npub, created_at) {
+                tracing::debug!(
+                    peer = %peer_npub,
+                    task = %id,
+                    "task state change refused — not theirs to make"
+                );
+                return None;
+            }
+            let line = render_task_line(*state, &task.text);
+            if let Err(e) = store
+                .save_task(&stored_task(&task))
+                .and_then(|()| store.flush())
+            {
+                warn!("failed to persist task state: {e}");
+                return None;
+            }
+            Some(line)
+        }
+    }
+}
+
+/// Persist and surface a chat line this device generated from a control
+/// envelope, so a task or an offer reads as the message it is.
+///
+/// Deliberately reuses the incoming event's real id, so the plain-chat dedup
+/// (`get_message`) catches a redelivered envelope and no second bubble appears.
+/// Sends a delivered receipt for the same reason the plain-chat path does: the
+/// message *did* arrive.
+#[allow(clippy::too_many_arguments)]
+fn deliver_synthetic_line(
+    vault: &Arc<VaultEngine>,
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    tx: &broadcast::Sender<BridgeEvent>,
+    route: &DmRoute<'_>,
+    msg: &VaultMessage,
+    peer_npub: &str,
+    line: String,
+) {
+    if let Some(store) = store {
+        if store.get_message(&msg.event_id).ok().flatten().is_some() {
+            return;
+        }
+        let row = comrade_storage::StoredMessage {
+            id: msg.event_id.clone(),
+            peer_npub: peer_npub.to_string(),
+            content: line.clone(),
+            created_at: msg.created_at,
+            outgoing: false,
+            status: None,
+            reply_to: None,
+        };
+        if let Err(e) = store.save_message(&row).and_then(|()| store.flush()) {
+            warn!("failed to persist a rendered control line: {e}");
+        }
+    }
+    send_delivered_receipt(vault, route.mesh, &msg.sender_pubkey, &msg.event_id);
+    let _ = tx.send(BridgeEvent::IncomingDirectMessage(DirectMessageDto {
+        id: msg.event_id.clone(),
+        sender: peer_npub.to_string(),
+        content: line,
+        created_at: msg.created_at,
+        upi_intents: Vec::new(),
+        reply_to: None,
+    }));
+}
+
+// ── Task conversions ─────────────────────────────────────────────────────────
+//
+// Three shapes for one thing, and each earns its place: `karya::Task` holds the
+// state machine, `StoredTask` is what `comrade_storage` can persist without
+// depending on `comrade_core`, and `TaskDto` is what a list renders. The two
+// conversions live here, once, rather than at each call site.
+
+/// A `karya::Task` as the store holds it.
+fn stored_task(task: &Task) -> comrade_storage::StoredTask {
+    comrade_storage::StoredTask {
+        id: task.id.clone(),
+        text: task.text.clone(),
+        assigner_npub: task.assigner_npub.clone(),
+        assignee_npub: task.assignee_npub.clone(),
+        created_at: task.created_at,
+        state: task.state.as_str().to_string(),
+        updated_at: task.updated_at,
+    }
+}
+
+/// A stored row back as a `karya::Task`, or `None` if its state is one this
+/// build does not know — a row from a newer version is skipped rather than
+/// coerced into `Open`, which would resurrect somebody's finished task.
+fn task_from_stored(row: &comrade_storage::StoredTask) -> Option<Task> {
+    Some(Task {
+        id: row.id.clone(),
+        text: row.text.clone(),
+        assigner_npub: row.assigner_npub.clone(),
+        assignee_npub: row.assignee_npub.clone(),
+        created_at: row.created_at,
+        state: TaskState::from_str_opt(&row.state)?,
+        updated_at: row.updated_at,
+    })
+}
+
+/// A stored row as a list wants it, from the point of view of `me`.
+fn task_dto(row: comrade_storage::StoredTask, me: &str) -> Option<TaskDto> {
+    let task = task_from_stored(&row)?;
+    let assigned_by_me = task.assigner_npub == me;
+    Some(TaskDto {
+        // `Party::Assignee` is what carries the power to finish or decline, and
+        // on a note to self it is the same person as the assigner — so this is
+        // the one honest source for "may I tick this off".
+        mine_to_do: matches!(task.party(me), Some(Party::Assignee)),
+        assigned_by_me,
+        id: task.id,
+        text: task.text,
+        assigner: task.assigner_npub,
+        assignee: task.assignee_npub,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        state: task.state,
+    })
+}
+
 /// Whether `peer`'s last beacon still claims them online at `now`. The one
 /// read path for stored presence, so an expired claim can never render as a
 /// green dot just because no sweep has run yet.
@@ -6551,7 +7183,46 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 7) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 7) A task: named, or moved to a new state. Gated exactly like a call
+    //    signal — a stranger who can write to your task list has been handed a
+    //    harassment channel, and in an app about wellbeing that is worse than
+    //    the feature is good. Returns either way, so an ungated one is dropped
+    //    rather than surfacing as a message request full of JSON.
+    if let Some(env) = parse_karya_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            let me = vault.our_npub();
+            if let Some(line) =
+                apply_karya_signal(store, &peer_npub, &me, msg.created_at, &env.signal)
+            {
+                deliver_synthetic_line(vault, store, tx, route, &msg, &peer_npub, line);
+            }
+        }
+        return;
+    }
+
+    // 8) An offer — "I thought this might help". Gated like a task, and the
+    //    action must be one this build actually has a screen for: a bubble
+    //    naming a destination that does not exist here would be a button that
+    //    goes nowhere.
+    if let Some(env) = parse_offer_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            match env.app_action() {
+                Some(action) => deliver_synthetic_line(
+                    vault,
+                    store,
+                    tx,
+                    route,
+                    &msg,
+                    &peer_npub,
+                    render_offer_line(action),
+                ),
+                None => tracing::debug!(action = %env.action, "offer names an unknown action"),
+            }
+        }
+        return;
+    }
+
+    // 9) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         // Everything in the envelope is chosen by the peer. The MIME type
@@ -6619,7 +7290,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 8) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 10) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
     // A message can reach us twice by two routes — sealed over the local mesh
@@ -11353,5 +12024,249 @@ mod tests {
             rt.broadcast_anonymous_chitthi("   ", None).await,
             Err(UiError::Engine(_))
         ));
+    }
+
+    // ── In-chat commands, tasks and offers ───────────────────────────────────
+
+    #[tokio::test]
+    async fn parsing_and_the_catalogue_need_no_vault() {
+        // A composer calls these on every keystroke, including before unlock.
+        let rt = ComradeRuntime::new();
+        assert!(matches!(
+            rt.parse_chat_command("/task ship it"),
+            ChatCommand::Task { .. }
+        ));
+        assert!(matches!(
+            rt.parse_chat_command("20/80 split"),
+            ChatCommand::Plain
+        ));
+        assert!(!rt.chat_command_catalog().is_empty());
+        assert_eq!(rt.chat_mentions("hi @ana").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_handle_resolves_to_the_contact_the_user_named() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+
+        let found = rt.resolve_mentions("/task ship it @ana").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].npub.as_deref(), Some(ana.as_str()));
+        assert!(found[0].candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_handle_resolves_to_nobody_rather_than_a_guess() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+
+        let found = rt.resolve_mentions("@bina").unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].npub.is_none());
+        assert!(found[0].candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_contacts_answering_to_one_handle_come_back_as_a_question() {
+        // Two people can publish the same name. Picking one is how a private
+        // message reaches the wrong person, so the ambiguity is returned.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_h1, one) = stranger();
+        let (_h2, two) = stranger();
+        rt.add_contact(&one, "ana").unwrap();
+        rt.add_contact(&two, "ana").unwrap();
+
+        let found = rt.resolve_mentions("@ana").unwrap();
+        assert!(found[0].npub.is_none(), "must not pick one of two");
+        assert_eq!(found[0].candidates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_note_to_self_never_needs_a_relay() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let task = rt.assign_task(None, "water the plants").await.unwrap();
+        assert_eq!(task.text, "water the plants");
+        assert_eq!(task.state, TaskState::Open);
+        assert!(task.assignee.is_none());
+        assert!(task.assigned_by_me);
+        assert!(task.mine_to_do, "the one person holding it may tick it off");
+
+        assert_eq!(rt.tasks().unwrap().len(), 1);
+        let done = rt.set_task_state(&task.id, TaskState::Done).await.unwrap();
+        assert_eq!(done.state, TaskState::Done);
+        assert_eq!(rt.tasks().unwrap()[0].state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn an_empty_task_is_refused_rather_than_stored() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(matches!(
+            rt.assign_task(None, "   ").await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(rt.tasks().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_finished_task_cannot_be_reopened_through_the_runtime() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let task = rt.assign_task(None, "ship it").await.unwrap();
+        rt.set_task_state(&task.id, TaskState::Done).await.unwrap();
+        assert!(matches!(
+            rt.set_task_state(&task.id, TaskState::Open).await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(matches!(
+            rt.set_task_state("no-such-task", TaskState::Done).await,
+            Err(UiError::Engine(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn tasks_and_offers_need_an_unlocked_vault() {
+        let rt = ComradeRuntime::new();
+        assert!(matches!(rt.tasks(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.assign_task(None, "x").await,
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.offer_action(AppAction::Breathe, vec!["npub1x".into()])
+                .await,
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.tara_aside("hello"), Err(UiError::VaultLocked)));
+    }
+
+    #[tokio::test]
+    async fn an_offer_to_someone_who_is_not_a_comrade_is_not_sent() {
+        // Marking someone a comrade is the existing "may reach me" grant; an
+        // offer is a notification, so it lives inside that grant.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+
+        assert_eq!(
+            rt.offer_action(AppAction::Breathe, vec![ana.clone()])
+                .await
+                .unwrap(),
+            0,
+            "a contact is not yet a comrade"
+        );
+        assert_eq!(
+            rt.offer_action(AppAction::Breathe, vec![]).await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_offer_inside_the_cooldown_tells_nobody_twice() {
+        // The cooldown is a floor on notifications, shared with the nudge —
+        // being able to send this repeatedly would make it a way to needle
+        // somebody. There is no relay in this test, so nothing actually
+        // delivers; what is pinned is that the second call claims nobody.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+        rt.set_comrade(&ana, true).unwrap();
+
+        // First call claims the cooldown for ana (the send itself fails with no
+        // relay, which is why the count is 0 rather than 1).
+        let _ = rt.offer_action(AppAction::Breathe, vec![ana.clone()]).await;
+        assert_eq!(
+            rt.offer_action(AppAction::Breathe, vec![ana.clone()])
+                .await
+                .unwrap(),
+            0,
+            "the cooldown must swallow the second attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_aside_stays_on_this_device_and_reaches_the_tara_thread() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let reply = rt.tara_aside("i keep putting this off").unwrap();
+        assert!(reply.from_tara);
+        // Same thread as the Tara tab — one companion, one history.
+        let thread = rt.tara_thread().unwrap();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].text, "i keep putting this off");
+        // And nothing was queued for anybody.
+        assert_eq!(rt.outbox_pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_aside_about_a_named_person_is_turned_around() {
+        // The request's own example, end to end through the runtime.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let reply = rt
+            .tara_aside("what does she @xyz thinking of herself")
+            .unwrap();
+        assert!(reply.text.contains("what's coming up for you about @xyz"));
+        assert!(!reply.crisis);
+    }
+
+    #[tokio::test]
+    async fn a_play_query_resolves_links_and_words_without_touching_a_network() {
+        let rt = ComradeRuntime::new();
+
+        // A YouTube link is the one thing we can drive ourselves.
+        let yt = rt.play_query("https://youtu.be/dQw4w9WgXcQ", None);
+        assert_eq!(yt.plan, PlayPlan::OpenNow);
+        assert!(matches!(yt.content, Some(TogetherContent::Youtube { .. })));
+        assert_eq!(yt.service, Some(MusicService::Youtube));
+
+        // Spotify serves DRM audio no third party may decode, so the honest
+        // answer is "here is what to open".
+        let sp = rt.play_query(
+            "https://open.spotify.com/track/1234567890abcdefghijkl",
+            None,
+        );
+        assert_eq!(sp.plan, PlayPlan::NameOnly);
+        assert!(sp.content.is_none());
+        assert_eq!(sp.service, Some(MusicService::Spotify));
+
+        // Free text names a recording to look for locally.
+        let words = rt.play_query("Kun Faya Kun", Some(MusicService::Spotify));
+        assert_eq!(words.plan, PlayPlan::FindLocally);
+        assert_eq!(words.recording.unwrap().title, "Kun Faya Kun");
+
+        assert_eq!(rt.play_query("  ", None).plan, PlayPlan::Empty);
+    }
+
+    #[tokio::test]
+    async fn a_links_own_service_outranks_the_alias_that_was_typed() {
+        // `/youtube <spotify url>` is still a Spotify URL.
+        let rt = ComradeRuntime::new();
+        let t = rt.play_query(
+            "https://open.spotify.com/track/1234567890abcdefghijkl",
+            Some(MusicService::Youtube),
+        );
+        assert_eq!(t.service, Some(MusicService::Spotify));
     }
 }

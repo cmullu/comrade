@@ -6,6 +6,9 @@
  *   sabha   — NIP-10 ChitthiThread parser + public relay engine (Chitthi Feed)
  *   vault   — NIP-04 E2E DM engine + UPI /pay regex processor
  *   dm      — DM control envelopes (profile-share on accept, read/delivered receipts)
+ *   command — in-chat command grammar + @mentions (one parser for every frontend)
+ *   catalogue — name a recording, then decide where its audio may come from
+ *   karya   — tasks: name a piece of work, yours or a comrade's
  *   call    — voice/video call signaling (WebRTC over the Vault DM channel)
  *   presence— comrade presence beacons (online/offline, to chosen peers only)
  *   nudge   — "they nearly wrote to you": one signal for an abandoned draft
@@ -40,12 +43,15 @@ uniffi::setup_scaffolding!("comrade_core");
 pub mod anon;
 pub mod attention;
 pub mod call;
+pub mod catalogue;
+pub mod command;
 pub mod crypto;
 pub mod dak;
 pub mod dm;
 pub mod error;
 pub mod gcs;
 pub mod geo;
+pub mod karya;
 pub mod media;
 pub mod metrics;
 pub mod nudge;
