@@ -655,11 +655,20 @@ String _str(Map<String, dynamic> json, String key) {
 
 /// Translate one pushed event, or `null` when it cannot be represented.
 ///
-/// The only `null` case is a delivery status this build does not know. A
-/// newer core adding a fourth receipt state must not crash an older UI, and
-/// there is nothing useful to show for a status whose rank is unknown — so it
-/// is dropped, which is what "newest-wins ranking" already does to anything
-/// that does not outrank what is on screen.
+/// Two `null` cases, and they are different in kind.
+///
+/// A delivery status this build does not know: a newer core adding a fourth
+/// receipt state must not crash an older UI, and there is nothing useful to
+/// show for a status whose rank is unknown — so it is dropped, which is what
+/// "newest-wins ranking" already does to anything that does not outrank what is
+/// on screen.
+///
+/// And the watch-together events, which this app has no surface for. Dropped
+/// deliberately rather than half-handled, exactly as `RelayConnectionService`
+/// does on Android: a notification about a session nobody can see or leave
+/// would be worse than silence. They are listed one by one rather than caught
+/// by a wildcard, so that adding a together screen here is a compile error
+/// pointing at this spot instead of a silent no-op. See `docs/TOGETHER.md` §9.
 @visibleForTesting
 BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
       rust.BridgeEvent_IncomingChitthi(:final rust.ChitthiDto field0) =>
@@ -719,6 +728,12 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
         MeshStatusChanged(_meshStatus(field0)),
       rust.BridgeEvent_LedgerUpdated(:final String ledger) =>
         LedgerUpdated(ledger),
+      // Watch/listen together — no Flutter surface yet; see the doc comment.
+      rust.BridgeEvent_TogetherInvited() => null,
+      rust.BridgeEvent_TogetherJoined() => null,
+      rust.BridgeEvent_TogetherCommand() => null,
+      rust.BridgeEvent_TogetherCorrection() => null,
+      rust.BridgeEvent_TogetherEnded() => null,
     };
 
 /// Flatten the typed `CallSignal` union back into the flat shape the call UI
