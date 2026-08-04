@@ -1,6 +1,7 @@
 package mullu.comrade.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -105,55 +106,86 @@ class BreathingScreenTest {
     }
 
     @Test
-    fun theFirstLineIsAlreadySettledOnArrival() {
-        // Not mid-change, and not blank: second zero is a line someone can read.
-        assertEquals(0, breathingLineIndex(0, 11))
+    fun theInhaleLineIsShowingOnArrival() {
+        // Second zero is the start of a breath, so it is the "draw on this" half
+        // of the first pair — not mid-change and not the exhale line.
+        assertTrue(showsInhaleLine(breathingPhase(0)))
+        assertEquals(0, breathingPairIndex(0, 8))
     }
 
     @Test
-    fun aLineOutlastsSeveralBreathsRatherThanOne() {
-        // Swapping every phase — or even every cycle — would be one more thing
-        // to keep up with, on the one screen in the app with nothing to keep up
-        // with. Two full cycles is 28 seconds.
-        assertEquals(28, LINE_SECONDS)
-        for (second in 0 until LINE_SECONDS) {
-            assertEquals("second $second", 0, breathingLineIndex(second, 11))
+    fun theLineTurnsOverExactlyTwiceEachBreath() {
+        // The ask: one line going in, another coming out. Two changes per cycle
+        // — no more (a line per phase would swap during a pause, when nothing is
+        // being asked of the reader) and no fewer (one per cycle is what this
+        // replaced).
+        val shown = (0 until CYCLE_SECONDS).map { second ->
+            breathingPairIndex(second, 8) to showsInhaleLine(breathingPhase(second))
         }
-        assertEquals(1, breathingLineIndex(LINE_SECONDS, 11))
-        assertEquals(1, breathingLineIndex(LINE_SECONDS * 2 - 1, 11))
-        assertEquals(2, breathingLineIndex(LINE_SECONDS * 2, 11))
+        // One change inside the cycle: the inhale half handing over to the exhale
+        // half, as the out-breath starts.
+        assertEquals(1, shown.zipWithNext().count { (a, b) -> a != b })
+        // The second change is the wrap the zip above cannot see — into the next
+        // pair's inhale half, on the next breath.
+        assertEquals(1, breathingPairIndex(CYCLE_SECONDS, 8))
+        assertTrue(showsInhaleLine(breathingPhase(CYCLE_SECONDS)))
     }
 
     @Test
-    fun theLongestOfferedSitGetsThroughTheListWithoutRepeating() {
-        // Five minutes is the longest duration chip. Eleven lines at 28s covers
-        // 308s; ten would have repeated one in the last half-minute. If a line
-        // is ever removed from the array this fails, which is the point: the
-        // same sentence coming round again reads as the screen having run out of
-        // things to say.
-        val longestSit = 5 * 60
-        val seen = (0..longestSit step LINE_SECONDS).map { breathingLineIndex(it, 11) }
-        assertEquals(seen.size, seen.distinct().size)
-        assertTrue("eleven lines should cover a five-minute sit", seen.size <= 11)
+    fun aLineHoldsThroughThePauseThatFollowsIt() {
+        // The inhale line carries through the hold-on-full; the exhale line
+        // carries through the settle. Changing mid-pause would put a new sentence
+        // on screen in the one moment there is nothing to do with it.
+        assertTrue(showsInhaleLine(BreathPhase.IN))
+        assertTrue(showsInhaleLine(BreathPhase.HOLD_FULL))
+        assertFalse(showsInhaleLine(BreathPhase.OUT))
+        assertFalse(showsInhaleLine(BreathPhase.HOLD_EMPTY))
     }
 
     @Test
-    fun theLineIndexStaysInsideTheArrayWhateverTheInputs() {
+    fun aPairIsNeverSplitAcrossABreath() {
+        // Whatever someone reads on the way out must be the partner of what they
+        // read on the way in, so the index has to hold still for a whole cycle
+        // and advance on the inhale.
+        for (second in 0 until CYCLE_SECONDS) {
+            assertEquals("second $second", 0, breathingPairIndex(second, 8))
+        }
+        assertEquals(1, breathingPairIndex(CYCLE_SECONDS, 8))
+        assertEquals(1, breathingPairIndex(CYCLE_SECONDS * 2 - 1, 8))
+        assertEquals(2, breathingPairIndex(CYCLE_SECONDS * 2, 8))
+    }
+
+    @Test
+    fun theSetRepeatingOnALongSitIsAllowed() {
+        // Deliberately NOT the "never repeats" assertion this replaced. Five
+        // minutes is 21 cycles against eight pairs, so the set comes round two
+        // and a half times — which for someone waiting out a bad few minutes is
+        // mantra rather than the screen running out of things to say. The test
+        // exists to stop a future reader "fixing" the repetition by reference to
+        // the old rule.
+        val cyclesInLongestSit = (5 * 60) / CYCLE_SECONDS
+        assertTrue("a five-minute sit should outlast the set", cyclesInLongestSit > 8)
+        assertEquals(0, breathingPairIndex(CYCLE_SECONDS * 8, 8))
+    }
+
+    @Test
+    fun thePairIndexStaysInsideTheArrayWhateverTheInputs() {
         // stringArrayResource decides the count, not this function, so it must
         // hold for any of them — including the degenerate ones.
         for (count in 1..13) {
             for (second in -5..400) {
-                val i = breathingLineIndex(second, count)
-                assertTrue("index $i out of bounds for $count lines", i in 0 until count)
+                val i = breathingPairIndex(second, count)
+                assertTrue("index $i out of bounds for $count pairs", i in 0 until count)
             }
         }
     }
 
     @Test
-    fun anEmptyLineArrayIsSurvivedRatherThanThrown() {
-        // A translation that shipped the array empty must not crash the pause
-        // screen; the caller gets 0 and can decide what to draw.
-        assertEquals(0, breathingLineIndex(30, 0))
+    fun noPairsAtAllIsSurvivedRatherThanThrown() {
+        // A translation that shipped an array empty — or the two arrays at
+        // different lengths, which the caller resolves with minOf — must not
+        // crash the pause screen. The caller gets 0 and draws nothing.
+        assertEquals(0, breathingPairIndex(30, 0))
     }
 
     @Test

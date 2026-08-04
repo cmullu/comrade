@@ -53,6 +53,12 @@ import mullu.comrade.R
  * fail. Nothing about having used it is stored — there is no count of breathing
  * minutes to accumulate, because a number would turn a pause into a task.
  *
+ * It is for **anxiety, panic and stress as much as for practice** (owner, stating
+ * the purpose). That is why the copy reaffirms rather than instructs, and why it
+ * is careful about what it will not say — see the comment above `breathe_lines_in`
+ * in `strings.xml`, which is where the limit belongs because that is where the
+ * next person edits the words.
+ *
  * Two things it does that a person should know about, and which the screen says
  * in as many words rather than leaving to this comment:
  *
@@ -237,11 +243,24 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
         }
     }
 
-    val lines = stringArrayResource(R.array.breathe_lines)
-    // `getOrNull` rather than `[]`: the count comes from a resource a
-    // translation could ship empty, and the pause screen is the last place in
-    // the app that should be able to crash.
-    val line = lines.getOrNull(breathingLineIndex(elapsed, lines.size)).orEmpty()
+    // One line to draw on going in, its partner to put down coming out. The
+    // pair is chosen per cycle and the half is chosen by the phase, so the text
+    // turns over exactly twice a breath — at the top of the inhale and at the
+    // start of the exhale — rather than sitting there through both.
+    //
+    // `minOf` rather than trusting either length: the two arrays are paired by
+    // index, and a translation that dropped one item from one of them would
+    // otherwise show an inhale line with someone else's exhale line, or index
+    // past the end. `getOrNull` for the same reason one layer down — the pause
+    // screen is the last place in the app that should be able to crash.
+    val inLines = stringArrayResource(R.array.breathe_lines_in)
+    val outLines = stringArrayResource(R.array.breathe_lines_out)
+    val pair = breathingPairIndex(elapsed, minOf(inLines.size, outLines.size))
+    val line = if (showsInhaleLine(phase)) {
+        inLines.getOrNull(pair).orEmpty()
+    } else {
+        outLines.getOrNull(pair).orEmpty()
+    }
 
     Column(
         modifier = modifier
@@ -257,9 +276,10 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        // Where the screen used to repeat its own app-bar title. A line the
-        // reader has already read is not worth the most prominent slot on a
-        // screen whose whole job is to stop asking things of them.
+        // Where the screen used to repeat its own app-bar title. Crossfaded
+        // because it now turns over on every inhale and every exhale — twice as
+        // often as before — and a hard cut at that rate would be a flicker in
+        // the corner of someone's eye rather than a line arriving.
         Crossfade(targetState = line, label = "breathe-line") { current ->
             Text(
                 current,
@@ -354,29 +374,39 @@ internal fun breathingPhase(elapsedSeconds: Int): BreathPhase {
     return BreathPhase.entries.first()
 }
 
-/** How many full cycles one calming line stays on screen for. */
-private const val CYCLES_PER_LINE = 2
-
-/** How long one calming line stays on screen. */
-internal val LINE_SECONDS: Int = CYCLE_SECONDS * CYCLES_PER_LINE
+/**
+ * Whether the **inhale** half of the current pair is the one to show.
+ *
+ * A line holds through the pause that follows its own phase: the inhale line
+ * appears at the top of the breath and stays for the hold-on-full, then the
+ * exhale line takes over as the out-breath starts and stays for the settle. So
+ * the text turns over exactly twice a cycle, on the two phases that are actually
+ * asking something of the reader, and never mid-pause.
+ */
+internal fun showsInhaleLine(phase: BreathPhase): Boolean = when (phase) {
+    BreathPhase.IN, BreathPhase.HOLD_FULL -> true
+    BreathPhase.OUT, BreathPhase.HOLD_EMPTY -> false
+}
 
 /**
- * Which of the calming lines to show at [elapsedSeconds], given [lineCount] of
- * them.
+ * Which **pair** of calming lines is current at [elapsedSeconds], given
+ * [pairCount] of them.
  *
- * Changes every [CYCLES_PER_LINE] **cycles**, not every phase. A line that
- * swapped every four seconds would be one more thing to keep up with, and this
- * is the one screen in the app with nothing to keep up with; half a minute is
- * long enough to read a sentence and then stop reading it. Index 0 is on screen
- * from arrival, so the first thing a person sees is settled rather than
- * mid-change.
+ * One pair per cycle, advancing on the inhale, so a pair is never split across a
+ * breath — the line someone reads on the way out is the partner of the one they
+ * read on the way in, not the next pair's.
+ *
+ * The set repeating on a long sit is fine, and deliberately so: for someone
+ * waiting out a bad few minutes, a line they have already read is closer to a
+ * mantra than to the screen running out of things to say. That is the opposite
+ * of the call made when this was framed purely as attention practice.
  *
  * Pure, and tested, because the failure it guards is an index out of bounds on
  * a screen someone reached for while having a bad minute.
  */
-internal fun breathingLineIndex(elapsedSeconds: Int, lineCount: Int): Int {
-    if (lineCount <= 0 || LINE_SECONDS <= 0) return 0
-    return (elapsedSeconds.coerceAtLeast(0) / LINE_SECONDS) % lineCount
+internal fun breathingPairIndex(elapsedSeconds: Int, pairCount: Int): Int {
+    if (pairCount <= 0 || CYCLE_SECONDS <= 0) return 0
+    return (elapsedSeconds.coerceAtLeast(0) / CYCLE_SECONDS) % pairCount
 }
 
 /**
