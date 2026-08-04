@@ -8,4 +8,9 @@
          write into them. Separate from media/ because purgeDecryptedMedia sweeps
          that directory and must not race a capture still being written. -->
     <cache-path name="capture" path="capture/" />
+    <!-- Where a large attachment handed straight over by a peer lands, so the
+         person it was sent to can open it in whatever app handles its type. Its
+         own directory because that is what makes AttachmentHandoffManager's purge
+         a single sweep (AUDIT S-4) rather than a search for files by name. -->
+    <cache-path name="attachment-handoff" path="attachment-handoff/" />
 </paths>

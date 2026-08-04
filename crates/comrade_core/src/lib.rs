@@ -51,6 +51,7 @@ pub mod dm;
 pub mod error;
 pub mod gcs;
 pub mod geo;
+pub mod handoff;
 pub mod karya;
 pub mod media;
 pub mod metrics;

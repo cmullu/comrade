@@ -10,17 +10,20 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/comrade_repository.dart';
 import '../../data/models.dart';
 import '../../state/chat_providers.dart';
 import '../../state/providers.dart';
+import '../../theme/comrade_theme.dart';
 import '../../util/attachment_caption.dart';
 import '../../util/chat_thread.dart';
 import '../../widgets/app_chrome.dart';
 import '../../widgets/attachment_preview.dart';
 import '../../widgets/composer.dart';
+import '../../widgets/emoji_picker.dart';
 import '../../widgets/media_attachment.dart';
 import '../../widgets/message_bubble.dart';
 
@@ -43,6 +46,11 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   int _knownItemCount = 0;
   bool _newMessagesBelow = false;
   bool _atBottom = true;
+
+  /// The item key currently flashing because a quote was tapped to reach it,
+  /// plus a token so an older flash's expiry cannot cancel a newer one.
+  String? _highlightKey;
+  int _highlightSeq = 0;
 
   /// Whether the core has been told this composer holds unsent text. Only the
   /// edges are worth a call — the core is idempotent, but a bridge hop per
@@ -161,6 +169,33 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
       await Future<void>.delayed(Duration.zero);
       await WidgetsBinding.instance.endOfFrame;
     }
+  }
+
+  /// Go to the message a reply is quoting, and flash it on arrival.
+  ///
+  /// The flash is not decoration. The scroll lands the target somewhere in a
+  /// screenful of other messages and says nothing about which one it was; without
+  /// the highlight the jump reads as the thread having lost your place. The
+  /// jump-to-latest button appears on the way, which is the way back.
+  ///
+  /// Does nothing when the original is not in the loaded thread — see
+  /// [indexOfEventId]. Staying put is the honest outcome there.
+  Future<void> _goToQuoted(ConversationState state, String? targetId) async {
+    final int? index = indexOfEventId(
+      <String>[for (final ChatItem i in state.items) i.id],
+      targetId,
+    );
+    if (index == null) return;
+    final int seq = ++_highlightSeq;
+    setState(() => _highlightKey = state.items[index].key);
+    // The scroll and the flash's clock run together rather than in sequence. The
+    // flash is measured from the tap; awaiting the scroll first would make its
+    // length depend on how many correction frames the list happened to need.
+    fireAndForget(_jumpToIndex(index, state.items.length));
+    await Future<void>.delayed(quoteHighlightDuration);
+    // Only the newest tap gets to end the flash, so tapping through a chain of
+    // replies keeps highlighting where you actually are.
+    if (mounted && _highlightSeq == seq) setState(() => _highlightKey = null);
   }
 
   void _jumpToLatest({bool animate = true}) {
@@ -323,6 +358,28 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     );
   }
 
+  /// Tint the whole item — bubble, reactions and all — while it is the target of
+  /// a quote tap. Applied at the item level rather than inside the bubble so a
+  /// jumped-to attachment flashes exactly like a jumped-to message.
+  Widget _highlightWrap(
+    BuildContext context, {
+    required bool highlighted,
+    required Widget child,
+  }) =>
+      AnimatedContainer(
+        key: highlighted ? const Key('quote-target-highlight') : null,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          color: highlighted
+              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.14)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(ComradeRadii.bubble),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: child,
+      );
+
   Widget _thread(BuildContext context, ConversationState state) {
     if (state.items.isEmpty) {
       return Padding(
@@ -361,18 +418,33 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                     DaySeparator(dayLabel(item.createdAt, nowSecs)),
                   if (item.key == state.unreadBoundaryKey)
                     const UnreadSeparator(),
-                  switch (item) {
-                    MediaChatItem(:final MediaMessageInfo media) =>
-                      MediaAttachmentBubble(
-                        media,
-                        onReply: () => _startReply(item),
-                      ),
-                    TextChatItem(:final MessageInfo message) => MessageBubble(
-                        message: message,
-                        quotedText: state.quoted(message.replyTo)?.preview,
-                        onReply: () => _startReply(item),
-                      ),
-                  },
+                  _highlightWrap(
+                    context,
+                    highlighted: item.key == _highlightKey,
+                    child: switch (item) {
+                      MediaChatItem(:final MediaMessageInfo media) =>
+                        MediaAttachmentBubble(
+                          media,
+                          onReply: () => _startReply(item),
+                          onLongPress: () => _openActions(item, state),
+                          chips: state.chipsFor(item.id),
+                          onToggleReaction: (String e) =>
+                              _toggleReaction(item, e),
+                        ),
+                      TextChatItem(:final MessageInfo message) => MessageBubble(
+                          message: message,
+                          quotedText: state.quoted(message.replyTo)?.preview,
+                          onQuotedTap: state.quoted(message.replyTo) == null
+                              ? null
+                              : () => _goToQuoted(state, message.replyTo),
+                          onReply: () => _startReply(item),
+                          onLongPress: () => _openActions(item, state),
+                          chips: state.chipsFor(item.id),
+                          onToggleReaction: (String e) =>
+                              _toggleReaction(item, e),
+                        ),
+                    },
+                  ),
                 ],
               ),
             );
@@ -404,6 +476,55 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
 
   /// Aim the composer at [item] and put the cursor where the reply goes. The
   /// chip appearing with the keyboard still down reads as "nothing happened".
+  /// Long press on a message: the reaction row and the actions.
+  ///
+  /// The sheet is popped before anything happens, so a reaction or a reply never
+  /// races the sheet's own dismissal — and `mounted` is re-checked after the await
+  /// because the screen can be gone by the time it resolves.
+  Future<void> _openActions(ChatItem item, ConversationState state) async {
+    final String? mine = state.myReaction(item.id);
+    final _MessageAction? chosen = await showModalBottomSheet<_MessageAction>(
+      context: context,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (BuildContext sheetContext) => MessageActionSheet(
+        myReaction: mine,
+        onReact: (String emoji) =>
+            Navigator.of(sheetContext).pop(_MessageAction.react(emoji)),
+        onMoreEmoji: () =>
+            Navigator.of(sheetContext).pop(const _MessageAction.moreEmoji()),
+        onReply: () =>
+            Navigator.of(sheetContext).pop(const _MessageAction.reply()),
+        onCopy: () =>
+            Navigator.of(sheetContext).pop(const _MessageAction.copy()),
+      ),
+    );
+    if (!mounted || chosen == null) return;
+    switch (chosen.kind) {
+      case _MessageActionKind.react:
+        await _toggleReaction(item, chosen.emoji!);
+      case _MessageActionKind.moreEmoji:
+        // One message takes one reaction, so the picker closes on the first pick
+        // — unlike the composer's, where choosing several in a row is the point.
+        // Staying open would only invite a second tap that undoes the first.
+        await showEmojiPicker(
+          context,
+          onPick: (String emoji) {
+            Navigator.of(context).pop();
+            fireAndForget(_toggleReaction(item, emoji));
+          },
+        );
+      case _MessageActionKind.reply:
+        _startReply(item);
+      case _MessageActionKind.copy:
+        await Clipboard.setData(ClipboardData(text: item.preview));
+    }
+  }
+
+  Future<void> _toggleReaction(ChatItem item, String emoji) => ref
+      .read(conversationProvider(widget.peer).notifier)
+      .toggleReaction(item, emoji);
+
   void _startReply(ChatItem item) {
     ref.read(conversationProvider(widget.peer).notifier).startReply(item);
     _composerFocus.requestFocus();
@@ -453,4 +574,29 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         onSend: _send,
         onAttachment: _sendAttachment,
       );
+}
+
+/// What [_ConversationScreenState._openActions]'s sheet came back with.
+///
+/// A returned value rather than callbacks that act directly: the sheet has to be
+/// popped *before* a reply focuses the composer or the emoji picker opens, and
+/// having the sheet close itself and report is the only ordering that cannot race.
+enum _MessageActionKind { react, moreEmoji, reply, copy }
+
+class _MessageAction {
+  const _MessageAction.react(this.emoji) : kind = _MessageActionKind.react;
+  const _MessageAction.moreEmoji()
+      : kind = _MessageActionKind.moreEmoji,
+        emoji = null;
+  const _MessageAction.reply()
+      : kind = _MessageActionKind.reply,
+        emoji = null;
+  const _MessageAction.copy()
+      : kind = _MessageActionKind.copy,
+        emoji = null;
+
+  final _MessageActionKind kind;
+
+  /// Set only for [_MessageActionKind.react].
+  final String? emoji;
 }

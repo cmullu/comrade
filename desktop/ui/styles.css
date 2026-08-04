@@ -879,6 +879,40 @@ code {
   text-overflow: ellipsis;
 }
 
+/* A quote whose original is in the thread: tapping it goes there. Rendered as a
+   <button>, so the inherited control styling has to be undone back to the plain
+   quote above — everything here is a reset except the cursor and the hover. */
+.bubble-quote-link {
+  display: block;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border: none;
+  border-left: 2px solid currentColor;
+}
+
+.bubble-quote-link:hover,
+.bubble-quote-link:focus-visible {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+/* The flash on arriving at a jumped-to message. Transitions on the way out so it
+   fades rather than snapping off; `prefers-reduced-motion` drops the fade but
+   keeps the highlight, because the highlight is the information. */
+.bubble.bubble-jumped {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  transition: background 220ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble.bubble-jumped {
+    transition: none;
+  }
+}
+
 /* Hover-revealed "reply" affordance hugging the outer edge of a bubble. */
 .bubble-reply {
   position: absolute;
@@ -1091,6 +1125,114 @@ code {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* Which road this file takes. Quiet for the hosted road — it is the one people
+   already expect — and marked for the direct one, because that road asks
+   something of the recipient that the other does not. */
+.attach-preview-route {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.attach-preview-route.is-direct {
+  padding: 7px 9px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attach-preview-note {
+  font-size: 12px;
+  color: var(--warn, var(--text-dim));
+}
+
+/* ── The large-attachment card ──────────────────────────────────────────────
+   Sits above the composer, inside the conversation it belongs to. Bordered for
+   the same reason the relay question is: until it is answered, nothing about
+   this file has happened yet. */
+.handoff-card {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.handoff-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.handoff-glyph {
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.handoff-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.handoff-kind {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* A peer chose this filename, so it is bounded in `safeDisplayName` *and* here:
+   the truncation is what stops a long name pushing the buttons off the card. */
+.handoff-detail,
+.handoff-status {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-caption {
+  font-size: 13px;
+  /* A peer wrote this and it can be 512 characters — five lines at this width,
+     measured in Chromium. It wraps rather than stretching the card, and it stops
+     at four lines rather than pushing the conversation off its own screen: the
+     length is bounded in `boundedCaption`, and this is the half of that bound the
+     layout owes. */
+  max-height: 4.4em;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.handoff-refusal {
+  font-size: 12px;
+  color: var(--warn, var(--text));
+}
+
+.handoff-bar {
+  height: 4px;
+  overflow: hidden;
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.handoff-bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent, currentColor);
+  transition: width 120ms linear;
+}
+
+.handoff-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.handoff-actions:empty {
+  display: none;
 }
 
 .bubble audio {
@@ -2403,4 +2545,21 @@ code {
 .input.composer-aside {
   border-style: dashed;
   background: color-mix(in srgb, var(--panel, #161616) 88%, currentColor 12%);
+
+/* The relay-consent question. Bordered rather than inline text because it is
+   the one thing in this panel that stops until it is answered. */
+.share-consent {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.share-consent-text {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.share-consent-actions {
+  display: flex;
+  gap: 0.5rem;
 }

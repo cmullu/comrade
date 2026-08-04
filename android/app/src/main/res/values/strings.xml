@@ -109,6 +109,16 @@
     <string name="settings_block_screenshots_title">Block screenshots</string>
     <string name="settings_block_screenshots_summary">Off by default: screenshots and screen recording work everywhere in Comrade. Turn this on and the system refuses both, and the app is hidden from the recents preview. It cannot stop a photo of your screen, and it applies to your device only — never to the person you are talking to.</string>
 
+    <!-- Sending files peer-to-peer. Separate from the TURN setting above it:
+         a relayed call is kilobits, a relayed film is gigabytes through
+         somebody else's machine. -->
+    <string name="settings_share_relay_title">Sending files through a relay</string>
+    <string name="settings_share_relay_summary">When there\'s no direct route to someone, a file can only reach them through a relay server — someone else\'s bandwidth, and their machine in the middle. Your calls keep their relay either way; this is only about files.</string>
+    <string name="settings_share_relay_never">Never \u2014 only send files over a direct connection</string>
+    <string name="settings_share_relay_small">Small files only (up to 50 MB)</string>
+    <string name="settings_share_relay_ask">Ask me each time</string>
+    <string name="settings_share_relay_always">Always, without asking</string>
+
     <!-- Vault lock -->
     <string name="settings_lock_vault_title">Lock vault now</string>
     <string name="settings_lock_vault_summary">Drops the decrypted key from memory immediately. You’ll need your passphrase to unlock again.</string>
@@ -186,6 +196,13 @@
     <string name="composer_swap_capture">Switch to: %1$s</string>
     <string name="composer_stop_recording">Stop and send</string>
     <string name="composer_recording">Recording… tap to send</string>
+    <!-- Long-press-a-message sheet, and the accessibility actions that reach the
+         same two things without a gesture. -->
+    <string name="message_action_reply">Reply</string>
+    <string name="message_action_react">React</string>
+    <string name="message_action_copy">Copy text</string>
+    <string name="react_more">More emoji</string>
+    <string name="message_goto_quoted">Go to the quoted message</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->
@@ -202,6 +219,10 @@
 
     <!-- Notifications (settings card + grouping) -->
     <string name="notification_messages_summary">New messages</string>
+    <!-- The "self" name in a MessagingStyle notification. Only ever drawn beside
+         messages we sent, of which an incoming-message notification has none —
+         deliberately not the user's own handle, which is identifying. -->
+    <string name="notification_you">You</string>
     <string name="settings_notifications_title">Notifications</string>
     <string name="settings_notifications_summary">Messages, message requests, calls, comrades coming online and app updates each have their own channel, so you can silence one without silencing the rest.</string>
     <string name="settings_notifications_blocked">Notifications are turned off for Comrade — nothing will reach you while the app is in the background, including calls.</string>
@@ -474,6 +495,11 @@
     <!-- The case together otherwise assumes away: only one of you has the file.
          It comes straight from their device, never through a server of ours. -->
     <string name="together_ask_for_copy">I don\'t have it</string>
+    <!-- The relay question. The message body comes from core so that all three
+         frontends ask it in the same words and with the same number in it. -->
+    <string name="together_relay_title">Send this through a relay?</string>
+    <string name="together_relay_yes">Send it anyway</string>
+    <string name="together_relay_no">Don\'t send</string>
     <string name="together_waiting_for_them">waiting for them to open it</string>
     <string name="together_open_your_copy">open your copy to start</string>
     <string name="together_together">together</string>

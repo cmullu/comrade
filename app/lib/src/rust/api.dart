@@ -10,7 +10,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `pump_bridge_events`, `runtime`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ShareVerdictDto`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AttachmentRoute`, `ShareVerdictDto`
 
 /// The comrade_jni crate version (e.g. "0.1.0").
 String version() => RustLib.instance.api.crateApiVersion();
@@ -125,6 +125,27 @@ Future<MessageDto> sendDmReply(
         {required String target, required String content, String? replyTo}) =>
     RustLib.instance.api.crateApiSendDmReply(
         target: target, content: content, replyTo: replyTo);
+
+/// React to a message in `peer`'s thread — or take an existing reaction back by
+/// passing the same emoji again. Returns the reaction now standing, or `None` if
+/// the tap withdrew one.
+///
+/// The toggle is decided on the Rust side (see `ComradeRuntime::toggle_reaction`)
+/// so this frontend and Android cannot disagree about what tapping an
+/// already-sent emoji means.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<ReactionDto?> toggleReaction(
+        {required String peer,
+        required String targetId,
+        required String emoji}) =>
+    RustLib.instance.api
+        .crateApiToggleReaction(peer: peer, targetId: targetId, emoji: emoji);
+
+/// Every reaction in `peer`'s conversation, oldest first, read from the encrypted
+/// store — so a thread opens with its reactions already drawn.
+Future<List<ReactionDto>> reactions({required String peer}) =>
+    RustLib.instance.api.crateApiReactions(peer: peer);
 
 /// Retry every DM sitting in the sender outbox because no relay would take it.
 /// Returns how many a relay accepted this pass.
@@ -364,12 +385,20 @@ Future<IcePathKind> shareClassifyPath(
         localType: localType, remoteType: remoteType);
 
 /// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+///
+/// `consent_granted` answers a question a previous call asked by returning
+/// `NeedsConsent`. It can only turn that into `Allow`; a refusal stays refused
+/// however insistently a frontend claims consent.
 Future<TransferVerdict> shareTransferVerdict(
         {required IcePathKind path,
         required BigInt totalBytes,
-        required RelayPolicy policy}) =>
+        required RelayPolicy policy,
+        required bool consentGranted}) =>
     RustLib.instance.api.crateApiShareTransferVerdict(
-        path: path, totalBytes: totalBytes, policy: policy);
+        path: path,
+        totalBytes: totalBytes,
+        policy: policy,
+        consentGranted: consentGranted);
 
 /// Whether a transfer connection built under `policy` may be offered TURN.
 Future<bool> shareIceServersAllowed({required RelayPolicy policy}) =>
@@ -487,6 +516,58 @@ Future<String> syncLedger() => RustLib.instance.api.crateApiSyncLedger();
 Stream<BridgeEvent> bridgeEventStream() =>
     RustLib.instance.api.crateApiBridgeEventStream();
 
+class AttachmentHandoff {
+  final ShareOffer shape;
+  final String mimeType;
+  final String fileName;
+  final String caption;
+
+  const AttachmentHandoff({
+    required this.shape,
+    required this.mimeType,
+    required this.fileName,
+    required this.caption,
+  });
+
+  @override
+  int get hashCode =>
+      shape.hashCode ^ mimeType.hashCode ^ fileName.hashCode ^ caption.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentHandoff &&
+          runtimeType == other.runtimeType &&
+          shape == other.shape &&
+          mimeType == other.mimeType &&
+          fileName == other.fileName &&
+          caption == other.caption;
+}
+
+class AttachmentHandoffDto {
+  final String transferId;
+  final String peer;
+  final HandoffSignal signal;
+
+  const AttachmentHandoffDto({
+    required this.transferId,
+    required this.peer,
+    required this.signal,
+  });
+
+  @override
+  int get hashCode => transferId.hashCode ^ peer.hashCode ^ signal.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentHandoffDto &&
+          runtimeType == other.runtimeType &&
+          transferId == other.transferId &&
+          peer == other.peer &&
+          signal == other.signal;
+}
+
 @freezed
 sealed class BridgeEvent with _$BridgeEvent {
   const BridgeEvent._();
@@ -500,6 +581,9 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.incomingMedia(
     MediaMessageDto field0,
   ) = BridgeEvent_IncomingMedia;
+  const factory BridgeEvent.incomingReaction(
+    ReactionDto field0,
+  ) = BridgeEvent_IncomingReaction;
   const factory BridgeEvent.incomingCallSignal(
     CallSignalDto field0,
   ) = BridgeEvent_IncomingCallSignal;
@@ -546,6 +630,9 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.togetherShare(
     TogetherShareDto field0,
   ) = BridgeEvent_TogetherShare;
+  const factory BridgeEvent.attachmentHandoff(
+    AttachmentHandoffDto field0,
+  ) = BridgeEvent_AttachmentHandoff;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;
@@ -924,6 +1011,24 @@ class FoundProfileDto {
           about == other.about;
 }
 
+@freezed
+sealed class HandoffSignal with _$HandoffSignal {
+  const HandoffSignal._();
+
+  const factory HandoffSignal.offer({
+    required AttachmentHandoff attachment,
+  }) = HandoffSignal_Offer;
+  const factory HandoffSignal.accept() = HandoffSignal_Accept;
+  const factory HandoffSignal.decline() = HandoffSignal_Decline;
+  const factory HandoffSignal.refuse({
+    required RefusalReason reason,
+  }) = HandoffSignal_Refuse;
+  const factory HandoffSignal.withdraw() = HandoffSignal_Withdraw;
+  const factory HandoffSignal.transport({
+    required TransferSignal signal,
+  }) = HandoffSignal_Transport;
+}
+
 enum HangupReason {
   normal,
   declined,
@@ -1265,6 +1370,45 @@ class ProfileDto {
           runtimeType == other.runtimeType &&
           npub == other.npub &&
           username == other.username;
+}
+
+class ReactionDto {
+  final String targetId;
+  final String peer;
+  final String reactor;
+  final String emoji;
+  final BigInt createdAt;
+  final bool outgoing;
+
+  const ReactionDto({
+    required this.targetId,
+    required this.peer,
+    required this.reactor,
+    required this.emoji,
+    required this.createdAt,
+    required this.outgoing,
+  });
+
+  @override
+  int get hashCode =>
+      targetId.hashCode ^
+      peer.hashCode ^
+      reactor.hashCode ^
+      emoji.hashCode ^
+      createdAt.hashCode ^
+      outgoing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReactionDto &&
+          runtimeType == other.runtimeType &&
+          targetId == other.targetId &&
+          peer == other.peer &&
+          reactor == other.reactor &&
+          emoji == other.emoji &&
+          createdAt == other.createdAt &&
+          outgoing == other.outgoing;
 }
 
 class Recording {

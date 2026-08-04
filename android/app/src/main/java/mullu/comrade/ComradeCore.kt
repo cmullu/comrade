@@ -875,6 +875,50 @@ object ComradeCore {
     fun media(peer: String): List<MediaMessageInfo> =
         rethrowing("Media history") { ffi.mediaWith(peer).map { it.toInfo() } }
 
+    /** One person's emoji reaction to one message — see [reactions]. */
+    data class ReactionInfo(
+        /** Event id of the message reacted to. A text message or an attachment. */
+        val targetId: String,
+        val peer: String,
+        val reactor: String,
+        val emoji: String,
+        val createdAt: Long,
+        /** Whether *this device* sent it — mirrors [MessageInfo.outgoing]. */
+        val outgoing: Boolean,
+    )
+
+    private fun uniffi.comrade_ui.ReactionDto.toInfo() = ReactionInfo(
+        targetId = targetId,
+        peer = peer,
+        reactor = reactor,
+        emoji = emoji,
+        createdAt = createdAt.toLong(),
+        outgoing = outgoing,
+    )
+
+    /**
+     * Every reaction in [peer]'s conversation, oldest first, from the encrypted
+     * store — so a thread opens with its reactions already drawn rather than
+     * waiting for a live event.
+     */
+    fun reactions(peer: String): List<ReactionInfo> =
+        rethrowing("Reactions") { ffi.reactions(peer).map { it.toInfo() } }
+
+    /**
+     * React to a message, or take an existing reaction back by passing the same
+     * emoji again. Returns the reaction now standing, or `null` if the tap
+     * withdrew one.
+     *
+     * The toggle is decided in Rust, not here — see
+     * `ComradeRuntime::toggle_reaction`. That is deliberate: "tapping what you
+     * already sent removes it" needs the current reaction to decide, and a copy
+     * of that rule in each frontend is a copy that can disagree.
+     */
+    fun toggleReactionTyped(peer: String, targetId: String, emoji: String): ReactionInfo? =
+        rethrowing("React") {
+            runBlocking { ffi.toggleReaction(peer, targetId, emoji) }?.toInfo()
+        }
+
     /** Encrypt + send raw media bytes (no base64 round-trip — uniffi carries `ByteArray` natively). */
     fun sendMediaBytesTyped(
         target: String,
@@ -1055,6 +1099,44 @@ object ComradeCore {
         rethrowing("Send file") { runBlocking { ffi.togetherShare(signal) } }
     }
 
+    // ── Handing a large attachment over ──────────────────────────────────────
+
+    /**
+     * Send one step of handing a large attachment over — the road a file takes
+     * when it is past the 10 MB the hosted path can carry.
+     *
+     * Unlike [togetherShareTyped] this does **not** need a live session: nobody
+     * starts a listening session to send a video file. The gate is on receipt
+     * instead, and it is the same one a call signal clears — see
+     * `comrade_core::handoff`.
+     */
+    fun attachmentHandoffSendTyped(
+        peer: String,
+        transferId: String,
+        signal: uniffi.comrade_core.HandoffSignal,
+    ) {
+        rethrowing("Send attachment") {
+            runBlocking { ffi.attachmentHandoffSend(peer, transferId, signal) }
+        }
+    }
+
+    /**
+     * Which road an attachment of this size takes. Asked of the core rather than
+     * compared against a local constant, so a UI can never disagree with the
+     * threshold the core enforces.
+     */
+    fun attachmentRouteForBytes(totalBytes: Long): uniffi.comrade_core.AttachmentRoute =
+        uniffi.comrade.attachmentRouteForBytes(totalBytes.toULong())
+
+    /**
+     * A fresh id scoping every signal of one handoff.
+     *
+     * Minted by the core rather than here because the id *is* the replay guard —
+     * 128 bits from the same CSPRNG on every frontend, so an id a third party
+     * could predict never becomes an injected `Accept`.
+     */
+    fun newAttachmentTransferId(): String = uniffi.comrade.newAttachmentTransferId()
+
     /**
      * Whether a *transfer* connection may be given TURN at all. Under the
      * default policy it may not, so a relay candidate is never gathered and
@@ -1074,8 +1156,14 @@ object ComradeCore {
         localCandidateType: String,
         remoteCandidateType: String,
         totalBytes: Long,
+        consentGranted: Boolean = false,
     ): uniffi.comrade_ui.ShareVerdictDto =
-        ffi.shareTransferVerdict(localCandidateType, remoteCandidateType, totalBytes.toULong())
+        ffi.shareTransferVerdict(
+            localCandidateType,
+            remoteCandidateType,
+            totalBytes.toULong(),
+            consentGranted,
+        )
 
     /** How many chunks may go into a data channel currently holding this much. */
     fun shareChunksToSend(bufferedBytes: Long): Int =
@@ -1086,10 +1174,15 @@ object ComradeCore {
         runCatching { ffi.shareRelayPolicy() }
             .getOrDefault(uniffi.comrade_core.RelayPolicy.DirectOnly)
 
-    /** Change it. Takes effect on the next transfer connection. */
-    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy) {
-        runCatching { ffi.setShareRelayPolicy(policy) }
-    }
+    /**
+     * Change it, and remember it. Takes effect on the next transfer connection.
+     *
+     * Returns whether it was written down: with the vault locked the choice
+     * still applies to this process but will not survive it, and a settings
+     * screen that showed a saved preference which was not saved would be lying.
+     */
+    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy): Boolean =
+        runCatching { ffi.setShareRelayPolicy(policy) }.isSuccess
 
     data class CallRecordInfo(
         val id: String,

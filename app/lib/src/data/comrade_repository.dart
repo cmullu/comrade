@@ -152,6 +152,25 @@ abstract interface class ComradeRepository {
   /// position the thread on. See `firstUnreadIndex`.
   Future<int> markConversationRead(String peer);
 
+  /// Every reaction in [peer]'s conversation, oldest first, from the encrypted
+  /// store — so a thread opens with its reactions already drawn rather than
+  /// waiting for a live event.
+  Future<List<ReactionInfo>> reactions(String peer);
+
+  /// React to a message, or take an existing reaction back by passing the same
+  /// emoji again. Returns the reaction now standing, or null if the tap withdrew
+  /// one.
+  ///
+  /// The toggle is decided in Rust, not here — see
+  /// `ComradeRuntime::toggle_reaction`. "Tapping what you already sent removes
+  /// it" needs the current reaction to decide, and a copy of that rule in each
+  /// frontend is a copy that can disagree with the other.
+  Future<ReactionInfo?> toggleReaction({
+    required String peer,
+    required String targetId,
+    required String emoji,
+  });
+
   Future<List<MessageRequestInfo>> messageRequests();
 
   Future<void> acceptRequest(String peer);

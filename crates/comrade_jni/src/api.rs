@@ -71,18 +71,19 @@ use crate::frb_generated::StreamSink;
 // no Rust downstream.)
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+pub use comrade_core::handoff::{AttachmentHandoff, AttachmentRoute, HandoffSignal};
 pub use comrade_core::share::transport::{
     IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
 pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
-    BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
-    ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
-    IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ShareVerdictDto, TaraMessageDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
-    TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    AttachmentHandoffDto, BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto,
+    ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
+    IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
+    MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto,
+    ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -304,6 +305,16 @@ pub struct _MediaMessageDto {
     pub sender: String,
     pub created_at: u64,
     pub size: u64,
+    pub outgoing: bool,
+}
+
+#[frb(mirror(ReactionDto))]
+pub struct _ReactionDto {
+    pub target_id: String,
+    pub peer: String,
+    pub reactor: String,
+    pub emoji: String,
+    pub created_at: u64,
     pub outgoing: bool,
 }
 
@@ -532,6 +543,37 @@ pub struct _TogetherShareDto {
     pub signal: ShareSignal,
 }
 
+#[frb(mirror(AttachmentHandoff))]
+pub struct _AttachmentHandoff {
+    pub shape: ShareOffer,
+    pub mime_type: String,
+    pub file_name: String,
+    pub caption: String,
+}
+
+#[frb(mirror(HandoffSignal))]
+pub enum _HandoffSignal {
+    Offer { attachment: AttachmentHandoff },
+    Accept,
+    Decline,
+    Refuse { reason: RefusalReason },
+    Withdraw,
+    Transport { signal: TransferSignal },
+}
+
+#[frb(mirror(AttachmentRoute))]
+pub enum _AttachmentRoute {
+    Hosted,
+    PeerToPeer,
+}
+
+#[frb(mirror(AttachmentHandoffDto))]
+pub struct _AttachmentHandoffDto {
+    pub transfer_id: String,
+    pub peer: String,
+    pub signal: HandoffSignal,
+}
+
 #[frb(mirror(ShareVerdictDto))]
 pub struct _ShareVerdictDto {
     pub verdict: String,
@@ -545,6 +587,7 @@ pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
     IncomingDirectMessage(DirectMessageDto),
     IncomingMedia(MediaMessageDto),
+    IncomingReaction(ReactionDto),
     IncomingCallSignal(CallSignalDto),
     IncomingMessageRequest(MessageRequestDto),
     MessageStatus {
@@ -579,6 +622,7 @@ pub enum _BridgeEvent {
         by_peer: bool,
     },
     TogetherShare(TogetherShareDto),
+    AttachmentHandoff(AttachmentHandoffDto),
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
         ledger: String,
@@ -774,6 +818,30 @@ pub async fn send_dm_reply(
     handles
         .send_dm_reply(&target, &content, reply_to.as_deref())
         .await
+}
+
+/// React to a message in `peer`'s thread — or take an existing reaction back by
+/// passing the same emoji again. Returns the reaction now standing, or `None` if
+/// the tap withdrew one.
+///
+/// The toggle is decided on the Rust side (see `ComradeRuntime::toggle_reaction`)
+/// so this frontend and Android cannot disagree about what tapping an
+/// already-sent emoji means.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn toggle_reaction(
+    peer: String,
+    target_id: String,
+    emoji: String,
+) -> Result<Option<ReactionDto>, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.toggle_reaction(&peer, &target_id, &emoji).await
+}
+
+/// Every reaction in `peer`'s conversation, oldest first, read from the encrypted
+/// store — so a thread opens with its reactions already drawn.
+pub async fn reactions(peer: String) -> Result<Vec<ReactionDto>, UiError> {
+    runtime().read().await.reactions(&peer)
 }
 
 /// Retry every DM sitting in the sender outbox because no relay would take it.
@@ -1087,12 +1155,17 @@ pub fn share_classify_path(local_type: String, remote_type: String) -> IcePathKi
 }
 
 /// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+///
+/// `consent_granted` answers a question a previous call asked by returning
+/// `NeedsConsent`. It can only turn that into `Allow`; a refusal stays refused
+/// however insistently a frontend claims consent.
 pub fn share_transfer_verdict(
     path: IcePathKind,
     total_bytes: u64,
     policy: RelayPolicy,
+    consent_granted: bool,
 ) -> TransferVerdict {
-    comrade_core::share::transport::decide(path, total_bytes, policy)
+    comrade_core::share::transport::decide_with_consent(path, total_bytes, policy, consent_granted)
 }
 
 /// Whether a transfer connection built under `policy` may be offered TURN.

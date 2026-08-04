@@ -5,6 +5,9 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.roundToInt
 
 /**
  * The wrist-style haptic behind [BreathingScreen] — a swell that rises as you
@@ -90,13 +93,44 @@ object BreathHaptics {
     }
 
     /**
-     * Amplitude of `step` on a rising ramp, linearly interpolated between
+     * The shape of a breath, as 0..1 over 0..1 — **and the one place it is
+     * written down.**
+     *
+     * `BreathingScreen` builds its animation easing straight out of this
+     * function, so the circle on screen and the buzz in the hand are not merely
+     * intended to match: they cannot diverge without this returning something
+     * different to both. That mattered enough to unify, because the previous
+     * curve was a straight line in both places and a straight line is what made
+     * the motion feel mechanical — the circle shrank at a constant rate and then
+     * stopped dead at the settle, reported as the change from out-breath to
+     * settle "not being natural".
+     *
+     * Sinusoidal ease-in-out: velocity is zero at both ends and greatest in the
+     * middle. That is not a stylistic pick — airflow through a real breath has
+     * very nearly this profile, which is why a breath has no sharp edge where it
+     * turns around. It also makes the phase boundary forgiving: the circle is
+     * barely moving as it arrives at full or empty, so the snap the holds perform
+     * has almost nothing left to absorb.
+     */
+    fun curve(fraction: Float): Float {
+        val clamped = fraction.coerceIn(0f, 1f)
+        return ((1.0 - cos(PI * clamped)) / 2.0).toFloat()
+    }
+
+    /**
+     * Amplitude of `step` on a rising ramp, following [curve] between
      * [MIN_AMPLITUDE] and [MAX_AMPLITUDE] and never leaving 1..255 — the
      * platform throws on anything outside that.
+     *
+     * Still strictly monotonic despite the curve flattening at both ends: over
+     * [STEPS] steps and this amplitude span the smallest increment is 1, which
+     * [BreathHapticsTest] pins, because an eased ramp that repeated a value would
+     * feel like a stall rather than a swell.
      */
     private fun amplitudeAt(step: Int): Int {
-        val span = (MAX_AMPLITUDE - MIN_AMPLITUDE).toLong()
-        val value = MIN_AMPLITUDE + (span * step / (STEPS - 1)).toInt()
+        val span = (MAX_AMPLITUDE - MIN_AMPLITUDE).toFloat()
+        val fraction = step.toFloat() / (STEPS - 1)
+        val value = MIN_AMPLITUDE + (span * curve(fraction)).roundToInt()
         return value.coerceIn(1, 255)
     }
 

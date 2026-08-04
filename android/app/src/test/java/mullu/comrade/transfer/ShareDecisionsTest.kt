@@ -1,7 +1,8 @@
-package mullu.comrade.together
+package mullu.comrade.transfer
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -61,6 +62,53 @@ class ShareDecisionsTest {
         assertFalse("and is not padded to full", ShareDecisions.chunkFrameFits(250, 100, 2, 100))
         assertFalse(ShareDecisions.chunkFrameFits(250, 100, 0, 99))
         assertFalse("past the end of the file", ShareDecisions.chunkFrameFits(250, 100, 3, 100))
+    }
+
+    // ── Where an incoming file lands ────────────────────────
+
+    @Test
+    fun `an incoming file is named after what it contains`() {
+        val sha = "a".repeat(64)
+        assertEquals("$sha.bin", ShareDecisions.incomingFileName(sha))
+        // Content-addressed, so two handovers in one session cannot land on
+        // each other the way one fixed name did.
+        assertNotEquals(
+            ShareDecisions.incomingFileName("a".repeat(64)),
+            ShareDecisions.incomingFileName("b".repeat(64)),
+        )
+    }
+
+    /**
+     * The hash arrives in an offer from the other device, and it is used to
+     * build a path. A peer must not be able to choose where their file lands.
+     */
+    @Test
+    fun `a peer cannot steer their file out of the directory meant for it`() {
+        for (hostile in listOf(
+            "../../databases/comrade",
+            "/etc/passwd",
+            "..",
+            "a/../../b",
+            "abc .bin",
+        )) {
+            val name = ShareDecisions.incomingFileName(hostile)
+            assertFalse("$hostile escaped", name.contains('/'))
+            assertFalse("$hostile escaped", name.contains('\\'))
+            assertFalse("$hostile kept a traversal", name.contains(".."))
+            assertTrue("$hostile lost its extension", name.endsWith(".bin"))
+        }
+    }
+
+    @Test
+    fun `a hash with nothing usable in it still names a file`() {
+        assertEquals("incoming.bin", ShareDecisions.incomingFileName(""))
+        assertEquals("incoming.bin", ShareDecisions.incomingFileName("zzz///"))
+    }
+
+    @Test
+    fun `an overlong hash cannot choose a name the filesystem will refuse`() {
+        val name = ShareDecisions.incomingFileName("f".repeat(4096))
+        assertEquals(64 + ".bin".length, name.length)
     }
 
     // ── The tracker ─────────────────────────────────────────────────────────

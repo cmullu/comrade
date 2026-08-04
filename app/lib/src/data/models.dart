@@ -239,6 +239,35 @@ class MediaMessageInfo {
   final bool outgoing;
 }
 
+/// One person's emoji reaction to one message.
+///
+/// Flat rather than "a message plus its reactions" because reactions arrive
+/// independently of the message they are about — a reaction can outrun the
+/// backfill of its target — so the UI joins them by [targetId], the same way it
+/// resolves a `replyTo` into a quoted preview.
+class ReactionInfo {
+  const ReactionInfo({
+    required this.targetId,
+    required this.peer,
+    required this.reactor,
+    required this.emoji,
+    required this.createdAt,
+    required this.outgoing,
+  });
+
+  /// Event id of the message reacted to — a text message or an attachment.
+  final String targetId;
+  final String peer;
+  final String reactor;
+
+  /// Empty on a withdrawal, which is how the wire says "I take mine back".
+  final String emoji;
+  final int createdAt;
+
+  /// Whether *this device* sent it, so the UI can highlight your own.
+  final bool outgoing;
+}
+
 /// Decrypted attachment bytes.
 ///
 /// The Kotlin/JS bridges both carried base64; the repository interface takes
@@ -491,6 +520,16 @@ class IncomingDirectMessage extends BridgeEvent {
 class IncomingMedia extends BridgeEvent {
   const IncomingMedia(this.media);
   final MediaMessageInfo media;
+}
+
+/// A peer reacted to a message, changed their reaction, or took it back — an
+/// empty [ReactionInfo.emoji] is the withdrawal.
+///
+/// Emitted only when the visible state actually changed, so a replay off the
+/// two-day gift-wrap backfill redraws nothing.
+class IncomingReaction extends BridgeEvent {
+  const IncomingReaction(this.reaction);
+  final ReactionInfo reaction;
 }
 
 class IncomingMessageRequest extends BridgeEvent {

@@ -70,6 +70,7 @@ use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
+use comrade_core::handoff::{AttachmentRoute, HandoffSignal};
 use comrade_core::share::transport::RelayPolicy;
 use comrade_core::share::ShareSignal;
 use comrade_core::together::{MusicLink, Recording, TogetherContent};
@@ -80,8 +81,8 @@ use comrade_ui::{
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
     MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PlayTargetDto,
-    PresenceDto, ProfileDto, ReadingDto, ShareVerdictDto, TaraMessageDto, TaskDto, TaskState,
-    TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    PresenceDto, ProfileDto, ReactionDto, ReadingDto, ShareVerdictDto, TaraMessageDto, TaskDto,
+    TaskState, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -183,6 +184,30 @@ pub struct WorkspaceKeyLabel {
 
 /// Every workspace discriminant and its label — a stable, store-free list
 /// (contrast [`Comrade::workspaces`], which also reports which one is active).
+/// Which road an attachment of this size takes — hosted, or straight to the
+/// other device.
+///
+/// Exported rather than reimplemented per frontend because the two roads have
+/// different failure modes a person has to be told about, and a UI that guessed
+/// the threshold would eventually guess it differently from the core that
+/// enforces it. See `comrade_core::handoff::route_for_bytes`.
+#[uniffi::export]
+pub fn attachment_route_for_bytes(total_bytes: u64) -> AttachmentRoute {
+    comrade_core::handoff::route_for_bytes(total_bytes)
+}
+
+/// A fresh id scoping every signal of one attachment handoff.
+///
+/// Exported rather than minted per frontend because the id *is* the replay
+/// guard: 128 bits from the same CSPRNG everywhere, so no frontend can weaken it
+/// to a counter or a timestamp that a third party could predict and use to
+/// inject an `Accept` for a transfer nobody offered. See
+/// `comrade_core::handoff::new_transfer_id`.
+#[uniffi::export]
+pub fn new_attachment_transfer_id() -> String {
+    comrade_core::handoff::new_transfer_id()
+}
+
 #[uniffi::export]
 pub fn all_workspaces() -> Vec<WorkspaceKeyLabel> {
     AppWorkspace::all()
@@ -542,6 +567,31 @@ impl Comrade {
         handles
             .send_dm_reply(&target, &content, reply_to.as_deref())
             .await
+    }
+
+    /// React to a message in `peer`'s thread with `emoji` — or take an existing
+    /// reaction back by passing the same emoji again. Returns the reaction now
+    /// standing, or `None` if the tap withdrew one.
+    ///
+    /// The toggle is decided on the Rust side (see
+    /// `ComradeRuntime::toggle_reaction`) so the two frontends cannot disagree
+    /// about what tapping an already-sent emoji means.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn toggle_reaction(
+        &self,
+        peer: String,
+        target_id: String,
+        emoji: String,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.toggle_reaction(&peer, &target_id, &emoji).await
+    }
+
+    /// Every reaction in `peer`'s conversation, oldest first, from the encrypted
+    /// store — so a thread opens with its reactions already drawn.
+    pub fn reactions(&self, peer: String) -> Result<Vec<ReactionDto>, UiError> {
+        self.inner.blocking_read().reactions(&peer)
     }
 
     /// Retry every DM sitting in the sender outbox because no relay would take
@@ -1109,15 +1159,38 @@ impl Comrade {
         handles.together_share(signal).await
     }
 
+    /// Send one step of handing a **large attachment** over — the road a file
+    /// takes when it is past [`comrade_core::media::MAX_MEDIA_BYTES`] and the
+    /// hosted path cannot carry it.
+    ///
+    /// Deliberately not [`Self::together_share`]: that one refuses outside a live
+    /// watch-together session, which is right for a playhead and wrong here —
+    /// nobody starts a listening session to send a video file. The gate a handoff
+    /// gets instead is on receipt, and it is the same one a call signal clears.
+    /// See `comrade_core::handoff`.
+    pub async fn attachment_handoff_send(
+        &self,
+        peer: String,
+        transfer_id: String,
+        signal: HandoffSignal,
+    ) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .attachment_handoff_send(&peer, &transfer_id, signal)
+            .await
+    }
+
     /// What this device does when the only path a transfer could take is
     /// somebody else's relay.
     pub fn share_relay_policy(&self) -> RelayPolicy {
         self.inner.blocking_read().share_relay_policy()
     }
 
-    /// Change it. Takes effect on the next transfer connection.
-    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
-        self.inner.blocking_read().set_share_relay_policy(policy);
+    /// Change it, and remember it. Takes effect on the next transfer
+    /// connection. Errors if the vault is locked — the choice still holds for
+    /// this process, but it could not be written down.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) -> Result<(), UiError> {
+        self.inner.blocking_read().set_share_relay_policy(policy)
     }
 
     /// Whether a transfer connection may be given TURN servers at all. Under
@@ -1139,11 +1212,13 @@ impl Comrade {
         local_candidate_type: String,
         remote_candidate_type: String,
         total_bytes: u64,
+        consent_granted: bool,
     ) -> ShareVerdictDto {
         self.inner.blocking_read().share_transfer_verdict(
             &local_candidate_type,
             &remote_candidate_type,
             total_bytes,
+            consent_granted,
         )
     }
 

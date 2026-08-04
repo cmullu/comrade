@@ -9,6 +9,7 @@ import '../data/comrade_repository.dart';
 import '../data/models.dart';
 import '../util/attachment_caption.dart';
 import '../util/chat_thread.dart';
+import '../util/message_reactions.dart';
 import 'providers.dart';
 
 // ── Chat list ───────────────────────────────────────────────────────────────
@@ -242,6 +243,7 @@ class ConversationState {
     this.messages = const <MessageInfo>[],
     this.media = const <MediaMessageInfo>[],
     this.items = const <ChatItem>[],
+    this.reactions = const <ReactionInfo>[],
     this.replyingTo,
     this.sending = false,
     this.attaching = false,
@@ -252,6 +254,11 @@ class ConversationState {
   final List<MessageInfo> messages;
   final List<MediaMessageInfo> media;
   final List<ChatItem> items;
+
+  /// Every reaction in this thread, oldest first. Flat rather than attached to
+  /// each message because a reaction can arrive before the message it names —
+  /// `chipsFor` joins them by target id, exactly as [quoted] joins a reply.
+  final List<ReactionInfo> reactions;
 
   /// [ChatItem.key] of the first message the reader had not seen when they
   /// opened this thread, or null for "nothing unread".
@@ -284,9 +291,40 @@ class ConversationState {
     return null;
   }
 
+  /// The chips to draw under the message with event id [targetId].
+  ///
+  /// `outgoing` is the "yours" marker rather than the local npub, which no screen
+  /// has any reason to hold: the core already recorded which rows this device
+  /// sent, so every outgoing row collapses to [mineReactor] and the comparison
+  /// cannot be got wrong.
+  List<ReactionChip> chipsFor(String targetId) => summariseReactions(
+        <ReactionRow>[
+          for (final ReactionInfo r in reactions)
+            if (r.targetId == targetId)
+              ReactionRow(
+                targetId: r.targetId,
+                reactor: r.outgoing ? mineReactor : r.reactor,
+                emoji: r.emoji,
+              ),
+        ],
+        mineReactor,
+      );
+
+  /// The emoji this device has on [targetId], if any — the highlight in the
+  /// long-press sheet, so it is visible that tapping it again removes it.
+  String? myReaction(String targetId) {
+    for (final ReactionInfo r in reactions) {
+      if (r.targetId == targetId && r.outgoing && r.emoji.isNotEmpty) {
+        return r.emoji;
+      }
+    }
+    return null;
+  }
+
   ConversationState copyWith({
     List<MessageInfo>? messages,
     List<MediaMessageInfo>? media,
+    List<ReactionInfo>? reactions,
     ChatItem? replyingTo,
     bool clearReplyingTo = false,
     bool? sending,
@@ -302,6 +340,7 @@ class ConversationState {
       items: (messages != null || media != null)
           ? mergeChatItems(nextMessages, nextMedia)
           : items,
+      reactions: reactions ?? this.reactions,
       replyingTo: clearReplyingTo ? null : (replyingTo ?? this.replyingTo),
       sending: sending ?? this.sending,
       attaching: attaching ?? this.attaching,
@@ -330,6 +369,8 @@ class ConversationController
           message.peer == _peer,
         IncomingMedia(:final MediaMessageInfo media) => media.sender == _peer,
         MessageStatusChanged(:final String peer) => peer == _peer,
+        IncomingReaction(:final ReactionInfo reaction) =>
+          reaction.peer == _peer,
         _ => false,
       },
       onEvent: (BridgeEvent e) => _applyEvent(e),
@@ -338,6 +379,14 @@ class ConversationController
     final ComradeRepository repo = ref.watch(comradeRepositoryProvider);
     final List<MessageInfo> messages = await repo.messages(_peer);
     final List<MediaMessageInfo> media = await repo.media(_peer);
+    // A failure here costs the chips, not the thread: reactions are decoration
+    // on a conversation that has to open either way.
+    List<ReactionInfo> reactions = const <ReactionInfo>[];
+    try {
+      reactions = await repo.reactions(_peer);
+    } on ComradeException catch (_) {
+      reactions = const <ReactionInfo>[];
+    }
     final List<ChatItem> items = mergeChatItems(messages, media);
     // Opening the thread marks it read (sends a read receipt) *and* reports
     // where the reader had got to, which is what the thread opens at. Awaited
@@ -361,6 +410,7 @@ class ConversationController
       messages: messages,
       media: media,
       items: items,
+      reactions: reactions,
       unreadBoundaryKey: firstUnread == null ? null : items[firstUnread].key,
     );
   }
@@ -437,8 +487,57 @@ class ConversationController
         if (changed) {
           state = AsyncData<ConversationState>(_state.copyWith(messages: next));
         }
+      case IncomingReaction(:final ReactionInfo reaction):
+        _applyReaction(reaction);
       default:
         break;
+    }
+  }
+
+  /// Fold one incoming reaction into the thread, replacing that person's previous
+  /// reaction on that message rather than adding to it — the same
+  /// one-per-person-per-message rule the store enforces, applied here so the live
+  /// path and a reload cannot disagree about what is on screen.
+  ///
+  /// An empty emoji is the withdrawal, and drops the row entirely.
+  void _applyReaction(ReactionInfo reaction) {
+    final List<ReactionInfo> next = <ReactionInfo>[
+      for (final ReactionInfo r in _state.reactions)
+        if (!(r.targetId == reaction.targetId && r.reactor == reaction.reactor))
+          r,
+      if (reaction.emoji.isNotEmpty) reaction,
+    ];
+    state = AsyncData<ConversationState>(_state.copyWith(reactions: next));
+  }
+
+  /// React to [item], or take an existing reaction back by passing the emoji this
+  /// device already sent.
+  ///
+  /// The core decides which of the three happened (add / replace / withdraw) and
+  /// returns the reaction now standing, so this does not re-derive it — that rule
+  /// exists in exactly one place on purpose. On failure the thread is left as it
+  /// was and the error surfaces, because a chip that appears and then silently
+  /// is not there is worse than one that never appeared.
+  Future<void> toggleReaction(ChatItem item, String emoji) async {
+    try {
+      final ReactionInfo? now = await ref
+          .read(comradeRepositoryProvider)
+          .toggleReaction(peer: _peer, targetId: item.id, emoji: emoji);
+      // Our own rows are identified by `outgoing`, not by npub: this screen has
+      // no reason to hold the local key, and a withdrawal comes back as null with
+      // no row to read an author off. There is at most one outgoing row per
+      // message, so dropping them all and re-adding is exact rather than a
+      // heuristic.
+      final List<ReactionInfo> next = <ReactionInfo>[
+        for (final ReactionInfo r in _state.reactions)
+          if (!(r.targetId == item.id && r.outgoing)) r,
+        if (now != null) now,
+      ];
+      state = AsyncData<ConversationState>(_state.copyWith(reactions: next));
+    } on ComradeException catch (e) {
+      // Left as it was: a chip that appears and then silently is not there reads
+      // as a bug, where an error at least says the reaction did not happen.
+      state = AsyncData<ConversationState>(_state.copyWith(error: e.message));
     }
   }
 

@@ -143,6 +143,40 @@ void main() {
     });
   });
 
+  group('peerToPeerAttachmentRejection', () {
+    test('the other road has no ceiling to refuse against', () {
+      // The 10 MB limit is what the hosted path can encrypt and what a Blossom
+      // operator will take; neither applies device to device.
+      expect(
+        peerToPeerAttachmentRejection(
+          name: 'holiday.mp4',
+          bytes: maxAttachmentBytes + 1,
+        ),
+        isNull,
+      );
+      expect(
+        peerToPeerAttachmentRejection(
+          name: 'holiday.mp4',
+          bytes: 4 * 1024 * 1024 * 1024,
+        ),
+        isNull,
+      );
+    });
+
+    test('an empty file is still refused', () {
+      // Not a size problem: a cancelled camera hands back zero bytes, and they
+      // are unopenable however they travel.
+      expect(
+        peerToPeerAttachmentRejection(name: 'cap.jpg', bytes: 0),
+        '"cap.jpg" is empty — there is nothing to send.',
+      );
+      expect(
+        peerToPeerAttachmentRejection(name: '  ', bytes: -1),
+        'That file is empty — there is nothing to send.',
+      );
+    });
+  });
+
   group('attachmentPreviewKind', () {
     test('is what the preview sheet renders', () {
       expect(attachmentPreviewKind('image/png'), AttachmentPreviewKind.image);

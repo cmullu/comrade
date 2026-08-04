@@ -29,6 +29,21 @@ object Notifier {
     const val CHANNEL_REQUESTS = "comrade_requests"
 
     /**
+     * Messages and requests that arrived during Comrade's own quiet hours.
+     *
+     * A separate channel rather than a flag, because on Android O+ the channel
+     * is the only thing that actually governs sound: a `setSilent(true)` on a
+     * builder posting to an `IMPORTANCE_HIGH` channel is advisory at best. This
+     * one is `IMPORTANCE_LOW`, so a message that lands at 02:00 reaches the
+     * shade — and waits there — without making a sound.
+     *
+     * It exists because the alternative shipped for a while: quiet hours used to
+     * mean *no notification at all*, so a message sent overnight was invisible
+     * until the app was next opened. See [NotifyDecision.Silent].
+     */
+    const val CHANNEL_MESSAGES_QUIET = "comrade_messages_quiet"
+
+    /**
      * `_v2`: channel settings (including sound) are sticky once created — the
      * OS never lets an app change them after the fact, so an existing install
      * would keep its original ringtone forever. Bumping the id is what makes
@@ -93,6 +108,19 @@ object Notifier {
                 "Message requests",
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply { description = "Messages from people you haven't accepted yet" },
+        )
+        mgr.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_MESSAGES_QUIET,
+                "Messages during quiet hours",
+                // LOW is the whole point: it reaches the shade and stays there
+                // without a sound, which is what "quiet" should have always meant.
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "Messages that arrived inside your quiet hours — delivered without a sound"
+                setSound(null, null)
+                enableVibration(false)
+            },
         )
         mgr.createNotificationChannel(
             NotificationChannel(
@@ -197,20 +225,56 @@ object Notifier {
      * A new encrypted DM from an accepted conversation. Tapping it opens that
      * conversation.
      *
-     * Callers decide *whether* to notify — [NotificationPolicy.shouldNotifyMessage]
-     * holds that rule (the thread on screen, and per-conversation mute) so it is
-     * testable and identical for DMs and attachments.
+     * Callers decide *whether* to notify — [NotificationPolicy.messageDecision]
+     * holds that rule (the thread on screen, per-conversation mute, and the
+     * nightly quiet window) so it is testable and identical for DMs and
+     * attachments. [silent] is that decision's [NotifyDecision.Silent] arm: same
+     * notification, posted on [CHANNEL_MESSAGES_QUIET] so it makes no sound.
+     *
+     * Rendered with [NotificationCompat.MessagingStyle], which is what makes a
+     * *conversation* rather than a single line. The per-peer notification id is
+     * stable — that part was always right — but with only `setContentText` to
+     * work with, each message overwrote the last, so two messages from one peer
+     * showed as one and the earlier text was simply gone from the shade.
+     * [MessageShade] keeps the recent lines so every re-post carries the whole
+     * exchange, and Android renders it as the sender's conversation.
      */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
-    fun notifyMessage(context: Context, peer: String, title: String, preview: String) {
+    fun notifyMessage(
+        context: Context,
+        peer: String,
+        title: String,
+        preview: String,
+        silent: Boolean = false,
+    ) {
         if (!canPost(context)) return
-        val n = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
+        val label = title.ifBlank { shortNpub(peer) }
+        val now = System.currentTimeMillis()
+        val lines = MessageShade.record(peer, ShadeLine(preview, now))
+        val sender = Person.Builder().setName(label).setKey(peer).build()
+        // The "you" of the conversation. Named from a string resource rather
+        // than the user's own handle: the handle is identifying, and this label
+        // is only ever drawn next to messages we sent, which there are none of
+        // here.
+        val self = Person.Builder().setName(context.getString(R.string.notification_you)).build()
+        val style = NotificationCompat.MessagingStyle(self)
+        for (line in lines) style.addMessage(line.text, line.atMs, sender)
+        val channel = if (silent) CHANNEL_MESSAGES_QUIET else CHANNEL_MESSAGES
+        val n = NotificationCompat.Builder(context, channel)
             .setSmallIcon(android.R.drawable.sym_action_chat)
-            .setContentTitle(title.ifBlank { shortNpub(peer) })
+            // Kept for platforms and launchers that ignore the style.
+            .setContentTitle(label)
             .setContentText(preview)
+            .setStyle(style)
+            .addPerson(sender)
+            .setWhen(now)
+            .setShowWhen(true)
             .setAutoCancel(true)
             .setGroup(GROUP_MESSAGES)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            // Belt-and-braces with the channel: on pre-O the channel does not
+            // exist and this flag is the only thing that keeps a quiet hour quiet.
+            .setSilent(silent)
             .setContentIntent(openAppIntent(context, peer = peer))
             .build()
         val mgr = NotificationManagerCompat.from(context)
@@ -222,6 +286,12 @@ object Notifier {
     /**
      * The group summary for message notifications. Needed for them to collapse
      * into one entry rather than stack; carries no message content of its own.
+     *
+     * Always silent. It is re-posted on every message, and without that it
+     * alerted alongside the child that actually had something to say — so one
+     * arriving message made the phone sound twice. The child is what alerts;
+     * this is only the thing that keeps two conversations from becoming two
+     * separate shade entries.
      */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
     private fun postMessageSummary(context: Context) {
@@ -230,6 +300,8 @@ object Notifier {
             .setContentTitle(context.getString(R.string.notification_messages_summary))
             .setGroup(GROUP_MESSAGES)
             .setGroupSummary(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(openAppIntent(context))
@@ -257,13 +329,17 @@ object Notifier {
      * request is accepted.
      */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
-    fun notifyRequest(context: Context, peer: String, preview: String) {
+    fun notifyRequest(context: Context, peer: String, preview: String, silent: Boolean = false) {
         if (!canPost(context)) return
-        val n = NotificationCompat.Builder(context, CHANNEL_REQUESTS)
+        val n = NotificationCompat.Builder(
+            context,
+            if (silent) CHANNEL_MESSAGES_QUIET else CHANNEL_REQUESTS,
+        )
             .setSmallIcon(android.R.drawable.sym_action_chat)
             .setContentTitle("Message request")
             .setContentText(preview)
             .setAutoCancel(true)
+            .setSilent(silent)
             .setContentIntent(openAppIntent(context, screen = AppNavigation.SCREEN_REQUESTS))
             .build()
         NotificationManagerCompat.from(context).notify("req:$peer".hashCode(), n)
@@ -445,6 +521,9 @@ object Notifier {
     fun clearForPeer(context: Context, peer: String) {
         val mgr = NotificationManagerCompat.from(context)
         mgr.cancel(peer.hashCode())
+        // …and the lines behind it, or the next message would re-post a
+        // conversation the user has already read.
+        MessageShade.clear(peer)
         mgr.cancel("req:$peer".hashCode())
         mgr.cancel("call:$peer".hashCode())
         mgr.cancel("online:$peer".hashCode())

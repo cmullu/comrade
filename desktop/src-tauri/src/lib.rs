@@ -146,6 +146,10 @@ pub fn run() {
             commands::together_report_position,
             commands::together_session,
             commands::together_share,
+            // Large attachments (over the hosted cap) handed straight to the
+            // other device — `comrade_core::handoff`.
+            commands::attachment_route_for_bytes,
+            commands::attachment_handoff_send,
             commands::share_ice_servers,
             commands::share_transfer_verdict,
             commands::share_relay_policy,

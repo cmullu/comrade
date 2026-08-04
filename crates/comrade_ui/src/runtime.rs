@@ -47,7 +47,11 @@ use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
 use comrade_core::dak::{open_dm, seal_dm, MeshDm};
 use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
-use comrade_core::dm::{parse_profile_share, parse_receipt, ProfileShare, Receipt, ReceiptKind};
+use comrade_core::dm::{
+    parse_profile_share, parse_reaction, parse_receipt, ProfileShare, ReactionEnvelope, Receipt,
+    ReceiptKind, MAX_REACTION_BYTES,
+};
+use comrade_core::handoff::{parse_handoff_envelope, HandoffEnvelope, HandoffSignal};
 use comrade_core::karya::{
     new_task_id, parse_karya_envelope, render_task_line, KaryaEnvelope, Party, Task, TaskSignal,
     TaskState,
@@ -73,6 +77,37 @@ use comrade_core::share::transport::{
     self as share_transport, IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
 use comrade_core::share::ShareSignal;
+
+/// Read a stored [`SharePrefs`] back into a policy.
+///
+/// **An unrecognised string is [`RelayPolicy::DirectOnly`]**, not a panic and
+/// not `Always`. The value can only be wrong if an older or newer build wrote
+/// it, and the safe reading of "I do not know what this device agreed to" is
+/// the one that carries nobody's bytes but our own.
+fn relay_policy_from_prefs(prefs: &comrade_storage::SharePrefs) -> RelayPolicy {
+    match prefs.relay_policy.as_str() {
+        "under_bytes" => RelayPolicy::UnderBytes {
+            limit: prefs.relay_limit_bytes,
+        },
+        "ask_each_time" => RelayPolicy::AskEachTime,
+        "always" => RelayPolicy::Always,
+        _ => RelayPolicy::DirectOnly,
+    }
+}
+
+/// The inverse. Round-trips through [`relay_policy_from_prefs`] by test.
+fn relay_policy_to_prefs(policy: RelayPolicy) -> comrade_storage::SharePrefs {
+    let (name, limit) = match policy {
+        RelayPolicy::DirectOnly => ("direct_only", 0),
+        RelayPolicy::UnderBytes { limit } => ("under_bytes", limit),
+        RelayPolicy::AskEachTime => ("ask_each_time", 0),
+        RelayPolicy::Always => ("always", 0),
+    };
+    comrade_storage::SharePrefs {
+        relay_policy: name.to_string(),
+        relay_limit_bytes: limit,
+    }
+}
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
 use comrade_core::together::{
     command_apply, describe_state_change, heartbeat_interval_ms, parse_together_envelope,
@@ -260,6 +295,40 @@ impl ChitthiDto {
             content: c.content.clone(),
             created_at: c.created_at,
             reply_to: c.reply_to.clone(),
+        }
+    }
+}
+
+/// One person's emoji reaction to one message, as a frontend sees it.
+///
+/// Flat rather than "a message plus its reactions" because reactions arrive
+/// independently of the message they are about — a reaction can outrun the
+/// backfill of its target — so the UI joins them by [`Self::target_id`] the same
+/// way it already resolves a `reply_to` into a quoted preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ReactionDto {
+    /// Event id (hex) of the message reacted to. A text message or an
+    /// attachment — the reaction does not care which.
+    pub target_id: String,
+    /// The conversation it belongs to (the other party's npub).
+    pub peer: String,
+    /// Who reacted, as an npub.
+    pub reactor: String,
+    pub emoji: String,
+    pub created_at: u64,
+    /// Whether *this device* sent it, so the UI can highlight your own.
+    pub outgoing: bool,
+}
+
+impl From<comrade_storage::MessageReaction> for ReactionDto {
+    fn from(r: comrade_storage::MessageReaction) -> Self {
+        Self {
+            target_id: r.target_id,
+            peer: r.peer_npub,
+            reactor: r.reactor_npub,
+            emoji: r.emoji,
+            created_at: r.created_at,
+            outgoing: r.outgoing,
         }
     }
 }
@@ -532,6 +601,22 @@ pub struct PlayTargetDto {
     /// The recording the query names by words. `None` for a link, whose id
     /// names the thing and whose title is the player's to report.
     pub recording: Option<comrade_core::together::Recording>,
+}
+
+/// One step of handing a large attachment over, on its way to the frontend that
+/// owns the peer connection.
+///
+/// Same division of labour as [`TogetherShareDto`], for the same reason: WebRTC
+/// lives in the frontend, and mirroring the negotiation here as well would mean
+/// two state machines that have to agree — the shape of both call bugs this repo
+/// has already fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AttachmentHandoffDto {
+    /// Scopes every signal of one transfer. A signal naming a transfer the
+    /// frontend does not have is its to drop.
+    pub transfer_id: String,
+    pub peer: String,
+    pub signal: HandoffSignal,
 }
 
 /// Whether a transfer may run over the path ICE actually chose.
@@ -1194,6 +1279,11 @@ pub enum BridgeEvent {
     IncomingDirectMessage(DirectMessageDto),
     /// A new encrypted-media reference (NIP-94) arrived over the DM channel.
     IncomingMedia(MediaMessageDto),
+    /// A peer reacted to a message, changed their reaction, or took it back — an
+    /// empty [`ReactionDto::emoji`] is the withdrawal. Emitted only when the
+    /// visible state actually changed, so a replay off the two-day backfill does
+    /// not redraw anything.
+    IncomingReaction(ReactionDto),
     /// A call-signaling payload (offer/answer/ICE/hangup) arrived for the
     /// frontend's WebRTC layer.
     IncomingCallSignal(CallSignalDto),
@@ -1264,6 +1354,8 @@ pub enum BridgeEvent {
     /// protocol tweak, which is exactly the tax that keeps protocols from being
     /// tweaked.
     TogetherShare(TogetherShareDto),
+    /// One step of a large-attachment handoff from `peer`.
+    AttachmentHandoff(AttachmentHandoffDto),
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
     MeshStatusChanged(MeshStatusDto),
@@ -1521,6 +1613,16 @@ impl ComradeRuntime {
                     tracing::info!(restored, "restored queued messages from the outbox");
                 }
                 self.outbox = Arc::new(Outbox::from_snapshot(snapshot));
+            }
+        }
+
+        // The relay policy is a stored preference, so seed the in-memory cell
+        // the WebRTC callbacks read. It is deliberately *only* seeded here: a
+        // locked vault has no preference to read, and the cell's default is the
+        // refusing one, so a failure to load can only ever be conservative.
+        if let Some(store) = self.ui.store_ref() {
+            if let Ok(prefs) = store.load_share_prefs() {
+                *self.share_policy.lock().unwrap() = relay_policy_from_prefs(&prefs);
             }
         }
 
@@ -1979,6 +2081,36 @@ impl ComradeRuntime {
         self.handles()
             .send_dm_reply(target, content, reply_to)
             .await
+    }
+
+    /// React to a message in `peer`'s thread, or take an existing reaction back
+    /// by tapping the same emoji again. Returns the reaction now standing, or
+    /// `None` if the tap withdrew one.
+    ///
+    /// Delegates to [`RuntimeHandles::toggle_reaction`] — see [`Self::send_dm`]
+    /// for why the handle snapshot comes first, and that method for why the
+    /// toggle decision lives on this side of the FFI rather than in each frontend.
+    pub async fn toggle_reaction(
+        &self,
+        peer: &str,
+        target_id: &str,
+        emoji: &str,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        self.handles().toggle_reaction(peer, target_id, emoji).await
+    }
+
+    /// Every reaction in `peer`'s conversation, oldest first — read from the
+    /// encrypted store, so a thread opens with its reactions already on it rather
+    /// than waiting for a live event.
+    ///
+    /// Withdrawn reactions are not returned (the store keeps a tombstone to
+    /// refuse replays; see `EncryptedStore::set_reaction`).
+    pub fn reactions(&self, peer: &str) -> Result<Vec<ReactionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::StoreLocked)?;
+        let rows = store
+            .reactions_with(&to_npub(peer))
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(ReactionDto::from).collect())
     }
 
     /// Retry queued mail now. Delegates to [`RuntimeHandles::flush_outbox`] —
@@ -2609,12 +2741,26 @@ impl ComradeRuntime {
         *self.share_policy.lock().unwrap()
     }
 
-    /// Change it. The next transfer connection is built under the new policy;
-    /// one already running is not renegotiated, because tearing down a transfer
-    /// someone is watching from is a worse answer than letting it finish under
-    /// the rules it started with.
-    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
+    /// Change it, and remember it. The next transfer connection is built under
+    /// the new policy; one already running is not renegotiated, because tearing
+    /// down a transfer someone is watching from is a worse answer than letting
+    /// it finish under the rules it started with.
+    ///
+    /// The cell is updated even when the vault is locked, so a frontend can set
+    /// a policy for this session without one; it just will not survive the
+    /// process. Persistence failures are reported rather than swallowed —
+    /// silently forgetting a choice about someone else's bandwidth is the kind
+    /// of quiet default this codebase does not do.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) -> Result<(), UiError> {
         *self.share_policy.lock().unwrap() = policy;
+        let Some(store) = self.ui.store_ref() else {
+            return Err(UiError::VaultLocked);
+        };
+        let prefs = relay_policy_to_prefs(policy);
+        store
+            .save_share_prefs(&prefs)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))
     }
 
     /// Whether a transfer connection may be handed TURN servers at all.
@@ -2634,14 +2780,25 @@ impl ComradeRuntime {
     /// browser-supplied, so classification is lenient about case and spacing and
     /// anything it does not recognise becomes
     /// [`IcePathKind::Unknown`] — which is *refused*, never waved through.
+    ///
+    /// `consent_granted` is the answer to a question a *previous* call asked by
+    /// returning `needs_consent`; it can only ever turn that into `allow`, never
+    /// move a refusal — see [`share_transport::decide_with_consent`] for why
+    /// that asymmetry is load-bearing.
     pub fn share_transfer_verdict(
         &self,
         local_candidate_type: &str,
         remote_candidate_type: &str,
         total_bytes: u64,
+        consent_granted: bool,
     ) -> ShareVerdictDto {
         let path = IcePathKind::classify(local_candidate_type, remote_candidate_type);
-        let verdict = share_transport::decide(path, total_bytes, self.share_relay_policy());
+        let verdict = share_transport::decide_with_consent(
+            path,
+            total_bytes,
+            self.share_relay_policy(),
+            consent_granted,
+        );
         ShareVerdictDto {
             verdict: match verdict {
                 TransferVerdict::Allow => "allow",
@@ -4456,6 +4613,101 @@ impl RuntimeHandles {
         .await
     }
 
+    /// React to one of `peer`'s messages, or take an existing reaction back.
+    ///
+    /// **Toggling lives here, not in the frontends.** Tapping the emoji you
+    /// already sent means "remove it", and tapping a different one means
+    /// "replace"; deciding that needs the current reaction, which only this side
+    /// knows. Putting it here is what keeps Android and Flutter from each having
+    /// their own answer — and each having their own bug when the two disagree.
+    ///
+    /// Returns the reaction now standing, or `None` if the tap withdrew one.
+    ///
+    /// The local write happens **before** the send and is kept whatever the send
+    /// does, so the chip appears the moment it is tapped and survives being
+    /// offline. A reaction is deliberately **not** queued in the outbox on
+    /// failure, unlike a message: the outbox persists `StoredMessage` rows, so a
+    /// queued envelope would sit in the conversation as a JSON bubble, and a
+    /// reaction is worth much less than the retry machinery would cost.
+    /// The peer simply does not learn about it. That becomes worth revisiting if
+    /// the outbox ever grows a non-chat lane — at which point reactions should
+    /// use it.
+    pub async fn toggle_reaction(
+        &self,
+        peer: &str,
+        target_id: &str,
+        emoji: &str,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        if target_id.trim().is_empty() {
+            return Err(UiError::Engine("no message to react to".into()));
+        }
+        // The same bound the parser enforces on the way in, applied on the way
+        // out: this device must not send a peer something it would itself refuse.
+        if emoji.is_empty() || emoji.len() > MAX_REACTION_BYTES {
+            return Err(UiError::Engine(format!(
+                "a reaction must be 1..={MAX_REACTION_BYTES} bytes"
+            )));
+        }
+        let store = self.store.clone().ok_or(UiError::StoreLocked)?;
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer_pk = parse_pubkey(peer)?;
+        let peer_npub = to_npub(peer);
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+
+        let current = store
+            .reaction_by(target_id, &me)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        // Tapping what you already sent takes it back; anything else replaces.
+        let clearing = current.as_ref().map(|r| r.emoji.as_str()) == Some(emoji);
+        let next = if clearing { "" } else { emoji };
+        let created_at = now_secs();
+
+        let row = comrade_storage::MessageReaction {
+            target_id: target_id.to_string(),
+            peer_npub: peer_npub.clone(),
+            reactor_npub: me,
+            emoji: next.to_string(),
+            created_at,
+            outgoing: true,
+        };
+        store
+            .set_reaction(&row)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+
+        let json = ReactionEnvelope::new(target_id, next)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+
+        // Same transport precedence a message gets: the local mesh first when the
+        // user has asked for it, a relay otherwise — a reaction sent across the
+        // room should not need the internet either.
+        let plan = SendPlan::for_attempt(self.prefer_local, 0);
+        let local_id = local_message_id(&peer_npub, &json, created_at);
+        let on_mesh = plan.local_first
+            && self
+                .try_mesh(&peer_pk, &local_id, &json, None, created_at)
+                .await;
+        if !on_mesh || plan.force_both {
+            if let Err(e) = vault.send_dm(&peer_pk, &json).await {
+                if !plan.local_first {
+                    self.try_mesh(&peer_pk, &local_id, &json, None, created_at)
+                        .await;
+                }
+                // Logged, not returned: the local reaction stands either way, and
+                // failing the call would make the UI un-draw a chip the user just
+                // tapped over something they cannot act on.
+                tracing::info!(error = %e, "reaction could not be published");
+            }
+        }
+
+        Ok((!clearing).then(|| ReactionDto::from(row)))
+    }
+
     /// Park a message in the sender outbox under a locally minted id and
     /// persist the queue, failing the oldest entry if the peer's queue was
     /// full (it is gone, and must stop showing as pending).
@@ -5429,6 +5681,42 @@ impl RuntimeHandles {
     /// someone who never agreed to watch anything with you.
     pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
         self.send_together(TogetherSignal::Share { signal }).await
+    }
+
+    /// Carry one step of a large-attachment handoff to `peer`.
+    ///
+    /// Deliberately **not** routed through [`Self::send_together`]: that refuses
+    /// outside a live session, which is right for a playhead and wrong for an
+    /// attachment — nobody starts a watch-together session to send a video file.
+    /// The gate a handoff gets instead is the one on receipt
+    /// ([`IncomingGate::Accepted`]), which is the same bar a call signal has to
+    /// clear, and for the same reason: both open a peer connection and both leak
+    /// ICE candidates to whoever is on the other end. A stranger cannot get that
+    /// far, and an accepted contact still has to be told and still has to agree —
+    /// [`HandoffSignal::Accept`] comes from a person pressing a button, not from
+    /// this runtime.
+    ///
+    /// Relay-first, unlike a together signal. A handoff is a handful of messages
+    /// over the life of one transfer rather than a heartbeat every ten seconds,
+    /// so the mesh's latency advantage buys nothing here — and the mesh reaches
+    /// only the local network, where a large file would have found a `host`
+    /// candidate anyway.
+    pub async fn attachment_handoff_send(
+        &self,
+        peer: &str,
+        transfer_id: &str,
+        signal: HandoffSignal,
+    ) -> Result<(), UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer_pk = parse_pubkey(peer)?;
+        let json = HandoffEnvelope::new(transfer_id, signal)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        vault
+            .send_dm(&peer_pk, &json)
+            .await
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        Ok(())
     }
 
     /// One pass of the session loop: expire a session we have stopped hearing
@@ -7256,7 +7544,74 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 7) A task: named, or moved to a new state. Gated exactly like a call
+    // 6a) Handing a large attachment over. Gated identically to the together
+    //     envelope above and to a call signal — both of those also end in a peer
+    //     connection, and a stranger must not be able to make this device gather
+    //     ICE candidates for them. Returning either way, so an ungated one is
+    //     dropped rather than surfacing as a message request full of JSON.
+    //
+    //     No session to check against and no replay window to enforce here: the
+    //     `transfer_id` is the scope, and the frontend that owns the transfer is
+    //     the only thing that knows which ids are live. A signal for an id it
+    //     never started is its to ignore — which is also why a *sender-only*
+    //     signal arriving for a transfer this side started is checked there and
+    //     not here.
+    if let Some(env) = parse_handoff_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            let _ = tx.send(BridgeEvent::AttachmentHandoff(AttachmentHandoffDto {
+                transfer_id: env.transfer_id,
+                peer: peer_npub.clone(),
+                signal: env.signal,
+            }));
+        }
+        return;
+    }
+
+    // 7) Emoji reaction — a peer reacted to one of our messages (or to one of
+    //    theirs). Gated like a beacon and a nudge: a stranger must not be able to
+    //    decorate our messages before their request is accepted, and returning
+    //    either way keeps a reaction from an unaccepted peer from surfacing as a
+    //    message request full of JSON.
+    //
+    //    Not deduped by event id, and deliberately: the store's own timestamp
+    //    check is the stronger guard (it refuses a replay even when the replay
+    //    arrives under a *fresh* wrapper id, which the two-day backfill produces),
+    //    and it also collapses a reaction that reached us over both transports.
+    if let Some(env) = parse_reaction(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            if let Some(store) = store {
+                let row = comrade_storage::MessageReaction {
+                    target_id: env.target_id.clone(),
+                    peer_npub: peer_npub.clone(),
+                    reactor_npub: peer_npub.clone(),
+                    emoji: env.emoji.clone(),
+                    created_at: msg.created_at,
+                    outgoing: false,
+                };
+                match store
+                    .set_reaction(&row)
+                    .and_then(|c| store.flush().map(|()| c))
+                {
+                    // Only news redraws anything — a replay or a repeat is not.
+                    Ok(true) => {
+                        let _ = tx.send(BridgeEvent::IncomingReaction(ReactionDto {
+                            target_id: env.target_id,
+                            peer: peer_npub,
+                            reactor: row.reactor_npub,
+                            emoji: env.emoji,
+                            created_at: msg.created_at,
+                            outgoing: false,
+                        }));
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("failed to persist incoming reaction: {e}"),
+                }
+            }
+        }
+        return;
+    }
+
+    // 8) A task: named, or moved to a new state. Gated exactly like a call
     //    signal — a stranger who can write to your task list has been handed a
     //    harassment channel, and in an app about wellbeing that is worse than
     //    the feature is good. Returns either way, so an ungated one is dropped
@@ -7280,7 +7635,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 8) An offer — "I thought this might help". Gated like a task, and the
+    // 9) An offer — "I thought this might help". Gated like a task, and the
     //    action must be one this build actually has a screen for: a bubble
     //    naming a destination that does not exist here would be a button that
     //    goes nowhere.
@@ -7308,7 +7663,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 9) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 10) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         // Everything in the envelope is chosen by the peer. The MIME type
@@ -7376,7 +7731,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 10) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 11) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
     // A message can reach us twice by two routes — sealed over the local mesh
@@ -10188,6 +10543,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peers_reaction_lands_on_the_message_it_names() {
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        let now = now_secs();
+
+        let react = ReactionEnvelope::new("m1", "🔥").to_json().unwrap();
+        ingress.deliver(&hex, "r1", &react, now);
+        match rx.try_recv().unwrap() {
+            BridgeEvent::IncomingReaction(r) => {
+                assert_eq!(r.target_id, "m1");
+                assert_eq!(r.emoji, "🔥");
+                assert_eq!(r.peer, peer);
+                assert_eq!(r.reactor, peer);
+                assert!(!r.outgoing);
+            }
+            other => panic!("expected IncomingReaction, got {other:?}"),
+        }
+
+        // A reaction is a control envelope, never a chat bubble. Before the
+        // parser existed it would have fallen through to the plain-text branch
+        // and rendered as a message full of JSON.
+        assert!(
+            ingress.store.messages_with(&peer).unwrap().is_empty(),
+            "a reaction must not become a message"
+        );
+        assert_eq!(ingress.store.reactions_with(&peer).unwrap().len(), 1);
+
+        // Changing it replaces rather than stacks…
+        ingress.deliver(
+            &hex,
+            "r2",
+            &ReactionEnvelope::new("m1", "👍").to_json().unwrap(),
+            now + 1,
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::IncomingReaction(_)
+        ));
+        let rows = ingress.store.reactions_with(&peer).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one reaction per person per message: {rows:?}"
+        );
+        assert_eq!(rows[0].emoji, "👍");
+
+        // …and withdrawing it is an empty emoji, reported so the chip can go.
+        ingress.deliver(
+            &hex,
+            "r3",
+            &ReactionEnvelope::clearing("m1").to_json().unwrap(),
+            now + 2,
+        );
+        match rx.try_recv().unwrap() {
+            BridgeEvent::IncomingReaction(r) => assert!(r.emoji.is_empty()),
+            other => panic!("expected IncomingReaction, got {other:?}"),
+        }
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_reaction_redraws_nothing_even_under_a_fresh_wrapper_id() {
+        // The two-day gift-wrap backfill re-scans on every launch, and a replay
+        // can arrive under a *different* wrapper id than the first delivery — so
+        // event-id dedup alone would not catch this. The store's timestamp check
+        // is what does.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        let now = now_secs();
+
+        ingress.deliver(
+            &hex,
+            "r1",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(rx.try_recv().is_ok());
+
+        ingress.deliver(
+            &hex,
+            "r1-again",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a replayed reaction is not news, whatever wrapper it came in"
+        );
+
+        // And the sharper case: an older reaction replayed after a newer one
+        // must not resurrect itself.
+        ingress.deliver(
+            &hex,
+            "r2",
+            &ReactionEnvelope::new("m1", "👍").to_json().unwrap(),
+            now + 5,
+        );
+        assert!(rx.try_recv().is_ok());
+        ingress.deliver(
+            &hex,
+            "r1-replay",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(ingress.store.reactions_with(&peer).unwrap()[0].emoji, "👍");
+    }
+
+    #[tokio::test]
+    async fn a_stranger_cannot_react_before_their_request_is_accepted() {
+        // Same gate a beacon and a nudge sit behind: an unaccepted peer must not
+        // be able to decorate our messages, and must not surface as a message
+        // request full of JSON either.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        let now = now_secs();
+
+        ingress.deliver(
+            &hex,
+            "r1",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no event at all from an unaccepted peer"
+        );
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+        assert!(ingress.store.messages_with(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_reaction_is_not_mistaken_for_chat_text() {
+        // The parser refuses it (see `MAX_REACTION_BYTES`). The thing worth
+        // pinning is what happens *next*: falling through to the plain-text
+        // branch would put a wall of JSON in the conversation.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+
+        let huge = ReactionEnvelope::new("m1", "🔥".repeat(MAX_REACTION_BYTES))
+            .to_json()
+            .unwrap();
+        ingress.deliver(&hex, "r1", &huge, now_secs());
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+        // It does arrive as a message, which is the honest outcome for a payload
+        // this side cannot interpret — but it must not have been stored as a
+        // reaction, and it must not have raised a reaction event.
+        assert!(!matches!(
+            rx.try_recv(),
+            Ok(BridgeEvent::IncomingReaction(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn a_comrade_who_gave_up_on_a_message_is_announced_once() {
         let dir = TempDir::new().unwrap();
         let (ingress, mut rx) = Ingress::new(&dir).await;
@@ -11032,6 +11548,170 @@ mod tests {
         );
     }
 
+    // ── Handing a large attachment over ─────────────────────────────────────
+
+    fn handoff_json(transfer_id: &str, signal: HandoffSignal) -> String {
+        HandoffEnvelope::new(transfer_id, signal).to_json().unwrap()
+    }
+
+    fn an_attachment_offer() -> HandoffSignal {
+        HandoffSignal::Offer {
+            attachment: comrade_core::handoff::AttachmentHandoff {
+                shape: comrade_core::share::ShareOffer {
+                    total_bytes: 400 * 1024 * 1024,
+                    chunk_bytes: comrade_core::share::SHARE_CHUNK_BYTES,
+                    sha256: "c".repeat(64),
+                    duration_ms: 0,
+                },
+                mime_type: "video/mp4".into(),
+                file_name: "holiday.mp4".into(),
+                caption: "the last morning".into(),
+            },
+        }
+    }
+
+    /// The gate. A handoff has no session to hide behind, so the *only* thing
+    /// standing between a stranger and this device gathering ICE candidates for
+    /// them is the accepted-conversation check — the same one a call signal gets.
+    #[tokio::test]
+    async fn a_handoff_from_someone_not_accepted_negotiates_nothing() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        // Deliberately *not* `accepted_peer`: a pending request is the case.
+        let (hex, _peer) = stranger();
+
+        let body = handoff_json("t-stranger", an_attachment_offer());
+        let mut msg = incoming(&hex, "h1", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(
+            rx.try_recv().is_err(),
+            "an offer from a stranger reached the frontend"
+        );
+    }
+
+    /// And it must not fall through into the message-request bucket either: a
+    /// person should never see a chat request whose body is a wall of JSON.
+    #[tokio::test]
+    async fn an_ungated_handoff_is_dropped_rather_than_shown_as_a_request() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, _peer) = stranger();
+
+        let body = handoff_json("t-x", HandoffSignal::Accept);
+        let mut msg = incoming(&hex, "h2", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        match rx.try_recv() {
+            Err(_) => {}
+            Ok(BridgeEvent::IncomingMessageRequest(r)) => {
+                panic!("surfaced as a message request: {}", r.last_message)
+            }
+            Ok(other) => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// From an accepted contact it goes straight through, unchanged and with no
+    /// runtime-side transfer state — the frontend owns the peer connection, so it
+    /// owns which transfer ids are live.
+    #[tokio::test]
+    async fn a_handoff_from_an_accepted_contact_reaches_the_frontend_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let body = handoff_json("t-live", an_attachment_offer());
+        let mut msg = incoming(&hex, "h3", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+
+        let mut seen = None;
+        while let Ok(event) = rx.try_recv() {
+            if let BridgeEvent::AttachmentHandoff(dto) = event {
+                seen = Some(dto);
+            }
+        }
+        let dto = seen.expect("the handoff never reached the frontend");
+        assert_eq!(dto.transfer_id, "t-live");
+        assert_eq!(dto.peer, peer);
+        match dto.signal {
+            HandoffSignal::Offer { attachment } => {
+                // The whole point of the offer arriving first: 400 MB is a
+                // decision, and it is answerable before a byte moves.
+                assert_eq!(attachment.shape.total_bytes, 400 * 1024 * 1024);
+                assert_eq!(attachment.file_name, "holiday.mp4");
+                assert_eq!(attachment.caption, "the last morning");
+            }
+            other => panic!("signal changed in transit: {other:?}"),
+        }
+    }
+
+    /// A together envelope and a handoff envelope must not shadow each other:
+    /// both are JSON DM bodies, and whichever is parsed first would swallow the
+    /// other if the markers were not distinct.
+    #[tokio::test]
+    async fn a_together_envelope_is_not_mistaken_for_a_handoff() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s-not-a-handoff",
+            1,
+            TogetherSignal::Share {
+                signal: a_transfer_offer(),
+            },
+        );
+        let mut msg = incoming(&hex, "h4", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, BridgeEvent::AttachmentHandoff(_)),
+                "a together share was routed as an attachment handoff"
+            );
+        }
+    }
+
     /// Inside a session it goes straight through, unchanged. The runtime keeps
     /// no transfer state on purpose — see [`TogetherShareDto`].
     #[tokio::test]
@@ -11172,7 +11852,7 @@ mod tests {
             !rt.share_ice_servers_allowed(),
             "a direct-only transfer connection must not be handed TURN"
         );
-        let v = rt.share_transfer_verdict("relay", "host", 8_000_000_000);
+        let v = rt.share_transfer_verdict("relay", "host", 8_000_000_000, false);
         assert_eq!(v.verdict, "refuse");
         assert_eq!(v.path, "relay");
         assert_eq!(v.reason, Some(RefusalReason::RelayForbidden));
@@ -11182,7 +11862,7 @@ mod tests {
     #[test]
     fn a_path_ice_has_not_settled_on_is_refused_rather_than_assumed_direct() {
         let rt = ComradeRuntime::new();
-        let v = rt.share_transfer_verdict("", "", 1);
+        let v = rt.share_transfer_verdict("", "", 1, false);
         assert_eq!(v.path, "unknown");
         assert_eq!(v.reason, Some(RefusalReason::PathUnknown));
     }
@@ -11194,7 +11874,8 @@ mod tests {
         let rt = ComradeRuntime::new();
         for (local, remote) in [("host", "host"), ("srflx", "host"), ("srflx", "srflx")] {
             assert_eq!(
-                rt.share_transfer_verdict(local, remote, u64::MAX).verdict,
+                rt.share_transfer_verdict(local, remote, u64::MAX, false)
+                    .verdict,
                 "allow",
                 "{local}/{remote}"
             );
@@ -11204,31 +11885,134 @@ mod tests {
     #[test]
     fn changing_the_policy_changes_the_answer_and_the_ice_list_together() {
         let rt = ComradeRuntime::new();
-        rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10_000_000 });
+        // No store attached, so the choice holds for this process and says so
+        // rather than reporting a save that did not happen.
+        assert!(matches!(
+            rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10_000_000 }),
+            Err(UiError::VaultLocked)
+        ));
+        assert_eq!(
+            rt.share_relay_policy(),
+            RelayPolicy::UnderBytes { limit: 10_000_000 },
+            "the cell still took the change"
+        );
         assert!(
             rt.share_ice_servers_allowed(),
             "a policy that can use a relay must be allowed to gather one"
         );
         assert_eq!(
-            rt.share_transfer_verdict("relay", "host", 9_000_000)
+            rt.share_transfer_verdict("relay", "host", 9_000_000, false)
                 .verdict,
             "allow"
         );
-        let big = rt.share_transfer_verdict("relay", "host", 11_000_000);
+        let big = rt.share_transfer_verdict("relay", "host", 11_000_000, false);
         assert_eq!(big.verdict, "refuse");
         assert_eq!(
             big.reason,
             Some(RefusalReason::TooLargeForRelay { limit: 10_000_000 })
         );
 
-        rt.set_share_relay_policy(RelayPolicy::AskEachTime);
-        let ask = rt.share_transfer_verdict("relay", "relay", 500);
+        let _ = rt.set_share_relay_policy(RelayPolicy::AskEachTime);
+        let ask = rt.share_transfer_verdict("relay", "relay", 500, false);
         assert_eq!(ask.verdict, "needs_consent");
         assert_eq!(
             ask.relayed_bytes,
             Some(500),
             "the question has to be able to name the size"
         );
+    }
+
+    /// The consent loop end to end: the runtime asks, the frontend answers,
+    /// and the same call that asked now allows.
+    #[test]
+    fn a_yes_is_carried_back_into_the_call_that_asked_for_it() {
+        let rt = ComradeRuntime::new();
+        let _ = rt.set_share_relay_policy(RelayPolicy::AskEachTime);
+        let asked = rt.share_transfer_verdict("relay", "relay", 500, false);
+        assert_eq!(asked.verdict, "needs_consent");
+        assert_eq!(
+            rt.share_transfer_verdict("relay", "relay", 500, true)
+                .verdict,
+            "allow"
+        );
+    }
+
+    /// The frontend is the least trustworthy caller this policy has, so the one
+    /// thing it must not be able to do is talk its way past a refusal.
+    #[test]
+    fn a_frontend_claiming_consent_cannot_talk_past_a_refusal() {
+        let rt = ComradeRuntime::new();
+        // Default policy: relayed bulk is refused outright, consent or not.
+        let v = rt.share_transfer_verdict("relay", "host", 1_000, true);
+        assert_eq!(v.verdict, "refuse");
+        assert_eq!(v.reason, Some(RefusalReason::RelayForbidden));
+
+        // Over the allowance: the refusal names a limit, and a yes does not
+        // raise it — changing the limit is a policy change, not a dialog.
+        let _ = rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10 });
+        let over = rt.share_transfer_verdict("relay", "host", 11, true);
+        assert_eq!(over.verdict, "refuse");
+        assert_eq!(
+            over.reason,
+            Some(RefusalReason::TooLargeForRelay { limit: 10 })
+        );
+
+        // And an unsettled path stays unsettled.
+        assert_eq!(
+            rt.share_transfer_verdict("", "", 1, true).reason,
+            Some(RefusalReason::PathUnknown)
+        );
+    }
+
+    /// Every policy survives a write and a read, so a choice made once is the
+    /// choice the next launch enforces.
+    #[tokio::test]
+    async fn a_relay_policy_outlives_the_process_that_chose_it() {
+        let dir = TempDir::new().unwrap();
+        for policy in [
+            RelayPolicy::UnderBytes { limit: 42 },
+            RelayPolicy::AskEachTime,
+            RelayPolicy::Always,
+            RelayPolicy::DirectOnly,
+        ] {
+            let mut rt = ComradeRuntime::new();
+            rt.unlock_vault(dir.path(), "pin").await.unwrap();
+            rt.set_share_relay_policy(policy).unwrap();
+            // redb holds the file exclusively, so the "next launch" cannot open
+            // it until this one is gone — which is also the situation being
+            // modelled.
+            drop(rt);
+
+            let mut next = ComradeRuntime::new();
+            assert_eq!(
+                next.share_relay_policy(),
+                RelayPolicy::DirectOnly,
+                "a locked vault has no preference to read yet"
+            );
+            next.unlock_vault(dir.path(), "pin").await.unwrap();
+            assert_eq!(
+                next.share_relay_policy(),
+                policy,
+                "{policy:?} did not survive"
+            );
+            drop(next);
+        }
+    }
+
+    /// A stored value this build does not recognise — an older or newer write —
+    /// must read as the policy that carries nobody's bytes, never as permission.
+    #[test]
+    fn an_unreadable_stored_policy_falls_back_to_refusing() {
+        for stored in ["", "relay_everything", "ALWAYS", "always "] {
+            assert_eq!(
+                relay_policy_from_prefs(&comrade_storage::SharePrefs {
+                    relay_policy: stored.to_string(),
+                    relay_limit_bytes: 999,
+                }),
+                RelayPolicy::DirectOnly,
+                "{stored:?} was read as something other than direct-only"
+            );
+        }
     }
 
     /// The pump's budget, from the runtime rather than a frontend's own copy.
