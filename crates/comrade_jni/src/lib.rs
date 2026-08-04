@@ -76,12 +76,13 @@ use comrade_core::share::ShareSignal;
 use comrade_core::together::{MusicLink, Recording, TogetherContent};
 use comrade_state::AppWorkspace;
 use comrade_ui::{
-    AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto,
-    ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
-    FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
-    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto,
-    ReadingDto, ShareVerdictDto, TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError,
-    UpiIntentDto, WorkspaceDto,
+    AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
+    ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
+    CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
+    JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
+    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PlayTargetDto,
+    PresenceDto, ProfileDto, ReactionDto, ReadingDto, ShareVerdictDto, TaraMessageDto, TaskDto,
+    TaskState, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -844,6 +845,77 @@ impl Comrade {
     /// The crisis helplines Tara hands off to.
     pub fn tara_crisis_resources(&self) -> Vec<CrisisResourceDto> {
         self.inner.blocking_read().tara_crisis_resources()
+    }
+
+    // ── In-chat commands, tasks and offers ───────────────────────────────────
+
+    /// What the text in a composer means. Pure and needs no vault, so Kotlin can
+    /// call it on every keystroke — which is what the command bar does.
+    pub fn parse_chat_command(&self, text: String) -> ChatCommand {
+        self.inner.blocking_read().parse_chat_command(&text)
+    }
+
+    /// Every command the composer offers, for `/`-autocomplete and `/help`.
+    pub fn chat_command_catalog(&self) -> Vec<CommandSpec> {
+        self.inner.blocking_read().chat_command_catalog()
+    }
+
+    /// Every `@handle` in `text`, unresolved — for drawing chips while typing.
+    pub fn chat_mentions(&self, text: String) -> Vec<Mention> {
+        self.inner.blocking_read().chat_mentions(&text)
+    }
+
+    /// Every `@handle` in `text`, resolved against the saved contacts. A match
+    /// with no `npub` and a non-empty `candidates` is an ambiguity the UI must
+    /// ask about rather than resolve.
+    pub fn resolve_mentions(&self, text: String) -> Result<Vec<MentionMatchDto>, UiError> {
+        self.inner.blocking_read().resolve_mentions(&text)
+    }
+
+    /// How far a `/play` query gets without a network or a library.
+    pub fn play_query(&self, query: String, service: Option<MusicService>) -> PlayTargetDto {
+        self.inner.blocking_read().play_query(&query, service)
+    }
+
+    /// Name a piece of work. `peer` of `None` is a note to self, which never
+    /// touches a relay.
+    pub async fn assign_task(
+        &self,
+        peer: Option<String>,
+        text: String,
+    ) -> Result<TaskDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.assign_task(peer, &text).await
+    }
+
+    /// Every task this device knows about, newest first.
+    pub fn tasks(&self) -> Result<Vec<TaskDto>, UiError> {
+        self.inner.blocking_read().tasks()
+    }
+
+    /// Move a task to `state` and tell the other party. Errors if this device
+    /// has no standing to make that change.
+    pub async fn set_task_state(&self, id: String, state: TaskState) -> Result<TaskDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.set_task_state(&id, state).await
+    }
+
+    /// Offer an in-app action to comrades. The outcome names who was told and
+    /// why the others were not — a bare count could not tell "the cooldown is
+    /// running" from "that person is not your comrade".
+    pub async fn offer_action(
+        &self,
+        action: AppAction,
+        peers: Vec<String>,
+    ) -> Result<OfferOutcomeDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.offer_action(action, peers).await
+    }
+
+    /// Say something to Tara from inside a conversation — a private aside that
+    /// never reaches the peer. See `ComradeRuntime::tara_aside`.
+    pub fn tara_aside(&self, text: String) -> Result<TaraMessageDto, UiError> {
+        self.inner.blocking_read().tara_aside(&text)
     }
 
     // ── Attention (usage mirror · focus sessions · long read) ────────────────

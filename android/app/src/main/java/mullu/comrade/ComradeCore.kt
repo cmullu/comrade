@@ -573,6 +573,133 @@ object ComradeCore {
         }
     }
 
+    // ── In-chat commands (grammar in `comrade_core::command`) ─────────────────
+    //
+    // The grammar is Rust, deliberately: `VoiceCommand.kt` used to be the only
+    // command parser in the app, and a second one here for the composer would be
+    // the same drift `/pay` already suffered across four implementations. These
+    // are wrappers, nothing more.
+
+    data class MentionMatchInfo(
+        /** Lowercased handle without the leading `@`. */
+        val handle: String,
+        /** Byte span in the text that was parsed, for drawing a chip. */
+        val start: Int,
+        val end: Int,
+        /** The one contact this names, or null. */
+        val npub: String?,
+        /**
+         * Every contact answering to the handle when more than one does. A
+         * non-empty list with a null [npub] is an ambiguity the UI must ask
+         * about — picking one is how a private message reaches the wrong person.
+         */
+        val candidates: List<ContactInfo>,
+    )
+
+    data class TaskInfo(
+        val id: String,
+        val text: String,
+        val assigner: String,
+        /** Null for a note to self, which never reached a relay. */
+        val assignee: String?,
+        val createdAt: Long,
+        val updatedAt: Long,
+        val state: uniffi.comrade_core.TaskState,
+        /** Whether this device named the task. */
+        val assignedByMe: Boolean,
+        /** Whether this device may finish or decline it. True for a note to self. */
+        val mineToDo: Boolean,
+    )
+
+    private fun uniffi.comrade_ui.MentionMatchDto.toInfo() = MentionMatchInfo(
+        handle = handle,
+        start = start.toInt(),
+        end = end.toInt(),
+        npub = npub,
+        candidates = candidates.map { it.toInfo() },
+    )
+
+    private fun uniffi.comrade_ui.TaskDto.toInfo() = TaskInfo(
+        id = id,
+        text = text,
+        assigner = assigner,
+        assignee = assignee,
+        createdAt = createdAt.toLong(),
+        updatedAt = updatedAt.toLong(),
+        state = state,
+        assignedByMe = assignedByMe,
+        mineToDo = mineToDo,
+    )
+
+    /** What the composer's text means. Pure — safe to call on every keystroke. */
+    fun parseChatCommand(text: String): uniffi.comrade_core.ChatCommand =
+        rethrowing("Command") { ffi.parseChatCommand(text) }
+
+    /** Every command the composer offers, for the `/` picker and `/help`. */
+    fun chatCommandCatalog(): List<uniffi.comrade_core.CommandSpec> =
+        rethrowing("Command") { ffi.chatCommandCatalog() }
+
+    /** Every `@handle` in [text], unresolved — for chips while typing. */
+    fun chatMentions(text: String): List<uniffi.comrade_core.Mention> =
+        rethrowing("Command") { ffi.chatMentions(text) }
+
+    /** Every `@handle` in [text], resolved against the saved contacts. */
+    fun resolveMentions(text: String): List<MentionMatchInfo> =
+        rethrowing("Command") { ffi.resolveMentions(text).map { it.toInfo() } }
+
+    /** How far a `/play` query gets with no network and no library. */
+    fun playQuery(
+        query: String,
+        service: uniffi.comrade_core.MusicService?,
+    ): uniffi.comrade_ui.PlayTargetDto = rethrowing("Play") { ffi.playQuery(query, service) }
+
+    /** Name a piece of work. [peer] of null is a note to self — no relay. */
+    fun assignTaskTyped(peer: String?, text: String): TaskInfo =
+        rethrowing("Task") { runBlocking { ffi.assignTask(peer, text) }.toInfo() }
+
+    /** Every task this device knows about, newest first. */
+    fun tasks(): List<TaskInfo> = rethrowing("Tasks") { ffi.tasks().map { it.toInfo() } }
+
+    /** Move a task; throws if this device has no standing to make that change. */
+    fun setTaskStateTyped(id: String, state: uniffi.comrade_core.TaskState): TaskInfo =
+        rethrowing("Task") { runBlocking { ffi.setTaskState(id, state) }.toInfo() }
+
+    /**
+     * Who was told when an action was offered, and why the others were not.
+     *
+     * A bare count could not tell "the cooldown is running" from "that person is
+     * not your comrade", so the UI said the first for both — naming a cause that
+     * was not real and never suggesting the fix.
+     */
+    data class OfferOutcome(
+        val sent: List<String>,
+        val notComrades: List<String>,
+        val onCooldown: List<String>,
+        val failed: List<String>,
+    )
+
+    private fun uniffi.comrade_ui.OfferOutcomeDto.toInfo() = OfferOutcome(
+        sent = sent,
+        notComrades = notComrades,
+        onCooldown = onCooldown,
+        failed = failed,
+    )
+
+    /** Offer an in-app action to comrades. See [OfferOutcome]. */
+    fun offerActionTyped(
+        action: uniffi.comrade_core.AppAction,
+        peers: List<String>,
+    ): OfferOutcome = rethrowing("Offer") {
+        runBlocking { ffi.offerAction(action, peers) }.toInfo()
+    }
+
+    /**
+     * Say something to Tara from inside a conversation — a private aside. Never
+     * reaches the peer; same thread and same store as the Tara tab.
+     */
+    fun taraAsideTyped(text: String): TaraMessageInfo =
+        rethrowing("Tara") { ffi.taraAside(text).toInfo() }
+
     // ── Attention (usage mirror · focus · long read — strictly local) ─────────
     //
     // Wellbeing pillar #5 (docs/ATTENTION.md). Nothing here is ever networked,

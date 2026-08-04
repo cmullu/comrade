@@ -199,6 +199,11 @@
                    it. Built in main.js from `handoff_transfer.mjs`'s plan, which
                    is where "may this even be accepted" is decided. -->
               <div id="handoff-card" class="handoff-card" hidden></div>
+              <div id="dm-command-picker" class="command-picker" hidden></div>
+              <p id="dm-aside-note" class="aside-note sm" hidden>
+                Only you will see this — it goes to Tara, not to them.
+              </p>
+              <p id="dm-command-hint" class="command-hint sm" hidden></p>
               <div id="dm-upi-preview" class="upi-preview" hidden></div>
               <div id="dm-reply-chip" class="reply-chip" hidden>
                 <div class="reply-chip-body">
@@ -220,7 +225,7 @@
                   id="dm-input"
                   class="input"
                   type="text"
-                  placeholder="Message… (try “/pay 250 to friend@upi”)"
+                  placeholder="Message… (type / for what you can do)"
                   disabled
                 />
                 <button id="dm-send" class="btn btn-primary" disabled>
@@ -229,10 +234,11 @@
                 </button>
               </div>
               <p class="hint sm">
-                Messages are end-to-end encrypted. Live UPI <code>/pay</code>
-                detection is active, and the 📎 attaches a file — up to 10 MB
-                encrypted and uploaded, anything larger handed straight to their
-                device while you are both online.
+                Messages are end-to-end encrypted. Type <code>/</code> for
+                in-chat actions and <code>@tara</code> for a private aside only
+                you can see. 📎 attaches a file — up to 10 MB encrypted and
+                uploaded, anything larger handed straight to their device while
+                you are both online.
               </p>
             </div>
           </div>
