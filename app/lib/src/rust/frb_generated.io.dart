@@ -61,6 +61,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityDto dco_decode_box_autoadd_identity_dto(dynamic raw);
 
   @protected
+  MediaBytesDto dco_decode_box_autoadd_media_bytes_dto(dynamic raw);
+
+  @protected
   MediaMessageDto dco_decode_box_autoadd_media_message_dto(dynamic raw);
 
   @protected
@@ -275,6 +278,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityDto? dco_decode_opt_box_autoadd_identity_dto(dynamic raw);
 
   @protected
+  MediaBytesDto? dco_decode_opt_box_autoadd_media_bytes_dto(dynamic raw);
+
+  @protected
   MusicLink? dco_decode_opt_box_autoadd_music_link(dynamic raw);
 
   @protected
@@ -291,6 +297,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String>? dco_decode_opt_list_String(dynamic raw);
+
+  @protected
+  PeerProfileDto dco_decode_peer_profile_dto(dynamic raw);
 
   @protected
   PresenceDto dco_decode_presence_dto(dynamic raw);
@@ -423,6 +432,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IdentityDto sse_decode_box_autoadd_identity_dto(SseDeserializer deserializer);
+
+  @protected
+  MediaBytesDto sse_decode_box_autoadd_media_bytes_dto(
+      SseDeserializer deserializer);
 
   @protected
   MediaMessageDto sse_decode_box_autoadd_media_message_dto(
@@ -663,6 +676,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  MediaBytesDto? sse_decode_opt_box_autoadd_media_bytes_dto(
+      SseDeserializer deserializer);
+
+  @protected
   MusicLink? sse_decode_opt_box_autoadd_music_link(
       SseDeserializer deserializer);
 
@@ -682,6 +699,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
+
+  @protected
+  PeerProfileDto sse_decode_peer_profile_dto(SseDeserializer deserializer);
 
   @protected
   PresenceDto sse_decode_presence_dto(SseDeserializer deserializer);
@@ -825,6 +845,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_identity_dto(
       IdentityDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_media_bytes_dto(
+      MediaBytesDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_media_message_dto(
@@ -1084,6 +1108,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       IdentityDto? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_media_bytes_dto(
+      MediaBytesDto? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_music_link(
       MusicLink? self, SseSerializer serializer);
 
@@ -1104,6 +1132,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_peer_profile_dto(
+      PeerProfileDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_presence_dto(PresenceDto self, SseSerializer serializer);

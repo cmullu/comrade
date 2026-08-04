@@ -80,10 +80,10 @@ use comrade_ui::{
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PlayPlan, PlayRoute,
-    PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto, ShareVerdictDto,
-    TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto, UiError,
-    UpiIntentDto, WorkspaceDto,
+    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto,
+    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
+    ShareVerdictDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto,
+    UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -683,6 +683,31 @@ impl Comrade {
 
     pub async fn set_username(&self, name: String) -> Result<ProfileDto, UiError> {
         self.inner.write().await.set_username(&name).await
+    }
+
+    /// Set (or clear, with an empty string) this identity's bio, and republish.
+    pub async fn set_about(&self, about: String) -> Result<ProfileDto, UiError> {
+        self.inner.write().await.set_about(&about).await
+    }
+
+    /// Everything a profile page draws for one peer, from the local cache alone.
+    pub fn peer_profile(&self, npub: String) -> Result<PeerProfileDto, UiError> {
+        self.inner.blocking_read().peer_profile(&npub)
+    }
+
+    /// A peer's cached avatar bytes, or `None` to draw initials. Never touches
+    /// the network.
+    pub fn peer_avatar(&self, npub: String) -> Result<Option<MediaBytesDto>, UiError> {
+        self.inner.blocking_read().peer_avatar(&npub)
+    }
+
+    /// Whether peer-published pictures may be fetched at all (default on).
+    pub fn remote_avatars_enabled(&self) -> Result<bool, UiError> {
+        self.inner.blocking_read().remote_avatars_enabled()
+    }
+
+    pub fn set_remote_avatars_enabled(&self, on: bool) -> Result<(), UiError> {
+        self.inner.blocking_read().set_remote_avatars_enabled(on)
     }
 
     pub fn add_contact(&self, npub: String, alias: String) -> Result<ContactDto, UiError> {

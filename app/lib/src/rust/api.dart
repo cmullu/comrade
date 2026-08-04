@@ -210,6 +210,27 @@ Future<ProfileDto> profile() => RustLib.instance.api.crateApiProfile();
 Future<ProfileDto> setUsername({required String name}) =>
     RustLib.instance.api.crateApiSetUsername(name: name);
 
+/// Set (or clear, with an empty string) this identity's bio, and republish.
+Future<ProfileDto> setAbout({required String about}) =>
+    RustLib.instance.api.crateApiSetAbout(about: about);
+
+/// Everything a profile page draws for one peer, from the local cache alone —
+/// no relay round trip, so it answers offline and immediately.
+Future<PeerProfileDto> peerProfile({required String npub}) =>
+    RustLib.instance.api.crateApiPeerProfile(npub: npub);
+
+/// A peer's cached avatar bytes, or `None` to draw initials. Reads the encrypted
+/// store and never the network, so calling it discloses nothing to anyone.
+Future<MediaBytesDto?> peerAvatar({required String npub}) =>
+    RustLib.instance.api.crateApiPeerAvatar(npub: npub);
+
+/// Whether peer-published pictures may be fetched at all (default on).
+Future<bool> remoteAvatarsEnabled() =>
+    RustLib.instance.api.crateApiRemoteAvatarsEnabled();
+
+Future<void> setRemoteAvatarsEnabled({required bool on_}) =>
+    RustLib.instance.api.crateApiSetRemoteAvatarsEnabled(on_: on_);
+
 Future<ContactDto> addContact({required String npub, required String alias}) =>
     RustLib.instance.api.crateApiAddContact(npub: npub, alias: alias);
 
@@ -991,15 +1012,24 @@ class FoundProfileDto {
   final String npub;
   final String? name;
   final String? about;
+  final String? picture;
+  final String? nip05;
 
   const FoundProfileDto({
     required this.npub,
     this.name,
     this.about,
+    this.picture,
+    this.nip05,
   });
 
   @override
-  int get hashCode => npub.hashCode ^ name.hashCode ^ about.hashCode;
+  int get hashCode =>
+      npub.hashCode ^
+      name.hashCode ^
+      about.hashCode ^
+      picture.hashCode ^
+      nip05.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1008,7 +1038,9 @@ class FoundProfileDto {
           runtimeType == other.runtimeType &&
           npub == other.npub &&
           name == other.name &&
-          about == other.about;
+          about == other.about &&
+          picture == other.picture &&
+          nip05 == other.nip05;
 }
 
 @freezed
@@ -1320,6 +1352,81 @@ sealed class MusicLink with _$MusicLink {
   }) = MusicLink_Youtube;
 }
 
+class PeerProfileDto {
+  final String npub;
+  final String alias;
+  final String? name;
+  final String? about;
+  final String? picture;
+  final String? nip05;
+  final String? lud16;
+  final bool avatarCached;
+  final bool contact;
+  final bool comrade;
+  final bool blocked;
+  final bool online;
+  final BigInt lastSeenAt;
+  final bool peerMarkedUs;
+  final BigInt updatedAt;
+
+  const PeerProfileDto({
+    required this.npub,
+    required this.alias,
+    this.name,
+    this.about,
+    this.picture,
+    this.nip05,
+    this.lud16,
+    required this.avatarCached,
+    required this.contact,
+    required this.comrade,
+    required this.blocked,
+    required this.online,
+    required this.lastSeenAt,
+    required this.peerMarkedUs,
+    required this.updatedAt,
+  });
+
+  @override
+  int get hashCode =>
+      npub.hashCode ^
+      alias.hashCode ^
+      name.hashCode ^
+      about.hashCode ^
+      picture.hashCode ^
+      nip05.hashCode ^
+      lud16.hashCode ^
+      avatarCached.hashCode ^
+      contact.hashCode ^
+      comrade.hashCode ^
+      blocked.hashCode ^
+      online.hashCode ^
+      lastSeenAt.hashCode ^
+      peerMarkedUs.hashCode ^
+      updatedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PeerProfileDto &&
+          runtimeType == other.runtimeType &&
+          npub == other.npub &&
+          alias == other.alias &&
+          name == other.name &&
+          about == other.about &&
+          picture == other.picture &&
+          nip05 == other.nip05 &&
+          lud16 == other.lud16 &&
+          avatarCached == other.avatarCached &&
+          contact == other.contact &&
+          comrade == other.comrade &&
+          blocked == other.blocked &&
+          online == other.online &&
+          lastSeenAt == other.lastSeenAt &&
+          peerMarkedUs == other.peerMarkedUs &&
+          updatedAt == other.updatedAt;
+}
+
 class PresenceDto {
   final String peer;
   final bool online;
@@ -1354,14 +1461,25 @@ class PresenceDto {
 class ProfileDto {
   final String npub;
   final String? username;
+  final String? about;
+  final String? picture;
+  final bool avatarCached;
 
   const ProfileDto({
     required this.npub,
     this.username,
+    this.about,
+    this.picture,
+    required this.avatarCached,
   });
 
   @override
-  int get hashCode => npub.hashCode ^ username.hashCode;
+  int get hashCode =>
+      npub.hashCode ^
+      username.hashCode ^
+      about.hashCode ^
+      picture.hashCode ^
+      avatarCached.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1369,7 +1487,10 @@ class ProfileDto {
       other is ProfileDto &&
           runtimeType == other.runtimeType &&
           npub == other.npub &&
-          username == other.username;
+          username == other.username &&
+          about == other.about &&
+          picture == other.picture &&
+          avatarCached == other.avatarCached;
 }
 
 class ReactionDto {
