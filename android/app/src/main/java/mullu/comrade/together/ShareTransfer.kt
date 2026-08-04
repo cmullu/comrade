@@ -188,7 +188,7 @@ object ShareTransfer {
             // The drain event, not a poll. Resuming on every few bytes would be
             // an event per chunk, which is the busy loop the threshold exists
             // to prevent — so only wake when it has actually drained.
-            if ((s.channel?.bufferedAmount() ?: 0) <= LOW_WATER_BYTES) io.launch { pump(s) }
+            if ((s.channel?.bufferedAmount() ?: 0L) <= LOW_WATER_BYTES) io.launch { pump(s) }
         }
 
         override fun onStateChange() {
@@ -199,7 +199,9 @@ object ShareTransfer {
             // The receiver's request, as `from:count`. Deliberately not JSON:
             // this is two integers on a hot path, and a parser here is a
             // parser a peer controls.
-            val text = String(buffer.data.toByteArray()).trim()
+            val raw = ByteArray(buffer.data.remaining())
+            buffer.data.get(raw)
+            val text = String(raw).trim()
             val parts = text.split(':')
             val from = parts.getOrNull(0)?.toIntOrNull() ?: return
             val count = parts.getOrNull(1)?.toIntOrNull() ?: return
@@ -426,9 +428,14 @@ object ShareTransfer {
             uniffi.comrade_core.IceStrategy.STUN_ONLY
         }
         val servers = ComradeCore.callIceServersForTyped(strategy).map {
+            // Same shape as CallManager's `toWebRtc`: leave the auth fields
+            // untouched when they are absent rather than setting them empty,
+            // which some stacks read as "authenticate with a blank password".
             PeerConnection.IceServer.builder(it.urls)
-                .setUsername(it.username ?: "")
-                .setPassword(it.credential ?: "")
+                .apply {
+                    it.username?.let { u -> setUsername(u) }
+                    it.credential?.let { c -> setPassword(c) }
+                }
                 .createIceServer()
         }
         val config = PeerConnection.RTCConfiguration(servers).apply {
@@ -476,7 +483,7 @@ object ShareTransfer {
         override fun onAddStream(stream: MediaStream) = Unit
         override fun onRemoveStream(stream: MediaStream) = Unit
         override fun onRenegotiationNeeded() = Unit
-        override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) = Unit
+        override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) = Unit
     }
 
     /**
@@ -534,9 +541,10 @@ object ShareTransfer {
             it.type == "candidate-pair" && it.members["nominated"] == true &&
                 it.members["state"] == "succeeded"
         } ?: return null
-        val local = stats[pair.members["localCandidateId"] as? String]
-        val remote = stats[pair.members["remoteCandidateId"] as? String]
-        if (local == null || remote == null) return null
+        val localId = pair.members["localCandidateId"] as? String ?: return null
+        val remoteId = pair.members["remoteCandidateId"] as? String ?: return null
+        val local = stats[localId] ?: return null
+        val remote = stats[remoteId] ?: return null
         return (local.members["candidateType"] as? String).orEmpty() to
             (remote.members["candidateType"] as? String).orEmpty()
     }
