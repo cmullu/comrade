@@ -58,7 +58,13 @@ class MessageComposer extends ConsumerStatefulWidget {
   final Future<void> Function() onSend;
 
   /// Send one attachment — picked, captured, or recorded.
-  final Future<void> Function(PickedAttachment attachment) onAttachment;
+  ///
+  /// `preview` asks the caller to show the confirm-before-sending sheet. It is
+  /// false for a voice note and true for everything else: the recording strip is
+  /// *already* that sheet — it holds the clip with a discard button and a send
+  /// button — and a second confirmation after tapping send would be one too many.
+  final Future<void> Function(PickedAttachment attachment,
+      {required bool preview}) onAttachment;
 
   /// A text send is in flight.
   final bool sending;
@@ -130,15 +136,25 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
 
   // ── Attach / capture ──────────────────────────────────────────────────────
 
+  /// Run one picker/camera round trip, with the spinner up and a second tap
+  /// locked out, then hand what it produced to the caller.
+  ///
+  /// `_busy` is dropped *before* [MessageComposer.onAttachment] deliberately: the
+  /// caller now shows a confirm-before-sending sheet, and a paper clip spinning
+  /// throughout would claim an upload is in flight while the sender is still
+  /// writing the caption. The sheet is modal, so nothing needs guarding while it
+  /// is up, and the real upload has its own flag in
+  /// [MessageComposer.attaching].
   Future<void> _guarded(Future<PickedAttachment?> Function() source) async {
     if (_busy || widget.attaching) return;
     setState(() => _busy = true);
+    PickedAttachment? picked;
     try {
-      final PickedAttachment? picked = await source();
-      if (picked != null) await widget.onAttachment(picked);
+      picked = await source();
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+    if (picked != null) await widget.onAttachment(picked, preview: true);
   }
 
   Future<void> _attach() => _guarded(() async {
@@ -199,7 +215,7 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
       _snack('Too short — hold on a moment longer.');
       return;
     }
-    await widget.onAttachment(note);
+    await widget.onAttachment(note, preview: false);
   }
 
   // ── The round button and its mode ─────────────────────────────────────────

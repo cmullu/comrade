@@ -8,6 +8,7 @@ import 'package:comrade/src/data/fake_comrade_repository.dart';
 import 'package:comrade/src/data/models.dart';
 import 'package:comrade/src/screens/chats/conversation_screen.dart';
 import 'package:comrade/src/state/chat_providers.dart';
+import 'package:comrade/src/util/attachment_caption.dart';
 import 'package:comrade/src/widgets/media_attachment.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,6 +26,35 @@ class _OnePicker implements AttachmentPicker {
         bytes: Uint8List.fromList(<int>[1, 2, 3]),
       );
 }
+
+/// Yields something over the 10 MB cap. Allocated, not faked: the refusal has to
+/// be decided from the bytes the picker actually handed over.
+class _HugePicker implements AttachmentPicker {
+  @override
+  Future<PickedAttachment?> pick() async => PickedAttachment(
+        name: 'holiday.mov',
+        mimeType: 'video/quicktime',
+        bytes: Uint8List(maxAttachmentBytes + 1),
+      );
+}
+
+/// What a cancelled camera hands back.
+class _EmptyPicker implements AttachmentPicker {
+  @override
+  Future<PickedAttachment?> pick() async => PickedAttachment(
+        name: 'cap.jpg',
+        mimeType: 'image/jpeg',
+        bytes: Uint8List(0),
+      );
+}
+
+/// The text currently in the preview sheet's caption box.
+String captionInSheet(WidgetTester tester) =>
+    tester
+        .widget<TextField>(find.byKey(const Key('attachment-preview-caption')))
+        .controller
+        ?.text ??
+    '';
 
 void main() {
   group('mergeChatItems', () {
@@ -303,8 +333,116 @@ void main() {
     });
   });
 
+  group('previewing an attachment before sending it', () {
+    // The gap this closes: a pick went straight to encrypt-and-upload, so the
+    // first time the sender saw what they had chosen was in their own thread,
+    // already delivered.
+
+    testWidgets('picking shows the file, its name and its size',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.bhaskar),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_OnePicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('attachment-preview')), findsOneWidget);
+      // The device-chosen filename belongs here and nowhere else: it is what
+      // answers "is this the file I meant to pick".
+      expect(find.text('IMG_20260731_114233.png · 3 B'), findsOneWidget);
+      // Nothing has been sent yet.
+      expect(await repo.media(FakePeers.bhaskar), hasLength(0));
+    });
+
+    testWidgets('backing out sends nothing and keeps the draft',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.bhaskar),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_OnePicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), 'at the gate');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('attachment-preview-cancel')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('attachment-preview')), findsNothing);
+      expect(await repo.media(FakePeers.bhaskar), hasLength(0));
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('dm-input')))
+            .controller
+            ?.text,
+        'at the gate',
+        reason: 'nothing was sent, so nothing was consumed',
+      );
+    });
+
+    testWidgets('an oversize pick is refused before any preview',
+        (WidgetTester tester) async {
+      // The cap used to be met only once the upload had begun — after the
+      // caption was written, which is the only work the sender actually did.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.bhaskar),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_HugePicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('attachment-preview')), findsNothing);
+      expect(
+        find.textContaining('attachments are limited to 10 MB'),
+        findsOneWidget,
+      );
+      expect(await repo.media(FakePeers.bhaskar), hasLength(0));
+    });
+
+    testWidgets('an empty capture is refused too', (WidgetTester tester) async {
+      // A cancelled camera hands back a zero-byte placeholder.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.bhaskar),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_EmptyPicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('attachment-preview')), findsNothing);
+      expect(find.textContaining('is empty'), findsOneWidget);
+    });
+  });
+
   group('tagging an attachment', () {
-    testWidgets('the composer text becomes the caption, and the box empties',
+    testWidgets('the composer text seeds the caption, and the box empties',
         (WidgetTester tester) async {
       setWindowSize(tester, const Size(420, 900));
       final FakeComradeRepository repo = await unlockedFake();
@@ -323,11 +461,80 @@ void main() {
       await tester.tap(find.byKey(const Key('dm-attach')));
       await tester.pumpAndSettle();
 
+      // Seeded, so the habit of typing-then-attaching keeps working.
+      expect(captionInSheet(tester), 'at the gate');
+      await tester.tap(find.byKey(const Key('attachment-preview-send')));
+      await tester.pumpAndSettle();
+
       final MediaMessageInfo sent = (await repo.media(FakePeers.bhaskar)).last;
       expect(sent.caption, 'at the gate');
       // Not the file's name, which is what this used to send: a device-chosen
       // `IMG_20260731_114233.jpg` is noise the sender never chose to share.
       expect(sent.caption, isNot(contains('.png')));
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('dm-input')))
+            .controller
+            ?.text,
+        isEmpty,
+      );
+    });
+
+    testWidgets('a caption written in the sheet is what gets sent',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.bhaskar),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_OnePicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('attachment-preview-caption')),
+        '  composed against the picture  ',
+      );
+      await tester.tap(find.byKey(const Key('attachment-preview-send')));
+      await tester.pumpAndSettle();
+
+      // Trimmed on the way out, so the sender's thread and the recipient's show
+      // the same string.
+      expect(
+        (await repo.media(FakePeers.bhaskar)).last.caption,
+        'composed against the picture',
+      );
+    });
+
+    testWidgets('a seeded draft the sheet deletes is still consumed',
+        (WidgetTester tester) async {
+      // The deletion was deliberate; putting the words back would be the
+      // surprise.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(harness(
+        const ConversationScreen(peer: FakePeers.bhaskar),
+        repo: repo,
+        extra: <Override>[
+          attachmentPickerProvider.overrideWithValue(_OnePicker()),
+        ],
+      ));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dm-input')), 'never mind');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+          find.byKey(const Key('attachment-preview-caption')), '');
+      await tester.tap(find.byKey(const Key('attachment-preview-send')));
+      await tester.pumpAndSettle();
+
+      expect((await repo.media(FakePeers.bhaskar)).last.caption, isEmpty);
       expect(
         tester
             .widget<TextField>(find.byKey(const Key('dm-input')))
@@ -357,6 +564,11 @@ void main() {
       await tester.enterText(find.byKey(const Key('dm-input')), 'this one');
       await tester.pump();
       await tester.tap(find.byKey(const Key('dm-attach')));
+      await tester.pumpAndSettle();
+
+      // The sheet opens with an empty caption rather than the reply's words.
+      expect(captionInSheet(tester), isEmpty);
+      await tester.tap(find.byKey(const Key('attachment-preview-send')));
       await tester.pumpAndSettle();
 
       expect((await repo.media(FakePeers.alice)).last.caption, isEmpty);

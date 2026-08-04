@@ -18,7 +18,9 @@
 
   const STORE_PATH = "comrade-data";
   const EVENT_CHANNEL = "comrade://event";
-  const MAX_MEDIA_BYTES = 10 * 1024 * 1024; // 10 MB hard limit (Milestone 5)
+  // The 10 MB hard limit (Milestone 5) now lives in `attachment_caption.mjs` as
+  // MAX_ATTACHMENT_BYTES, next to the message shown when a file exceeds it — one
+  // copy, shared with the Flutter app and Android, tested in all three.
 
   // ── Backend access (real Tauri, or a dev mock for browser preview) ────────
   const TAURI = window.__TAURI__;
@@ -412,6 +414,141 @@
     );
     document.addEventListener("keydown", onKey);
     document.body.append(overlay);
+  }
+
+  // The last look before an attachment leaves the machine.
+  //
+  // Telegram's shape: pick a file and you get the file itself, a caption box, and
+  // two ways out. This UI had none of it — a pick went straight to encrypt and
+  // upload, so the first sight of what had been chosen was in one's own thread,
+  // already sent. Resolves to the confirmed caption, or `null` for every way of
+  // backing out: the ✕, Cancel, Escape and a click on the backdrop are all "don't
+  // send this" and none of them should be distinguishable from the caller.
+  //
+  // The object URL is created here and revoked on close, so an abandoned preview
+  // leaves nothing behind — and unlike the Android and Flutter ports, a video
+  // really does play, because a blob URL is in memory and needs no file on disk
+  // (AUDIT S-4).
+  async function openAttachmentPreview(file, seedCaption) {
+    // Awaited here rather than read off the module-level handle: this is the one
+    // call site that needs *every* rule at once, and awaiting removes any
+    // question of whether the handle has been assigned yet.
+    const rules = await attachmentCaptionReady;
+    const { attachmentPreviewKind, attachmentPreviewDetail, normalizeCaption } = rules;
+    const mime = file.type || "application/octet-stream";
+    const url = URL.createObjectURL(file);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        URL.revokeObjectURL(url);
+        overlay.remove();
+        document.removeEventListener("keydown", onKey);
+        resolve(value);
+      };
+      const onKey = (e) => {
+        if (e.key === "Escape") finish(null);
+      };
+
+      const caption = el("textarea", {
+        id: "attachment-preview-caption",
+        class: "attach-preview-caption",
+        rows: "2",
+        placeholder: "Add a caption…",
+        maxlength: String(rules.MAX_CAPTION_LENGTH),
+      });
+      caption.value = seedCaption;
+      // Enter sends, Shift+Enter is a newline — the same bargain the DM box makes.
+      caption.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          finish(normalizeCaption(caption.value));
+        }
+      });
+
+      const kind = attachmentPreviewKind(mime);
+      let media;
+      if (kind === "image") {
+        media = el("img", { class: "attach-preview-media", src: url, alt: file.name || "Photo" });
+      } else if (kind === "video") {
+        media = el("video", { class: "attach-preview-media", controls: "", src: url });
+      } else {
+        media = el(
+          "div",
+          { class: "attach-preview-card" },
+          el("div", { class: "attach-preview-glyph", text: rules.mediaKindGlyph(mime) }),
+          el("div", { text: rules.mediaKindLabel(mime) }),
+        );
+      }
+
+      const overlay = el(
+        "div",
+        {
+          id: "attachment-preview",
+          class: "lightbox lightbox-scrim",
+          // Only a click on the backdrop itself: one on the photo or in the
+          // caption box must not throw away what is being written.
+          onClick: (e) => {
+            if (e.target === overlay) finish(null);
+          },
+        },
+        el(
+          "div",
+          { class: "attach-preview" },
+          el(
+            "div",
+            { class: "attach-preview-head" },
+            el(
+              "div",
+              { class: "attach-preview-titles" },
+              el("div", { class: "attach-preview-kind", text: rules.mediaQuoteLabel(mime, "") }),
+              el("div", {
+                // The one place the machine's own filename belongs: it answers
+                // "is this the file I meant", and it is deliberately not what
+                // gets sent as the caption.
+                class: "attach-preview-detail",
+                id: "attachment-preview-detail",
+                text: attachmentPreviewDetail(file.name, file.size),
+              }),
+            ),
+            el("button", {
+              // `icon-btn`, the same control the reply chip cancels with — a
+              // bordered `btn-sm` reads as heavy as Send in a two-line header.
+              class: "icon-btn",
+              id: "attachment-preview-close",
+              text: "✕",
+              title: "Discard",
+              onClick: () => finish(null),
+            }),
+          ),
+          // Only the picture scrolls. The heading, the caption box and the two
+          // buttons stay put, because on a short window they are the parts that
+          // must not go looking for a scrollbar.
+          el("div", { class: "attach-preview-body" }, media),
+          caption,
+          el(
+            "div",
+            { class: "attach-preview-actions" },
+            el("button", {
+              class: "btn btn-ghost",
+              id: "attachment-preview-cancel",
+              text: "Cancel",
+              onClick: () => finish(null),
+            }),
+            el("button", {
+              class: "btn btn-primary",
+              id: "attachment-preview-send",
+              text: "Send",
+              onClick: () => finish(normalizeCaption(caption.value)),
+            }),
+          ),
+        ),
+      );
+      document.addEventListener("keydown", onKey);
+      document.body.append(overlay);
+    });
   }
 
   // ── Screen + theme management (progressive disclosure) ────────────────────
@@ -2660,15 +2797,21 @@
     showToast(`New encrypted media from ${shortNpub(key)}`, "info");
   }
 
-  // Encrypt + upload a selected file to `targetPubkey`, then render it locally.
+  // Confirm, encrypt and upload a selected file to `targetPubkey`, then render it
+  // locally.
   //
-  // The caption ("tag") is whatever is in the composer when the file is picked,
-  // per `attachment_caption.mjs` — Telegram's rule, minus the case where those
-  // words are a half-written reply. It used to be the *file's name*, which is
-  // noise in the recipient's thread at best and at worst the one piece of local
-  // filesystem vocabulary the sender never chose to share.
+  // Three steps, and the split between them is the point: refuse what cannot be
+  // sent, let the sender look at what can, then upload. It used to be one step —
+  // a pick went straight to the uploader — so the first sight of what had been
+  // chosen was in one's own thread, already sent.
   //
-  // `composer` is the input whose text becomes that caption — the DM box in the
+  // The caption ("tag") the sheet opens with is whatever is in the composer, per
+  // `attachment_caption.mjs` — Telegram's rule, minus the case where those words
+  // are a half-written reply. It used to be the *file's name*, which is noise in
+  // the recipient's thread at best and at worst the one piece of local filesystem
+  // vocabulary the sender never chose to share.
+  //
+  // `composer` is the input whose text seeds that caption — the DM box in the
   // conversation, and nothing at all in the couple panel, which has no composer
   // of its own and must not reach across screens for the DM one's draft.
   async function handleAttach(file, targetPubkey, { composer = null } = {}) {
@@ -2677,14 +2820,27 @@
       showToast("No recipient selected", "warn");
       return;
     }
-    if (file.size > MAX_MEDIA_BYTES) {
-      showToast(
-        `"${file.name}" is ${(file.size / 1048576).toFixed(1)} MB — over the 10 MB limit`,
-        "warn",
-      );
+    const { captionForAttachment, captionConsumesDraft, attachmentRejection } =
+      await attachmentCaptionReady;
+    // Before the preview, not after the upload: composing a caption for a file
+    // that was never going to fit is the one bit of work worth not wasting.
+    const refusal = attachmentRejection(file.name, file.size);
+    if (refusal) {
+      showToast(refusal, "warn");
       return;
     }
     const mime = file.type || "application/octet-stream";
+    const replyPending = !!state.replyTo;
+    const draft = composer ? composer.value : "";
+    const consumed = captionConsumesDraft(draft, replyPending);
+    const caption = await openAttachmentPreview(
+      file,
+      captionForAttachment(draft, replyPending),
+    );
+    // Backed out. Nothing was read, nothing was encrypted, and the draft is
+    // still where they left it.
+    if (caption === null) return;
+
     let base64;
     try {
       base64 = await fileToBase64(file);
@@ -2692,11 +2848,6 @@
       showToast("Could not read the file", "error");
       return;
     }
-    const replyPending = !!state.replyTo;
-    const { captionForAttachment, captionConsumesDraft } = await attachmentCaptionReady;
-    const draft = composer ? composer.value : "";
-    const caption = captionForAttachment(draft, replyPending);
-    const consumed = captionConsumesDraft(draft, replyPending);
     showToast("Encrypting & uploading…", "info");
     try {
       const dto = await safeInvoke("send_media_bytes", {

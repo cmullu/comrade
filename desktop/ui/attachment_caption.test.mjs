@@ -2,10 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  MAX_ATTACHMENT_BYTES,
   MAX_CAPTION_LENGTH,
+  attachmentPreviewDetail,
+  attachmentPreviewMediaHeight,
+  attachmentPreviewKind,
+  attachmentRejection,
   captionConsumesDraft,
   captionForAttachment,
+  formatAttachmentSize,
   mediaQuoteLabel,
+  normalizeCaption,
   opensFullScreen,
 } from "./attachment_caption.mjs";
 
@@ -58,4 +65,83 @@ test("only photos and videos open full screen", () => {
   assert.equal(opensFullScreen("video/mp4"), true);
   assert.equal(opensFullScreen("audio/aac"), false);
   assert.equal(opensFullScreen("application/pdf"), false);
+});
+
+test("a size reads as one a person would say out loud", () => {
+  assert.equal(formatAttachmentSize(0), "0 B");
+  assert.equal(formatAttachmentSize(48), "48 B");
+  assert.equal(formatAttachmentSize(1024), "1 KB");
+  assert.equal(formatAttachmentSize(831488), "812 KB");
+  assert.equal(formatAttachmentSize(1572864), "1.5 MB");
+  assert.equal(formatAttachmentSize(12999999), "12.4 MB");
+});
+
+test("a trailing .0 is dropped rather than saying \"10.0 MB\"", () => {
+  assert.equal(formatAttachmentSize(MAX_ATTACHMENT_BYTES), "10 MB");
+  assert.equal(formatAttachmentSize(1024 * 1024), "1 MB");
+});
+
+test("a negative or absurd size does not produce a negative string", () => {
+  assert.equal(formatAttachmentSize(-1), "0 B");
+  assert.equal(formatAttachmentSize(undefined), "0 B");
+});
+
+test("a file inside the cap is not refused", () => {
+  assert.equal(attachmentRejection("a.png", 1), null);
+  // The cap is inclusive — the core accepts exactly this many.
+  assert.equal(attachmentRejection("a.png", MAX_ATTACHMENT_BYTES), null);
+});
+
+test("a refusal names the file, its size, and the limit", () => {
+  assert.equal(
+    attachmentRejection("  holiday.mov  ", 12999999),
+    '"holiday.mov" is 12.4 MB — attachments are limited to 10 MB.',
+  );
+});
+
+test("a capture with no name still gets a sentence", () => {
+  assert.ok(
+    attachmentRejection("", MAX_ATTACHMENT_BYTES + 1).startsWith("That file is 10 MB"),
+  );
+});
+
+test("an empty pick is refused before anything is encrypted", () => {
+  // A cancelled camera hands back a zero-byte placeholder; sending it produces
+  // an attachment the recipient cannot open.
+  assert.equal(
+    attachmentRejection("cap.jpg", 0),
+    '"cap.jpg" is empty — there is nothing to send.',
+  );
+});
+
+test("the preview kind is what the sheet renders", () => {
+  assert.equal(attachmentPreviewKind("image/png"), "image");
+  assert.equal(attachmentPreviewKind("VIDEO/MP4"), "video");
+  assert.equal(attachmentPreviewKind("audio/aac"), "audio");
+  assert.equal(attachmentPreviewKind("application/pdf"), "file");
+  assert.equal(attachmentPreviewKind(""), "file");
+});
+
+test("the preview detail is the name and the size, which is how you spot a wrong pick", () => {
+  assert.equal(
+    attachmentPreviewDetail("IMG_20260731_114233.png", 1572864),
+    "IMG_20260731_114233.png · 1.5 MB",
+  );
+  assert.equal(attachmentPreviewDetail("  ", 48), "48 B");
+});
+
+test("a caption is trimmed and capped whatever the source", () => {
+  assert.equal(normalizeCaption("  at the gate  "), "at the gate");
+  assert.equal(normalizeCaption("x".repeat(MAX_CAPTION_LENGTH + 40)).length, MAX_CAPTION_LENGTH);
+});
+
+test("the preview's picture is 52% of the viewport, floored and capped", () => {
+  assert.equal(attachmentPreviewMediaHeight(600), 312);
+  assert.equal(attachmentPreviewMediaHeight(500), 260);
+  // Capped, so a sheet on a big screen still reads as a sheet.
+  assert.equal(attachmentPreviewMediaHeight(1600), 420);
+  // Floored, so a short window still shows a recognisable picture — below this it
+  // scrolls rather than shrinking further.
+  assert.equal(attachmentPreviewMediaHeight(200), 120);
+  assert.equal(attachmentPreviewMediaHeight(0), 120);
 });
