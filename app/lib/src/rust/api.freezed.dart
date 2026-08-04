@@ -68,6 +68,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
     TResult Function(BridgeEvent_TogetherEnded value)? togetherEnded,
     TResult Function(BridgeEvent_TogetherShare value)? togetherShare,
+    TResult Function(BridgeEvent_AttachmentHandoff value)? attachmentHandoff,
     TResult Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
     required TResult orElse(),
@@ -108,6 +109,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that);
+      case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
+        return attachmentHandoff(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -158,6 +161,8 @@ extension BridgeEventPatterns on BridgeEvent {
         togetherCorrection,
     required TResult Function(BridgeEvent_TogetherEnded value) togetherEnded,
     required TResult Function(BridgeEvent_TogetherShare value) togetherShare,
+    required TResult Function(BridgeEvent_AttachmentHandoff value)
+        attachmentHandoff,
     required TResult Function(BridgeEvent_MeshStatusChanged value)
         meshStatusChanged,
     required TResult Function(BridgeEvent_LedgerUpdated value) ledgerUpdated,
@@ -196,6 +201,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that);
       case BridgeEvent_TogetherShare():
         return togetherShare(_that);
+      case BridgeEvent_AttachmentHandoff():
+        return attachmentHandoff(_that);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated():
@@ -235,6 +242,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
     TResult? Function(BridgeEvent_TogetherEnded value)? togetherEnded,
     TResult? Function(BridgeEvent_TogetherShare value)? togetherShare,
+    TResult? Function(BridgeEvent_AttachmentHandoff value)? attachmentHandoff,
     TResult? Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult? Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
   }) {
@@ -274,6 +282,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that);
+      case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
+        return attachmentHandoff(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -315,6 +325,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(TogetherCorrectionDto field0)? togetherCorrection,
     TResult Function(String sessionId, String peer, bool byPeer)? togetherEnded,
     TResult Function(TogetherShareDto field0)? togetherShare,
+    TResult Function(AttachmentHandoffDto field0)? attachmentHandoff,
     TResult Function(MeshStatusDto field0)? meshStatusChanged,
     TResult Function(String ledger)? ledgerUpdated,
     required TResult orElse(),
@@ -355,6 +366,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that.field0);
+      case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
+        return attachmentHandoff(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -399,6 +412,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(String sessionId, String peer, bool byPeer)
         togetherEnded,
     required TResult Function(TogetherShareDto field0) togetherShare,
+    required TResult Function(AttachmentHandoffDto field0) attachmentHandoff,
     required TResult Function(MeshStatusDto field0) meshStatusChanged,
     required TResult Function(String ledger) ledgerUpdated,
   }) {
@@ -436,6 +450,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_TogetherShare():
         return togetherShare(_that.field0);
+      case BridgeEvent_AttachmentHandoff():
+        return attachmentHandoff(_that.field0);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated():
@@ -476,6 +492,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(String sessionId, String peer, bool byPeer)?
         togetherEnded,
     TResult? Function(TogetherShareDto field0)? togetherShare,
+    TResult? Function(AttachmentHandoffDto field0)? attachmentHandoff,
     TResult? Function(MeshStatusDto field0)? meshStatusChanged,
     TResult? Function(String ledger)? ledgerUpdated,
   }) {
@@ -515,6 +532,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that.field0);
+      case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
+        return attachmentHandoff(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -1671,6 +1690,72 @@ class _$BridgeEvent_TogetherShareCopyWithImpl<$Res>
 
 /// @nodoc
 
+class BridgeEvent_AttachmentHandoff extends BridgeEvent {
+  const BridgeEvent_AttachmentHandoff(this.field0) : super._();
+
+  final AttachmentHandoffDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_AttachmentHandoffCopyWith<BridgeEvent_AttachmentHandoff>
+      get copyWith => _$BridgeEvent_AttachmentHandoffCopyWithImpl<
+          BridgeEvent_AttachmentHandoff>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_AttachmentHandoff &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.attachmentHandoff(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_AttachmentHandoffCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_AttachmentHandoffCopyWith(
+          BridgeEvent_AttachmentHandoff value,
+          $Res Function(BridgeEvent_AttachmentHandoff) _then) =
+      _$BridgeEvent_AttachmentHandoffCopyWithImpl;
+  @useResult
+  $Res call({AttachmentHandoffDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_AttachmentHandoffCopyWithImpl<$Res>
+    implements $BridgeEvent_AttachmentHandoffCopyWith<$Res> {
+  _$BridgeEvent_AttachmentHandoffCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_AttachmentHandoff _self;
+  final $Res Function(BridgeEvent_AttachmentHandoff) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_AttachmentHandoff(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as AttachmentHandoffDto,
+    ));
+  }
+}
+
+/// @nodoc
+
 class BridgeEvent_MeshStatusChanged extends BridgeEvent {
   const BridgeEvent_MeshStatusChanged(this.field0) : super._();
 
@@ -2380,6 +2465,550 @@ class _$CallSignal_HangupCopyWithImpl<$Res>
           : reason // ignore: cast_nullable_to_non_nullable
               as HangupReason,
     ));
+  }
+}
+
+/// @nodoc
+mixin _$HandoffSignal {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is HandoffSignal);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'HandoffSignal()';
+  }
+}
+
+/// @nodoc
+class $HandoffSignalCopyWith<$Res> {
+  $HandoffSignalCopyWith(HandoffSignal _, $Res Function(HandoffSignal) __);
+}
+
+/// Adds pattern-matching-related methods to [HandoffSignal].
+extension HandoffSignalPatterns on HandoffSignal {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(HandoffSignal_Offer value)? offer,
+    TResult Function(HandoffSignal_Accept value)? accept,
+    TResult Function(HandoffSignal_Decline value)? decline,
+    TResult Function(HandoffSignal_Refuse value)? refuse,
+    TResult Function(HandoffSignal_Withdraw value)? withdraw,
+    TResult Function(HandoffSignal_Transport value)? transport,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case HandoffSignal_Offer() when offer != null:
+        return offer(_that);
+      case HandoffSignal_Accept() when accept != null:
+        return accept(_that);
+      case HandoffSignal_Decline() when decline != null:
+        return decline(_that);
+      case HandoffSignal_Refuse() when refuse != null:
+        return refuse(_that);
+      case HandoffSignal_Withdraw() when withdraw != null:
+        return withdraw(_that);
+      case HandoffSignal_Transport() when transport != null:
+        return transport(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(HandoffSignal_Offer value) offer,
+    required TResult Function(HandoffSignal_Accept value) accept,
+    required TResult Function(HandoffSignal_Decline value) decline,
+    required TResult Function(HandoffSignal_Refuse value) refuse,
+    required TResult Function(HandoffSignal_Withdraw value) withdraw,
+    required TResult Function(HandoffSignal_Transport value) transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case HandoffSignal_Offer():
+        return offer(_that);
+      case HandoffSignal_Accept():
+        return accept(_that);
+      case HandoffSignal_Decline():
+        return decline(_that);
+      case HandoffSignal_Refuse():
+        return refuse(_that);
+      case HandoffSignal_Withdraw():
+        return withdraw(_that);
+      case HandoffSignal_Transport():
+        return transport(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(HandoffSignal_Offer value)? offer,
+    TResult? Function(HandoffSignal_Accept value)? accept,
+    TResult? Function(HandoffSignal_Decline value)? decline,
+    TResult? Function(HandoffSignal_Refuse value)? refuse,
+    TResult? Function(HandoffSignal_Withdraw value)? withdraw,
+    TResult? Function(HandoffSignal_Transport value)? transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case HandoffSignal_Offer() when offer != null:
+        return offer(_that);
+      case HandoffSignal_Accept() when accept != null:
+        return accept(_that);
+      case HandoffSignal_Decline() when decline != null:
+        return decline(_that);
+      case HandoffSignal_Refuse() when refuse != null:
+        return refuse(_that);
+      case HandoffSignal_Withdraw() when withdraw != null:
+        return withdraw(_that);
+      case HandoffSignal_Transport() when transport != null:
+        return transport(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(AttachmentHandoff attachment)? offer,
+    TResult Function()? accept,
+    TResult Function()? decline,
+    TResult Function(RefusalReason reason)? refuse,
+    TResult Function()? withdraw,
+    TResult Function(TransferSignal signal)? transport,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case HandoffSignal_Offer() when offer != null:
+        return offer(_that.attachment);
+      case HandoffSignal_Accept() when accept != null:
+        return accept();
+      case HandoffSignal_Decline() when decline != null:
+        return decline();
+      case HandoffSignal_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case HandoffSignal_Withdraw() when withdraw != null:
+        return withdraw();
+      case HandoffSignal_Transport() when transport != null:
+        return transport(_that.signal);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(AttachmentHandoff attachment) offer,
+    required TResult Function() accept,
+    required TResult Function() decline,
+    required TResult Function(RefusalReason reason) refuse,
+    required TResult Function() withdraw,
+    required TResult Function(TransferSignal signal) transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case HandoffSignal_Offer():
+        return offer(_that.attachment);
+      case HandoffSignal_Accept():
+        return accept();
+      case HandoffSignal_Decline():
+        return decline();
+      case HandoffSignal_Refuse():
+        return refuse(_that.reason);
+      case HandoffSignal_Withdraw():
+        return withdraw();
+      case HandoffSignal_Transport():
+        return transport(_that.signal);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(AttachmentHandoff attachment)? offer,
+    TResult? Function()? accept,
+    TResult? Function()? decline,
+    TResult? Function(RefusalReason reason)? refuse,
+    TResult? Function()? withdraw,
+    TResult? Function(TransferSignal signal)? transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case HandoffSignal_Offer() when offer != null:
+        return offer(_that.attachment);
+      case HandoffSignal_Accept() when accept != null:
+        return accept();
+      case HandoffSignal_Decline() when decline != null:
+        return decline();
+      case HandoffSignal_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case HandoffSignal_Withdraw() when withdraw != null:
+        return withdraw();
+      case HandoffSignal_Transport() when transport != null:
+        return transport(_that.signal);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class HandoffSignal_Offer extends HandoffSignal {
+  const HandoffSignal_Offer({required this.attachment}) : super._();
+
+  final AttachmentHandoff attachment;
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $HandoffSignal_OfferCopyWith<HandoffSignal_Offer> get copyWith =>
+      _$HandoffSignal_OfferCopyWithImpl<HandoffSignal_Offer>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is HandoffSignal_Offer &&
+            (identical(other.attachment, attachment) ||
+                other.attachment == attachment));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, attachment);
+
+  @override
+  String toString() {
+    return 'HandoffSignal.offer(attachment: $attachment)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $HandoffSignal_OfferCopyWith<$Res>
+    implements $HandoffSignalCopyWith<$Res> {
+  factory $HandoffSignal_OfferCopyWith(
+          HandoffSignal_Offer value, $Res Function(HandoffSignal_Offer) _then) =
+      _$HandoffSignal_OfferCopyWithImpl;
+  @useResult
+  $Res call({AttachmentHandoff attachment});
+}
+
+/// @nodoc
+class _$HandoffSignal_OfferCopyWithImpl<$Res>
+    implements $HandoffSignal_OfferCopyWith<$Res> {
+  _$HandoffSignal_OfferCopyWithImpl(this._self, this._then);
+
+  final HandoffSignal_Offer _self;
+  final $Res Function(HandoffSignal_Offer) _then;
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? attachment = null,
+  }) {
+    return _then(HandoffSignal_Offer(
+      attachment: null == attachment
+          ? _self.attachment
+          : attachment // ignore: cast_nullable_to_non_nullable
+              as AttachmentHandoff,
+    ));
+  }
+}
+
+/// @nodoc
+
+class HandoffSignal_Accept extends HandoffSignal {
+  const HandoffSignal_Accept() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is HandoffSignal_Accept);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'HandoffSignal.accept()';
+  }
+}
+
+/// @nodoc
+
+class HandoffSignal_Decline extends HandoffSignal {
+  const HandoffSignal_Decline() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is HandoffSignal_Decline);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'HandoffSignal.decline()';
+  }
+}
+
+/// @nodoc
+
+class HandoffSignal_Refuse extends HandoffSignal {
+  const HandoffSignal_Refuse({required this.reason}) : super._();
+
+  final RefusalReason reason;
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $HandoffSignal_RefuseCopyWith<HandoffSignal_Refuse> get copyWith =>
+      _$HandoffSignal_RefuseCopyWithImpl<HandoffSignal_Refuse>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is HandoffSignal_Refuse &&
+            (identical(other.reason, reason) || other.reason == reason));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reason);
+
+  @override
+  String toString() {
+    return 'HandoffSignal.refuse(reason: $reason)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $HandoffSignal_RefuseCopyWith<$Res>
+    implements $HandoffSignalCopyWith<$Res> {
+  factory $HandoffSignal_RefuseCopyWith(HandoffSignal_Refuse value,
+          $Res Function(HandoffSignal_Refuse) _then) =
+      _$HandoffSignal_RefuseCopyWithImpl;
+  @useResult
+  $Res call({RefusalReason reason});
+
+  $RefusalReasonCopyWith<$Res> get reason;
+}
+
+/// @nodoc
+class _$HandoffSignal_RefuseCopyWithImpl<$Res>
+    implements $HandoffSignal_RefuseCopyWith<$Res> {
+  _$HandoffSignal_RefuseCopyWithImpl(this._self, this._then);
+
+  final HandoffSignal_Refuse _self;
+  final $Res Function(HandoffSignal_Refuse) _then;
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? reason = null,
+  }) {
+    return _then(HandoffSignal_Refuse(
+      reason: null == reason
+          ? _self.reason
+          : reason // ignore: cast_nullable_to_non_nullable
+              as RefusalReason,
+    ));
+  }
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $RefusalReasonCopyWith<$Res> get reason {
+    return $RefusalReasonCopyWith<$Res>(_self.reason, (value) {
+      return _then(_self.copyWith(reason: value));
+    });
+  }
+}
+
+/// @nodoc
+
+class HandoffSignal_Withdraw extends HandoffSignal {
+  const HandoffSignal_Withdraw() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is HandoffSignal_Withdraw);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'HandoffSignal.withdraw()';
+  }
+}
+
+/// @nodoc
+
+class HandoffSignal_Transport extends HandoffSignal {
+  const HandoffSignal_Transport({required this.signal}) : super._();
+
+  final TransferSignal signal;
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $HandoffSignal_TransportCopyWith<HandoffSignal_Transport> get copyWith =>
+      _$HandoffSignal_TransportCopyWithImpl<HandoffSignal_Transport>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is HandoffSignal_Transport &&
+            (identical(other.signal, signal) || other.signal == signal));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, signal);
+
+  @override
+  String toString() {
+    return 'HandoffSignal.transport(signal: $signal)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $HandoffSignal_TransportCopyWith<$Res>
+    implements $HandoffSignalCopyWith<$Res> {
+  factory $HandoffSignal_TransportCopyWith(HandoffSignal_Transport value,
+          $Res Function(HandoffSignal_Transport) _then) =
+      _$HandoffSignal_TransportCopyWithImpl;
+  @useResult
+  $Res call({TransferSignal signal});
+
+  $TransferSignalCopyWith<$Res> get signal;
+}
+
+/// @nodoc
+class _$HandoffSignal_TransportCopyWithImpl<$Res>
+    implements $HandoffSignal_TransportCopyWith<$Res> {
+  _$HandoffSignal_TransportCopyWithImpl(this._self, this._then);
+
+  final HandoffSignal_Transport _self;
+  final $Res Function(HandoffSignal_Transport) _then;
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? signal = null,
+  }) {
+    return _then(HandoffSignal_Transport(
+      signal: null == signal
+          ? _self.signal
+          : signal // ignore: cast_nullable_to_non_nullable
+              as TransferSignal,
+    ));
+  }
+
+  /// Create a copy of HandoffSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $TransferSignalCopyWith<$Res> get signal {
+    return $TransferSignalCopyWith<$Res>(_self.signal, (value) {
+      return _then(_self.copyWith(signal: value));
+    });
   }
 }
 

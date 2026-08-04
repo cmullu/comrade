@@ -2456,9 +2456,49 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AttachmentHandoff dco_decode_attachment_handoff(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return AttachmentHandoff(
+      shape: dco_decode_share_offer(arr[0]),
+      mimeType: dco_decode_String(arr[1]),
+      fileName: dco_decode_String(arr[2]),
+      caption: dco_decode_String(arr[3]),
+    );
+  }
+
+  @protected
+  AttachmentHandoffDto dco_decode_attachment_handoff_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return AttachmentHandoffDto(
+      transferId: dco_decode_String(arr[0]),
+      peer: dco_decode_String(arr[1]),
+      signal: dco_decode_handoff_signal(arr[2]),
+    );
+  }
+
+  @protected
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
+  }
+
+  @protected
+  AttachmentHandoff dco_decode_box_autoadd_attachment_handoff(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_attachment_handoff(raw);
+  }
+
+  @protected
+  AttachmentHandoffDto dco_decode_box_autoadd_attachment_handoff_dto(
+      dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_attachment_handoff_dto(raw);
   }
 
   @protected
@@ -2673,10 +2713,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           dco_decode_box_autoadd_together_share_dto(raw[1]),
         );
       case 16:
+        return BridgeEvent_AttachmentHandoff(
+          dco_decode_box_autoadd_attachment_handoff_dto(raw[1]),
+        );
+      case 17:
         return BridgeEvent_MeshStatusChanged(
           dco_decode_box_autoadd_mesh_status_dto(raw[1]),
         );
-      case 17:
+      case 18:
         return BridgeEvent_LedgerUpdated(
           ledger: dco_decode_String(raw[1]),
         );
@@ -2877,6 +2921,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       name: dco_decode_opt_String(arr[1]),
       about: dco_decode_opt_String(arr[2]),
     );
+  }
+
+  @protected
+  HandoffSignal dco_decode_handoff_signal(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    switch (raw[0]) {
+      case 0:
+        return HandoffSignal_Offer(
+          attachment: dco_decode_box_autoadd_attachment_handoff(raw[1]),
+        );
+      case 1:
+        return HandoffSignal_Accept();
+      case 2:
+        return HandoffSignal_Decline();
+      case 3:
+        return HandoffSignal_Refuse(
+          reason: dco_decode_box_autoadd_refusal_reason(raw[1]),
+        );
+      case 4:
+        return HandoffSignal_Withdraw();
+      case 5:
+        return HandoffSignal_Transport(
+          signal: dco_decode_box_autoadd_transfer_signal(raw[1]),
+        );
+      default:
+        throw Exception('unreachable');
+    }
   }
 
   @protected
@@ -3692,9 +3763,49 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AttachmentHandoff sse_decode_attachment_handoff(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    final var_shape = sse_decode_share_offer(deserializer);
+    final var_mimeType = sse_decode_String(deserializer);
+    final var_fileName = sse_decode_String(deserializer);
+    final var_caption = sse_decode_String(deserializer);
+    return AttachmentHandoff(
+        shape: var_shape,
+        mimeType: var_mimeType,
+        fileName: var_fileName,
+        caption: var_caption);
+  }
+
+  @protected
+  AttachmentHandoffDto sse_decode_attachment_handoff_dto(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    final var_transferId = sse_decode_String(deserializer);
+    final var_peer = sse_decode_String(deserializer);
+    final var_signal = sse_decode_handoff_signal(deserializer);
+    return AttachmentHandoffDto(
+        transferId: var_transferId, peer: var_peer, signal: var_signal);
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  AttachmentHandoff sse_decode_box_autoadd_attachment_handoff(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_attachment_handoff(deserializer));
+  }
+
+  @protected
+  AttachmentHandoffDto sse_decode_box_autoadd_attachment_handoff_dto(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_attachment_handoff_dto(deserializer));
   }
 
   @protected
@@ -3921,9 +4032,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_decode_box_autoadd_together_share_dto(deserializer);
         return BridgeEvent_TogetherShare(var_field0);
       case 16:
+        final var_field0 =
+            sse_decode_box_autoadd_attachment_handoff_dto(deserializer);
+        return BridgeEvent_AttachmentHandoff(var_field0);
+      case 17:
         final var_field0 = sse_decode_box_autoadd_mesh_status_dto(deserializer);
         return BridgeEvent_MeshStatusChanged(var_field0);
-      case 17:
+      case 18:
         final var_ledger = sse_decode_String(deserializer);
         return BridgeEvent_LedgerUpdated(ledger: var_ledger);
       default:
@@ -4129,6 +4244,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     final var_name = sse_decode_opt_String(deserializer);
     final var_about = sse_decode_opt_String(deserializer);
     return FoundProfileDto(npub: var_npub, name: var_name, about: var_about);
+  }
+
+  @protected
+  HandoffSignal sse_decode_handoff_signal(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    final tag_ = sse_decode_i_32(deserializer);
+    switch (tag_) {
+      case 0:
+        final var_attachment =
+            sse_decode_box_autoadd_attachment_handoff(deserializer);
+        return HandoffSignal_Offer(attachment: var_attachment);
+      case 1:
+        return HandoffSignal_Accept();
+      case 2:
+        return HandoffSignal_Decline();
+      case 3:
+        final var_reason = sse_decode_box_autoadd_refusal_reason(deserializer);
+        return HandoffSignal_Refuse(reason: var_reason);
+      case 4:
+        return HandoffSignal_Withdraw();
+      case 5:
+        final var_signal = sse_decode_box_autoadd_transfer_signal(deserializer);
+        return HandoffSignal_Transport(signal: var_signal);
+      default:
+        throw UnimplementedError('');
+    }
   }
 
   @protected
@@ -5101,9 +5243,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_attachment_handoff(
+      AttachmentHandoff self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_share_offer(self.shape, serializer);
+    sse_encode_String(self.mimeType, serializer);
+    sse_encode_String(self.fileName, serializer);
+    sse_encode_String(self.caption, serializer);
+  }
+
+  @protected
+  void sse_encode_attachment_handoff_dto(
+      AttachmentHandoffDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.transferId, serializer);
+    sse_encode_String(self.peer, serializer);
+    sse_encode_handoff_signal(self.signal, serializer);
+  }
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_attachment_handoff(
+      AttachmentHandoff self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_attachment_handoff(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_attachment_handoff_dto(
+      AttachmentHandoffDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_attachment_handoff_dto(self, serializer);
   }
 
   @protected
@@ -5337,11 +5512,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case BridgeEvent_TogetherShare(field0: final field0):
         sse_encode_i_32(15, serializer);
         sse_encode_box_autoadd_together_share_dto(field0, serializer);
-      case BridgeEvent_MeshStatusChanged(field0: final field0):
+      case BridgeEvent_AttachmentHandoff(field0: final field0):
         sse_encode_i_32(16, serializer);
+        sse_encode_box_autoadd_attachment_handoff_dto(field0, serializer);
+      case BridgeEvent_MeshStatusChanged(field0: final field0):
+        sse_encode_i_32(17, serializer);
         sse_encode_box_autoadd_mesh_status_dto(field0, serializer);
       case BridgeEvent_LedgerUpdated(ledger: final ledger):
-        sse_encode_i_32(17, serializer);
+        sse_encode_i_32(18, serializer);
         sse_encode_String(ledger, serializer);
     }
   }
@@ -5494,6 +5672,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.npub, serializer);
     sse_encode_opt_String(self.name, serializer);
     sse_encode_opt_String(self.about, serializer);
+  }
+
+  @protected
+  void sse_encode_handoff_signal(HandoffSignal self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    switch (self) {
+      case HandoffSignal_Offer(attachment: final attachment):
+        sse_encode_i_32(0, serializer);
+        sse_encode_box_autoadd_attachment_handoff(attachment, serializer);
+      case HandoffSignal_Accept():
+        sse_encode_i_32(1, serializer);
+      case HandoffSignal_Decline():
+        sse_encode_i_32(2, serializer);
+      case HandoffSignal_Refuse(reason: final reason):
+        sse_encode_i_32(3, serializer);
+        sse_encode_box_autoadd_refusal_reason(reason, serializer);
+      case HandoffSignal_Withdraw():
+        sse_encode_i_32(4, serializer);
+      case HandoffSignal_Transport(signal: final signal):
+        sse_encode_i_32(5, serializer);
+        sse_encode_box_autoadd_transfer_signal(signal, serializer);
+    }
   }
 
   @protected

@@ -71,17 +71,18 @@ use crate::frb_generated::StreamSink;
 // no Rust downstream.)
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+pub use comrade_core::handoff::{AttachmentHandoff, AttachmentRoute, HandoffSignal};
 pub use comrade_core::share::transport::{
     IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
 pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
-    BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
-    ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
-    IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto, ShareVerdictDto,
-    TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    AttachmentHandoffDto, BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto,
+    ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
+    IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
+    MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto,
+    ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
     TogetherSessionDto, TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 
@@ -542,6 +543,37 @@ pub struct _TogetherShareDto {
     pub signal: ShareSignal,
 }
 
+#[frb(mirror(AttachmentHandoff))]
+pub struct _AttachmentHandoff {
+    pub shape: ShareOffer,
+    pub mime_type: String,
+    pub file_name: String,
+    pub caption: String,
+}
+
+#[frb(mirror(HandoffSignal))]
+pub enum _HandoffSignal {
+    Offer { attachment: AttachmentHandoff },
+    Accept,
+    Decline,
+    Refuse { reason: RefusalReason },
+    Withdraw,
+    Transport { signal: TransferSignal },
+}
+
+#[frb(mirror(AttachmentRoute))]
+pub enum _AttachmentRoute {
+    Hosted,
+    PeerToPeer,
+}
+
+#[frb(mirror(AttachmentHandoffDto))]
+pub struct _AttachmentHandoffDto {
+    pub transfer_id: String,
+    pub peer: String,
+    pub signal: HandoffSignal,
+}
+
 #[frb(mirror(ShareVerdictDto))]
 pub struct _ShareVerdictDto {
     pub verdict: String,
@@ -590,6 +622,7 @@ pub enum _BridgeEvent {
         by_peer: bool,
     },
     TogetherShare(TogetherShareDto),
+    AttachmentHandoff(AttachmentHandoffDto),
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
         ledger: String,

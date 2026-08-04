@@ -70,6 +70,7 @@ use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
+use comrade_core::handoff::{AttachmentRoute, HandoffSignal};
 use comrade_core::share::transport::RelayPolicy;
 use comrade_core::share::ShareSignal;
 use comrade_core::together::{MusicLink, Recording, TogetherContent};
@@ -182,6 +183,18 @@ pub struct WorkspaceKeyLabel {
 
 /// Every workspace discriminant and its label — a stable, store-free list
 /// (contrast [`Comrade::workspaces`], which also reports which one is active).
+/// Which road an attachment of this size takes — hosted, or straight to the
+/// other device.
+///
+/// Exported rather than reimplemented per frontend because the two roads have
+/// different failure modes a person has to be told about, and a UI that guessed
+/// the threshold would eventually guess it differently from the core that
+/// enforces it. See `comrade_core::handoff::route_for_bytes`.
+#[uniffi::export]
+pub fn attachment_route_for_bytes(total_bytes: u64) -> AttachmentRoute {
+    comrade_core::handoff::route_for_bytes(total_bytes)
+}
+
 #[uniffi::export]
 pub fn all_workspaces() -> Vec<WorkspaceKeyLabel> {
     AppWorkspace::all()
@@ -1060,6 +1073,27 @@ impl Comrade {
     pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
         let handles = self.inner.read().await.handles();
         handles.together_share(signal).await
+    }
+
+    /// Send one step of handing a **large attachment** over — the road a file
+    /// takes when it is past [`comrade_core::media::MAX_MEDIA_BYTES`] and the
+    /// hosted path cannot carry it.
+    ///
+    /// Deliberately not [`Self::together_share`]: that one refuses outside a live
+    /// watch-together session, which is right for a playhead and wrong here —
+    /// nobody starts a listening session to send a video file. The gate a handoff
+    /// gets instead is on receipt, and it is the same one a call signal clears.
+    /// See `comrade_core::handoff`.
+    pub async fn attachment_handoff_send(
+        &self,
+        peer: String,
+        transfer_id: String,
+        signal: HandoffSignal,
+    ) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .attachment_handoff_send(&peer, &transfer_id, signal)
+            .await
     }
 
     /// What this device does when the only path a transfer could take is

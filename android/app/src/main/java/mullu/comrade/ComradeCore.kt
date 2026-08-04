@@ -972,6 +972,35 @@ object ComradeCore {
         rethrowing("Send file") { runBlocking { ffi.togetherShare(signal) } }
     }
 
+    // ── Handing a large attachment over ──────────────────────────────────────
+
+    /**
+     * Send one step of handing a large attachment over — the road a file takes
+     * when it is past the 10 MB the hosted path can carry.
+     *
+     * Unlike [togetherShareTyped] this does **not** need a live session: nobody
+     * starts a listening session to send a video file. The gate is on receipt
+     * instead, and it is the same one a call signal clears — see
+     * `comrade_core::handoff`.
+     */
+    fun attachmentHandoffSendTyped(
+        peer: String,
+        transferId: String,
+        signal: uniffi.comrade_core.HandoffSignal,
+    ) {
+        rethrowing("Send attachment") {
+            runBlocking { ffi.attachmentHandoffSend(peer, transferId, signal) }
+        }
+    }
+
+    /**
+     * Which road an attachment of this size takes. Asked of the core rather than
+     * compared against a local constant, so a UI can never disagree with the
+     * threshold the core enforces.
+     */
+    fun attachmentRouteForBytes(totalBytes: Long): uniffi.comrade_core.AttachmentRoute =
+        uniffi.comrade.attachmentRouteForBytes(totalBytes.toULong())
+
     /**
      * Whether a *transfer* connection may be given TURN at all. Under the
      * default policy it may not, so a relay candidate is never gathered and

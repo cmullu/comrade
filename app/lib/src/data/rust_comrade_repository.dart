@@ -753,6 +753,10 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
       rust.BridgeEvent_TogetherCorrection() => null,
       rust.BridgeEvent_TogetherEnded() => null,
       rust.BridgeEvent_TogetherShare() => null,
+      // Handing a large attachment over needs a WebRTC data channel, which this
+      // frontend has none of — see divergence D21 in `SCREEN_INVENTORY.md`. Null
+      // rather than a stub so nothing here pretends the transfer is possible.
+      rust.BridgeEvent_AttachmentHandoff() => null,
     };
 
 /// Flatten the typed `CallSignal` union back into the flat shape the call UI
