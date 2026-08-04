@@ -609,15 +609,31 @@ is small; the content problem is the real constraint:
   channels, no new infrastructure. Builds after the loved-one space
   (pairing UI) exists.
 
-> **Status (2026-08-03, protocol + view-model + bridges landed).** Built as
+> **Status (2026-08-04, protocol + both shipping frontends landed).** Built as
 > `comrade_core::together` (`crates/comrade_core/src/together.rs`) — a seventh
 > control envelope on the `comrade_core::dm` marker convention — plus the
 > view-model half in `crates/comrade_ui/src/runtime.rs` (`together_start` /
-> `together_join` / `together_set_state` / `together_end` with `RuntimeHandles`
-> twins, `together_report_position`, the `dispatch_incoming_dm` arm, the session
-> loop, five `BridgeEvent` variants), both FFI bridges, six Tauri commands, and
-> the desktop decision module `desktop/ui/together_sync.mjs`. Design record:
+> `together_join` / `together_set_state` / `together_end` / `together_share`
+> with `RuntimeHandles` twins, `together_report_position`, the
+> `dispatch_incoming_dm` arm, the session loop, **six** `BridgeEvent` variants
+> at `runtime.rs:1126-1150`), both FFI bridges, **eleven** Tauri commands
+> (`desktop/src-tauri/src/lib.rs:142-152`), the desktop panel and decision
+> modules (`desktop/ui/together_sync.mjs`, `share_transfer.mjs`), and the
+> Android package `android/app/src/main/java/mullu/comrade/together/` with
+> `ui/TogetherScreen.kt`. Design record:
 > [`docs/TOGETHER.md`](docs/TOGETHER.md).
+>
+> A fourth assumption of this section also did not survive contact: **"each
+> participant plays their own copy" is often just false**, and the honest answer
+> when only one side has the file is for that side to send it. That is
+> `comrade_core::share` + `share::transport` — chunked, receiver-driven,
+> resumable, over a **separate** `RTCPeerConnection` from any call, with the
+> negotiation riding inside the session envelope so it inherits the acceptance
+> gate, the age gate and the session scoping rather than growing its own copies.
+> It is emphatically **not** the re-streaming this section rules out: the bytes
+> go from one device to one other device and touch nothing else, and the default
+> policy refuses to put them through anyone's relay at all
+> (`share::transport::RelayPolicy::DirectOnly`). See `docs/TOGETHER.md` §9a–§9d.
 >
 > Three of this section's own assumptions did not survive the code, and the
 > build follows the corrections rather than the sketch:
@@ -638,14 +654,31 @@ is small; the content problem is the real constraint:
 >   scoped to any accepted conversation and gated exactly like call signaling.
 >   (The pairing claim it rested on was also stale — see below.)
 >
-> Also **not** built, deliberately and stated in the doc rather than implied: no
-> desktop player surface yet (so no way to start a session from the UI), no
-> Android screen (the five events are dropped explicitly in
-> `RelayConnectionService.kt`), and no YouTube embed on either. `docs/TOGETHER.md`
-> §9 carries the conditions each must meet — in particular that a YouTube embed
-> must be a bare cross-origin iframe with the CSP widened by exactly `frame-src`,
-> never `script-src`, which would put third-party JavaScript in the origin where
-> `withGlobalTauri` exposes every registered command.
+> Still **not** built, stated here rather than implied by the test counts:
+>
+> - **No YouTube embed on either frontend.** `docs/TOGETHER.md` §7 carries the
+>   condition it must meet — a bare cross-origin iframe with the CSP widened by
+>   exactly `frame-src`, never `script-src`, which would put third-party
+>   JavaScript in the origin where `withGlobalTauri` exposes every registered
+>   command.
+> - **Nothing asks for consent, and nothing sets the policy.**
+>   `TransferVerdict::NeedsConsent` is computed and carried to both frontends,
+>   and neither presents the question — so `RelayPolicy::AskEachTime` currently
+>   behaves as a refusal. `set_share_relay_policy` likewise has no UI and is not
+>   persisted, so every launch is `DirectOnly`. Safe default; not yet the
+>   configurable policy the design claims.
+> - **Playable-early is computed and unused.** `ShareTracker::playable_at` and
+>   `runway_ms` are tested on all three sides, but desktop plays only once the
+>   file is whole (a `blob:` URL cannot grow; progressive playback needs MSE and
+>   a fragmented container) and Android opens it only after the hash checks out.
+> - **The Flutter app has no together surface** — all six events are dropped
+>   one variant at a time in `rust_comrade_repository.dart` so that building one
+>   is a compile error rather than a silent no-op.
+>
+> And the limit no test count can cover: **no session and no transfer has ever
+> run between two real devices.** The wire, the clock filter, the drift verdict,
+> the tracker and the relay policy are unit-tested three ways over; the
+> `RTCPeerConnection` handling on both frontends is reviewed, not exercised.
 
 ---
 
