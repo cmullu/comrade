@@ -257,17 +257,31 @@ jobs:
         run: flutter build web --release --no-web-resources-cdn
 
       # The CSP promise, checked against the artifact rather than asserted in a
-      # comment: nothing in the bundle may point at an off-origin host. Greps the
-      # emitted loader/config JS, where the CanvasKit base URL lands as a literal
-      # — unlike `dart:ffi`, this one survives compilation as a string.
-      - name: No off-origin resource URLs in the bundle
+      # comment: the renderer must be served from this origin.
+      #
+      # Asserted as the *presence of the local asset* rather than the absence of a
+      # hostname, deliberately. An absence-grep is the obvious way to write this
+      # and it is wrong twice over: `flutter.js` carries its own hardcoded CDN
+      # fallback string regardless of the flag, so the grep can fail on a string
+      # the build will never fetch; and `web/index.html` is copied into the bundle
+      # verbatim, so even a *comment* naming the host trips it. Checking that
+      # canvaskit is actually in the bundle tests the thing the CSP needs — the
+      # renderer resolves locally — and cannot be defeated by prose.
+      # Matched on "a .wasm under canvaskit/" rather than a specific filename,
+      # because which one lands (canvaskit.wasm, skwasm.wasm, a chromium/ variant)
+      # depends on the renderer Flutter picks, and pinning the name would make this
+      # fail on a renderer change that is not a regression.
+      - name: The renderer is served from this origin, not a CDN
         working-directory: app
         run: |
-          if grep -rIn "gstatic.com\|googleapis.com" build/web/ ; then
-            echo "::error::the web bundle points at an off-origin CDN; the page's CSP blocks it"
+          found=$(find build/web/canvaskit -name '*.wasm' 2>/dev/null | head -5)
+          if [ -z "$found" ]; then
+            echo "::error::no renderer .wasm under build/web/canvaskit/ — the page would fetch it from a CDN, which its own CSP blocks"
+            ls -la build/web/ 2>&1 || true
             exit 1
           fi
-          echo "no off-origin resource URLs"
+          echo "renderer bundled locally:"
+          echo "$found"
 
       - uses: actions/upload-artifact@v4
         with:
