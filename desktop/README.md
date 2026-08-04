@@ -121,9 +121,17 @@ Outbound text DM send is wired (`send_dm`), and the Vault tab seeds its
 contact list and threads from the Rust-side offline history (`conversations` /
 `messages_with`). Remaining known gaps: server-side QR-pairing validation
 (pairing payloads are validated client-side before committing the workspace
-transition) and a desktop UI for the profile/username commands the backend
-now exposes (`current_profile`, `set_username`, `search_profiles`,
-`add_contact`, `list_contacts`).
+transition).
+
+The profile/username commands now have a caller. `#view-profile` (reached from
+the identity chip for your own, and from a conversation header's name for a
+peer — never from the tab rail) renders `current_profile` / `peer_profile`,
+edits the handle and bio through `set_username` / `set_about`, and shows what
+you have exchanged from `media_with` and `messages_with`. Two things it still
+cannot do, stated rather than left to be discovered: **mute** renders disabled,
+because there is no desktop backend for it and an absent control would make the
+three frontends disagree about the row; and a **blocked peer gets no actions at
+all**, because there is no unblock command in the core to pair a button with.
 
 The desktop crate's webview build needs system GTK/webkit libs absent from the
 CI sandbox, so the media commands compile-check via the workspace crates
