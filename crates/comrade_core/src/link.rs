@@ -298,6 +298,19 @@ fn is_never_grantable(method: &str) -> bool {
             | "npub_from_nsec"
             | "panic_wipe"
             | "set_turn_server"
+            // Process lifecycle. `scope_for` would refuse these anyway by not
+            // knowing them, but `init_runtime_with_relays` takes a **relay list**
+            // — a linked session that could call it would choose which relays the
+            // host talks to, which is a traffic-redirection primitive and not the
+            // kind of thing to leave resting on a default. Named explicitly so it
+            // stays refused even if someone later adds it to the scope table.
+            | "init_app"
+            | "init_runtime"
+            | "init_runtime_with_relays"
+            // The link surface itself. Deny-listed before it exists (Phase W2 of
+            // docs/FLUTTER_WEB_MIGRATION.md adds these exports), because the
+            // order matters: a session that could mint or revoke grants could
+            // promote itself and lock the key-holder out of their own vault.
             | "link_grant"
             | "link_revoke"
             | "link_sessions"
@@ -330,7 +343,14 @@ fn scope_for(method: &str) -> Option<LinkScope> {
         | "abandon_draft"
         | "toggle_workspace" => LinkScope::SendMessages,
 
-        "media_with" | "upload_and_send_media" | "download_media" => LinkScope::Media,
+        // `download_and_decrypt_media`, not `download_media`: these are
+        // `comrade_jni::api` export names, and an approximation of one fails
+        // closed — which is the safe direction and still a bug, because the
+        // browser silently cannot open an attachment. An earlier draft of this
+        // table had the shorter name, from `ComradeRepository.downloadMedia`.
+        // Phase W3's method table is where the two can finally be diffed
+        // mechanically; see docs/FLUTTER_WEB_MIGRATION.md.
+        "media_with" | "upload_and_send_media" | "download_and_decrypt_media" => LinkScope::Media,
 
         "fetch_sabha_timeline" | "broadcast_chitthi" | "broadcast_anonymous_chitthi" => {
             LinkScope::Feed
@@ -1409,6 +1429,8 @@ mod tests {
             "npub_from_nsec",
             "panic_wipe",
             "set_turn_server",
+            "is_vault_unlocked",
+            "is_store_unlocked",
             "link_grant",
             "link_revoke",
             "link_sessions",
@@ -1418,6 +1440,29 @@ mod tests {
                 "{method} must stay with the key-holder"
             );
         }
+    }
+
+    #[test]
+    fn no_scope_set_can_choose_which_relays_the_host_talks_to() {
+        // `init_runtime_with_relays` takes a relay list. A linked session that
+        // could call it would redirect the host's traffic, so it is refused by
+        // name rather than only by `scope_for` happening not to list it.
+        let all = LinkScopes::web_default();
+        for method in ["init_app", "init_runtime", "init_runtime_with_relays"] {
+            assert!(!all.permits(method), "{method} is process lifecycle");
+        }
+    }
+
+    #[test]
+    fn media_download_is_named_after_the_real_export() {
+        // Regression. The table once said "download_media", which is not an
+        // export — `comrade_jni::api` spells it `download_and_decrypt_media`, and
+        // the short name came from `ComradeRepository.downloadMedia`. It failed
+        // closed, so nothing was exposed; a linked browser just silently could
+        // not open an attachment.
+        let media = LinkScopes::from_iter([LinkScope::Media]);
+        assert!(media.permits("download_and_decrypt_media"));
+        assert!(!media.permits("download_media"));
     }
 
     #[test]

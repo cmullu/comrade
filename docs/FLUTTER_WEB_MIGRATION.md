@@ -44,12 +44,49 @@ for 11 of them. **Five have no Dart counterpart at all:**
 | `VoiceModelDownloadDialog` | 119 |
 | **Total** | **2,024** |
 
+### The gap is not all view work — some of it is ABI
+
+Three of those five screens cannot be written today, because the methods behind
+them do not cross Flutter's bridge. Measured per bridge:
+
+| Surface | uniffi (Android) | Tauri (desktop) | FRB (Flutter) | Dart `ComradeRepository` |
+|---|---:|---:|---:|---:|
+| Attention: focus sessions, presets, prompts, reflection, day rollups, summary | **11** | **11** | **0** | **0** |
+| Together (listen together) | ✅ | ✅ | **6** | **0** |
+| Sakha (couple sandbox) | **0** | ✅ | **0** | throws `_notBridged` |
+
+So there are three distinct failure modes wearing one label, and they cost
+different amounts:
+
+1. **`ComradesScreen`** is pure view work. `comrades()`, `peerPresence()` and
+   `setComrade()` are already on `ComradeRepository`.
+2. **`TogetherScreen`** is view work *plus* six repository methods. The FRB
+   exports exist (`together_start`, `together_join`, `together_set_state`,
+   `together_report_position`, `together_end`, `together_match_score`); nothing in
+   Dart declares them.
+3. **The whole Attention feature — `FocusScreen`, `ReaderScreen`,
+   `BreathingScreen`, `MirrorCard` — is unreachable from Flutter at the ABI.**
+   `active_focus_session`, `start_focus_session`, `finish_focus_session`,
+   `focus_presets`, `focus_prompt`, `focus_reflection`, `focus_sessions`,
+   `suggested_focus_minutes`, `attention_days`, `attention_summary` and
+   `record_attention_day` are on `comrade_ui::ComradeRuntime` and exported by
+   **both** shipping bridges. `crates/comrade_jni/src/api.rs` exports none of
+   them. This is the same shape of hole as Sakha and four times the size, and it
+   is the one item on this list that cannot start without a codegen run.
+
 `app/` also has one screen Android does not — `couple_screen.dart`, the Sakha
-sandbox — and it cannot work against the real core: `sakha_status`, `pair_sakha`,
-`sakha_add_entry`, `sakha_read_ledger` and `test_turn_connectivity` are on
-`ComradeRuntime` and exposed by Tauri but by **neither** FFI ABI, so
+sandbox — and it cannot work against the real core either: `sakha_status`,
+`pair_sakha`, `sakha_add_entry`, `sakha_read_ledger` and `test_turn_connectivity`
+are on `ComradeRuntime` and exposed by Tauri but by **neither** FFI ABI, so
 `rust_comrade_repository.dart:497-516` throws `_notBridged` for all of them. That
 is the pre-existing hole `FRONTEND_STRATEGY.md` §10 surfaced, still open.
+
+**Worth naming for what it is.** `FRONTEND_STRATEGY.md` §2 measured that the real
+problem was never UI duplication but *parity debt* — desktop stopped tracking
+Android and drifted. The table above is that same debt, reproduced on the new
+frontend before the old one has been retired. It is the argument for §5's Phase P3
+ordering: a frontend that is missing a whole feature at the ABI is not a frontend
+you can retire the others in favour of.
 
 So the honest summary of "migrate completely to Flutter" is **three** pieces of
 work, not one:
@@ -251,8 +288,14 @@ The half that makes a grant do something. In `comrade_ui`:
 
 * A method table mapping `LinkFrame::Request { method }` to the runtime, refusing
   anything `LinkSessionStore::authorize` declines. It is the *same* table
-  `scope_for` names, and the two must not drift — a test that every arm of one
-  appears in the other is cheap and worth having.
+  `scope_for` names, and **a test that every name in one is a real export of the
+  other is not optional.** `link.rs` cannot see `api.rs` — different crates, and
+  `comrade_core` sits below `comrade_jni` — so `scope_for` is a list of strings
+  nothing checks. That already bit once: the first draft said `download_media`,
+  which is not an export (`download_and_decrypt_media` is), and the only symptom
+  would have been a linked browser silently unable to open an attachment.
+  Fail-closed contained it; nothing caught it. `comrade_ui` is the first place
+  both sides are visible, so the check belongs there.
 * `BridgeEvent` forwarding as `LinkFrame::Event`, so a linked tab updates live.
 * Transport over relays, both directions, chunked and sealed. Bounded, because a
   relay round trip per call is the latency floor — batch the initial sync rather
@@ -276,9 +319,33 @@ to *find* work rather than complete it.
 ### Phase P2 — close the 2,024-line gap
 
 The five missing screens from §1, plus voice notes, dictation, wake word and the
-UPI `/pay` preview, plus the Sakha FFI hole. Straight view work against a
-repository interface that already exists — except Sakha, which needs the five
-missing exports first.
+UPI `/pay` preview. **Not uniform work**, per §1's table, and the ordering follows
+from that:
+
+1. **`api.rs` first**, in one codegen run: the 11 Attention exports and the 5
+   Sakha/TURN ones. Everything else in this phase is blocked behind or
+   independent of it, and batching means one `flutter_rust_bridge_codegen` pass
+   rather than three.
+2. `ComradesScreen` — view only, unblocked today.
+3. `TogetherScreen` — six repository methods over exports that already exist.
+4. Attention's four surfaces, once (1) has landed.
+
+Two of Attention's thresholds sit on opposite sides of that line, and the port has
+to treat them differently:
+
+* **The focus ladder is shared.** `FOCUS_PRESETS: &[u32] = &[25, 45, 90]` is in
+  `crates/comrade_core/src/attention.rs:107`, with `FOCUS_GRACE_SECS`,
+  `FOCUS_MIN_MINUTES` and `FOCUS_MAX_MINUTES` beside it. The Dart port reads them
+  over the bridge and must not restate them.
+* **The gentle stop is not.** Its ten-minute rule lives only in
+  `android/app/src/main/java/mullu/comrade/attention/ScrollSitting.kt`
+  (`THRESHOLD_MS`), tested only in Kotlin, and absent from `comrade_core`, from
+  `desktop/ui/` and from `app/lib/src/screens/feed_screen.dart`. So a Dart port
+  either re-derives the number — a second copy of a wellbeing policy, which is
+  exactly the drift the repo's parity rule exists to stop — or the rule moves into
+  `comrade_core::attention` first. **Move it.** It is ~30 lines of pure predicate
+  with a Kotlin test to port alongside, and doing it before the screen means the
+  threshold has one home rather than three.
 
 ### Phase P3 — retire, in this order
 
@@ -307,16 +374,31 @@ Rust, verified here (`cargo fmt`, `clippy --workspace --all-targets -D warnings`
 Dart, **unverified** — no `flutter` or `dart` in this container, CI is the first
 build:
 
-* `app/web/` — the target's entry point, so `flutter build web` has something to
-  build.
-* The two imports that made a web build impossible are now conditional:
-  `dart:ffi` (via `lib/src/rust/frb_generated.io.dart`) and `dart:io` (in
-  `lib/src/platform/media_channel.dart`).
-* `app/lib/src/link/link_offer.dart` — the offer URI codec, checked against the
-  same pinned string as the Rust test. Deliberately **no crypto in Dart**: the
-  fingerprint is computed by Rust, and a Dart sha256 would be the first step
-  toward the second implementation §2(b) rules out.
-* A `flutter build web` CI lane.
+* `app/web/index.html` + `manifest.json` — the target's entry point. The CSP
+  allows `connect-src` to this origin and `wss:` and nothing else, because once
+  Phase W3 lands the only network this page makes is a relay websocket. No CDN,
+  no font host, no analytics: a privacy client that phones a third party to
+  render its own sign-in screen has lost the argument before it starts. `icons`
+  is empty rather than pointing at PNGs that are not in the tree — the browser
+  declines to offer "install", which is honest, instead of 404ing on an icon.
+* The two imports that made a web build impossible are now behind conditional
+  ones: `dart:ffi` (reached from `main.dart` through
+  `lib/src/rust/frb_generated.io.dart`) now goes via
+  `lib/src/data/rust_backend.dart`, and `dart:io` (in
+  `lib/src/platform/media_channel.dart`) via
+  `lib/src/platform/voice_clip.dart`. Both are build-time problems rather than
+  runtime ones — a `dart:ffi` import in a web compilation unit does not compile —
+  so neither could have been fixed with a platform check inside `main`.
+* A `flutter build web --release` CI lane, which is the only lane that can catch
+  either of those regressing: analyze, test, the APK and the Linux bundle all
+  target the VM and stay green with an FFI import in place.
+
+**No Dart port of the offer codec, deliberately.** An earlier draft of this plan
+had one, checked against the pinned URI string. It is the wrong call for the same
+reason §2(b) is: the host parses a scanned code by handing the string to Rust, and
+the browser mints its offer in Rust too, so a Dart codec would be a second
+implementation of a wire format with no caller. The pinned test
+(`offer_uri_shape_is_pinned`) stays valuable as the contract for the *wasm* half.
 
 **What it does not contain, stated plainly.** No web build has been run. The web
 target can only reach `FakeComradeRepository` until Phase W2 lands the wasm
@@ -349,4 +431,22 @@ ls app/lib/src/screens app/lib/src/screens/chats
 
 # The Sakha hole
 grep -n '_notBridged' app/lib/src/data/rust_comrade_repository.dart
+
+# The Attention hole: 11 exports on both shipping bridges, 0 on FRB, 0 in Dart.
+# NB: a bare `grep -c attention` over api.rs returns 54 and every one of them is
+# a false positive — FRB's DTO restatements are spelled `#[frb(mirror(..))]`, and
+# "mirror" is also the name of an Attention surface. Match on `fn` names only.
+for f in crates/comrade_jni/src/lib.rs desktop/src-tauri/src/commands.rs \
+         crates/comrade_jni/src/api.rs; do
+  echo -n "$f "
+  grep -oE 'fn [a-z_]*(focus|attention)[a-z_]*' "$f" | sort -u | wc -l
+done                                    # 13 (11 + 2 test fns), 11, 0
+grep -ci 'focus\|attention' app/lib/src/data/comrade_repository.dart   # 0
+
+# Together: bridged to FRB, declared by nothing in Dart
+grep -cE '^pub (async )?fn together_' crates/comrade_jni/src/api.rs    # 6
+grep -ci together app/lib/src/data/comrade_repository.dart             # 0
+
+# The gentle stop's only home
+grep -rn THRESHOLD_MS android/app/src/main/java/mullu/comrade/attention/
 ```

@@ -401,3 +401,59 @@ kind of wrong.
    desktop window, no golden tests, no real relay — so "it builds" is the whole
    of the claim: not one attachment has been picked, played, or opened out, and
    `FLAG_SECURE` has never been applied to a real window.
+10. **Five Compose screens are missing from this document, not just from the
+    app** — added 2026-08-04, when a parity count for
+    `docs/FLUTTER_WEB_MIGRATION.md` found that §1's matrix and §2's
+    screen-by-screen walk do not mention them at all. That is worse than a
+    porting gap: the whole point of §1 was that nothing gets silently dropped,
+    and these were.
+
+    | Compose screen | LOC | In `app/` |
+    |---|---:|---|
+    | `ui/BreathingScreen.kt` (+ `BreathHaptics.kt`) | 423 + 162 | ✗ |
+    | `ui/FocusScreen.kt` (+ `MirrorCard.kt`) | 393 + 265 | ✗ |
+    | `ui/ComradesScreen.kt` | 300 | ✗ |
+    | `ui/ReaderScreen.kt` | 228 | ✗ |
+    | `ui/TogetherScreen.kt` | 134 | ✗ |
+    | `ui/VoiceModelDownloadDialog.kt` | 119 | ✗ |
+
+    Android has 16 top-level screen composables; `app/` has counterparts for 11.
+    And they are **not** all view work, which was this document's first guess and
+    is wrong. Measured per bridge:
+
+    | Surface | uniffi (Android) | Tauri | FRB (Flutter) | Dart `ComradeRepository` |
+    |---|---:|---:|---:|---:|
+    | Attention (focus + rollups) | 11 | 11 | **0** | **0** |
+    | Together | ✅ | ✅ | 6 | **0** |
+
+    So `ComradesScreen` is view-only (`comrades()`, `peerPresence()`,
+    `setComrade()` are already on the interface); `TogetherScreen` needs six
+    repository methods over exports that exist; and **the whole Attention feature
+    — Focus, Reader, Breathing, Mirror — is unreachable from Flutter at the ABI.**
+    `active_focus_session`, `start_focus_session`, `finish_focus_session`,
+    `focus_presets`, `focus_prompt`, `focus_reflection`, `focus_sessions`,
+    `suggested_focus_minutes`, `attention_days`, `attention_summary` and
+    `record_attention_day` are exported by *both* shipping bridges and by neither
+    line of `crates/comrade_jni/src/api.rs`. That is the same hole as Sakha, four
+    times the size, and it cannot start without a codegen run. Until it closes,
+    "parity" is not the right word for where `app/` is.
+
+    One threshold to move while porting: the feed's gentle stop lives only in
+    `android/.../attention/ScrollSitting.kt` (`THRESHOLD_MS`, ten minutes), tested
+    only in Kotlin and absent from `comrade_core`, `desktop/ui/` and
+    `feed_screen.dart`. Port it into `comrade_core::attention` rather than
+    restating the number in Dart — see `docs/FLUTTER_WEB_MIGRATION.md` Phase P2.
+
+11. **The LOC figures in the header are stale.** It says 4,838 lines of Compose
+    UI across 13 files, measured when the document was written. Today
+    `android/.../ui/` plus `CallScreen.kt` is 10,400 lines, and `desktop/ui/` is
+    11,283. Re-measure before quoting these; Appendix A of
+    `docs/FLUTTER_WEB_MIGRATION.md` has the commands.
+
+12. **No web target parity at all.** `app/web/` now exists and
+    `flutter build web --release` has a CI lane, so the target *builds* — but a
+    browser has no Comrade core (measured: `comrade_core` does not compile for
+    `wasm32-unknown-unknown`), so it reaches `FakeComradeRepository` and nothing
+    else. Signing in is a device-link handshake against a phone or laptop that
+    holds the vault; the protocol is `comrade_core::link` and the transport is
+    not built. See `docs/FLUTTER_WEB_MIGRATION.md` §§2, 4 and 5.

@@ -19,14 +19,13 @@
 /// working with the honest message rather than crashing.
 library;
 
-import 'dart:io';
-
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../data/models.dart';
 import '../widgets/media_attachment.dart';
 import 'channels.dart';
+import 'voice_clip.dart';
 import 'voice_recorder_channel.dart';
 
 /// What this device can actually do with attachments.
@@ -272,24 +271,13 @@ class NativeVoiceNoteRecorder implements VoiceNoteRecorder {
   Future<PickedAttachment?> stop() async {
     final VoiceNote? note = await _stopQuietly();
     if (note == null) return null;
-    final File clip = File(note.path);
-    try {
-      final Uint8List bytes = await clip.readAsBytes();
-      if (bytes.isEmpty) return null;
-      return PickedAttachment(
-        name: 'Voice note',
-        mimeType: note.mimeType,
-        bytes: bytes,
-      );
-    } on FileSystemException {
-      return null;
-    } finally {
-      try {
-        await clip.delete();
-      } on FileSystemException {
-        // Already gone, or never written. Nothing to do and nothing to say.
-      }
-    }
+    final Uint8List? bytes = await readAndDeleteClip(note.path);
+    if (bytes == null) return null;
+    return PickedAttachment(
+      name: 'Voice note',
+      mimeType: note.mimeType,
+      bytes: bytes,
+    );
   }
 
   Future<VoiceNote?> _stopQuietly() async {
