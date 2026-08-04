@@ -25,6 +25,18 @@ Versus `origin/main`:
 git -C "$CLAUDE_PROJECT_DIR" diff --name-only origin/main...HEAD 2>/dev/null | head -60
 ```
 
+## Before trusting a clippy run
+
+CI resolves `stable` fresh; this container's toolchain is a snapshot and is
+often behind. New clippy lints therefore fail in CI on code that was clean here.
+
+```!
+rustc --version && cargo clippy --version
+```
+
+If those are older than the current stable, run `rustup update stable` first —
+a green local clippy otherwise proves nothing about the gate.
+
 ## Lane selection
 
 Match the paths above. With `--all`, run every runnable lane regardless.

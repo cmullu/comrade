@@ -108,12 +108,9 @@ impl ShareOffer {
     /// close enough for deciding when to start: being a second out on the
     /// runway estimate costs a second of buffering, not correctness.
     pub fn chunk_ms(&self) -> u64 {
-        let chunks = self.chunk_count() as u64;
-        if chunks == 0 {
-            0
-        } else {
-            self.duration_ms / chunks
-        }
+        self.duration_ms
+            .checked_div(self.chunk_count() as u64)
+            .unwrap_or(0)
     }
 }
 
@@ -184,11 +181,10 @@ impl ShareTracker {
 
     /// The chunk containing `pos_ms`.
     pub fn chunk_at_ms(&self, pos_ms: u64) -> u32 {
-        let chunk_ms = self.offer.chunk_ms();
-        if chunk_ms == 0 {
+        let Some(index) = pos_ms.checked_div(self.offer.chunk_ms()) else {
             return 0;
-        }
-        ((pos_ms / chunk_ms) as u32).min(self.offer.chunk_count().saturating_sub(1))
+        };
+        (index as u32).min(self.offer.chunk_count().saturating_sub(1))
     }
 
     /// How many milliseconds of *uninterrupted* playback are available from
