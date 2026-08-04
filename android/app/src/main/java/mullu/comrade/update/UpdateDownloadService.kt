@@ -274,7 +274,7 @@ class UpdateDownloadService : Service() {
             .setAutoCancel(true)
             .setContentIntent(openSettingsIntent())
             .build()
-        notifications.notify(PROGRESS_ID + 1, notification)
+        notifications.notify(FAILED_ID, notification)
     }
 
     /** Tapping progress (or a failure) lands on the card that owns this. */
@@ -298,6 +298,14 @@ class UpdateDownloadService : Service() {
 
         /** The foreground (progress) id. Distinct from every other service's. */
         private const val PROGRESS_ID = 0xC0DE23
+
+        /**
+         * The "download failed" id. Written out rather than `PROGRESS_ID + 1`,
+         * which is how it silently came to collide with
+         * `UpdateInstaller.INSTALLED_ID`: arithmetic on a notification id does
+         * not show up in a grep for the number it produces.
+         */
+        private const val FAILED_ID = 0xC0DE24
 
         private val running = AtomicBoolean(false)
 

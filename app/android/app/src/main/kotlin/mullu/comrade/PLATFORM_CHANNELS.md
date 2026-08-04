@@ -804,9 +804,18 @@ both, and combining two `StateFlow`s natively is cheaper than two channels.
 `check` is `unknown` / `checking` / `upToDate {checkedAt}` /
 `failed {message, checkedAt}` / `available {version, tag, notes, pageUrl,
 apkBytes, checkedAt}`. `download` is `idle` / `downloading {bytesRead,
-totalBytes}` / `verifying` / `ready {version}` / `installing {version}` /
-`failed {message}`. Snapshot-based like every other state channel, so a finding —
-or a download that finished while the engine was detached — is the first event.
+totalBytes}` / `verifying` / `ready {version}` /
+`installing {version, bytesStaged, totalBytes}` / `failed {message}`.
+Snapshot-based like every other state channel, so a finding — or a download that
+finished while the engine was detached — is the first event.
+
+`installing` carries progress because it covers two phases, and `totalBytes`
+tells them apart the same way it does for `downloading`. Positive means the APK is
+still being streamed into the installer session and `bytesStaged` says how far;
+zero means the platform has it and what happens next — its dialog, or this process
+being replaced — is not ours to report progress on. Dart shows a bar for the first
+and the `retryInstall` escape hatch only for the second: offering "nothing
+happened?" while a progress bar is moving would be a lie.
 
 **Nothing here takes a URL or a path.** `check` hits the endpoint compiled into
 `UpdateCheck.LATEST_RELEASE_URL`; `download` fetches the APK asset that endpoint
@@ -816,11 +825,27 @@ opens that release's page. An update path is code execution, so every one of
 those is a place a caller-supplied string would be a way to run someone else's
 APK — and none of them accept one.
 
-**The install runs on a worker thread, and the confirmation dialog is started
-from an Activity.** Both are load-bearing, and the first shipped version had
-neither. Copying a release APK into a `PackageInstaller` session is tens of
+**The check also runs with the app closed, and no Dart is involved.**
+`UpdateCheckJob` (platform `JobScheduler`, daily with an hour of flex, persisted
+across reboot) asks GitHub and posts the notification itself. That is not push and
+there is no server: the device asks, on a schedule. It matters to this channel in
+one way — a notice can appear, and `notified_version` can advance, without the
+engine ever having been attached, so `settings` and the state channel must be read
+as *current truth on attach* rather than as a log of what Dart asked for.
+`setAutoCheck {enabled: false}` takes the job out of the queue outright rather than
+merely stopping the reading of its answer, because the whole point of that setting
+is that it stops the requests.
+
+**The install runs in a foreground service, and the confirmation dialog is
+started from an Activity.** Both are load-bearing, and the first shipped version
+had neither. Copying a release APK into a `PackageInstaller` session is tens of
 megabytes of I/O; doing it on the thread the method call arrives on froze the app
-long enough for an ANR. And `STATUS_PENDING_USER_ACTION` — the platform handing
+long enough for an ANR. Moving it to a bare worker thread fixed the freeze but
+left the copy invisible — several seconds behind an Activity that covered the app
+without drawing anything, so tapping Install looked like tapping nothing — which
+is why it is now `UpdateInstallService` (`dataSync`), reporting progress into the
+shade and onto the card, with the Activity finishing the moment it hands over.
+And `STATUS_PENDING_USER_ACTION` — the platform handing
 back an Intent for its own confirmation dialog, expecting the app to start it —
 came back to a `BroadcastReceiver`, which is the one context that may not
 reliably start an activity: a notification whose `contentIntent` is a broadcast

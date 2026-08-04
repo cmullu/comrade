@@ -240,6 +240,7 @@
     <string name="settings_updates_downloading">Downloading %1$s of %2$s…</string>
     <string name="settings_updates_verifying">Checking the download…</string>
     <string name="settings_updates_install">Install %1$s</string>
+    <string name="settings_updates_staging">Handing %1$s of %2$s to Android…</string>
     <string name="settings_updates_installing">Waiting for Android to install it…</string>
     <string name="settings_updates_install_retry">Nothing happened? Try again</string>
     <string name="settings_updates_cancel_download">Cancel download</string>
@@ -251,6 +252,10 @@
     <string name="update_downloading_title_generic">Downloading an update</string>
     <string name="update_downloading_text">%1$s of %2$s</string>
     <string name="update_verifying_text">Checking the download…</string>
+    <string name="update_installing_title">Installing Comrade %1$s</string>
+    <string name="update_installing_title_generic">Installing the update</string>
+    <string name="update_installing_text">Handing it to Android…</string>
+    <string name="update_installing_progress">%1$s of %2$s</string>
     <string name="update_ready_title">Comrade %1$s is ready to install</string>
     <string name="update_ready_text">Tap to install it now</string>
     <string name="update_download_failed_title">Update download failed</string>

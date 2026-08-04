@@ -614,10 +614,11 @@ class _UpdatesCardState extends ConsumerState<_UpdatesCard>
                     const SizedBox(height: 4),
                     Text(
                       'Asks github.com once a day whether a newer Comrade has '
-                      'been published. That tells GitHub your IP address and '
-                      'nothing else — no account, no identifier, no message '
-                      'data. With this off, nothing is checked until you tap '
-                      '“Check now”.',
+                      'been published, and notifies you if there is — '
+                      'including while Comrade is closed. That tells GitHub '
+                      'your IP address and nothing else — no account, no '
+                      'identifier, no message data. With this off, nothing is '
+                      'checked until you tap “Check now”.',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.onSurfaceVariant,
                       ),
@@ -709,6 +710,19 @@ class _UpdatesCardState extends ConsumerState<_UpdatesCard>
           ),
           ...permissionNote(),
         ];
+      // Two phases. While the APK is still being handed over there is real
+      // progress to show, and showing it is the difference between "installing"
+      // and the several silent seconds this used to be.
+      case DownloadInstalling(:final int? percent) when percent != null:
+        return <Widget>[
+          Text(
+            'Handing it to Android… $percent%',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 4),
+          LinearProgressIndicator(value: percent / 100),
+        ];
       case DownloadInstalling():
         return <Widget>[
           Text(
@@ -720,7 +734,9 @@ class _UpdatesCardState extends ConsumerState<_UpdatesCard>
           // Android reports nothing when it declines to show an app's install
           // confirmation, so "waiting" and "never going to happen" look
           // identical from here. This hands the install back to the user
-          // instead of stranding them on that line.
+          // instead of stranding them on that line. Deliberately not offered
+          // during the hand-off above, where "nothing is happening" is visibly
+          // false.
           OutlinedButton(
             onPressed: controller.retryInstall,
             child: const Text('Nothing happened? Try again'),

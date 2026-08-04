@@ -216,6 +216,16 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Streams the downloaded APK into the PackageInstaller session with
+             progress in the shade, so the seconds between tapping Install and the
+             platform taking over are visible instead of silent. Started from a
+             resumed Activity; reads what to install from UpdateDownloads, never
+             from an intent extra. See UpdateInstallService. -->
+        <service
+            android:name=".update.UpdateInstallService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Asks GitHub once a day whether a newer Comrade exists, with the app
              closed, and posts the notification that says so. Persisted, so it
              survives a reboot; taken out of the queue when auto-check is switched

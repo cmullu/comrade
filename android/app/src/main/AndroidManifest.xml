@@ -214,6 +214,19 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Streams the downloaded APK into the PackageInstaller session with
+             progress in the shade. A foreground service rather than a bare worker
+             thread because the copy takes seconds a user waits through: it used to
+             happen invisibly, behind an Activity that covered the app without
+             drawing anything, which is what "I clicked install and it stopped
+             responding" was. Started from a resumed Activity, so the Android 12+
+             background-start restriction never applies. Reads what to install from
+             UpdateDownloads, never from an intent extra. See UpdateInstallService. -->
+        <service
+            android:name=".update.UpdateInstallService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Asks GitHub once a day whether a newer Comrade exists, with the app
              closed, and posts the notification that says so — the only situation
              in which that notification is worth anything. Persisted, so it

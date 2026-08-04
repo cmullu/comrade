@@ -351,10 +351,12 @@ object UpdateChecker {
     /**
      * Install what has been downloaded, through [UpdateInstallActivity].
      *
-     * Not a direct call into [UpdateInstaller]: the install has to be driven
-     * from an Activity so the system's confirmation dialog can be started from
-     * one, and it has to be off the main thread so a 50 MB copy does not freeze
-     * the caller. That activity draws nothing — see its doc comment.
+     * Not a direct call into [UpdateInstaller]: the install has to be driven from
+     * an Activity so the system's confirmation dialog can be started from one.
+     * That activity draws nothing and finishes at once, handing the copy to
+     * [UpdateInstallService] — which is a foreground service because tens of
+     * megabytes of copying is a wait the user should be able to see, not several
+     * seconds in which tapping Install appears to do nothing.
      */
     fun install(context: Context) {
         val ready = UpdateDownloads.state.value as? UpdateDownloadState.Ready ?: return
