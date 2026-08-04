@@ -89,11 +89,35 @@ offset_ms = ((t2 - t1) + (t3 - t4)) / 2      // their clock − ours
 rtt_ms    = (t4 - t1) - (t3 - t2)            // their turnaround removed
 ```
 
-`ClockFilter` keeps eight probes in a two-minute window and reports the one
-with the **lowest round trip** — the standard minimum filter, because the
-least-queued sample is the one whose "both directions took the same time"
-assumption holds best. It also means a clock *step* on either device shows up
-as an outlier and ages out, rather than poisoning an average forever.
+`ClockFilter` keeps eight probes in a two-minute window and averages the offsets
+of the **best half by round trip** — [beatsync](https://github.com/freeman-jiang/beatsync)'s
+filter, and better than a bare minimum for the reason any average is: one lucky
+sample stops deciding the answer alone. The *lowest* round trip still sets the
+uncertainty, because that is a claim about the best evidence we have rather than
+about the mean. A clock *step* on either device shows up as an outlier and ages
+out, rather than poisoning the estimate forever.
+
+Two deliberate differences from beatsync, which is the closest prior art and
+solves a harder version of the same problem in a browser:
+
+- **Each offset is de-skewed to a common instant before averaging.** Offsets
+  taken minutes apart are not samples of one quantity once the two clocks run at
+  different rates; averaging them raw would smear the frequency difference back
+  into the phase. beatsync has no frequency term to conflict with, so it never
+  hits this — here it would be a real error.
+- **The probe rides the heartbeat.** beatsync bursts up to 40 dedicated
+  measurements at join, against a server. Here there is no server, and every
+  message is a persistent gift-wrapped event, so the four timestamps ride traffic
+  that was going out anyway.
+
+What beatsync gets right and this design had to adopt is the **burst**: at one
+probe per ten-second heartbeat, the first minute of a session runs on a
+deliberately pessimistic guess, so the two playheads would be at their furthest
+apart exactly when both people are looking. A session now probes every 500 ms
+until it has eight of them — about four seconds instead of eighty — and then
+settles to the slow tail. Eight rather than forty, because each one here costs a
+persistent event rather than a WebSocket frame, and because a paused session
+bursts too: the clock has to be converged *before* anyone presses play.
 
 Measuring the offset also measures how wrong it might be, and that gives the
 rule the whole module is built around:
@@ -139,6 +163,16 @@ lands 400 ms further along. On a transport fast enough to schedule slightly ahea
 — the local mesh — the sender instead names an instant a few tens of milliseconds
 out and *both* players change state on the same tick, which is how SMPTE and
 AES67 do it. `command_apply` returns exactly those two cases and nothing else.
+
+### What a browser cannot do, and what it does better
+
+beatsync schedules through the Web Audio API's `start(when, offset)`, which is
+**sample-accurate** — the browser hands the exact frame to the mixer. Android's
+`MediaPlayer` has no equivalent: `seekTo` lands on a sample boundary but the
+start instant is best-effort, which is a real advantage beatsync holds and an
+argument for an `AudioTrack`-based path later.
+
+What a native app can do instead is see the rest of the chain:
 
 ### Ear to ear, not decoder to decoder
 
@@ -194,6 +228,7 @@ rather than corrected against.
 
 | Constant | Value | Why |
 |---|---|---|
+| `TOGETHER_BURST_INTERVAL_MS` | 500 ms, for the first 8 probes | The clock must be converged before anyone presses play — see §3. A paused session bursts too, and only the burst does. |
 | `TOGETHER_HEARTBEAT_SECS` | 10 s, and **none while paused** | Not a steering knob. Two local players drift by crystal error — tens of ppm, well under a second across a whole film — so this exists to notice a stall or a lost command and to keep the clock filter supplied. |
 | `TOGETHER_SESSION_TTL_SECS` | 45 s | More than four heartbeats, so a couple of dropped beacons cannot end a session someone is still watching. A phone that dies mid-film sends no goodbye; this is what that costs. |
 | `TOGETHER_SIGNAL_MAX_AGE_SECS` | 60 s | Tighter than the call channel's 90 s, because a replayed call offer produces a ring a human can decline while a replayed playhead moves someone's player with no confirmation step. Wider than the TTL, so the TTL stays the single authority on when a session ends. |

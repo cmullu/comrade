@@ -63,10 +63,10 @@ use comrade_core::sakha::{LedgerEntry, SakhaEngine, SakhaSyncCallback};
 use comrade_core::seen::{content_key, SeenSet, CONTENT_KEY_PREFIX};
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
 use comrade_core::together::{
-    command_apply, describe_state_change, parse_together_envelope, projected_peer_pos_ms,
-    session_is_live_at, signal_is_fresh, sync_verdict, valid_youtube_id, ClockEcho, ClockFilter,
-    CommandApply, CommandStamp, StateChange, SyncSample, SyncVerdict, TogetherContent,
-    TogetherEnvelope, TogetherSignal, TOGETHER_HEARTBEAT_SECS,
+    command_apply, describe_state_change, heartbeat_interval_ms, parse_together_envelope,
+    projected_peer_pos_ms, session_is_live_at, signal_is_fresh, sync_verdict, valid_youtube_id,
+    ClockEcho, ClockFilter, CommandApply, CommandStamp, StateChange, SyncSample, SyncVerdict,
+    TogetherContent, TogetherEnvelope, TogetherSignal, CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
@@ -4765,7 +4765,10 @@ impl RuntimeHandles {
             let guard = self.together.lock().unwrap();
             guard
                 .as_ref()
-                .filter(|s| s.joined && s.local_playing)
+                // While bursting, a paused session still probes: the clock has
+                // to be converged *before* anyone presses play, or the first
+                // minute is the worst-synced part of the session.
+                .filter(|s| s.joined && (s.local_playing || s.clock.len() < CLOCK_BURST_PROBES))
                 .map(|s| TogetherSignal::Heartbeat {
                     pos_ms: s.local_pos_ms,
                     playing: s.local_playing,
@@ -4788,14 +4791,21 @@ impl RuntimeHandles {
     fn spawn_together_loop(&self) {
         let handles = self.clone();
         tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(TOGETHER_HEARTBEAT_SECS));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // The first tick fires immediately; skip it, since whoever spawned
-            // this has just sent the message that started the session.
-            ticker.tick().await;
             loop {
-                ticker.tick().await;
+                // The interval is re-read every pass rather than fixed up front:
+                // a session bursts probes until its clock has converged and then
+                // settles to the slow tail (`heartbeat_interval_ms`). A
+                // `tokio::time::interval` cannot change period, and this loop
+                // has no catch-up semantics to preserve — a missed tick should
+                // simply be the next tick.
+                let probes = match handles.together.lock().unwrap().as_ref() {
+                    None => return,
+                    Some(session) => session.clock.len(),
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(heartbeat_interval_ms(
+                    probes,
+                )))
+                .await;
                 if handles.together.lock().unwrap().is_none() {
                     return;
                 }

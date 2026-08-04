@@ -155,6 +155,24 @@ pub const TOGETHER_UNMEASURED_UNCERTAINTY_MS: u64 = 1_500;
 /// out of the estimate within two windows.
 pub const CLOCK_PROBE_WINDOW_MS: u64 = 120_000;
 
+/// How many probes to gather before the clock is treated as converged.
+///
+/// Adopted from beatsync (github.com/freeman-jiang/beatsync), which bursts up
+/// to 40 measurements at join. The problem it solves is real and this design had
+/// it: at one probe per ten-second heartbeat, the first *minute* of a session
+/// runs on [`TOGETHER_UNMEASURED_UNCERTAINTY_MS`] — a deliberately pessimistic
+/// guess — so the two playheads are at their furthest apart exactly when both
+/// people are looking. Eight is fewer than beatsync's forty because each probe
+/// here is a persistent gift-wrapped event rather than a WebSocket frame, and
+/// eight is enough for the best-half filter to have something to choose from.
+pub const CLOCK_BURST_PROBES: usize = 8;
+
+/// The heartbeat interval while bursting. Eight probes at this spacing converges
+/// the clock in about four seconds instead of eighty, for eight extra events
+/// once per session — a trade worth making, and the only place this design
+/// deliberately spends relay traffic.
+pub const TOGETHER_BURST_INTERVAL_MS: u64 = 500;
+
 /// How many probes a frequency estimate needs before it means anything.
 pub const CLOCK_MIN_SKEW_PROBES: usize = 4;
 
@@ -187,6 +205,10 @@ const _: () = assert!(TOGETHER_SESSION_TTL_SECS > 4 * TOGETHER_HEARTBEAT_SECS);
 const _: () = assert!(TOGETHER_SIGNAL_MAX_AGE_SECS > TOGETHER_SESSION_TTL_SECS);
 const _: () = assert!(TOGETHER_SEEK_THRESHOLD_MS > TOGETHER_DEADBAND_COARSE_MS);
 const _: () = assert!(TOGETHER_DEADBAND_COARSE_MS > TOGETHER_DEADBAND_FINE_MS);
+// The burst must actually be a burst and the tail an actual tail; a change that
+// quietly collapsed them into each other would otherwise cost either the first
+// minute of every session or a two-hour film's worth of persistent events.
+const _: () = assert!(TOGETHER_BURST_INTERVAL_MS * 10 < TOGETHER_HEARTBEAT_SECS * 1000);
 
 // ── What is being played ─────────────────────────────────────────────────────
 
@@ -494,6 +516,21 @@ pub fn session_is_live_at(last_heard_ms: u64, now_ms: u64) -> bool {
     now_ms.saturating_sub(last_heard_ms) < TOGETHER_SESSION_TTL_MS
 }
 
+/// How long to wait before the next heartbeat, given how many usable clock
+/// probes this session has gathered.
+///
+/// Fast until the clock has converged, then slow for the rest of the session —
+/// the burst is what makes the *first* minute as tight as the rest, and the
+/// slow tail is what keeps a two-hour film from writing thousands of persistent
+/// events that every later app launch re-scans.
+pub fn heartbeat_interval_ms(probes: usize) -> u64 {
+    if probes < CLOCK_BURST_PROBES {
+        TOGETHER_BURST_INTERVAL_MS
+    } else {
+        TOGETHER_HEARTBEAT_SECS * 1000
+    }
+}
+
 // ── Command arbitration ──────────────────────────────────────────────────────
 
 /// One command's place in the total order both devices compute independently.
@@ -673,20 +710,51 @@ impl ClockFilter {
     }
 
     /// The best estimate at `now_ms`, ignoring probes that have aged out.
+    ///
+    /// Offsets are averaged over the **best half by round trip**, not taken from
+    /// the single least-delayed probe — beatsync's filter, and it is better than
+    /// a bare minimum for the same reason any average is: one lucky sample stops
+    /// deciding the answer alone. The lowest round trip still sets the
+    /// *uncertainty*, because that is a claim about the best evidence we have,
+    /// not about the mean.
+    ///
+    /// With one improvement on it: each offset is **de-skewed to a common
+    /// instant before averaging**. Offsets measured minutes apart are not
+    /// samples of one quantity when the two clocks run at different rates —
+    /// averaging them raw would smear the frequency difference back into the
+    /// phase and partly undo [`Self::estimate`]'s own skew term. beatsync has no
+    /// frequency term to conflict with, so it does not hit this; here it would
+    /// be a real error.
     pub fn estimate(&self, now_ms: u64) -> ClockEstimate {
+        // Insertion order is time order, which `skew_ppm` relies on.
         let live: Vec<&ClockProbe> = self
             .probes
             .iter()
             .filter(|p| now_ms.saturating_sub(p.at_ms) <= CLOCK_PROBE_WINDOW_MS)
             .collect();
-        let Some(best) = live.iter().min_by_key(|p| p.rtt_ms) else {
+        if live.is_empty() {
             return ClockEstimate::unmeasured();
-        };
+        }
+        let skew = skew_ppm(&live);
+
+        let mut by_rtt = live.clone();
+        by_rtt.sort_by_key(|p| p.rtt_ms);
+        let best = by_rtt[0];
+        let keep = by_rtt.len().div_ceil(2); // the best half, at least one
+        let reference = best.at_ms;
+        let sum: f64 = by_rtt[..keep]
+            .iter()
+            .map(|p| {
+                let dt = p.at_ms as f64 - reference as f64;
+                p.offset_ms as f64 - skew * dt / 1_000_000.0
+            })
+            .sum();
+
         ClockEstimate {
-            offset_ms: best.offset_ms,
+            offset_ms: (sum / keep as f64).round() as i64,
             rtt_ms: Some(best.rtt_ms),
-            skew_ppm: skew_ppm(&live),
-            measured_at_ms: best.at_ms,
+            skew_ppm: skew,
+            measured_at_ms: reference,
         }
     }
 
@@ -1463,6 +1531,84 @@ mod tests {
         assert_eq!(
             ClockEstimate::unmeasured().uncertainty_at(9_999_999),
             TOGETHER_UNMEASURED_UNCERTAINTY_MS
+        );
+    }
+
+    /// beatsync's filter: the best half by round trip, averaged — so one lucky
+    /// sample does not decide the answer on its own.
+    #[test]
+    fn the_offset_averages_the_best_half_rather_than_one_lucky_probe() {
+        let mut filter = ClockFilter::new();
+        // Four clean probes around a true offset of 1000, and four badly
+        // delayed ones whose apparent offsets are far off.
+        for (i, (rtt, offset)) in [
+            (40i64, 1_010i64),
+            (44, 990),
+            (42, 1_004),
+            (46, 996),
+            (900, 1_400),
+            (950, 600),
+            (1_000, 1_500),
+            (1_100, 500),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let t1 = 1_000_000i64 + i as i64 * 1_000;
+            let t2 = t1 + rtt / 2 + offset;
+            let t3 = t2;
+            let t4 = t3 - offset + rtt / 2;
+            filter.observe(t1 as u64, t2 as u64, t3 as u64, t4 as u64);
+        }
+        let est = filter.estimate(1_010_000);
+        assert!(
+            (est.offset_ms - 1_000).abs() <= 15,
+            "the delayed probes should not move the answer: {}",
+            est.offset_ms
+        );
+        // The uncertainty still comes from the *best* evidence, not the mean.
+        assert_eq!(est.rtt_ms, Some(40));
+    }
+
+    /// The improvement on beatsync's filter: offsets taken minutes apart are not
+    /// samples of one quantity once the clocks differ in rate, so they are
+    /// de-skewed to a common instant before averaging. Without this the average
+    /// would smear the frequency back into the phase.
+    #[test]
+    fn offsets_are_de_skewed_before_they_are_averaged() {
+        let mut filter = ClockFilter::new();
+        let skew = 100.0f64; // deliberately large, so the effect is visible
+        let base = 1_000_000i64;
+        for i in 0..8i64 {
+            let t1 = base + i * 15_000;
+            let offset = 1_000.0 + skew * (t1 - base) as f64 / 1_000_000.0;
+            let t2 = t1 + 20 + offset as i64;
+            let t3 = t2;
+            let t4 = t3 - offset as i64 + 20;
+            filter.observe(t1 as u64, t2 as u64, t3 as u64, t4 as u64);
+        }
+        let est = filter.estimate((base + 7 * 15_000) as u64);
+        // The reported offset must be the one that holds at `measured_at_ms`,
+        // and projecting it forward must land on the true offset there.
+        let latest = (base + 7 * 15_000) as u64;
+        let projected = est.offset_at(latest);
+        let truth = 1_000.0 + skew * (7 * 15_000) as f64 / 1_000_000.0;
+        assert!(
+            (projected as f64 - truth).abs() < 3.0,
+            "projected {projected} vs true {truth}"
+        );
+    }
+
+    #[test]
+    fn the_heartbeat_bursts_until_the_clock_has_converged_then_settles() {
+        assert_eq!(heartbeat_interval_ms(0), TOGETHER_BURST_INTERVAL_MS);
+        assert_eq!(
+            heartbeat_interval_ms(CLOCK_BURST_PROBES - 1),
+            TOGETHER_BURST_INTERVAL_MS
+        );
+        assert_eq!(
+            heartbeat_interval_ms(CLOCK_BURST_PROBES),
+            TOGETHER_HEARTBEAT_SECS * 1000
         );
     }
 
