@@ -10,8 +10,12 @@
         anything remote. A privacy client that phones a third party to render its
         own login screen has already lost the argument. Everything here is served
         from this origin or is inline — which is *not* the default: the build
-        would otherwise fetch CanvasKit from gstatic.com, so the CI lane passes
+        would otherwise fetch CanvasKit from a Google CDN, so the CI lane passes
         `--no-web-resources-cdn` and greps the artifact to keep it that way.
+
+        That grep scans this file too, since the build copies it into build/web/
+        verbatim. Hence "a Google CDN" rather than the hostname: naming the host
+        in a comment would trip the check that exists to keep the host out.
       * No `<base href="/">` rewriting beyond the token Flutter's tooling
         replaces, so the app can be hosted at a sub-path.
       * `referrer` is `no-referrer`.
