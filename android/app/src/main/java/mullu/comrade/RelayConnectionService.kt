@@ -569,7 +569,7 @@ object ChatEventRouter {
             // peer is an accepted conversation — the same gate a call signal
             // clears — but says nothing about the signal's *contents*, so the
             // manager checks every peer-chosen field before it reaches a
-            // filesystem or a screen. See D21a in `app/lib/SCREEN_INVENTORY.md`.
+            // filesystem or a screen. See D34a in `app/lib/SCREEN_INVENTORY.md`.
             is BridgeEvent.AttachmentHandoff -> {
                 val handoff = event.v1
                 mullu.comrade.handoff.AttachmentHandoffManager.onSignal(
