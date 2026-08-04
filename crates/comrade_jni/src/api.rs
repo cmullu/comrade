@@ -71,7 +71,7 @@ use crate::frb_generated::StreamSink;
 // no Rust downstream.)
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
-pub use comrade_core::together::{StateChange, SyncVerdict, TogetherContent};
+pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
     BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
@@ -363,11 +363,33 @@ pub enum _CallSignal {
     },
 }
 
+#[frb(mirror(Recording))]
+pub struct _Recording {
+    pub isrc: Option<String>,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+}
+
+#[frb(mirror(MusicLink))]
+pub enum _MusicLink {
+    Spotify {
+        track_id: String,
+    },
+    AppleMusic {
+        storefront: String,
+        track_id: String,
+    },
+    Youtube {
+        video_id: String,
+    },
+}
+
 #[frb(mirror(TogetherContent))]
 pub enum _TogetherContent {
     LocalFile {
         duration_ms: u64,
-        label: Option<String>,
+        recording: Option<Recording>,
     },
     Youtube {
         video_id: String,
@@ -975,6 +997,16 @@ pub async fn send_call_signal(
     handles
         .send_call_signal(&peer, &call_id, media.as_str(), &signal_json)
         .await
+}
+
+/// Recognise a Spotify / Apple Music / YouTube link. Pure and offline.
+pub fn parse_music_link(input: String) -> Option<MusicLink> {
+    comrade_core::together::parse_music_link(&input)
+}
+
+/// Score a library candidate against what the peer named — see the uniffi twin.
+pub fn together_match_score(want: Recording, have: Recording, want_ms: u64, have_ms: u64) -> f64 {
+    comrade_core::together::match_score(&want, &have, want_ms, have_ms)
 }
 
 /// See [`broadcast_chitthi`] for the lock discipline.

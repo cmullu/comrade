@@ -9555,7 +9555,10 @@ mod tests {
     }
 
     fn a_film() -> TogetherContent {
-        TogetherContent::local_file(7_200_000, Some("Solaris".into()))
+        TogetherContent::local_file(
+            7_200_000,
+            Some(comrade_core::together::Recording::titled("Solaris")),
+        )
     }
 
     /// The two-day inbox backfill is the case this exists for: an invitation is

@@ -70,7 +70,7 @@ use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
-use comrade_core::together::TogetherContent;
+use comrade_core::together::{MusicLink, Recording, TogetherContent};
 use comrade_state::AppWorkspace;
 use comrade_ui::{
     AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto,
@@ -938,6 +938,33 @@ impl Comrade {
         media: CallMediaKind,
     ) -> Result<CallSessionDto, UiError> {
         self.inner.blocking_read().place_call(&peer, media.as_str())
+    }
+
+    /// Recognise a Spotify / Apple Music / YouTube link and reduce it to what
+    /// it identifies. Pure and offline — no audio is fetched and no account is
+    /// touched; turning the id into a title needs the service's public
+    /// catalogue API, which is the frontend's call to make.
+    pub fn parse_music_link(&self, input: String) -> Option<MusicLink> {
+        comrade_core::together::parse_music_link(&input)
+    }
+
+    /// How well a candidate in the listener's own library matches what the peer
+    /// named — 1.0 on an ISRC agreement, 0.0 on an ISRC disagreement, a weighted
+    /// title/artist/duration score otherwise. Above
+    /// [`Comrade::together_match_confident`] a frontend may open it unasked.
+    pub fn together_match_score(
+        &self,
+        want: Recording,
+        have: Recording,
+        want_ms: u64,
+        have_ms: u64,
+    ) -> f64 {
+        comrade_core::together::match_score(&want, &have, want_ms, have_ms)
+    }
+
+    /// The bar above which a library match may be opened without asking.
+    pub fn together_match_confident(&self) -> f64 {
+        comrade_core::together::MATCH_CONFIDENT
     }
 
     /// Invite `peer` to watch or listen to something together.

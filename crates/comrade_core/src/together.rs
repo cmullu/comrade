@@ -212,6 +212,203 @@ const _: () = assert!(TOGETHER_BURST_INTERVAL_MS * 10 < TOGETHER_HEARTBEAT_SECS 
 
 // ── What is being played ─────────────────────────────────────────────────────
 
+/// What is being played, named the way a catalogue names it.
+///
+/// The idea, and specifically the ISRC-first shape, is adapted from
+/// [Antra](https://github.com/anandprtp/Antra), which uses the International
+/// Standard Recording Code to guarantee an exact-recording match and falls back
+/// to a scored title/artist similarity when there isn't one. (Only that idea:
+/// Antra is a downloader, and acquiring content is not something this app does.)
+///
+/// It is a **better** answer than the content hash this module deliberately does
+/// not send, on both axes at once:
+///
+/// - *More useful.* A hash answers "is this the same bytes", which is not the
+///   question — two people can be perfectly in step on different rips of the
+///   same recording. An ISRC answers "is this the same recording", which is.
+/// - *Less revealing.* A hash fingerprints the exact artefact someone holds —
+///   which rip, which release group, which personal copy. An ISRC is public
+///   catalogue data about a commercial release and says nothing about the file.
+///
+/// Every field is what the sender chose to disclose about something they are
+/// already telling this person they are listening to. There is still no
+/// filename, no path, no size and no digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct Recording {
+    /// International Standard Recording Code, when known — the exact-match key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isrc: Option<String>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub artist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+}
+
+impl Recording {
+    /// Just a name, for something with no catalogue entry — a home video, a
+    /// lecture recording, a file whose tags are empty.
+    pub fn titled(title: impl Into<String>) -> Self {
+        Self {
+            isrc: None,
+            title: title.into(),
+            artist: String::new(),
+            album: None,
+        }
+    }
+
+    /// A one-line label for a UI that has nowhere to put the structure.
+    pub fn label(&self) -> String {
+        if self.artist.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{} — {}", self.artist, self.title)
+        }
+    }
+}
+
+/// Whether `s` is a well-formed ISRC: two-letter country, three-character
+/// registrant, two-digit year, five-digit designation — `CCXXXYYNNNNN`.
+/// Hyphens are accepted and ignored, because catalogues print it both ways.
+pub fn valid_isrc(s: &str) -> bool {
+    let bytes: Vec<u8> = s
+        .bytes()
+        .filter(|b| *b != b'-')
+        .map(|b| b.to_ascii_uppercase())
+        .collect();
+    bytes.len() == 12
+        && bytes[0..2].iter().all(|b| b.is_ascii_alphabetic())
+        && bytes[2..5].iter().all(|b| b.is_ascii_alphanumeric())
+        && bytes[5..12].iter().all(|b| b.is_ascii_digit())
+}
+
+/// Normalise an ISRC to its canonical, hyphen-free upper-case form.
+pub fn normalise_isrc(s: &str) -> Option<String> {
+    valid_isrc(s).then(|| {
+        s.bytes()
+            .filter(|b| *b != b'-')
+            .map(|b| b.to_ascii_uppercase() as char)
+            .collect()
+    })
+}
+
+/// How well a candidate in the listener's own library matches what the peer
+/// named, from 0.0 (no) to 1.0 (certainly).
+///
+/// Antra's fallback, and the ordering matters: an ISRC agreement is decisive and
+/// nothing else needs consulting, because that is precisely what the code is
+/// for. Without one it is a weighted title/artist comparison with duration as a
+/// tiebreak — title carries most of the signal, artist disambiguates covers, and
+/// duration separates the radio edit from the album version.
+///
+/// Deliberately conservative: this decides whether to open a file on someone's
+/// behalf, and opening the wrong one is worse than asking.
+pub fn match_score(want: &Recording, have: &Recording, want_ms: u64, have_ms: u64) -> f64 {
+    if let (Some(a), Some(b)) = (&want.isrc, &have.isrc) {
+        if let (Some(a), Some(b)) = (normalise_isrc(a), normalise_isrc(b)) {
+            // Two ISRCs that disagree are a definite *no*, not a weak maybe:
+            // they are different recordings and the catalogue says so.
+            return if a == b { 1.0 } else { 0.0 };
+        }
+    }
+    let title = title_similarity(&want.title, &have.title);
+    let artist = if want.artist.is_empty() || have.artist.is_empty() {
+        // Nothing to compare is not evidence either way, so it neither helps nor
+        // hurts — it just leaves the decision to the title.
+        title
+    } else {
+        title_similarity(&want.artist, &have.artist)
+    };
+    let known = want_ms > 0 && have_ms > 0;
+    let delta = want_ms.abs_diff(have_ms);
+    let duration = if known {
+        (1.0 - delta as f64 / MATCH_DURATION_TOLERANCE_MS as f64).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let score = 0.55 * title + 0.30 * artist + 0.15 * duration;
+
+    // A length that disagrees by more than the tolerance is a veto, not a
+    // deduction. Same title, same artist, two minutes shorter is the radio edit
+    // — a different recording, and opening it on someone's behalf would put the
+    // two of them on different cuts while the UI claimed they were together.
+    if known && delta > MATCH_DURATION_TOLERANCE_MS {
+        return score.min(MATCH_CONFIDENT - 0.2);
+    }
+    score
+}
+
+/// Words that mean "a different recording of the same song", as opposed to a
+/// different *pressing* of the same recording.
+///
+/// This is Antra's "radio edits and censored versions are penalised" rule,
+/// narrowed to the cases where it is unambiguous. "Remastered", "Deluxe" or a
+/// year in brackets describe the same performance and should barely cost
+/// anything; a live take or a remix is genuinely not what the other person is
+/// listening to.
+const VERSION_WORDS: [&str; 7] = [
+    "live",
+    "remix",
+    "acoustic",
+    "instrumental",
+    "karaoke",
+    "cover",
+    "demo",
+];
+
+/// Above this a library candidate may be opened without asking; below it the
+/// listener picks. Set high on purpose — see [`match_score`].
+pub const MATCH_CONFIDENT: f64 = 0.82;
+
+/// How far apart two durations can be before they stop supporting each other.
+/// Wide enough for a different master or a gapless trim, narrow enough to
+/// separate a radio edit from an album cut.
+pub const MATCH_DURATION_TOLERANCE_MS: u64 = 15_000;
+
+/// Containment, not Jaccard, over lower-cased alphanumeric word tokens.
+///
+/// Not an edit distance, because the differences that matter here are whole
+/// extra words — "(Remastered 2011)", "feat. …", "- Single Version" — rather
+/// than transposed letters, and a set comparison is unbothered by word order.
+///
+/// And not a symmetric Jaccard either, which was the first attempt and was
+/// wrong: it scores "Teardrop" against "Teardrop (Remastered)" at 0.5, the same
+/// as a genuinely different song sharing one word, because it counts the extra
+/// token against *both* sides. Containment asks the right question — is the
+/// shorter title entirely inside the longer one — and then charges a small
+/// amount per extra word, so a remaster stays a near-match while an unrelated
+/// title does not.
+///
+/// [`VERSION_WORDS`] are the exception: an extra word that means a different
+/// take is not a decoration and is charged heavily.
+fn title_similarity(a: &str, b: &str) -> f64 {
+    let ta = tokens(a);
+    let tb = tokens(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let (small, large) = if ta.len() <= tb.len() {
+        (&ta, &tb)
+    } else {
+        (&tb, &ta)
+    };
+    let shared = small.iter().filter(|t| large.contains(*t)).count() as f64;
+    let containment = shared / small.len() as f64;
+    let extra: Vec<&String> = large.iter().filter(|t| !small.contains(*t)).collect();
+    if extra.iter().any(|t| VERSION_WORDS.contains(&t.as_str())) {
+        return containment * 0.4;
+    }
+    containment * (1.0 - 0.05 * extra.len().min(4) as f64)
+}
+
+fn tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect()
+}
+
 /// What the two people are watching or listening to.
 ///
 /// Carried on [`TogetherSignal::Start`] only — the session id binds every later
@@ -236,11 +433,14 @@ pub enum TogetherContent {
     /// position against something.
     LocalFile {
         duration_ms: u64,
-        /// What the sender chose to call it. Optional, and the sending UI shows
-        /// it in an editable field before it goes out, so naming the film is a
-        /// deliberate act rather than a side effect of picking a file.
+        /// What is being played, when the sender chose to say.
+        ///
+        /// Optional, and the sending UI shows it before it goes out, so naming
+        /// the thing is a deliberate act rather than a side effect of picking a
+        /// file. When present it is what lets the *receiver* find their own copy
+        /// instead of hunting for it — see [`Recording`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
+        recording: Option<Recording>,
     },
     /// A public video, by its id. Unlike a local file this **is** fully
     /// disclosing — the id is publicly resolvable, so the invite says exactly
@@ -250,9 +450,12 @@ pub enum TogetherContent {
 }
 
 impl TogetherContent {
-    /// A local file of `duration_ms`, with an optional label.
-    pub fn local_file(duration_ms: u64, label: Option<String>) -> Self {
-        Self::LocalFile { duration_ms, label }
+    /// A local file of `duration_ms`, optionally saying what it is.
+    pub fn local_file(duration_ms: u64, recording: Option<Recording>) -> Self {
+        Self::LocalFile {
+            duration_ms,
+            recording,
+        }
     }
 
     /// A YouTube session from a link or a bare id, or `None` if it is neither.
@@ -289,6 +492,109 @@ impl TogetherContent {
             },
         }
     }
+}
+
+/// A streaming-service link, reduced to what it identifies.
+///
+/// This is the *adapter* half of the Antra idea, minus the part this app will
+/// not do. Antra resolves a link and then acquires the audio; here a link is
+/// resolved only to **which recording it names**, so the listener's own copy can
+/// be found. No audio is fetched, no DRM is involved, and nothing but a public
+/// catalogue id leaves the device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(tag = "service", rename_all = "snake_case")]
+pub enum MusicLink {
+    /// A Spotify track id, resolvable through their public Web API.
+    Spotify { track_id: String },
+    /// An Apple Music track, resolvable through their catalogue API. The
+    /// storefront is part of the key — the same recording has different ids in
+    /// different countries.
+    AppleMusic {
+        storefront: String,
+        track_id: String,
+    },
+    /// A YouTube (or YouTube Music) video. Unlike the two above this one is also
+    /// *playable* in place, through the embed player — see [`TogetherContent`].
+    Youtube { video_id: String },
+}
+
+impl MusicLink {
+    /// The service's own name, for a UI that has to say where a link came from.
+    pub fn service(&self) -> &'static str {
+        match self {
+            Self::Spotify { .. } => "Spotify",
+            Self::AppleMusic { .. } => "Apple Music",
+            Self::Youtube { .. } => "YouTube",
+        }
+    }
+
+    /// Whether this link can be *played* by us, as opposed to merely naming
+    /// something the listener must already have.
+    ///
+    /// Only YouTube can, and only through its embed player. Spotify and Apple
+    /// Music serve DRM-protected audio that no third-party client may decode, so
+    /// for those the honest answer is "this tells you what to open", not "press
+    /// play". A UI that blurs the two would be promising something it cannot do.
+    pub fn playable_in_place(&self) -> bool {
+        matches!(self, Self::Youtube { .. })
+    }
+}
+
+/// Recognise a streaming-service link and reduce it to what it identifies.
+///
+/// Pure and offline: this only reads the URL. Turning the id into a title and an
+/// ISRC needs the service's public catalogue API and is the caller's job — see
+/// `docs/TOGETHER.md`.
+pub fn parse_music_link(input: &str) -> Option<MusicLink> {
+    let trimmed = input.trim();
+    if let Some(video_id) = youtube_id_from_url(trimmed) {
+        return Some(MusicLink::Youtube { video_id });
+    }
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+
+    // open.spotify.com/track/<22-char base62>  (optionally /intl-xx/ first)
+    if let Some(path) = rest.strip_prefix("open.spotify.com/") {
+        let path = path.split_once("intl-").map_or(path, |(_, after)| {
+            after.split_once('/').map_or(after, |(_, p)| p)
+        });
+        if let Some(after) = path.strip_prefix("track/") {
+            let id: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if id.len() == 22 {
+                return Some(MusicLink::Spotify { track_id: id });
+            }
+        }
+        return None;
+    }
+
+    // music.apple.com/<storefront>/album/<slug>/<album-id>?i=<track-id>
+    if let Some(path) = rest.strip_prefix("music.apple.com/") {
+        let storefront: String = path
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        if storefront.len() != 2 {
+            return None;
+        }
+        let track_id: String = path
+            .split_once("?i=")
+            .map(|(_, q)| q.chars().take_while(|c| c.is_ascii_digit()).collect())
+            .unwrap_or_default();
+        if !track_id.is_empty() {
+            return Some(MusicLink::AppleMusic {
+                storefront,
+                track_id,
+            });
+        }
+        return None;
+    }
+    None
 }
 
 /// Whether `id` is a well-formed YouTube video id.
@@ -1103,7 +1409,7 @@ mod tests {
     fn every_signal_round_trips_through_json() {
         let signals = vec![
             TogetherSignal::Start {
-                content: TogetherContent::local_file(7_200_000, Some("Solaris".into())),
+                content: TogetherContent::local_file(7_200_000, Some(Recording::titled("Solaris"))),
                 pos_ms: 0,
                 playing: false,
             },
@@ -1158,20 +1464,34 @@ mod tests {
     }
 
     /// The privacy claim, asserted rather than promised in a comment: a local
-    /// file is described by its length and an optional chosen label, and by
-    /// nothing else. Adding a filename, path, size or hash fails this test.
+    /// file is described by its length and — only if the sender chose to say —
+    /// what recording it is. Never by a filename, a path, a size or a digest.
+    /// Adding any of those fails this test.
     #[test]
-    fn a_local_file_is_identified_by_its_duration_and_nothing_else() {
+    fn a_local_file_is_identified_by_its_length_and_what_the_sender_chose_to_say() {
         let bare = serde_json::to_value(TogetherContent::local_file(7_200_000, None)).unwrap();
         let mut keys: Vec<_> = bare.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, vec!["duration_ms", "kind"]);
 
-        let labelled =
-            serde_json::to_value(TogetherContent::local_file(7_200_000, Some("x".into()))).unwrap();
-        let mut keys: Vec<_> = labelled.as_object().unwrap().keys().cloned().collect();
+        let named = serde_json::to_value(TogetherContent::local_file(
+            7_200_000,
+            Some(Recording::titled("Solaris")),
+        ))
+        .unwrap();
+        let mut keys: Vec<_> = named.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, vec!["duration_ms", "kind", "label"]);
+        assert_eq!(keys, vec!["duration_ms", "kind", "recording"]);
+
+        // And the recording itself carries only catalogue facts.
+        let mut inner: Vec<_> = named["recording"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        inner.sort();
+        assert_eq!(inner, vec!["title"]);
     }
 
     /// `End` says someone left and deliberately not why.
@@ -1610,6 +1930,201 @@ mod tests {
             heartbeat_interval_ms(CLOCK_BURST_PROBES),
             TOGETHER_HEARTBEAT_SECS * 1000
         );
+    }
+
+    // ── Recording identity (adapted from Antra) ─────────────────────────────
+
+    #[test]
+    fn an_isrc_is_recognised_in_either_printed_form() {
+        assert!(valid_isrc("GBAYE0601498"));
+        assert!(valid_isrc("GB-AYE-06-01498"));
+        assert_eq!(
+            normalise_isrc("gb-aye-06-01498").as_deref(),
+            Some("GBAYE0601498")
+        );
+        for bad in [
+            "",
+            "GBAYE060149",
+            "GBAYE06014988",
+            "GB-AYE-06-0149X",
+            "12AYE0601498",
+        ] {
+            assert!(!valid_isrc(bad), "should be invalid: {bad}");
+            assert!(normalise_isrc(bad).is_none());
+        }
+    }
+
+    fn rec(isrc: Option<&str>, title: &str, artist: &str) -> Recording {
+        Recording {
+            isrc: isrc.map(|s| s.to_string()),
+            title: title.into(),
+            artist: artist.into(),
+            album: None,
+        }
+    }
+
+    /// The whole reason to carry an ISRC: it is decisive, in both directions.
+    #[test]
+    fn two_agreeing_isrcs_settle_it_and_two_disagreeing_ones_settle_it_too() {
+        let want = rec(Some("GBAYE0601498"), "Anything", "Anyone");
+        let same = rec(
+            Some("gb-aye-06-01498"),
+            "Totally Different Title",
+            "Someone Else",
+        );
+        assert_eq!(match_score(&want, &same, 200_000, 999_000), 1.0);
+
+        let other = rec(Some("USRC17607839"), "Anything", "Anyone");
+        assert_eq!(
+            match_score(&want, &other, 200_000, 200_000),
+            0.0,
+            "two ISRCs that disagree are different recordings, however alike they look"
+        );
+    }
+
+    #[test]
+    fn without_an_isrc_a_close_title_and_artist_is_enough_to_open() {
+        let want = rec(None, "Teardrop", "Massive Attack");
+        let have = rec(None, "Teardrop (Remastered)", "Massive Attack");
+        let score = match_score(&want, &have, 330_000, 331_000);
+        assert!(score >= MATCH_CONFIDENT, "score was {score}");
+    }
+
+    #[test]
+    fn a_different_song_by_the_same_artist_is_not_opened_on_someones_behalf() {
+        let want = rec(None, "Teardrop", "Massive Attack");
+        let have = rec(None, "Angel", "Massive Attack");
+        let score = match_score(&want, &have, 330_000, 380_000);
+        assert!(
+            score < MATCH_CONFIDENT,
+            "opening the wrong track is worse than asking: {score}"
+        );
+    }
+
+    /// A remaster is the same performance; a live take is not. The scorer has
+    /// to tell those apart or it will cheerfully open the wrong one.
+    #[test]
+    fn a_remaster_is_the_same_recording_but_a_live_take_is_not() {
+        let want = rec(None, "Teardrop", "Massive Attack");
+        let remaster = rec(None, "Teardrop (2011 Remastered Version)", "Massive Attack");
+        assert!(
+            match_score(&want, &remaster, 330_000, 330_000) >= MATCH_CONFIDENT,
+            "a remaster should still open"
+        );
+        for variant in [
+            "Teardrop (Live)",
+            "Teardrop - Live at Glastonbury",
+            "Teardrop (Acoustic)",
+            "Teardrop (Tricky Remix)",
+        ] {
+            let other = rec(None, variant, "Massive Attack");
+            let score = match_score(&want, &other, 330_000, 330_000);
+            assert!(
+                score < MATCH_CONFIDENT,
+                "{variant} is a different recording, scored {score}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_radio_edit_is_separated_from_the_album_cut_by_its_length() {
+        let want = rec(None, "Paranoid Android", "Radiohead");
+        let have = rec(None, "Paranoid Android", "Radiohead");
+        let album = match_score(&want, &have, 383_000, 383_000);
+        let edit = match_score(&want, &have, 383_000, 240_000);
+        assert!(
+            album > edit,
+            "duration must break the tie: {album} vs {edit}"
+        );
+    }
+
+    #[test]
+    fn a_missing_artist_neither_helps_nor_hurts() {
+        let want = rec(None, "Solaris", "");
+        let have = rec(None, "Solaris", "Cliff Martinez");
+        let score = match_score(&want, &have, 100_000, 100_000);
+        assert!(score >= MATCH_CONFIDENT, "score was {score}");
+    }
+
+    #[test]
+    fn a_label_reads_the_way_a_person_would_write_it() {
+        assert_eq!(
+            rec(None, "Teardrop", "Massive Attack").label(),
+            "Massive Attack — Teardrop"
+        );
+        assert_eq!(Recording::titled("home video").label(), "home video");
+    }
+
+    // ── Streaming links, resolved to identity and nothing else ──────────────
+
+    #[test]
+    fn a_spotify_track_link_is_recognised() {
+        for url in [
+            "https://open.spotify.com/track/6habFhsOp2NvshLv26DqMb",
+            "https://open.spotify.com/track/6habFhsOp2NvshLv26DqMb?si=abc123",
+            "open.spotify.com/track/6habFhsOp2NvshLv26DqMb",
+        ] {
+            assert_eq!(
+                parse_music_link(url),
+                Some(MusicLink::Spotify {
+                    track_id: "6habFhsOp2NvshLv26DqMb".into()
+                }),
+                "failed for {url}"
+            );
+        }
+        // A playlist or album is not a track.
+        assert_eq!(parse_music_link("https://open.spotify.com/album/abc"), None);
+    }
+
+    #[test]
+    fn an_apple_music_track_link_keeps_its_storefront() {
+        assert_eq!(
+            parse_music_link("https://music.apple.com/in/album/mezzanine/1440931401?i=1440931493"),
+            Some(MusicLink::AppleMusic {
+                storefront: "in".into(),
+                track_id: "1440931493".into(),
+            }),
+        );
+        // An album link names no single recording.
+        assert_eq!(
+            parse_music_link("https://music.apple.com/in/album/mezzanine/1440931401"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_youtube_link_is_the_one_that_is_also_playable() {
+        let link = parse_music_link("https://music.youtube.com/watch?v=dQw4w9WgXcQ").unwrap();
+        assert_eq!(
+            link,
+            MusicLink::Youtube {
+                video_id: "dQw4w9WgXcQ".into()
+            }
+        );
+        assert!(link.playable_in_place());
+        // The other two name something you must already have; saying otherwise
+        // would promise a thing this app cannot do.
+        assert!(!MusicLink::Spotify {
+            track_id: "x".into()
+        }
+        .playable_in_place());
+        assert!(!MusicLink::AppleMusic {
+            storefront: "in".into(),
+            track_id: "1".into()
+        }
+        .playable_in_place());
+    }
+
+    #[test]
+    fn anything_else_is_not_a_music_link() {
+        for url in [
+            "",
+            "https://example.com/track/123",
+            "not a link",
+            "https://open.spotify.com/",
+        ] {
+            assert_eq!(parse_music_link(url), None, "should not parse: {url}");
+        }
     }
 
     // ── Timelines, not positions ─────────────────────────────────────────────

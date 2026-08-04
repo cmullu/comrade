@@ -560,12 +560,16 @@ private fun MainShell(
             mullu.comrade.together.TogetherManager.join(context, uri)
         } else {
             togetherPeer?.let { (peer, label) ->
+                // Name it from the file's own tags where it has them, so the
+                // other side can find their copy instead of hunting for it.
+                // Never from the filename — that is the one piece of local
+                // filesystem vocabulary the sender never chose to share.
                 mullu.comrade.together.TogetherManager.start(
                     context = context,
                     peer = peer,
                     peerLabel = label,
                     uri = uri,
-                    title = uri.lastPathSegment?.substringAfterLast('/').orEmpty(),
+                    recording = mullu.comrade.together.LibraryResolver.describe(context, uri),
                 )
             }
         }

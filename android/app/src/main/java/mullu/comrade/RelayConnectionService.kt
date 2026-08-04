@@ -479,12 +479,11 @@ object ChatEventRouter {
                 val invite = event.v1
                 val content = invite.content
                 mullu.comrade.together.TogetherManager.onInvited(
+                    context = context,
                     peer = invite.peer,
                     peerLabel = peerLabel(invite.peer),
-                    title = when (content) {
-                        is TogetherContent.LocalFile -> content.label ?: ""
-                        is TogetherContent.Youtube -> content.videoId
-                    },
+                    recording = (content as? TogetherContent.LocalFile)?.recording,
+                    durationMs = (content as? TogetherContent.LocalFile)?.durationMs?.toLong() ?: 0L,
                     youtube = content is TogetherContent.Youtube,
                 )
             }

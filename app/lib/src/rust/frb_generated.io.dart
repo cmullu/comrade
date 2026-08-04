@@ -57,7 +57,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MessageRequestDto dco_decode_box_autoadd_message_request_dto(dynamic raw);
 
   @protected
+  MusicLink dco_decode_box_autoadd_music_link(dynamic raw);
+
+  @protected
   PresenceDto dco_decode_box_autoadd_presence_dto(dynamic raw);
+
+  @protected
+  Recording dco_decode_box_autoadd_recording(dynamic raw);
 
   @protected
   TogetherCommandDto dco_decode_box_autoadd_together_command_dto(dynamic raw);
@@ -220,13 +226,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MetricDto dco_decode_metric_dto(dynamic raw);
 
   @protected
+  MusicLink dco_decode_music_link(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
   IdentityDto? dco_decode_opt_box_autoadd_identity_dto(dynamic raw);
 
   @protected
+  MusicLink? dco_decode_opt_box_autoadd_music_link(dynamic raw);
+
+  @protected
   PresenceDto? dco_decode_opt_box_autoadd_presence_dto(dynamic raw);
+
+  @protected
+  Recording? dco_decode_opt_box_autoadd_recording(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_u_16(dynamic raw);
@@ -239,6 +254,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProfileDto dco_decode_profile_dto(dynamic raw);
+
+  @protected
+  Recording dco_decode_recording(dynamic raw);
 
   @protected
   StateChange dco_decode_state_change(dynamic raw);
@@ -334,7 +352,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  MusicLink sse_decode_box_autoadd_music_link(SseDeserializer deserializer);
+
+  @protected
   PresenceDto sse_decode_box_autoadd_presence_dto(SseDeserializer deserializer);
+
+  @protected
+  Recording sse_decode_box_autoadd_recording(SseDeserializer deserializer);
 
   @protected
   TogetherCommandDto sse_decode_box_autoadd_together_command_dto(
@@ -514,6 +538,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MetricDto sse_decode_metric_dto(SseDeserializer deserializer);
 
   @protected
+  MusicLink sse_decode_music_link(SseDeserializer deserializer);
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
@@ -521,8 +548,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  MusicLink? sse_decode_opt_box_autoadd_music_link(
+      SseDeserializer deserializer);
+
+  @protected
   PresenceDto? sse_decode_opt_box_autoadd_presence_dto(
       SseDeserializer deserializer);
+
+  @protected
+  Recording? sse_decode_opt_box_autoadd_recording(SseDeserializer deserializer);
 
   @protected
   int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer);
@@ -535,6 +569,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProfileDto sse_decode_profile_dto(SseDeserializer deserializer);
+
+  @protected
+  Recording sse_decode_recording(SseDeserializer deserializer);
 
   @protected
   StateChange sse_decode_state_change(SseDeserializer deserializer);
@@ -640,8 +677,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       MessageRequestDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_music_link(
+      MusicLink self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_presence_dto(
       PresenceDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_recording(
+      Recording self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_together_command_dto(
@@ -833,6 +878,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_metric_dto(MetricDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_music_link(MusicLink self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
@@ -840,8 +888,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       IdentityDto? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_music_link(
+      MusicLink? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_presence_dto(
       PresenceDto? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_recording(
+      Recording? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer);
@@ -854,6 +910,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_profile_dto(ProfileDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_recording(Recording self, SseSerializer serializer);
 
   @protected
   void sse_encode_state_change(StateChange self, SseSerializer serializer);

@@ -52,20 +52,59 @@ and whether it is running. Which one it *was* is derived by one tested function
 
 **What the envelope deliberately does not carry.** `end` has no reason —
 bored, phone rang, app closed is not the other person's to learn, and "they
-left" is the whole signal. A local file is identified by **its length and
-nothing else**: no filename, no path, no size, no hash. A digest would
-fingerprint the exact release someone holds and cost seconds of work on the
-device for an answer we do not need; a filename carries release group, language
-and sometimes a path fragment, and does not even answer the question (two files
-called `movie.mkv` are not the same film). Length is enough to warn *"their
-copy runs four seconds longer than yours"*, and deliberately not enough to
-claim "same file" — which we cannot know and must not imply. The optional
-label is whatever the sender typed, shown in an editable field before it goes,
-so naming the film is a deliberate act.
+left" is the whole signal. And a local file is **never** identified by a
+filename, a path, a size or a digest: a hash would fingerprint the exact
+artefact someone holds and cost seconds of work for an answer we do not need,
+and a filename carries release group, language and sometimes a path fragment
+while not even answering the question (two files called `movie.mkv` are not the
+same film).
 
-That claim is a test, not a comment: `a_local_file_is_identified_by_its_duration_and_nothing_else`
-asserts the exact JSON key set, so adding a field to the envelope fails the
-build.
+**What it does carry: a recording.** `{kind:"local", duration_ms, recording?}`,
+where a `recording` is `{isrc?, title, artist, album?}`, read from the file's own
+**tags** and shown before it goes out, so naming the thing stays a deliberate
+act.
+
+The ISRC-first shape is adapted from [Antra](https://github.com/anandprtp/Antra),
+which uses the International Standard Recording Code to guarantee exact-recording
+matches with a scored title/artist fallback. (Only that idea — Antra is a
+downloader, and acquiring content is not something this app does; see §9.) It is
+a better answer than the hash on both axes at once:
+
+- **More useful.** A hash answers "is this the same bytes", which is not the
+  question — two people can be perfectly in step on different rips of the same
+  recording. An ISRC answers "is this the same recording", which is. And because
+  it names a recording rather than a file, the receiver can find their **own**
+  copy instead of being sent hunting for one.
+- **Less revealing.** A hash fingerprints which rip, which release group, which
+  personal copy. An ISRC is public catalogue data about a commercial release and
+  says nothing about the file on anyone's disk.
+
+`duration_ms` stays: it is needed to clamp an incoming position anyway, and it is
+what separates a radio edit from the album cut.
+
+That claim is a test, not a comment:
+`a_local_file_is_identified_by_its_length_and_what_the_sender_chose_to_say`
+asserts the exact JSON key set at both levels, so adding a field to the envelope
+fails the build.
+
+**Matching** (`match_score`, pure and shared by both frontends): an ISRC
+agreement is decisive, and an ISRC *disagreement* is equally decisive the other
+way. Without one it is a weighted title/artist comparison with duration as a
+tiebreak, using **containment rather than Jaccard** — a symmetric measure scores
+"Teardrop" against "Teardrop (Remastered)" the same as a different song sharing
+one word, because it charges the extra token to both sides. Words that mean a
+different *take* (`live`, `remix`, `acoustic`, `instrumental`, `karaoke`,
+`cover`, `demo`) are penalised heavily; "Remastered" or a year is not. A length
+disagreeing by more than 15 s is a **veto**, not a deduction. The bar for opening
+a file on someone's behalf is set high deliberately: opening the wrong one is
+worse than asking.
+
+**Links.** `parse_music_link` recognises Spotify, Apple Music and YouTube URLs
+and reduces them to what they identify — offline, metadata-only, no account and
+no audio. Only a YouTube link is *playable in place* (`playable_in_place`),
+through the embed player; for the other two the honest answer is "this tells you
+what to open", and a UI that blurred the two would be promising something the app
+cannot do.
 
 A YouTube id is the asymmetric case and is named rather than hidden: it *is*
 fully disclosing, because it is publicly resolvable. It is also validated in
@@ -312,6 +351,7 @@ And a permanent line under the stage:
 | `comrade_ui::runtime` | `together_start` / `together_join` / `together_set_state` / `together_end` (each a `RuntimeHandles` twin, so no bridge holds the lock across a relay round trip), `together_report_position`, `together_session`, the receive arm in `dispatch_incoming_dm`, the session loop, and five `BridgeEvent` variants. |
 | `comrade_jni`, `desktop/src-tauri` | The same calls over uniffi / flutter_rust_bridge / Tauri commands. `together_report_position` is the one that is **synchronous and skipped under contention**, because a player calls it several times a second from its UI thread — the trade `note_draft` already makes. |
 | `desktop/ui/together_sync.mjs` | Echo suppression, the verdict→player plan, and the status wording. Pure, 20 `node --test` cases. |
+| `android/…/together/LibraryResolver.kt` | Finds the listener's own copy via `MediaStore`, scored by the shared `match_score`; reads a picked file's tags so an invitation can name what it is. |
 | `android/…/together/` | `TogetherDecisions` (pure: echo ledger, scrubber rules, the two `MediaPlayer` footguns — 20 JVM tests mirroring the desktop vectors), `TogetherPlayer` (`MediaPlayer` + `SEEK_CLOSEST`), `TogetherManager` (session, audio focus, service control), `TogetherService` (foreground `mediaPlayback` + framework `MediaSession`). |
 
 Tests worth knowing about: `crates/comrade_ui/tests/two_peer_integration.rs`
@@ -366,6 +406,16 @@ Android specifics worth knowing:
 - **A measured output latency on Android** — see §3; today it is an estimate.
 - **Auto-starting the mesh for a session**, so the millisecond tier is available
   outside the off-grid workspace — see §5.
+
+**On acquiring content — deliberately not built.** Antra's resolution chain (its
+own mirror servers, then Tidal / Qobuz / Amazon / Deezer / Apple Music adapters,
+then Soulseek) is a downloader, and none of it is adopted. Tidal, Qobuz and Apple
+Music do not serve unencrypted audio to third-party clients, so obtaining it
+means defeating a technological protection measure — a separate liability from
+infringement (DMCA §1201, EU InfoSoc Art. 6, India's Copyright Act §65A) — and §1
+already rules the whole area out. What *is* adopted is the identity half: a link
+resolves to a recording, and the recording is looked for in the library already
+on the listener's device.
 
 **On "nanosecond" sync**, since it was asked for directly: it is not reachable by
 any software path on two phones, and the reason is three independent floors, each

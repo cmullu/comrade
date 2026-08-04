@@ -72,6 +72,10 @@ object TogetherManager {
     private val suppressor = TogetherDecisions.EchoSuppressor()
     private var scrub = TogetherDecisions.ScrubState(scrubbing = false, pendingRemoteMs = null)
     private var appContext: Context? = null
+
+    /** What the peer named, kept so the library can be searched for it. */
+    private var wanted: uniffi.comrade_core.Recording? = null
+    private var wantedMs: Long = 0
     private var focusRequest: AudioFocusRequest? = null
 
     /**
@@ -85,8 +89,32 @@ object TogetherManager {
 
     // ── Incoming, from the bridge ───────────────────────────────────────────
 
-    fun onInvited(peer: String, peerLabel: String, title: String, youtube: Boolean) {
+    /**
+     * They invited us.
+     *
+     * Before asking the listener to go and find a file, look for it: if the
+     * invitation named a recording and this device's own library holds a
+     * confident match, the session can just start. That is the whole point of
+     * carrying a recording identity rather than a bare duration — the Antra idea
+     * (`docs/TOGETHER.md` §2), minus the acquiring.
+     */
+    fun onInvited(
+        context: Context,
+        peer: String,
+        peerLabel: String,
+        recording: uniffi.comrade_core.Recording?,
+        durationMs: Long,
+        youtube: Boolean,
+    ) {
+        appContext = context.applicationContext
+        wanted = recording
+        wantedMs = durationMs
+        val title = recording?.let { if (it.artist.isBlank()) it.title else "${it.artist} — ${it.title}" }.orEmpty()
         _state.value = UiState.Invited(peer, peerLabel, title, youtube)
+
+        if (recording == null || youtube) return
+        val found = runCatching { LibraryResolver.resolve(context, recording, durationMs) }.getOrNull()
+        if (found != null) join(context, found.uri)
     }
 
     fun onJoined() {
@@ -162,12 +190,19 @@ object TogetherManager {
 
     // ── Outgoing, from this device ──────────────────────────────────────────
 
-    fun start(context: Context, peer: String, peerLabel: String, uri: Uri, title: String) {
+    fun start(
+        context: Context,
+        peer: String,
+        peerLabel: String,
+        uri: Uri,
+        recording: uniffi.comrade_core.Recording?,
+    ) {
         appContext = context.applicationContext
+        val title = recording?.title.orEmpty()
         openPlayer(uri) { durationMs ->
             ComradeCore.togetherStartTyped(
                 peer,
-                uniffi.comrade_core.TogetherContent.LocalFile(durationMs.toULong(), title),
+                uniffi.comrade_core.TogetherContent.LocalFile(durationMs.toULong(), recording),
             )
             _state.value = UiState.Live(
                 peer = peer,
@@ -336,6 +371,8 @@ object TogetherManager {
         player?.release()
         player = null
         suppressor.clear()
+        wanted = null
+        wantedMs = 0
         scrub = TogetherDecisions.ScrubState(scrubbing = false, pendingRemoteMs = null)
         abandonAudioFocus()
         stopService()

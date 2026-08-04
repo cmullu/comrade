@@ -837,6 +837,38 @@ object ComradeCore {
     // `comrade_core::together`; these are the thinnest possible wrappers over
     // it. See `docs/TOGETHER.md`.
 
+    /**
+     * Recognise a Spotify / Apple Music / YouTube link and reduce it to what it
+     * identifies.
+     *
+     * Offline and metadata-only: no audio is fetched and no account is touched.
+     * Spotify and Apple Music serve DRM-protected audio that no third-party
+     * client may decode, so what a link buys here is *which recording* the other
+     * person means — enough to find your own copy. Only a YouTube link is
+     * playable in place, through the embed player.
+     */
+    fun parseMusicLinkTyped(input: String): uniffi.comrade_core.MusicLink? =
+        runCatching { ffi.parseMusicLink(input) }.getOrNull()
+
+    /**
+     * How well a candidate in the listener's own library matches what the peer
+     * named. Decisive on an ISRC either way; a weighted title/artist/duration
+     * score otherwise. The arithmetic lives in `comrade_core::together` so this
+     * frontend and the desktop one cannot disagree about it.
+     */
+    fun togetherMatchScore(
+        want: uniffi.comrade_core.Recording,
+        have: uniffi.comrade_core.Recording,
+        wantMs: Long,
+        haveMs: Long,
+    ): Double = runCatching {
+        ffi.togetherMatchScore(want, have, wantMs.toULong(), haveMs.toULong())
+    }.getOrDefault(0.0)
+
+    /** The bar above which a library match may be opened without asking. */
+    fun togetherMatchConfident(): Double =
+        runCatching { ffi.togetherMatchConfident() }.getOrDefault(1.0)
+
     /** Invite `peer` to watch or listen to `content` together. */
     fun togetherStartTyped(peer: String, content: uniffi.comrade_core.TogetherContent) {
         rethrowing("Watch together") { runBlocking { ffi.togetherStart(peer, content) } }

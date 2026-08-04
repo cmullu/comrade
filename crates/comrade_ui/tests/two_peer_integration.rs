@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason};
 use comrade_core::nudge::NUDGE_SETTLE_SECS;
-use comrade_core::together::TogetherContent;
+use comrade_core::together::{Recording, TogetherContent};
 use comrade_ui::{BridgeEvent, ComradeRuntime};
 use support::TestRelay;
 use tempfile::TempDir;
@@ -1030,7 +1030,7 @@ async fn a_stranger_cannot_start_a_watch_party_with_an_unaccepted_target() {
     // Bob has never been accepted by Alice.
     bob.together_start(
         &alice_npub,
-        TogetherContent::local_file(7_200_000, Some("Solaris".into())),
+        TogetherContent::local_file(7_200_000, Some(Recording::titled("Solaris"))),
     )
     .await
     .unwrap();
@@ -1081,7 +1081,7 @@ async fn accepted_peers_start_join_pause_and_end_a_session() {
     let session = alice
         .together_start(
             &bob_npub,
-            TogetherContent::local_file(7_200_000, Some("Solaris".into())),
+            TogetherContent::local_file(7_200_000, Some(Recording::titled("Solaris"))),
         )
         .await
         .unwrap();

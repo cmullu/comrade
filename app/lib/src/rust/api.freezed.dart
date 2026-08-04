@@ -2216,6 +2216,419 @@ class _$CallSignal_HangupCopyWithImpl<$Res>
 }
 
 /// @nodoc
+mixin _$MusicLink {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is MusicLink);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'MusicLink()';
+  }
+}
+
+/// @nodoc
+class $MusicLinkCopyWith<$Res> {
+  $MusicLinkCopyWith(MusicLink _, $Res Function(MusicLink) __);
+}
+
+/// Adds pattern-matching-related methods to [MusicLink].
+extension MusicLinkPatterns on MusicLink {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(MusicLink_Spotify value)? spotify,
+    TResult Function(MusicLink_AppleMusic value)? appleMusic,
+    TResult Function(MusicLink_Youtube value)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(MusicLink_Spotify value) spotify,
+    required TResult Function(MusicLink_AppleMusic value) appleMusic,
+    required TResult Function(MusicLink_Youtube value) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify():
+        return spotify(_that);
+      case MusicLink_AppleMusic():
+        return appleMusic(_that);
+      case MusicLink_Youtube():
+        return youtube(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(MusicLink_Spotify value)? spotify,
+    TResult? Function(MusicLink_AppleMusic value)? appleMusic,
+    TResult? Function(MusicLink_Youtube value)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String trackId)? spotify,
+    TResult Function(String storefront, String trackId)? appleMusic,
+    TResult Function(String videoId)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that.trackId);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that.storefront, _that.trackId);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String trackId) spotify,
+    required TResult Function(String storefront, String trackId) appleMusic,
+    required TResult Function(String videoId) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify():
+        return spotify(_that.trackId);
+      case MusicLink_AppleMusic():
+        return appleMusic(_that.storefront, _that.trackId);
+      case MusicLink_Youtube():
+        return youtube(_that.videoId);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String trackId)? spotify,
+    TResult? Function(String storefront, String trackId)? appleMusic,
+    TResult? Function(String videoId)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that.trackId);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that.storefront, _that.trackId);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class MusicLink_Spotify extends MusicLink {
+  const MusicLink_Spotify({required this.trackId}) : super._();
+
+  final String trackId;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $MusicLink_SpotifyCopyWith<MusicLink_Spotify> get copyWith =>
+      _$MusicLink_SpotifyCopyWithImpl<MusicLink_Spotify>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is MusicLink_Spotify &&
+            (identical(other.trackId, trackId) || other.trackId == trackId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, trackId);
+
+  @override
+  String toString() {
+    return 'MusicLink.spotify(trackId: $trackId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $MusicLink_SpotifyCopyWith<$Res>
+    implements $MusicLinkCopyWith<$Res> {
+  factory $MusicLink_SpotifyCopyWith(
+          MusicLink_Spotify value, $Res Function(MusicLink_Spotify) _then) =
+      _$MusicLink_SpotifyCopyWithImpl;
+  @useResult
+  $Res call({String trackId});
+}
+
+/// @nodoc
+class _$MusicLink_SpotifyCopyWithImpl<$Res>
+    implements $MusicLink_SpotifyCopyWith<$Res> {
+  _$MusicLink_SpotifyCopyWithImpl(this._self, this._then);
+
+  final MusicLink_Spotify _self;
+  final $Res Function(MusicLink_Spotify) _then;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? trackId = null,
+  }) {
+    return _then(MusicLink_Spotify(
+      trackId: null == trackId
+          ? _self.trackId
+          : trackId // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class MusicLink_AppleMusic extends MusicLink {
+  const MusicLink_AppleMusic({required this.storefront, required this.trackId})
+      : super._();
+
+  final String storefront;
+  final String trackId;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $MusicLink_AppleMusicCopyWith<MusicLink_AppleMusic> get copyWith =>
+      _$MusicLink_AppleMusicCopyWithImpl<MusicLink_AppleMusic>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is MusicLink_AppleMusic &&
+            (identical(other.storefront, storefront) ||
+                other.storefront == storefront) &&
+            (identical(other.trackId, trackId) || other.trackId == trackId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, storefront, trackId);
+
+  @override
+  String toString() {
+    return 'MusicLink.appleMusic(storefront: $storefront, trackId: $trackId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $MusicLink_AppleMusicCopyWith<$Res>
+    implements $MusicLinkCopyWith<$Res> {
+  factory $MusicLink_AppleMusicCopyWith(MusicLink_AppleMusic value,
+          $Res Function(MusicLink_AppleMusic) _then) =
+      _$MusicLink_AppleMusicCopyWithImpl;
+  @useResult
+  $Res call({String storefront, String trackId});
+}
+
+/// @nodoc
+class _$MusicLink_AppleMusicCopyWithImpl<$Res>
+    implements $MusicLink_AppleMusicCopyWith<$Res> {
+  _$MusicLink_AppleMusicCopyWithImpl(this._self, this._then);
+
+  final MusicLink_AppleMusic _self;
+  final $Res Function(MusicLink_AppleMusic) _then;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? storefront = null,
+    Object? trackId = null,
+  }) {
+    return _then(MusicLink_AppleMusic(
+      storefront: null == storefront
+          ? _self.storefront
+          : storefront // ignore: cast_nullable_to_non_nullable
+              as String,
+      trackId: null == trackId
+          ? _self.trackId
+          : trackId // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class MusicLink_Youtube extends MusicLink {
+  const MusicLink_Youtube({required this.videoId}) : super._();
+
+  final String videoId;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $MusicLink_YoutubeCopyWith<MusicLink_Youtube> get copyWith =>
+      _$MusicLink_YoutubeCopyWithImpl<MusicLink_Youtube>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is MusicLink_Youtube &&
+            (identical(other.videoId, videoId) || other.videoId == videoId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, videoId);
+
+  @override
+  String toString() {
+    return 'MusicLink.youtube(videoId: $videoId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $MusicLink_YoutubeCopyWith<$Res>
+    implements $MusicLinkCopyWith<$Res> {
+  factory $MusicLink_YoutubeCopyWith(
+          MusicLink_Youtube value, $Res Function(MusicLink_Youtube) _then) =
+      _$MusicLink_YoutubeCopyWithImpl;
+  @useResult
+  $Res call({String videoId});
+}
+
+/// @nodoc
+class _$MusicLink_YoutubeCopyWithImpl<$Res>
+    implements $MusicLink_YoutubeCopyWith<$Res> {
+  _$MusicLink_YoutubeCopyWithImpl(this._self, this._then);
+
+  final MusicLink_Youtube _self;
+  final $Res Function(MusicLink_Youtube) _then;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? videoId = null,
+  }) {
+    return _then(MusicLink_Youtube(
+      videoId: null == videoId
+          ? _self.videoId
+          : videoId // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
 mixin _$SyncVerdict {
   @override
   bool operator ==(Object other) {
@@ -2795,14 +3208,14 @@ extension TogetherContentPatterns on TogetherContent {
 
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
-    TResult Function(BigInt durationMs, String? label)? localFile,
+    TResult Function(BigInt durationMs, Recording? recording)? localFile,
     TResult Function(String videoId)? youtube,
     required TResult orElse(),
   }) {
     final _that = this;
     switch (_that) {
       case TogetherContent_LocalFile() when localFile != null:
-        return localFile(_that.durationMs, _that.label);
+        return localFile(_that.durationMs, _that.recording);
       case TogetherContent_Youtube() when youtube != null:
         return youtube(_that.videoId);
       case _:
@@ -2825,13 +3238,14 @@ extension TogetherContentPatterns on TogetherContent {
 
   @optionalTypeArgs
   TResult when<TResult extends Object?>({
-    required TResult Function(BigInt durationMs, String? label) localFile,
+    required TResult Function(BigInt durationMs, Recording? recording)
+        localFile,
     required TResult Function(String videoId) youtube,
   }) {
     final _that = this;
     switch (_that) {
       case TogetherContent_LocalFile():
-        return localFile(_that.durationMs, _that.label);
+        return localFile(_that.durationMs, _that.recording);
       case TogetherContent_Youtube():
         return youtube(_that.videoId);
     }
@@ -2851,13 +3265,13 @@ extension TogetherContentPatterns on TogetherContent {
 
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
-    TResult? Function(BigInt durationMs, String? label)? localFile,
+    TResult? Function(BigInt durationMs, Recording? recording)? localFile,
     TResult? Function(String videoId)? youtube,
   }) {
     final _that = this;
     switch (_that) {
       case TogetherContent_LocalFile() when localFile != null:
-        return localFile(_that.durationMs, _that.label);
+        return localFile(_that.durationMs, _that.recording);
       case TogetherContent_Youtube() when youtube != null:
         return youtube(_that.videoId);
       case _:
@@ -2869,11 +3283,11 @@ extension TogetherContentPatterns on TogetherContent {
 /// @nodoc
 
 class TogetherContent_LocalFile extends TogetherContent {
-  const TogetherContent_LocalFile({required this.durationMs, this.label})
+  const TogetherContent_LocalFile({required this.durationMs, this.recording})
       : super._();
 
   final BigInt durationMs;
-  final String? label;
+  final Recording? recording;
 
   /// Create a copy of TogetherContent
   /// with the given fields replaced by the non-null parameter values.
@@ -2890,15 +3304,16 @@ class TogetherContent_LocalFile extends TogetherContent {
             other is TogetherContent_LocalFile &&
             (identical(other.durationMs, durationMs) ||
                 other.durationMs == durationMs) &&
-            (identical(other.label, label) || other.label == label));
+            (identical(other.recording, recording) ||
+                other.recording == recording));
   }
 
   @override
-  int get hashCode => Object.hash(runtimeType, durationMs, label);
+  int get hashCode => Object.hash(runtimeType, durationMs, recording);
 
   @override
   String toString() {
-    return 'TogetherContent.localFile(durationMs: $durationMs, label: $label)';
+    return 'TogetherContent.localFile(durationMs: $durationMs, recording: $recording)';
   }
 }
 
@@ -2909,7 +3324,7 @@ abstract mixin class $TogetherContent_LocalFileCopyWith<$Res>
           $Res Function(TogetherContent_LocalFile) _then) =
       _$TogetherContent_LocalFileCopyWithImpl;
   @useResult
-  $Res call({BigInt durationMs, String? label});
+  $Res call({BigInt durationMs, Recording? recording});
 }
 
 /// @nodoc
@@ -2925,17 +3340,17 @@ class _$TogetherContent_LocalFileCopyWithImpl<$Res>
   @pragma('vm:prefer-inline')
   $Res call({
     Object? durationMs = null,
-    Object? label = freezed,
+    Object? recording = freezed,
   }) {
     return _then(TogetherContent_LocalFile(
       durationMs: null == durationMs
           ? _self.durationMs
           : durationMs // ignore: cast_nullable_to_non_nullable
               as BigInt,
-      label: freezed == label
-          ? _self.label
-          : label // ignore: cast_nullable_to_non_nullable
-              as String?,
+      recording: freezed == recording
+          ? _self.recording
+          : recording // ignore: cast_nullable_to_non_nullable
+              as Recording?,
     ));
   }
 }

@@ -356,6 +356,19 @@ Future<void> sendCallSignal(
     RustLib.instance.api.crateApiSendCallSignal(
         peer: peer, callId: callId, media: media, signal: signal);
 
+/// Recognise a Spotify / Apple Music / YouTube link. Pure and offline.
+Future<MusicLink?> parseMusicLink({required String input}) =>
+    RustLib.instance.api.crateApiParseMusicLink(input: input);
+
+/// Score a library candidate against what the peer named — see the uniffi twin.
+Future<double> togetherMatchScore(
+        {required Recording want,
+        required Recording have,
+        required BigInt wantMs,
+        required BigInt haveMs}) =>
+    RustLib.instance.api.crateApiTogetherMatchScore(
+        want: want, have: have, wantMs: wantMs, haveMs: haveMs);
+
 /// See [`broadcast_chitthi`] for the lock discipline.
 Future<TogetherSessionDto> togetherStart(
         {required String peer, required TogetherContent content}) =>
@@ -1156,6 +1169,22 @@ class MetricDto {
           value == other.value;
 }
 
+@freezed
+sealed class MusicLink with _$MusicLink {
+  const MusicLink._();
+
+  const factory MusicLink.spotify({
+    required String trackId,
+  }) = MusicLink_Spotify;
+  const factory MusicLink.appleMusic({
+    required String storefront,
+    required String trackId,
+  }) = MusicLink_AppleMusic;
+  const factory MusicLink.youtube({
+    required String videoId,
+  }) = MusicLink_Youtube;
+}
+
 class PresenceDto {
   final String peer;
   final bool online;
@@ -1206,6 +1235,34 @@ class ProfileDto {
           runtimeType == other.runtimeType &&
           npub == other.npub &&
           username == other.username;
+}
+
+class Recording {
+  final String? isrc;
+  final String title;
+  final String artist;
+  final String? album;
+
+  const Recording({
+    this.isrc,
+    required this.title,
+    required this.artist,
+    this.album,
+  });
+
+  @override
+  int get hashCode =>
+      isrc.hashCode ^ title.hashCode ^ artist.hashCode ^ album.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Recording &&
+          runtimeType == other.runtimeType &&
+          isrc == other.isrc &&
+          title == other.title &&
+          artist == other.artist &&
+          album == other.album;
 }
 
 enum StateChange {
@@ -1311,7 +1368,7 @@ sealed class TogetherContent with _$TogetherContent {
 
   const factory TogetherContent.localFile({
     required BigInt durationMs,
-    String? label,
+    Recording? recording,
   }) = TogetherContent_LocalFile;
   const factory TogetherContent.youtube({
     required String videoId,
