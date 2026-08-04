@@ -17,17 +17,23 @@
  * something to one other person, which is the existing attachment path in a
  * different shape.
  *
- * ## Why this module is transport-free
+ * ## The transport is WebRTC, and this module does not know that
  * None of the three transports already in the app can carry bulk: relay DMs are
  * gift-wrapped control traffic, the media pipeline caps at 10 MiB *and* uploads
  * to a third-party host (exactly the intermediary this must avoid), and the
  * Saathi mesh is gossipsub — a 16 KiB frame broadcast to every peer on the
  * network, which is both too small and far too public.
  *
- * So the framing, the integrity and the "can we start playing yet" arithmetic
- * live here, pure and tested, and a transport adopts them: a libp2p direct
- * stream on a shared network first, the WebRTC data channel from §8.1 for peers
- * that are not.
+ * So bulk rides a **WebRTC data channel**, which is already peer-to-peer,
+ * already encrypted, already solves NAT traversal, and is already a dependency
+ * on both frontends. A second bulk protocol of our own over libp2p would
+ * duplicate all of that and still not reach anyone outside the local network.
+ *
+ * The framing, the integrity and the "can we start playing yet" arithmetic stay
+ * here and stay transport-agnostic; which paths may carry a transfer, and how
+ * fast to push into one, are [`transport`]'s business. Neither module knows the
+ * other's policy, which is what lets the relay rules change without touching
+ * the code that moves bytes.
  *
  * ## Receiver-driven, and why
  * The receiver asks for ranges rather than the sender pushing them. That single
@@ -39,12 +45,18 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod transport;
+
 /// How much file rides in one chunk.
 ///
 /// Big enough that per-chunk overhead is noise, small enough that a chunk lost
-/// to a dropped connection is cheap to ask for again, and small enough to sit
-/// well inside a WebRTC data channel message without fragmenting.
-pub const SHARE_CHUNK_BYTES: u32 = 64 * 1024;
+/// to a dropped connection is cheap to ask for again — and, decisively, small
+/// enough to be one WebRTC data-channel message everywhere. 64 KiB sits right
+/// at the practical ceiling for a reliable channel and is refused outright by
+/// some older implementations; 16 KiB is the size every stack accepts without
+/// fragmenting, and the throughput difference is noise next to the flow-control
+/// window in [`transport`].
+pub const SHARE_CHUNK_BYTES: u32 = 16 * 1024;
 
 /// How much contiguous audio from the playhead is enough to start on.
 ///

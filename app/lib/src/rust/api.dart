@@ -356,6 +356,24 @@ Future<void> sendCallSignal(
     RustLib.instance.api.crateApiSendCallSignal(
         peer: peer, callId: callId, media: media, signal: signal);
 
+/// Classify the ICE candidate pair a transfer connection selected.
+Future<IcePathKind> shareClassifyPath(
+        {required String localType, required String remoteType}) =>
+    RustLib.instance.api.crateApiShareClassifyPath(
+        localType: localType, remoteType: remoteType);
+
+/// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+Future<TransferVerdict> shareTransferVerdict(
+        {required IcePathKind path,
+        required BigInt totalBytes,
+        required RelayPolicy policy}) =>
+    RustLib.instance.api.crateApiShareTransferVerdict(
+        path: path, totalBytes: totalBytes, policy: policy);
+
+/// Whether a transfer connection built under `policy` may be offered TURN.
+Future<bool> shareIceServersAllowed({required RelayPolicy policy}) =>
+    RustLib.instance.api.crateApiShareIceServersAllowed(policy: policy);
+
 /// Recognise a Spotify / Apple Music / YouTube link. Pure and offline.
 Future<MusicLink?> parseMusicLink({required String input}) =>
     RustLib.instance.api.crateApiParseMusicLink(input: input);
@@ -913,6 +931,14 @@ enum HangupReason {
   ;
 }
 
+enum IcePathKind {
+  host,
+  serverReflexive,
+  relay,
+  unknown,
+  ;
+}
+
 class IceServerDto {
   final List<String> urls;
   final String? username;
@@ -1265,6 +1291,29 @@ class Recording {
           album == other.album;
 }
 
+@freezed
+sealed class RefusalReason with _$RefusalReason {
+  const RefusalReason._();
+
+  const factory RefusalReason.relayForbidden() = RefusalReason_RelayForbidden;
+  const factory RefusalReason.tooLargeForRelay({
+    required BigInt limit,
+  }) = RefusalReason_TooLargeForRelay;
+  const factory RefusalReason.pathUnknown() = RefusalReason_PathUnknown;
+}
+
+@freezed
+sealed class RelayPolicy with _$RelayPolicy {
+  const RelayPolicy._();
+
+  const factory RelayPolicy.directOnly() = RelayPolicy_DirectOnly;
+  const factory RelayPolicy.underBytes({
+    required BigInt limit,
+  }) = RelayPolicy_UnderBytes;
+  const factory RelayPolicy.askEachTime() = RelayPolicy_AskEachTime;
+  const factory RelayPolicy.always() = RelayPolicy_Always;
+}
+
 enum StateChange {
   played,
   paused,
@@ -1486,6 +1535,19 @@ class TogetherSessionDto {
           joined == other.joined &&
           posMs == other.posMs &&
           playing == other.playing;
+}
+
+@freezed
+sealed class TransferVerdict with _$TransferVerdict {
+  const TransferVerdict._();
+
+  const factory TransferVerdict.allow() = TransferVerdict_Allow;
+  const factory TransferVerdict.needsConsent({
+    required BigInt relayedBytes,
+  }) = TransferVerdict_NeedsConsent;
+  const factory TransferVerdict.refuse({
+    required RefusalReason reason,
+  }) = TransferVerdict_Refuse;
 }
 
 class TurnServerStatusDto {

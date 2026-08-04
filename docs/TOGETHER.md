@@ -476,14 +476,81 @@ between users; one person handing something to one other person, both already in
 an end-to-end conversation, is the existing encrypted-attachment path in a
 different shape.
 
-**The transports are the remaining work.** None of the three already in the app
-can carry bulk: relay DMs are gift-wrapped control traffic, the media pipeline
-caps at 10 MiB *and* uploads to a third-party host (exactly the intermediary this
-must avoid), and Saathi is gossipsub — a 16 KiB frame broadcast to every peer on
-the network, which is both too small and far too public. The protocol above is
-transport-free so that a libp2p **direct stream** can carry it on a shared
-network, and the WebRTC **data channel** from §8.1 for peers that are not. Both
-are unbuilt.
+**The transport is WebRTC.** None of the three already in the app can carry
+bulk: relay DMs are gift-wrapped control traffic, the media pipeline caps at
+10 MiB *and* uploads to a third-party host (exactly the intermediary this must
+avoid), and Saathi is gossipsub — a 16 KiB frame broadcast to every peer on the
+network, both too small and far too public. A data channel is already
+peer-to-peer, already encrypted (DTLS/SCTP), already solves NAT traversal, and is
+already a dependency on both frontends. A second bulk protocol of our own over
+libp2p would duplicate all of that and still reach nobody outside the LAN.
+
+### 9b. The relay rule, and why it is the centre of this design
+
+`AUDIT.md` §8.1 measures the problem: STUN alone finds a direct path for perhaps
+**60–70%** of real-world pairs, and the rest — CGNAT, very common on Indian
+mobile carriers — need TURN. That relay is *our own* server (`deploy/coturn/`),
+and pushing a film through it would mean paying for every byte twice, putting the
+operator's machine in the path of content it has no business carrying, and doing
+the exact thing §8.2 calls proxying media between users.
+
+So **the default is direct-only**, and it is enforced twice:
+
+1. **Structurally.** A transfer connection built under `RelayPolicy::DirectOnly`
+   is given **no TURN servers at all** (`ice_servers_allowed`,
+   `iceServersFor`). A relay candidate is never gathered, so the rule holds even
+   if every later check were deleted. An ICE server entry that mixes STUN and
+   TURN urls is dropped whole, so one `turn:` url cannot ride in on a `stun:`
+   entry.
+2. **After connection.** The selected candidate pair is read from
+   `getStats()` and classified (`IcePathKind::classify`). **Either end being a
+   relay makes the path relayed** — a pair is direct only if both halves are,
+   because a remote relay candidate means our packets reach the peer by way of
+   *their* TURN server. A pair that cannot be read is `Unknown`, which is
+   **refused, never assumed direct**.
+
+The policy is a value, not a branch: `DirectOnly` · `UnderBytes { limit }` ·
+`AskEachTime` · `Always`. The transfer logic never learns which is in force — it
+asks `decide(path, bytes, policy)` and does what it is told, which is what lets
+the rule change without touching the code that moves bytes.
+
+**What direct-only costs, plainly:** roughly a third of remote pairs will get no
+direct path, and for them the transfer simply does not happen. The honest answer
+for those pairs is §9a's substitute source — play the same recording from
+somewhere each side already has — not a quiet fallback onto the operator's
+bandwidth. A refusal says which of the three reasons it was, so the UI can be
+specific rather than saying "failed".
+
+### 9c. Flow control, and not degrading a call
+
+**`bufferedAmount` is not optional.** A data channel accepts writes long after it
+has stopped sending them; the bytes queue in the SCTP buffer. A naive
+`for (chunk of file) send(chunk)` therefore queues a 2 GB film in memory in
+milliseconds and either stalls the connection or gets the process killed — and it
+*looks fine* on a 50 MB test file, which is how that bug reaches production. So
+the pump fills to a 1 MiB high-water mark, stops, and waits for
+`bufferedamountlow`. The threshold is set at 256 KiB rather than just under the
+ceiling, because waking on every few drained bytes is an event per chunk, which
+is the busy loop the threshold exists to prevent. The window is re-checked
+*inside* each batch too, since `bufferedAmount` moves as we write and a batch
+sized against a stale reading is how the ceiling gets overshot on a slow link.
+
+Chunks are **16 KiB**, not 64: 64 KiB sits at the practical ceiling for a
+reliable data channel and is refused outright by some implementations, and the
+throughput difference is noise next to the window above.
+
+**A transfer gets its own `RTCPeerConnection`.** Sharing the call's would put
+bulk and live media under one congestion controller and one SCTP association,
+where a 2 GB push and a voice stream compete and the voice loses. Separate
+connections cost one extra ICE negotiation and buy complete isolation — a call
+cannot be degraded by a transfer it knows nothing about. It is also what makes
+the relay rule enforceable, since the transfer connection has its own ICE server
+list: the *call* keeps its TURN fallback, because a relayed call is a few tens of
+kilobits and entirely reasonable, while a relayed film is not.
+
+**Still to wire:** the policy, the pump and the protocol are built and tested;
+what remains is attaching them to a real `RTCPeerConnection` in `main.js` and in
+Kotlin, and neither has been run against a live connection.
 
 ## 10. Deliberately out of scope
 

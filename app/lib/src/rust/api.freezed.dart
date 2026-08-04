@@ -2629,6 +2629,681 @@ class _$MusicLink_YoutubeCopyWithImpl<$Res>
 }
 
 /// @nodoc
+mixin _$RefusalReason {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RefusalReason);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RefusalReason()';
+  }
+}
+
+/// @nodoc
+class $RefusalReasonCopyWith<$Res> {
+  $RefusalReasonCopyWith(RefusalReason _, $Res Function(RefusalReason) __);
+}
+
+/// Adds pattern-matching-related methods to [RefusalReason].
+extension RefusalReasonPatterns on RefusalReason {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(RefusalReason_RelayForbidden value)? relayForbidden,
+    TResult Function(RefusalReason_TooLargeForRelay value)? tooLargeForRelay,
+    TResult Function(RefusalReason_PathUnknown value)? pathUnknown,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden(_that);
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(RefusalReason_RelayForbidden value)
+        relayForbidden,
+    required TResult Function(RefusalReason_TooLargeForRelay value)
+        tooLargeForRelay,
+    required TResult Function(RefusalReason_PathUnknown value) pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden():
+        return relayForbidden(_that);
+      case RefusalReason_TooLargeForRelay():
+        return tooLargeForRelay(_that);
+      case RefusalReason_PathUnknown():
+        return pathUnknown(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(RefusalReason_RelayForbidden value)? relayForbidden,
+    TResult? Function(RefusalReason_TooLargeForRelay value)? tooLargeForRelay,
+    TResult? Function(RefusalReason_PathUnknown value)? pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden(_that);
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? relayForbidden,
+    TResult Function(BigInt limit)? tooLargeForRelay,
+    TResult Function()? pathUnknown,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden();
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that.limit);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown();
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() relayForbidden,
+    required TResult Function(BigInt limit) tooLargeForRelay,
+    required TResult Function() pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden():
+        return relayForbidden();
+      case RefusalReason_TooLargeForRelay():
+        return tooLargeForRelay(_that.limit);
+      case RefusalReason_PathUnknown():
+        return pathUnknown();
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? relayForbidden,
+    TResult? Function(BigInt limit)? tooLargeForRelay,
+    TResult? Function()? pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden();
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that.limit);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown();
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class RefusalReason_RelayForbidden extends RefusalReason {
+  const RefusalReason_RelayForbidden() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RefusalReason_RelayForbidden);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RefusalReason.relayForbidden()';
+  }
+}
+
+/// @nodoc
+
+class RefusalReason_TooLargeForRelay extends RefusalReason {
+  const RefusalReason_TooLargeForRelay({required this.limit}) : super._();
+
+  final BigInt limit;
+
+  /// Create a copy of RefusalReason
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $RefusalReason_TooLargeForRelayCopyWith<RefusalReason_TooLargeForRelay>
+      get copyWith => _$RefusalReason_TooLargeForRelayCopyWithImpl<
+          RefusalReason_TooLargeForRelay>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RefusalReason_TooLargeForRelay &&
+            (identical(other.limit, limit) || other.limit == limit));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, limit);
+
+  @override
+  String toString() {
+    return 'RefusalReason.tooLargeForRelay(limit: $limit)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $RefusalReason_TooLargeForRelayCopyWith<$Res>
+    implements $RefusalReasonCopyWith<$Res> {
+  factory $RefusalReason_TooLargeForRelayCopyWith(
+          RefusalReason_TooLargeForRelay value,
+          $Res Function(RefusalReason_TooLargeForRelay) _then) =
+      _$RefusalReason_TooLargeForRelayCopyWithImpl;
+  @useResult
+  $Res call({BigInt limit});
+}
+
+/// @nodoc
+class _$RefusalReason_TooLargeForRelayCopyWithImpl<$Res>
+    implements $RefusalReason_TooLargeForRelayCopyWith<$Res> {
+  _$RefusalReason_TooLargeForRelayCopyWithImpl(this._self, this._then);
+
+  final RefusalReason_TooLargeForRelay _self;
+  final $Res Function(RefusalReason_TooLargeForRelay) _then;
+
+  /// Create a copy of RefusalReason
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? limit = null,
+  }) {
+    return _then(RefusalReason_TooLargeForRelay(
+      limit: null == limit
+          ? _self.limit
+          : limit // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class RefusalReason_PathUnknown extends RefusalReason {
+  const RefusalReason_PathUnknown() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RefusalReason_PathUnknown);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RefusalReason.pathUnknown()';
+  }
+}
+
+/// @nodoc
+mixin _$RelayPolicy {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy()';
+  }
+}
+
+/// @nodoc
+class $RelayPolicyCopyWith<$Res> {
+  $RelayPolicyCopyWith(RelayPolicy _, $Res Function(RelayPolicy) __);
+}
+
+/// Adds pattern-matching-related methods to [RelayPolicy].
+extension RelayPolicyPatterns on RelayPolicy {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(RelayPolicy_DirectOnly value)? directOnly,
+    TResult Function(RelayPolicy_UnderBytes value)? underBytes,
+    TResult Function(RelayPolicy_AskEachTime value)? askEachTime,
+    TResult Function(RelayPolicy_Always value)? always,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly(_that);
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime(_that);
+      case RelayPolicy_Always() when always != null:
+        return always(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(RelayPolicy_DirectOnly value) directOnly,
+    required TResult Function(RelayPolicy_UnderBytes value) underBytes,
+    required TResult Function(RelayPolicy_AskEachTime value) askEachTime,
+    required TResult Function(RelayPolicy_Always value) always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly():
+        return directOnly(_that);
+      case RelayPolicy_UnderBytes():
+        return underBytes(_that);
+      case RelayPolicy_AskEachTime():
+        return askEachTime(_that);
+      case RelayPolicy_Always():
+        return always(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(RelayPolicy_DirectOnly value)? directOnly,
+    TResult? Function(RelayPolicy_UnderBytes value)? underBytes,
+    TResult? Function(RelayPolicy_AskEachTime value)? askEachTime,
+    TResult? Function(RelayPolicy_Always value)? always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly(_that);
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime(_that);
+      case RelayPolicy_Always() when always != null:
+        return always(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? directOnly,
+    TResult Function(BigInt limit)? underBytes,
+    TResult Function()? askEachTime,
+    TResult Function()? always,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly();
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that.limit);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime();
+      case RelayPolicy_Always() when always != null:
+        return always();
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() directOnly,
+    required TResult Function(BigInt limit) underBytes,
+    required TResult Function() askEachTime,
+    required TResult Function() always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly():
+        return directOnly();
+      case RelayPolicy_UnderBytes():
+        return underBytes(_that.limit);
+      case RelayPolicy_AskEachTime():
+        return askEachTime();
+      case RelayPolicy_Always():
+        return always();
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? directOnly,
+    TResult? Function(BigInt limit)? underBytes,
+    TResult? Function()? askEachTime,
+    TResult? Function()? always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly();
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that.limit);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime();
+      case RelayPolicy_Always() when always != null:
+        return always();
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_DirectOnly extends RelayPolicy {
+  const RelayPolicy_DirectOnly() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy_DirectOnly);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy.directOnly()';
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_UnderBytes extends RelayPolicy {
+  const RelayPolicy_UnderBytes({required this.limit}) : super._();
+
+  final BigInt limit;
+
+  /// Create a copy of RelayPolicy
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $RelayPolicy_UnderBytesCopyWith<RelayPolicy_UnderBytes> get copyWith =>
+      _$RelayPolicy_UnderBytesCopyWithImpl<RelayPolicy_UnderBytes>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RelayPolicy_UnderBytes &&
+            (identical(other.limit, limit) || other.limit == limit));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, limit);
+
+  @override
+  String toString() {
+    return 'RelayPolicy.underBytes(limit: $limit)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $RelayPolicy_UnderBytesCopyWith<$Res>
+    implements $RelayPolicyCopyWith<$Res> {
+  factory $RelayPolicy_UnderBytesCopyWith(RelayPolicy_UnderBytes value,
+          $Res Function(RelayPolicy_UnderBytes) _then) =
+      _$RelayPolicy_UnderBytesCopyWithImpl;
+  @useResult
+  $Res call({BigInt limit});
+}
+
+/// @nodoc
+class _$RelayPolicy_UnderBytesCopyWithImpl<$Res>
+    implements $RelayPolicy_UnderBytesCopyWith<$Res> {
+  _$RelayPolicy_UnderBytesCopyWithImpl(this._self, this._then);
+
+  final RelayPolicy_UnderBytes _self;
+  final $Res Function(RelayPolicy_UnderBytes) _then;
+
+  /// Create a copy of RelayPolicy
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? limit = null,
+  }) {
+    return _then(RelayPolicy_UnderBytes(
+      limit: null == limit
+          ? _self.limit
+          : limit // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_AskEachTime extends RelayPolicy {
+  const RelayPolicy_AskEachTime() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy_AskEachTime);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy.askEachTime()';
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_Always extends RelayPolicy {
+  const RelayPolicy_Always() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy_Always);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy.always()';
+  }
+}
+
+/// @nodoc
 mixin _$SyncVerdict {
   @override
   bool operator ==(Object other) {
@@ -3417,6 +4092,382 @@ class _$TogetherContent_YoutubeCopyWithImpl<$Res>
           : videoId // ignore: cast_nullable_to_non_nullable
               as String,
     ));
+  }
+}
+
+/// @nodoc
+mixin _$TransferVerdict {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TransferVerdict);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TransferVerdict()';
+  }
+}
+
+/// @nodoc
+class $TransferVerdictCopyWith<$Res> {
+  $TransferVerdictCopyWith(
+      TransferVerdict _, $Res Function(TransferVerdict) __);
+}
+
+/// Adds pattern-matching-related methods to [TransferVerdict].
+extension TransferVerdictPatterns on TransferVerdict {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(TransferVerdict_Allow value)? allow,
+    TResult Function(TransferVerdict_NeedsConsent value)? needsConsent,
+    TResult Function(TransferVerdict_Refuse value)? refuse,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow(_that);
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(TransferVerdict_Allow value) allow,
+    required TResult Function(TransferVerdict_NeedsConsent value) needsConsent,
+    required TResult Function(TransferVerdict_Refuse value) refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow():
+        return allow(_that);
+      case TransferVerdict_NeedsConsent():
+        return needsConsent(_that);
+      case TransferVerdict_Refuse():
+        return refuse(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(TransferVerdict_Allow value)? allow,
+    TResult? Function(TransferVerdict_NeedsConsent value)? needsConsent,
+    TResult? Function(TransferVerdict_Refuse value)? refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow(_that);
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? allow,
+    TResult Function(BigInt relayedBytes)? needsConsent,
+    TResult Function(RefusalReason reason)? refuse,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow();
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that.relayedBytes);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() allow,
+    required TResult Function(BigInt relayedBytes) needsConsent,
+    required TResult Function(RefusalReason reason) refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow():
+        return allow();
+      case TransferVerdict_NeedsConsent():
+        return needsConsent(_that.relayedBytes);
+      case TransferVerdict_Refuse():
+        return refuse(_that.reason);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? allow,
+    TResult? Function(BigInt relayedBytes)? needsConsent,
+    TResult? Function(RefusalReason reason)? refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow();
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that.relayedBytes);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class TransferVerdict_Allow extends TransferVerdict {
+  const TransferVerdict_Allow() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TransferVerdict_Allow);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TransferVerdict.allow()';
+  }
+}
+
+/// @nodoc
+
+class TransferVerdict_NeedsConsent extends TransferVerdict {
+  const TransferVerdict_NeedsConsent({required this.relayedBytes}) : super._();
+
+  final BigInt relayedBytes;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferVerdict_NeedsConsentCopyWith<TransferVerdict_NeedsConsent>
+      get copyWith => _$TransferVerdict_NeedsConsentCopyWithImpl<
+          TransferVerdict_NeedsConsent>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferVerdict_NeedsConsent &&
+            (identical(other.relayedBytes, relayedBytes) ||
+                other.relayedBytes == relayedBytes));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, relayedBytes);
+
+  @override
+  String toString() {
+    return 'TransferVerdict.needsConsent(relayedBytes: $relayedBytes)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferVerdict_NeedsConsentCopyWith<$Res>
+    implements $TransferVerdictCopyWith<$Res> {
+  factory $TransferVerdict_NeedsConsentCopyWith(
+          TransferVerdict_NeedsConsent value,
+          $Res Function(TransferVerdict_NeedsConsent) _then) =
+      _$TransferVerdict_NeedsConsentCopyWithImpl;
+  @useResult
+  $Res call({BigInt relayedBytes});
+}
+
+/// @nodoc
+class _$TransferVerdict_NeedsConsentCopyWithImpl<$Res>
+    implements $TransferVerdict_NeedsConsentCopyWith<$Res> {
+  _$TransferVerdict_NeedsConsentCopyWithImpl(this._self, this._then);
+
+  final TransferVerdict_NeedsConsent _self;
+  final $Res Function(TransferVerdict_NeedsConsent) _then;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? relayedBytes = null,
+  }) {
+    return _then(TransferVerdict_NeedsConsent(
+      relayedBytes: null == relayedBytes
+          ? _self.relayedBytes
+          : relayedBytes // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TransferVerdict_Refuse extends TransferVerdict {
+  const TransferVerdict_Refuse({required this.reason}) : super._();
+
+  final RefusalReason reason;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferVerdict_RefuseCopyWith<TransferVerdict_Refuse> get copyWith =>
+      _$TransferVerdict_RefuseCopyWithImpl<TransferVerdict_Refuse>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferVerdict_Refuse &&
+            (identical(other.reason, reason) || other.reason == reason));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reason);
+
+  @override
+  String toString() {
+    return 'TransferVerdict.refuse(reason: $reason)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferVerdict_RefuseCopyWith<$Res>
+    implements $TransferVerdictCopyWith<$Res> {
+  factory $TransferVerdict_RefuseCopyWith(TransferVerdict_Refuse value,
+          $Res Function(TransferVerdict_Refuse) _then) =
+      _$TransferVerdict_RefuseCopyWithImpl;
+  @useResult
+  $Res call({RefusalReason reason});
+
+  $RefusalReasonCopyWith<$Res> get reason;
+}
+
+/// @nodoc
+class _$TransferVerdict_RefuseCopyWithImpl<$Res>
+    implements $TransferVerdict_RefuseCopyWith<$Res> {
+  _$TransferVerdict_RefuseCopyWithImpl(this._self, this._then);
+
+  final TransferVerdict_Refuse _self;
+  final $Res Function(TransferVerdict_Refuse) _then;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? reason = null,
+  }) {
+    return _then(TransferVerdict_Refuse(
+      reason: null == reason
+          ? _self.reason
+          : reason // ignore: cast_nullable_to_non_nullable
+              as RefusalReason,
+    ));
+  }
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $RefusalReasonCopyWith<$Res> get reason {
+    return $RefusalReasonCopyWith<$Res>(_self.reason, (value) {
+      return _then(_self.copyWith(reason: value));
+    });
   }
 }
 

@@ -66,6 +66,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Recording dco_decode_box_autoadd_recording(dynamic raw);
 
   @protected
+  RefusalReason dco_decode_box_autoadd_refusal_reason(dynamic raw);
+
+  @protected
+  RelayPolicy dco_decode_box_autoadd_relay_policy(dynamic raw);
+
+  @protected
   TogetherCommandDto dco_decode_box_autoadd_together_command_dto(dynamic raw);
 
   @protected
@@ -131,6 +137,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  IcePathKind dco_decode_ice_path_kind(dynamic raw);
 
   @protected
   IceServerDto dco_decode_ice_server_dto(dynamic raw);
@@ -259,6 +268,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Recording dco_decode_recording(dynamic raw);
 
   @protected
+  RefusalReason dco_decode_refusal_reason(dynamic raw);
+
+  @protected
+  RelayPolicy dco_decode_relay_policy(dynamic raw);
+
+  @protected
   StateChange dco_decode_state_change(dynamic raw);
 
   @protected
@@ -281,6 +296,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TogetherSessionDto dco_decode_together_session_dto(dynamic raw);
+
+  @protected
+  TransferVerdict dco_decode_transfer_verdict(dynamic raw);
 
   @protected
   TurnServerStatusDto dco_decode_turn_server_status_dto(dynamic raw);
@@ -361,6 +379,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Recording sse_decode_box_autoadd_recording(SseDeserializer deserializer);
 
   @protected
+  RefusalReason sse_decode_box_autoadd_refusal_reason(
+      SseDeserializer deserializer);
+
+  @protected
+  RelayPolicy sse_decode_box_autoadd_relay_policy(SseDeserializer deserializer);
+
+  @protected
   TogetherCommandDto sse_decode_box_autoadd_together_command_dto(
       SseDeserializer deserializer);
 
@@ -430,6 +455,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  IcePathKind sse_decode_ice_path_kind(SseDeserializer deserializer);
 
   @protected
   IceServerDto sse_decode_ice_server_dto(SseDeserializer deserializer);
@@ -574,6 +602,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Recording sse_decode_recording(SseDeserializer deserializer);
 
   @protected
+  RefusalReason sse_decode_refusal_reason(SseDeserializer deserializer);
+
+  @protected
+  RelayPolicy sse_decode_relay_policy(SseDeserializer deserializer);
+
+  @protected
   StateChange sse_decode_state_change(SseDeserializer deserializer);
 
   @protected
@@ -600,6 +634,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   TogetherSessionDto sse_decode_together_session_dto(
       SseDeserializer deserializer);
+
+  @protected
+  TransferVerdict sse_decode_transfer_verdict(SseDeserializer deserializer);
 
   @protected
   TurnServerStatusDto sse_decode_turn_server_status_dto(
@@ -689,6 +726,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       Recording self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_refusal_reason(
+      RefusalReason self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_relay_policy(
+      RelayPolicy self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_together_command_dto(
       TogetherCommandDto self, SseSerializer serializer);
 
@@ -762,6 +807,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ice_path_kind(IcePathKind self, SseSerializer serializer);
 
   @protected
   void sse_encode_ice_server_dto(IceServerDto self, SseSerializer serializer);
@@ -915,6 +963,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_recording(Recording self, SseSerializer serializer);
 
   @protected
+  void sse_encode_refusal_reason(RefusalReason self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_relay_policy(RelayPolicy self, SseSerializer serializer);
+
+  @protected
   void sse_encode_state_change(StateChange self, SseSerializer serializer);
 
   @protected
@@ -943,6 +997,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_together_session_dto(
       TogetherSessionDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_transfer_verdict(
+      TransferVerdict self, SseSerializer serializer);
 
   @protected
   void sse_encode_turn_server_status_dto(

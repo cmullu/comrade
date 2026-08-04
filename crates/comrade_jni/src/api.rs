@@ -71,6 +71,9 @@ use crate::frb_generated::StreamSink;
 // no Rust downstream.)
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+pub use comrade_core::share::transport::{
+    IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
+};
 pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
     BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
@@ -361,6 +364,36 @@ pub enum _CallSignal {
     Hangup {
         reason: HangupReason,
     },
+}
+
+#[frb(mirror(IcePathKind))]
+pub enum _IcePathKind {
+    Host,
+    ServerReflexive,
+    Relay,
+    Unknown,
+}
+
+#[frb(mirror(RelayPolicy))]
+pub enum _RelayPolicy {
+    DirectOnly,
+    UnderBytes { limit: u64 },
+    AskEachTime,
+    Always,
+}
+
+#[frb(mirror(RefusalReason))]
+pub enum _RefusalReason {
+    RelayForbidden,
+    TooLargeForRelay { limit: u64 },
+    PathUnknown,
+}
+
+#[frb(mirror(TransferVerdict))]
+pub enum _TransferVerdict {
+    Allow,
+    NeedsConsent { relayed_bytes: u64 },
+    Refuse { reason: RefusalReason },
 }
 
 #[frb(mirror(Recording))]
@@ -997,6 +1030,25 @@ pub async fn send_call_signal(
     handles
         .send_call_signal(&peer, &call_id, media.as_str(), &signal_json)
         .await
+}
+
+/// Classify the ICE candidate pair a transfer connection selected.
+pub fn share_classify_path(local_type: String, remote_type: String) -> IcePathKind {
+    IcePathKind::classify(&local_type, &remote_type)
+}
+
+/// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+pub fn share_transfer_verdict(
+    path: IcePathKind,
+    total_bytes: u64,
+    policy: RelayPolicy,
+) -> TransferVerdict {
+    comrade_core::share::transport::decide(path, total_bytes, policy)
+}
+
+/// Whether a transfer connection built under `policy` may be offered TURN.
+pub fn share_ice_servers_allowed(policy: RelayPolicy) -> bool {
+    comrade_core::share::transport::ice_servers_allowed(policy)
 }
 
 /// Recognise a Spotify / Apple Music / YouTube link. Pure and offline.

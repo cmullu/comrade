@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -54530275;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1387386801;
 
 // Section: executor
 
@@ -2189,6 +2189,116 @@ fn wire__crate__api__set_username_impl(
         },
     )
 }
+fn wire__crate__api__share_classify_path_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "share_classify_path",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_local_type = <String>::sse_decode(&mut deserializer);
+            let api_remote_type = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(crate::api::share_classify_path(
+                        api_local_type,
+                        api_remote_type,
+                    ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__share_ice_servers_allowed_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "share_ice_servers_allowed",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_policy = <crate::api::RelayPolicy>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::share_ice_servers_allowed(api_policy))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__share_transfer_verdict_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "share_transfer_verdict",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_path = <crate::api::IcePathKind>::sse_decode(&mut deserializer);
+            let api_total_bytes = <u64>::sse_decode(&mut deserializer);
+            let api_policy = <crate::api::RelayPolicy>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(crate::api::share_transfer_verdict(
+                        api_path,
+                        api_total_bytes,
+                        api_policy,
+                    ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__sync_ledger_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3101,6 +3211,21 @@ const _: fn() = || {
         let _: String = Recording.artist;
         let _: Option<String> = Recording.album;
     }
+    match None::<crate::api::RefusalReason>.unwrap() {
+        crate::api::RefusalReason::RelayForbidden => {}
+        crate::api::RefusalReason::TooLargeForRelay { limit } => {
+            let _: u64 = limit;
+        }
+        crate::api::RefusalReason::PathUnknown => {}
+    }
+    match None::<crate::api::RelayPolicy>.unwrap() {
+        crate::api::RelayPolicy::DirectOnly => {}
+        crate::api::RelayPolicy::UnderBytes { limit } => {
+            let _: u64 = limit;
+        }
+        crate::api::RelayPolicy::AskEachTime => {}
+        crate::api::RelayPolicy::Always => {}
+    }
     match None::<crate::api::SyncVerdict>.unwrap() {
         crate::api::SyncVerdict::Hold => {}
         crate::api::SyncVerdict::Adopt {
@@ -3172,6 +3297,15 @@ const _: fn() = || {
         let _: bool = TogetherSessionDto.joined;
         let _: u64 = TogetherSessionDto.pos_ms;
         let _: bool = TogetherSessionDto.playing;
+    }
+    match None::<crate::api::TransferVerdict>.unwrap() {
+        crate::api::TransferVerdict::Allow => {}
+        crate::api::TransferVerdict::NeedsConsent { relayed_bytes } => {
+            let _: u64 = relayed_bytes;
+        }
+        crate::api::TransferVerdict::Refuse { reason } => {
+            let _: crate::api::RefusalReason = reason;
+        }
     }
     {
         let TurnServerStatusDto = None::<crate::api::TurnServerStatusDto>.unwrap();
@@ -3627,6 +3761,20 @@ impl SseDecode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i64::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for crate::api::IcePathKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::IcePathKind::Host,
+            1 => crate::api::IcePathKind::ServerReflexive,
+            2 => crate::api::IcePathKind::Relay,
+            3 => crate::api::IcePathKind::Unknown,
+            _ => unreachable!("Invalid variant for IcePathKind: {}", inner),
+        };
     }
 }
 
@@ -4173,6 +4321,53 @@ impl SseDecode for crate::api::Recording {
     }
 }
 
+impl SseDecode for crate::api::RefusalReason {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::api::RefusalReason::RelayForbidden;
+            }
+            1 => {
+                let mut var_limit = <u64>::sse_decode(deserializer);
+                return crate::api::RefusalReason::TooLargeForRelay { limit: var_limit };
+            }
+            2 => {
+                return crate::api::RefusalReason::PathUnknown;
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseDecode for crate::api::RelayPolicy {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::api::RelayPolicy::DirectOnly;
+            }
+            1 => {
+                let mut var_limit = <u64>::sse_decode(deserializer);
+                return crate::api::RelayPolicy::UnderBytes { limit: var_limit };
+            }
+            2 => {
+                return crate::api::RelayPolicy::AskEachTime;
+            }
+            3 => {
+                return crate::api::RelayPolicy::Always;
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseDecode for crate::api::StateChange {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4338,6 +4533,31 @@ impl SseDecode for crate::api::TogetherSessionDto {
             pos_ms: var_posMs,
             playing: var_playing,
         };
+    }
+}
+
+impl SseDecode for crate::api::TransferVerdict {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::api::TransferVerdict::Allow;
+            }
+            1 => {
+                let mut var_relayedBytes = <u64>::sse_decode(deserializer);
+                return crate::api::TransferVerdict::NeedsConsent {
+                    relayed_bytes: var_relayedBytes,
+                };
+            }
+            2 => {
+                let mut var_reason = <crate::api::RefusalReason>::sse_decode(deserializer);
+                return crate::api::TransferVerdict::Refuse { reason: var_reason };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 
@@ -4534,22 +4754,25 @@ fn pde_ffi_dispatcher_primary_impl(
         60 => wire__crate__api__set_contact_alias_impl(port, ptr, rust_vec_len, data_len),
         61 => wire__crate__api__set_turn_server_impl(port, ptr, rust_vec_len, data_len),
         62 => wire__crate__api__set_username_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__sync_ledger_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__tara_crisis_resources_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__together_end_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__together_join_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__together_match_score_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__together_report_position_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__together_set_state_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__together_start_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__share_classify_path_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__share_ice_servers_allowed_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__share_transfer_verdict_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__sync_ledger_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__tara_crisis_resources_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__together_end_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__together_join_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__together_match_score_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__together_report_position_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__together_set_state_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__together_start_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4565,8 +4788,8 @@ fn pde_ffi_dispatcher_sync_impl(
         5 => wire__crate__api__all_workspaces_impl(ptr, rust_vec_len, data_len),
         27 => wire__crate__api__generate_keypair_impl(ptr, rust_vec_len, data_len),
         45 => wire__crate__api__npub_from_nsec_impl(ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5009,6 +5232,29 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::HangupReason>>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::IcePathKind> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::IcePathKind::Host => 0.into_dart(),
+            crate::api::IcePathKind::ServerReflexive => 1.into_dart(),
+            crate::api::IcePathKind::Relay => 2.into_dart(),
+            crate::api::IcePathKind::Unknown => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::IcePathKind>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::IcePathKind>>
+    for crate::api::IcePathKind
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::IcePathKind> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::IceServerDto> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -5353,6 +5599,59 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::Recording>>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::RefusalReason> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::RefusalReason::RelayForbidden => [0.into_dart()].into_dart(),
+            crate::api::RefusalReason::TooLargeForRelay { limit } => {
+                [1.into_dart(), limit.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::RefusalReason::PathUnknown => [2.into_dart()].into_dart(),
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::RefusalReason>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::RefusalReason>>
+    for crate::api::RefusalReason
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::RefusalReason> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::RelayPolicy> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::RelayPolicy::DirectOnly => [0.into_dart()].into_dart(),
+            crate::api::RelayPolicy::UnderBytes { limit } => {
+                [1.into_dart(), limit.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::RelayPolicy::AskEachTime => [2.into_dart()].into_dart(),
+            crate::api::RelayPolicy::Always => [3.into_dart()].into_dart(),
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::RelayPolicy>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::RelayPolicy>>
+    for crate::api::RelayPolicy
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::RelayPolicy> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::StateChange> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self.0 {
@@ -5567,6 +5866,34 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherSessionDto
     for crate::api::TogetherSessionDto
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherSessionDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TransferVerdict> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::TransferVerdict::Allow => [0.into_dart()].into_dart(),
+            crate::api::TransferVerdict::NeedsConsent { relayed_bytes } => {
+                [1.into_dart(), relayed_bytes.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::TransferVerdict::Refuse { reason } => {
+                [2.into_dart(), reason.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TransferVerdict>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TransferVerdict>>
+    for crate::api::TransferVerdict
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TransferVerdict> {
         self.into()
     }
 }
@@ -6028,6 +6355,24 @@ impl SseEncode for i64 {
     }
 }
 
+impl SseEncode for crate::api::IcePathKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::IcePathKind::Host => 0,
+                crate::api::IcePathKind::ServerReflexive => 1,
+                crate::api::IcePathKind::Relay => 2,
+                crate::api::IcePathKind::Unknown => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::IceServerDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6454,6 +6799,51 @@ impl SseEncode for crate::api::Recording {
     }
 }
 
+impl SseEncode for crate::api::RefusalReason {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::RefusalReason::RelayForbidden => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::api::RefusalReason::TooLargeForRelay { limit } => {
+                <i32>::sse_encode(1, serializer);
+                <u64>::sse_encode(limit, serializer);
+            }
+            crate::api::RefusalReason::PathUnknown => {
+                <i32>::sse_encode(2, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseEncode for crate::api::RelayPolicy {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::RelayPolicy::DirectOnly => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::api::RelayPolicy::UnderBytes { limit } => {
+                <i32>::sse_encode(1, serializer);
+                <u64>::sse_encode(limit, serializer);
+            }
+            crate::api::RelayPolicy::AskEachTime => {
+                <i32>::sse_encode(2, serializer);
+            }
+            crate::api::RelayPolicy::Always => {
+                <i32>::sse_encode(3, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseEncode for crate::api::StateChange {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6582,6 +6972,28 @@ impl SseEncode for crate::api::TogetherSessionDto {
         <bool>::sse_encode(self.joined, serializer);
         <u64>::sse_encode(self.pos_ms, serializer);
         <bool>::sse_encode(self.playing, serializer);
+    }
+}
+
+impl SseEncode for crate::api::TransferVerdict {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::TransferVerdict::Allow => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::api::TransferVerdict::NeedsConsent { relayed_bytes } => {
+                <i32>::sse_encode(1, serializer);
+                <u64>::sse_encode(relayed_bytes, serializer);
+            }
+            crate::api::TransferVerdict::Refuse { reason } => {
+                <i32>::sse_encode(2, serializer);
+                <crate::api::RefusalReason>::sse_encode(reason, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 
