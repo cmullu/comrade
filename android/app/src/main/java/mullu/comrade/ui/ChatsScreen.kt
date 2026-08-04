@@ -652,41 +652,96 @@ fun ConversationScreen(
         }
     }
 
-    // Encrypt + send a picked file as an attachment (NIP-94 over the DM channel).
+    // ── Attachments (NIP-94 over the DM channel) ────────────────────────────
     //
-    // The caption ("tag") is whatever is in the composer, per
-    // [captionForAttachment] — Telegram's rule, minus the case where those
-    // words are a half-written reply. The box is emptied only once the send has
-    // actually succeeded and only if its text went along: a failed upload must
-    // leave what the person typed where they typed it.
-    val pickMedia = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent(),
-    ) { uri ->
-        if (uri == null || attaching) return@rememberLauncherForActivityResult
+    // Three steps, and the split between them is the point: obtain the bytes,
+    // let the sender confirm them, then encrypt and upload. It used to be one
+    // step — a pick went straight to the uploader — so the first sight of what
+    // had been chosen was in one's own thread, already delivered.
+
+    // The pick waiting on that confirmation; null whenever the sheet is closed.
+    var pendingAttachment by remember { mutableStateOf<PendingAttachment?>(null) }
+
+    // Encrypt + upload a confirmed attachment.
+    //
+    // The box is emptied only once the send has actually succeeded and only if
+    // its text went along: a failed upload must leave what the person typed
+    // where they typed it.
+    fun sendAttachment(pending: PendingAttachment, caption: String) {
+        if (attaching) return
+        pendingAttachment = null
         attaching = true
         error = null
-        val caption = captionForAttachment(draft.text, replyingTo != null)
-        val consumed = captionConsumesDraft(draft.text, replyingTo != null)
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                        ?: throw IllegalStateException("Could not read the file.")
-                    if (bytes.size > 10 * 1024 * 1024) {
-                        throw IllegalStateException("Attachments are limited to 10 MB.")
-                    }
-                    val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-                    ComradeCore.sendMediaBytesTyped(peer, mime, caption, bytes)
+                    ComradeCore.sendMediaBytesTyped(peer, pending.mime, caption, pending.bytes)
                 }
             }.onSuccess {
                 attaching = false
-                if (consumed) editDraft(TextFieldValue())
+                if (pending.consumesDraft) editDraft(TextFieldValue())
                 // Render the real attachment inline — not a synthetic text line.
                 mediaItems = mediaItems + it
                 scope.launch { listState.scrollToItem(messages.size + mediaItems.size - 1) }
             }.onFailure {
                 attaching = false
                 error = it.message ?: "Could not send the attachment."
+            }
+        }
+    }
+
+    // Hold a freshly obtained attachment for confirmation — or refuse it here,
+    // before the sheet, which is the whole reason the cap moved forward: it used
+    // to surface after the upload had begun, discarding the caption the sender
+    // had just written.
+    //
+    // The caption the sheet opens with is whatever is in the composer, per
+    // [captionForAttachment] — Telegram's rule, minus the case where those words
+    // are a half-written reply.
+    fun offerAttachment(name: String, mime: String, bytes: ByteArray) {
+        val refusal = attachmentRejection(name, bytes.size.toLong())
+        if (refusal != null) {
+            error = refusal
+            return
+        }
+        error = null
+        val replyPending = replyingTo != null
+        pendingAttachment = PendingAttachment(
+            name = name,
+            mime = mime,
+            bytes = bytes,
+            seedCaption = captionForAttachment(draft.text, replyPending),
+            consumesDraft = captionConsumesDraft(draft.text, replyPending),
+        )
+    }
+
+    val pickMedia = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri == null || attaching || pendingAttachment != null) {
+            return@rememberLauncherForActivityResult
+        }
+        error = null
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val described = describePickedFile(context, uri)
+                    // Refuse from the provider's own size where it reports one,
+                    // rather than slurping a 1 GB video into memory to learn it
+                    // is a 1 GB video.
+                    val declared = described.size
+                    if (declared != null) {
+                        attachmentRejection(described.name, declared)
+                            ?.let { throw IllegalStateException(it) }
+                    }
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw IllegalStateException("Could not read the file.")
+                    Triple(described.name, described.mime, bytes)
+                }
+            }.onSuccess { (name, mime, bytes) ->
+                offerAttachment(name, mime, bytes)
+            }.onFailure {
+                error = it.message ?: "Could not read the file."
             }
         }
     }
@@ -709,39 +764,32 @@ fun ConversationScreen(
         file,
     )
 
-    // Read the captured file, send it, and delete the plaintext immediately —
-    // the same rule voice notes follow (AUDIT S-4): a decrypted clip must not
-    // linger in the cache after the send resolves, successfully or not.
-    fun sendCapturedFile(file: File, mime: String) {
-        if (attaching) return
-        attaching = true
+    // Read the captured file, offer it for confirmation, and delete the
+    // plaintext immediately — the same rule voice notes follow (AUDIT S-4): a
+    // decrypted clip must not linger in the cache. Deleting at *read* time
+    // rather than after the send means backing out of the preview drops it too,
+    // which the old send-immediately path never had to think about.
+    //
+    // The bytes then live only in the pending attachment, in memory, until the
+    // sheet resolves one way or the other.
+    fun offerCapturedFile(file: File, mime: String) {
+        if (attaching || pendingAttachment != null) return
         error = null
-        val caption = captionForAttachment(draft.text, replyingTo != null)
-        val consumed = captionConsumesDraft(draft.text, replyingTo != null)
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
                     try {
-                        val bytes = file.readBytes()
-                        if (bytes.isEmpty()) {
-                            throw IllegalStateException("The capture was empty.")
-                        }
-                        if (bytes.size > 10 * 1024 * 1024) {
-                            throw IllegalStateException("Attachments are limited to 10 MB.")
-                        }
-                        ComradeCore.sendMediaBytesTyped(peer, mime, caption, bytes)
+                        file.readBytes()
                     } finally {
                         file.delete()
                     }
                 }
-            }.onSuccess {
-                attaching = false
-                if (consumed) editDraft(TextFieldValue())
-                mediaItems = mediaItems + it
-                scope.launch { listState.scrollToItem(messages.size + mediaItems.size - 1) }
+            }.onSuccess { bytes ->
+                // No name: the camera's temp file is called `cap-<nanos>.jpg`,
+                // which tells the sender nothing they did not already know.
+                offerAttachment("", mime, bytes)
             }.onFailure {
-                attaching = false
-                error = it.message ?: "Could not send the capture."
+                error = it.message ?: "Could not read the capture."
             }
         }
     }
@@ -758,7 +806,7 @@ fun ConversationScreen(
         if (pending == null) return@rememberLauncherForActivityResult
         // Cancelled: drop the empty placeholder rather than sending 0 bytes.
         if (!ok) { pending.first.delete(); return@rememberLauncherForActivityResult }
-        sendCapturedFile(pending.first, pending.second)
+        offerCapturedFile(pending.first, pending.second)
     }
 
     val recordVideo = rememberLauncherForActivityResult(
@@ -768,7 +816,7 @@ fun ConversationScreen(
         pendingCapture = null
         if (pending == null) return@rememberLauncherForActivityResult
         if (!ok) { pending.first.delete(); return@rememberLauncherForActivityResult }
-        sendCapturedFile(pending.first, pending.second)
+        offerCapturedFile(pending.first, pending.second)
     }
 
     val requestCameraPermission = rememberLauncherForActivityResult(
@@ -1166,6 +1214,17 @@ fun ConversationScreen(
         EmojiPickerSheet(
             onPick = { editDraft(insertEmoji(draft, it)) },
             onDismiss = { emojiOpen = false },
+        )
+    }
+
+    pendingAttachment?.let { pending ->
+        AttachmentPreviewSheet(
+            pending = pending,
+            // Dismissing sends nothing and leaves the draft alone. The bytes go
+            // with the state, and for a capture the file behind them is already
+            // deleted.
+            onDismiss = { pendingAttachment = null },
+            onSend = { caption -> sendAttachment(pending, caption) },
         )
     }
 }

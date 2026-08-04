@@ -488,6 +488,16 @@ class ConversationController
     }
   }
 
+  /// Surface a problem the screen found *before* anything was encrypted — an
+  /// oversize pick, an empty capture.
+  ///
+  /// The same slot [attach]'s own failures land in, so there is one place to read
+  /// for "why did nothing happen" rather than a toast for the early refusals and
+  /// an error line for the late ones.
+  void refuse(String reason) {
+    state = AsyncData<ConversationState>(_state.copyWith(error: reason));
+  }
+
   /// Encrypt + send an attachment (NIP-94 over the DM channel).
   Future<bool> attach({
     required String mimeType,
@@ -495,10 +505,13 @@ class ConversationController
     String caption = '',
   }) async {
     if (_state.attaching) return false;
-    if (bytes.length > 10 * 1024 * 1024) {
-      state = AsyncData<ConversationState>(
-        _state.copyWith(error: 'Attachments are limited to 10 MB.'),
-      );
+    // Also checked before the preview sheet opens, which is where a person
+    // normally meets it. Kept here because this is reachable without a sheet
+    // (a voice note) and because a screen that forgot the check must still not
+    // hand the core something it will reject.
+    final String? refusal = attachmentRejection(name: '', bytes: bytes.length);
+    if (refusal != null) {
+      state = AsyncData<ConversationState>(_state.copyWith(error: refusal));
       return false;
     }
     state = AsyncData<ConversationState>(

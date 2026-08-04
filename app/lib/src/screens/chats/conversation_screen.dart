@@ -19,6 +19,7 @@ import '../../state/providers.dart';
 import '../../util/attachment_caption.dart';
 import '../../util/chat_thread.dart';
 import '../../widgets/app_chrome.dart';
+import '../../widgets/attachment_preview.dart';
 import '../../widgets/composer.dart';
 import '../../widgets/media_attachment.dart';
 import '../../widgets/message_bubble.dart';
@@ -225,29 +226,67 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   }
 
   /// Send one attachment, however it was obtained — picked, photographed, or
-  /// recorded. The composer owns *getting* it; this owns sending it.
+  /// recorded. The composer owns *getting* it; this owns confirming and sending
+  /// it.
   ///
-  /// The caption is whatever is in the composer, per [captionForAttachment] —
-  /// not the file's name, which is what this used to send. A device-chosen name
-  /// (`IMG_20260731_114233.jpg`, `document.pdf`) is noise in the recipient's
-  /// thread at best, and at worst it is the one piece of local filesystem
-  /// vocabulary the sender never chose to share.
-  Future<void> _sendAttachment(PickedAttachment picked) async {
+  /// Three gates, in this order, and the order is the point:
+  ///
+  ///  1. **Can it be sent at all** ([attachmentRejection]). An empty capture or
+  ///     an oversize file is refused here, before the sheet — every frontend used
+  ///     to discover the 10 MB cap only after the upload began, which throws away
+  ///     the caption the sender had just written.
+  ///  2. **Is it the right file** ([showAttachmentPreview]). Backing out sends
+  ///     nothing and leaves the composer exactly as it was.
+  ///  3. **What is it called.** The caption is seeded from the composer per
+  ///     [captionForAttachment] and then edited against the picture — never the
+  ///     file's name, which is what this used to send. A device-chosen name
+  ///     (`IMG_20260731_114233.jpg`) is noise in the recipient's thread at best,
+  ///     and at worst the one piece of local filesystem vocabulary the sender
+  ///     never chose to share.
+  Future<void> _sendAttachment(
+    PickedAttachment picked, {
+    required bool preview,
+  }) async {
+    final ConversationController controller =
+        ref.read(conversationProvider(widget.peer).notifier);
+    final String? refusal = attachmentRejection(
+      name: picked.name,
+      bytes: picked.bytes.length,
+    );
+    if (refusal != null) {
+      controller.refuse(refusal);
+      return;
+    }
+
     final bool replyPending =
         ref.read(conversationProvider(widget.peer)).value?.replyingTo != null;
     final String draft = _draft.text;
-    final String caption =
+    String caption =
         captionForAttachment(draft: draft, replyPending: replyPending);
     final bool consumed =
         captionConsumesDraft(draft: draft, replyPending: replyPending);
-    final bool ok =
-        await ref.read(conversationProvider(widget.peer).notifier).attach(
-              mimeType: picked.mimeType,
-              bytes: picked.bytes,
-              caption: caption,
-            );
+
+    if (preview) {
+      final String? confirmed = await showAttachmentPreview(
+        context,
+        attachment: picked,
+        seedCaption: caption,
+      );
+      // Backed out. Nothing was encrypted, nothing was uploaded, and the draft
+      // is still where they left it.
+      if (confirmed == null || !mounted) return;
+      caption = confirmed;
+    }
+
+    final bool ok = await controller.attach(
+      mimeType: picked.mimeType,
+      bytes: picked.bytes,
+      caption: caption,
+    );
     // Only clear a draft that actually went with the attachment, and only once
     // it has: a failed upload must leave the words the person typed in the box.
+    // A draft the sheet then *deleted* still counts as gone — that deletion was
+    // deliberate, and putting the words back would be the surprise.
     if (ok && consumed) _draft.clear();
     if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToLatest());

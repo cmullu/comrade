@@ -102,12 +102,17 @@ void main() {
   late TextEditingController controller;
   late FocusNode focus;
   late List<PickedAttachment> sentAttachments;
+
+  /// Whether each send asked for the confirm-before-sending sheet. A voice note
+  /// must not: the recording strip it came from *is* that confirmation.
+  late List<bool> previewed;
   late int sends;
 
   setUp(() {
     controller = TextEditingController();
     focus = FocusNode();
     sentAttachments = <PickedAttachment>[];
+    previewed = <bool>[];
     sends = 0;
   });
 
@@ -129,7 +134,10 @@ void main() {
           controller: controller,
           focusNode: focus,
           onSend: () async => sends++,
-          onAttachment: (PickedAttachment a) async => sentAttachments.add(a),
+          onAttachment: (PickedAttachment a, {required bool preview}) async {
+            sentAttachments.add(a);
+            previewed.add(preview);
+          },
         ),
         repo: repo,
         extra: <Override>[
@@ -232,6 +240,7 @@ void main() {
 
       expect(picker.calls, 1);
       expect(sentAttachments.single.name, 'notes.pdf');
+      expect(previewed.single, isTrue, reason: 'a pick is confirmed first');
     });
 
     testWidgets('a cancelled pick sends nothing and reports nothing',
@@ -370,6 +379,9 @@ void main() {
       expect(recorder.stops, 1);
       expect(recorder.cancels, 0);
       expect(sentAttachments.single.mimeType, 'audio/aac');
+      // The strip already held it with a discard button and a send button; a
+      // second sheet after tapping send would be one confirmation too many.
+      expect(previewed.single, isFalse);
       expect(find.byKey(const Key('dm-input')), findsOneWidget);
     });
 
