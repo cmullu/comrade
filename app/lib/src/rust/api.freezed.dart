@@ -61,6 +61,12 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
     TResult Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult Function(BridgeEvent_ComradeNudge value)? comradeNudge,
+    TResult Function(BridgeEvent_TogetherInvited value)? togetherInvited,
+    TResult Function(BridgeEvent_TogetherJoined value)? togetherJoined,
+    TResult Function(BridgeEvent_TogetherCommand value)? togetherCommand,
+    TResult Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
+    TResult Function(BridgeEvent_TogetherEnded value)? togetherEnded,
+    TResult Function(BridgeEvent_TogetherShare value)? togetherShare,
     TResult Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
     required TResult orElse(),
@@ -87,6 +93,18 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -126,6 +144,15 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(BridgeEvent_ComradePresence value)
         comradePresence,
     required TResult Function(BridgeEvent_ComradeNudge value) comradeNudge,
+    required TResult Function(BridgeEvent_TogetherInvited value)
+        togetherInvited,
+    required TResult Function(BridgeEvent_TogetherJoined value) togetherJoined,
+    required TResult Function(BridgeEvent_TogetherCommand value)
+        togetherCommand,
+    required TResult Function(BridgeEvent_TogetherCorrection value)
+        togetherCorrection,
+    required TResult Function(BridgeEvent_TogetherEnded value) togetherEnded,
+    required TResult Function(BridgeEvent_TogetherShare value) togetherShare,
     required TResult Function(BridgeEvent_MeshStatusChanged value)
         meshStatusChanged,
     required TResult Function(BridgeEvent_LedgerUpdated value) ledgerUpdated,
@@ -150,6 +177,18 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge():
         return comradeNudge(_that);
+      case BridgeEvent_TogetherInvited():
+        return togetherInvited(_that);
+      case BridgeEvent_TogetherJoined():
+        return togetherJoined(_that);
+      case BridgeEvent_TogetherCommand():
+        return togetherCommand(_that);
+      case BridgeEvent_TogetherCorrection():
+        return togetherCorrection(_that);
+      case BridgeEvent_TogetherEnded():
+        return togetherEnded(_that);
+      case BridgeEvent_TogetherShare():
+        return togetherShare(_that);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated():
@@ -182,6 +221,12 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
     TResult? Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult? Function(BridgeEvent_ComradeNudge value)? comradeNudge,
+    TResult? Function(BridgeEvent_TogetherInvited value)? togetherInvited,
+    TResult? Function(BridgeEvent_TogetherJoined value)? togetherJoined,
+    TResult? Function(BridgeEvent_TogetherCommand value)? togetherCommand,
+    TResult? Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
+    TResult? Function(BridgeEvent_TogetherEnded value)? togetherEnded,
+    TResult? Function(BridgeEvent_TogetherShare value)? togetherShare,
     TResult? Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult? Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
   }) {
@@ -207,6 +252,18 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -241,6 +298,12 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(String peer, String? name, bool online, BigInt at)?
         comradePresence,
     TResult Function(String peer, String? name)? comradeNudge,
+    TResult Function(TogetherInviteDto field0)? togetherInvited,
+    TResult Function(String sessionId, String peer)? togetherJoined,
+    TResult Function(TogetherCommandDto field0)? togetherCommand,
+    TResult Function(TogetherCorrectionDto field0)? togetherCorrection,
+    TResult Function(String sessionId, String peer, bool byPeer)? togetherEnded,
+    TResult Function(TogetherShareDto field0)? togetherShare,
     TResult Function(MeshStatusDto field0)? meshStatusChanged,
     TResult Function(String ledger)? ledgerUpdated,
     required TResult orElse(),
@@ -267,6 +330,18 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that.field0);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that.sessionId, _that.peer);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that.field0);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that.field0);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -303,6 +378,13 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(String peer, String? name, bool online, BigInt at)
         comradePresence,
     required TResult Function(String peer, String? name) comradeNudge,
+    required TResult Function(TogetherInviteDto field0) togetherInvited,
+    required TResult Function(String sessionId, String peer) togetherJoined,
+    required TResult Function(TogetherCommandDto field0) togetherCommand,
+    required TResult Function(TogetherCorrectionDto field0) togetherCorrection,
+    required TResult Function(String sessionId, String peer, bool byPeer)
+        togetherEnded,
+    required TResult Function(TogetherShareDto field0) togetherShare,
     required TResult Function(MeshStatusDto field0) meshStatusChanged,
     required TResult Function(String ledger) ledgerUpdated,
   }) {
@@ -326,6 +408,18 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge():
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_TogetherInvited():
+        return togetherInvited(_that.field0);
+      case BridgeEvent_TogetherJoined():
+        return togetherJoined(_that.sessionId, _that.peer);
+      case BridgeEvent_TogetherCommand():
+        return togetherCommand(_that.field0);
+      case BridgeEvent_TogetherCorrection():
+        return togetherCorrection(_that.field0);
+      case BridgeEvent_TogetherEnded():
+        return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
+      case BridgeEvent_TogetherShare():
+        return togetherShare(_that.field0);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated():
@@ -358,6 +452,13 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(String peer, String? name, bool online, BigInt at)?
         comradePresence,
     TResult? Function(String peer, String? name)? comradeNudge,
+    TResult? Function(TogetherInviteDto field0)? togetherInvited,
+    TResult? Function(String sessionId, String peer)? togetherJoined,
+    TResult? Function(TogetherCommandDto field0)? togetherCommand,
+    TResult? Function(TogetherCorrectionDto field0)? togetherCorrection,
+    TResult? Function(String sessionId, String peer, bool byPeer)?
+        togetherEnded,
+    TResult? Function(TogetherShareDto field0)? togetherShare,
     TResult? Function(MeshStatusDto field0)? meshStatusChanged,
     TResult? Function(String ledger)? ledgerUpdated,
   }) {
@@ -383,6 +484,18 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_TogetherInvited() when togetherInvited != null:
+        return togetherInvited(_that.field0);
+      case BridgeEvent_TogetherJoined() when togetherJoined != null:
+        return togetherJoined(_that.sessionId, _that.peer);
+      case BridgeEvent_TogetherCommand() when togetherCommand != null:
+        return togetherCommand(_that.field0);
+      case BridgeEvent_TogetherCorrection() when togetherCorrection != null:
+        return togetherCorrection(_that.field0);
+      case BridgeEvent_TogetherEnded() when togetherEnded != null:
+        return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -1046,6 +1159,427 @@ class _$BridgeEvent_ComradeNudgeCopyWithImpl<$Res>
           ? _self.name
           : name // ignore: cast_nullable_to_non_nullable
               as String?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherInvited extends BridgeEvent {
+  const BridgeEvent_TogetherInvited(this.field0) : super._();
+
+  final TogetherInviteDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherInvitedCopyWith<BridgeEvent_TogetherInvited>
+      get copyWith => _$BridgeEvent_TogetherInvitedCopyWithImpl<
+          BridgeEvent_TogetherInvited>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherInvited &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherInvited(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherInvitedCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherInvitedCopyWith(
+          BridgeEvent_TogetherInvited value,
+          $Res Function(BridgeEvent_TogetherInvited) _then) =
+      _$BridgeEvent_TogetherInvitedCopyWithImpl;
+  @useResult
+  $Res call({TogetherInviteDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherInvitedCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherInvitedCopyWith<$Res> {
+  _$BridgeEvent_TogetherInvitedCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherInvited _self;
+  final $Res Function(BridgeEvent_TogetherInvited) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherInvited(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherInviteDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherJoined extends BridgeEvent {
+  const BridgeEvent_TogetherJoined(
+      {required this.sessionId, required this.peer})
+      : super._();
+
+  final String sessionId;
+  final String peer;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherJoinedCopyWith<BridgeEvent_TogetherJoined>
+      get copyWith =>
+          _$BridgeEvent_TogetherJoinedCopyWithImpl<BridgeEvent_TogetherJoined>(
+              this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherJoined &&
+            (identical(other.sessionId, sessionId) ||
+                other.sessionId == sessionId) &&
+            (identical(other.peer, peer) || other.peer == peer));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sessionId, peer);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherJoined(sessionId: $sessionId, peer: $peer)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherJoinedCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherJoinedCopyWith(BridgeEvent_TogetherJoined value,
+          $Res Function(BridgeEvent_TogetherJoined) _then) =
+      _$BridgeEvent_TogetherJoinedCopyWithImpl;
+  @useResult
+  $Res call({String sessionId, String peer});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherJoinedCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherJoinedCopyWith<$Res> {
+  _$BridgeEvent_TogetherJoinedCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherJoined _self;
+  final $Res Function(BridgeEvent_TogetherJoined) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sessionId = null,
+    Object? peer = null,
+  }) {
+    return _then(BridgeEvent_TogetherJoined(
+      sessionId: null == sessionId
+          ? _self.sessionId
+          : sessionId // ignore: cast_nullable_to_non_nullable
+              as String,
+      peer: null == peer
+          ? _self.peer
+          : peer // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherCommand extends BridgeEvent {
+  const BridgeEvent_TogetherCommand(this.field0) : super._();
+
+  final TogetherCommandDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherCommandCopyWith<BridgeEvent_TogetherCommand>
+      get copyWith => _$BridgeEvent_TogetherCommandCopyWithImpl<
+          BridgeEvent_TogetherCommand>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherCommand &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherCommand(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherCommandCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherCommandCopyWith(
+          BridgeEvent_TogetherCommand value,
+          $Res Function(BridgeEvent_TogetherCommand) _then) =
+      _$BridgeEvent_TogetherCommandCopyWithImpl;
+  @useResult
+  $Res call({TogetherCommandDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherCommandCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherCommandCopyWith<$Res> {
+  _$BridgeEvent_TogetherCommandCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherCommand _self;
+  final $Res Function(BridgeEvent_TogetherCommand) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherCommand(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherCommandDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherCorrection extends BridgeEvent {
+  const BridgeEvent_TogetherCorrection(this.field0) : super._();
+
+  final TogetherCorrectionDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherCorrectionCopyWith<BridgeEvent_TogetherCorrection>
+      get copyWith => _$BridgeEvent_TogetherCorrectionCopyWithImpl<
+          BridgeEvent_TogetherCorrection>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherCorrection &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherCorrection(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherCorrectionCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherCorrectionCopyWith(
+          BridgeEvent_TogetherCorrection value,
+          $Res Function(BridgeEvent_TogetherCorrection) _then) =
+      _$BridgeEvent_TogetherCorrectionCopyWithImpl;
+  @useResult
+  $Res call({TogetherCorrectionDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherCorrectionCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherCorrectionCopyWith<$Res> {
+  _$BridgeEvent_TogetherCorrectionCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherCorrection _self;
+  final $Res Function(BridgeEvent_TogetherCorrection) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherCorrection(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherCorrectionDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherEnded extends BridgeEvent {
+  const BridgeEvent_TogetherEnded(
+      {required this.sessionId, required this.peer, required this.byPeer})
+      : super._();
+
+  final String sessionId;
+  final String peer;
+  final bool byPeer;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherEndedCopyWith<BridgeEvent_TogetherEnded> get copyWith =>
+      _$BridgeEvent_TogetherEndedCopyWithImpl<BridgeEvent_TogetherEnded>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherEnded &&
+            (identical(other.sessionId, sessionId) ||
+                other.sessionId == sessionId) &&
+            (identical(other.peer, peer) || other.peer == peer) &&
+            (identical(other.byPeer, byPeer) || other.byPeer == byPeer));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sessionId, peer, byPeer);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherEnded(sessionId: $sessionId, peer: $peer, byPeer: $byPeer)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherEndedCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherEndedCopyWith(BridgeEvent_TogetherEnded value,
+          $Res Function(BridgeEvent_TogetherEnded) _then) =
+      _$BridgeEvent_TogetherEndedCopyWithImpl;
+  @useResult
+  $Res call({String sessionId, String peer, bool byPeer});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherEndedCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherEndedCopyWith<$Res> {
+  _$BridgeEvent_TogetherEndedCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherEnded _self;
+  final $Res Function(BridgeEvent_TogetherEnded) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sessionId = null,
+    Object? peer = null,
+    Object? byPeer = null,
+  }) {
+    return _then(BridgeEvent_TogetherEnded(
+      sessionId: null == sessionId
+          ? _self.sessionId
+          : sessionId // ignore: cast_nullable_to_non_nullable
+              as String,
+      peer: null == peer
+          ? _self.peer
+          : peer // ignore: cast_nullable_to_non_nullable
+              as String,
+      byPeer: null == byPeer
+          ? _self.byPeer
+          : byPeer // ignore: cast_nullable_to_non_nullable
+              as bool,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherShare extends BridgeEvent {
+  const BridgeEvent_TogetherShare(this.field0) : super._();
+
+  final TogetherShareDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherShareCopyWith<BridgeEvent_TogetherShare> get copyWith =>
+      _$BridgeEvent_TogetherShareCopyWithImpl<BridgeEvent_TogetherShare>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherShare &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherShare(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherShareCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherShareCopyWith(BridgeEvent_TogetherShare value,
+          $Res Function(BridgeEvent_TogetherShare) _then) =
+      _$BridgeEvent_TogetherShareCopyWithImpl;
+  @useResult
+  $Res call({TogetherShareDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherShareCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherShareCopyWith<$Res> {
+  _$BridgeEvent_TogetherShareCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherShare _self;
+  final $Res Function(BridgeEvent_TogetherShare) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherShare(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherShareDto,
     ));
   }
 }
@@ -1761,6 +2295,3193 @@ class _$CallSignal_HangupCopyWithImpl<$Res>
           : reason // ignore: cast_nullable_to_non_nullable
               as HangupReason,
     ));
+  }
+}
+
+/// @nodoc
+mixin _$MusicLink {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is MusicLink);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'MusicLink()';
+  }
+}
+
+/// @nodoc
+class $MusicLinkCopyWith<$Res> {
+  $MusicLinkCopyWith(MusicLink _, $Res Function(MusicLink) __);
+}
+
+/// Adds pattern-matching-related methods to [MusicLink].
+extension MusicLinkPatterns on MusicLink {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(MusicLink_Spotify value)? spotify,
+    TResult Function(MusicLink_AppleMusic value)? appleMusic,
+    TResult Function(MusicLink_Youtube value)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(MusicLink_Spotify value) spotify,
+    required TResult Function(MusicLink_AppleMusic value) appleMusic,
+    required TResult Function(MusicLink_Youtube value) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify():
+        return spotify(_that);
+      case MusicLink_AppleMusic():
+        return appleMusic(_that);
+      case MusicLink_Youtube():
+        return youtube(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(MusicLink_Spotify value)? spotify,
+    TResult? Function(MusicLink_AppleMusic value)? appleMusic,
+    TResult? Function(MusicLink_Youtube value)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String trackId)? spotify,
+    TResult Function(String storefront, String trackId)? appleMusic,
+    TResult Function(String videoId)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that.trackId);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that.storefront, _that.trackId);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String trackId) spotify,
+    required TResult Function(String storefront, String trackId) appleMusic,
+    required TResult Function(String videoId) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify():
+        return spotify(_that.trackId);
+      case MusicLink_AppleMusic():
+        return appleMusic(_that.storefront, _that.trackId);
+      case MusicLink_Youtube():
+        return youtube(_that.videoId);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String trackId)? spotify,
+    TResult? Function(String storefront, String trackId)? appleMusic,
+    TResult? Function(String videoId)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case MusicLink_Spotify() when spotify != null:
+        return spotify(_that.trackId);
+      case MusicLink_AppleMusic() when appleMusic != null:
+        return appleMusic(_that.storefront, _that.trackId);
+      case MusicLink_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class MusicLink_Spotify extends MusicLink {
+  const MusicLink_Spotify({required this.trackId}) : super._();
+
+  final String trackId;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $MusicLink_SpotifyCopyWith<MusicLink_Spotify> get copyWith =>
+      _$MusicLink_SpotifyCopyWithImpl<MusicLink_Spotify>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is MusicLink_Spotify &&
+            (identical(other.trackId, trackId) || other.trackId == trackId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, trackId);
+
+  @override
+  String toString() {
+    return 'MusicLink.spotify(trackId: $trackId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $MusicLink_SpotifyCopyWith<$Res>
+    implements $MusicLinkCopyWith<$Res> {
+  factory $MusicLink_SpotifyCopyWith(
+          MusicLink_Spotify value, $Res Function(MusicLink_Spotify) _then) =
+      _$MusicLink_SpotifyCopyWithImpl;
+  @useResult
+  $Res call({String trackId});
+}
+
+/// @nodoc
+class _$MusicLink_SpotifyCopyWithImpl<$Res>
+    implements $MusicLink_SpotifyCopyWith<$Res> {
+  _$MusicLink_SpotifyCopyWithImpl(this._self, this._then);
+
+  final MusicLink_Spotify _self;
+  final $Res Function(MusicLink_Spotify) _then;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? trackId = null,
+  }) {
+    return _then(MusicLink_Spotify(
+      trackId: null == trackId
+          ? _self.trackId
+          : trackId // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class MusicLink_AppleMusic extends MusicLink {
+  const MusicLink_AppleMusic({required this.storefront, required this.trackId})
+      : super._();
+
+  final String storefront;
+  final String trackId;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $MusicLink_AppleMusicCopyWith<MusicLink_AppleMusic> get copyWith =>
+      _$MusicLink_AppleMusicCopyWithImpl<MusicLink_AppleMusic>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is MusicLink_AppleMusic &&
+            (identical(other.storefront, storefront) ||
+                other.storefront == storefront) &&
+            (identical(other.trackId, trackId) || other.trackId == trackId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, storefront, trackId);
+
+  @override
+  String toString() {
+    return 'MusicLink.appleMusic(storefront: $storefront, trackId: $trackId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $MusicLink_AppleMusicCopyWith<$Res>
+    implements $MusicLinkCopyWith<$Res> {
+  factory $MusicLink_AppleMusicCopyWith(MusicLink_AppleMusic value,
+          $Res Function(MusicLink_AppleMusic) _then) =
+      _$MusicLink_AppleMusicCopyWithImpl;
+  @useResult
+  $Res call({String storefront, String trackId});
+}
+
+/// @nodoc
+class _$MusicLink_AppleMusicCopyWithImpl<$Res>
+    implements $MusicLink_AppleMusicCopyWith<$Res> {
+  _$MusicLink_AppleMusicCopyWithImpl(this._self, this._then);
+
+  final MusicLink_AppleMusic _self;
+  final $Res Function(MusicLink_AppleMusic) _then;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? storefront = null,
+    Object? trackId = null,
+  }) {
+    return _then(MusicLink_AppleMusic(
+      storefront: null == storefront
+          ? _self.storefront
+          : storefront // ignore: cast_nullable_to_non_nullable
+              as String,
+      trackId: null == trackId
+          ? _self.trackId
+          : trackId // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class MusicLink_Youtube extends MusicLink {
+  const MusicLink_Youtube({required this.videoId}) : super._();
+
+  final String videoId;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $MusicLink_YoutubeCopyWith<MusicLink_Youtube> get copyWith =>
+      _$MusicLink_YoutubeCopyWithImpl<MusicLink_Youtube>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is MusicLink_Youtube &&
+            (identical(other.videoId, videoId) || other.videoId == videoId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, videoId);
+
+  @override
+  String toString() {
+    return 'MusicLink.youtube(videoId: $videoId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $MusicLink_YoutubeCopyWith<$Res>
+    implements $MusicLinkCopyWith<$Res> {
+  factory $MusicLink_YoutubeCopyWith(
+          MusicLink_Youtube value, $Res Function(MusicLink_Youtube) _then) =
+      _$MusicLink_YoutubeCopyWithImpl;
+  @useResult
+  $Res call({String videoId});
+}
+
+/// @nodoc
+class _$MusicLink_YoutubeCopyWithImpl<$Res>
+    implements $MusicLink_YoutubeCopyWith<$Res> {
+  _$MusicLink_YoutubeCopyWithImpl(this._self, this._then);
+
+  final MusicLink_Youtube _self;
+  final $Res Function(MusicLink_Youtube) _then;
+
+  /// Create a copy of MusicLink
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? videoId = null,
+  }) {
+    return _then(MusicLink_Youtube(
+      videoId: null == videoId
+          ? _self.videoId
+          : videoId // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+mixin _$RefusalReason {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RefusalReason);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RefusalReason()';
+  }
+}
+
+/// @nodoc
+class $RefusalReasonCopyWith<$Res> {
+  $RefusalReasonCopyWith(RefusalReason _, $Res Function(RefusalReason) __);
+}
+
+/// Adds pattern-matching-related methods to [RefusalReason].
+extension RefusalReasonPatterns on RefusalReason {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(RefusalReason_RelayForbidden value)? relayForbidden,
+    TResult Function(RefusalReason_TooLargeForRelay value)? tooLargeForRelay,
+    TResult Function(RefusalReason_PathUnknown value)? pathUnknown,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden(_that);
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(RefusalReason_RelayForbidden value)
+        relayForbidden,
+    required TResult Function(RefusalReason_TooLargeForRelay value)
+        tooLargeForRelay,
+    required TResult Function(RefusalReason_PathUnknown value) pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden():
+        return relayForbidden(_that);
+      case RefusalReason_TooLargeForRelay():
+        return tooLargeForRelay(_that);
+      case RefusalReason_PathUnknown():
+        return pathUnknown(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(RefusalReason_RelayForbidden value)? relayForbidden,
+    TResult? Function(RefusalReason_TooLargeForRelay value)? tooLargeForRelay,
+    TResult? Function(RefusalReason_PathUnknown value)? pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden(_that);
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? relayForbidden,
+    TResult Function(BigInt limit)? tooLargeForRelay,
+    TResult Function()? pathUnknown,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden();
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that.limit);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown();
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() relayForbidden,
+    required TResult Function(BigInt limit) tooLargeForRelay,
+    required TResult Function() pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden():
+        return relayForbidden();
+      case RefusalReason_TooLargeForRelay():
+        return tooLargeForRelay(_that.limit);
+      case RefusalReason_PathUnknown():
+        return pathUnknown();
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? relayForbidden,
+    TResult? Function(BigInt limit)? tooLargeForRelay,
+    TResult? Function()? pathUnknown,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RefusalReason_RelayForbidden() when relayForbidden != null:
+        return relayForbidden();
+      case RefusalReason_TooLargeForRelay() when tooLargeForRelay != null:
+        return tooLargeForRelay(_that.limit);
+      case RefusalReason_PathUnknown() when pathUnknown != null:
+        return pathUnknown();
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class RefusalReason_RelayForbidden extends RefusalReason {
+  const RefusalReason_RelayForbidden() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RefusalReason_RelayForbidden);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RefusalReason.relayForbidden()';
+  }
+}
+
+/// @nodoc
+
+class RefusalReason_TooLargeForRelay extends RefusalReason {
+  const RefusalReason_TooLargeForRelay({required this.limit}) : super._();
+
+  final BigInt limit;
+
+  /// Create a copy of RefusalReason
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $RefusalReason_TooLargeForRelayCopyWith<RefusalReason_TooLargeForRelay>
+      get copyWith => _$RefusalReason_TooLargeForRelayCopyWithImpl<
+          RefusalReason_TooLargeForRelay>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RefusalReason_TooLargeForRelay &&
+            (identical(other.limit, limit) || other.limit == limit));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, limit);
+
+  @override
+  String toString() {
+    return 'RefusalReason.tooLargeForRelay(limit: $limit)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $RefusalReason_TooLargeForRelayCopyWith<$Res>
+    implements $RefusalReasonCopyWith<$Res> {
+  factory $RefusalReason_TooLargeForRelayCopyWith(
+          RefusalReason_TooLargeForRelay value,
+          $Res Function(RefusalReason_TooLargeForRelay) _then) =
+      _$RefusalReason_TooLargeForRelayCopyWithImpl;
+  @useResult
+  $Res call({BigInt limit});
+}
+
+/// @nodoc
+class _$RefusalReason_TooLargeForRelayCopyWithImpl<$Res>
+    implements $RefusalReason_TooLargeForRelayCopyWith<$Res> {
+  _$RefusalReason_TooLargeForRelayCopyWithImpl(this._self, this._then);
+
+  final RefusalReason_TooLargeForRelay _self;
+  final $Res Function(RefusalReason_TooLargeForRelay) _then;
+
+  /// Create a copy of RefusalReason
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? limit = null,
+  }) {
+    return _then(RefusalReason_TooLargeForRelay(
+      limit: null == limit
+          ? _self.limit
+          : limit // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class RefusalReason_PathUnknown extends RefusalReason {
+  const RefusalReason_PathUnknown() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RefusalReason_PathUnknown);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RefusalReason.pathUnknown()';
+  }
+}
+
+/// @nodoc
+mixin _$RelayPolicy {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy()';
+  }
+}
+
+/// @nodoc
+class $RelayPolicyCopyWith<$Res> {
+  $RelayPolicyCopyWith(RelayPolicy _, $Res Function(RelayPolicy) __);
+}
+
+/// Adds pattern-matching-related methods to [RelayPolicy].
+extension RelayPolicyPatterns on RelayPolicy {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(RelayPolicy_DirectOnly value)? directOnly,
+    TResult Function(RelayPolicy_UnderBytes value)? underBytes,
+    TResult Function(RelayPolicy_AskEachTime value)? askEachTime,
+    TResult Function(RelayPolicy_Always value)? always,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly(_that);
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime(_that);
+      case RelayPolicy_Always() when always != null:
+        return always(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(RelayPolicy_DirectOnly value) directOnly,
+    required TResult Function(RelayPolicy_UnderBytes value) underBytes,
+    required TResult Function(RelayPolicy_AskEachTime value) askEachTime,
+    required TResult Function(RelayPolicy_Always value) always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly():
+        return directOnly(_that);
+      case RelayPolicy_UnderBytes():
+        return underBytes(_that);
+      case RelayPolicy_AskEachTime():
+        return askEachTime(_that);
+      case RelayPolicy_Always():
+        return always(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(RelayPolicy_DirectOnly value)? directOnly,
+    TResult? Function(RelayPolicy_UnderBytes value)? underBytes,
+    TResult? Function(RelayPolicy_AskEachTime value)? askEachTime,
+    TResult? Function(RelayPolicy_Always value)? always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly(_that);
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime(_that);
+      case RelayPolicy_Always() when always != null:
+        return always(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? directOnly,
+    TResult Function(BigInt limit)? underBytes,
+    TResult Function()? askEachTime,
+    TResult Function()? always,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly();
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that.limit);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime();
+      case RelayPolicy_Always() when always != null:
+        return always();
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() directOnly,
+    required TResult Function(BigInt limit) underBytes,
+    required TResult Function() askEachTime,
+    required TResult Function() always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly():
+        return directOnly();
+      case RelayPolicy_UnderBytes():
+        return underBytes(_that.limit);
+      case RelayPolicy_AskEachTime():
+        return askEachTime();
+      case RelayPolicy_Always():
+        return always();
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? directOnly,
+    TResult? Function(BigInt limit)? underBytes,
+    TResult? Function()? askEachTime,
+    TResult? Function()? always,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case RelayPolicy_DirectOnly() when directOnly != null:
+        return directOnly();
+      case RelayPolicy_UnderBytes() when underBytes != null:
+        return underBytes(_that.limit);
+      case RelayPolicy_AskEachTime() when askEachTime != null:
+        return askEachTime();
+      case RelayPolicy_Always() when always != null:
+        return always();
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_DirectOnly extends RelayPolicy {
+  const RelayPolicy_DirectOnly() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy_DirectOnly);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy.directOnly()';
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_UnderBytes extends RelayPolicy {
+  const RelayPolicy_UnderBytes({required this.limit}) : super._();
+
+  final BigInt limit;
+
+  /// Create a copy of RelayPolicy
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $RelayPolicy_UnderBytesCopyWith<RelayPolicy_UnderBytes> get copyWith =>
+      _$RelayPolicy_UnderBytesCopyWithImpl<RelayPolicy_UnderBytes>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is RelayPolicy_UnderBytes &&
+            (identical(other.limit, limit) || other.limit == limit));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, limit);
+
+  @override
+  String toString() {
+    return 'RelayPolicy.underBytes(limit: $limit)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $RelayPolicy_UnderBytesCopyWith<$Res>
+    implements $RelayPolicyCopyWith<$Res> {
+  factory $RelayPolicy_UnderBytesCopyWith(RelayPolicy_UnderBytes value,
+          $Res Function(RelayPolicy_UnderBytes) _then) =
+      _$RelayPolicy_UnderBytesCopyWithImpl;
+  @useResult
+  $Res call({BigInt limit});
+}
+
+/// @nodoc
+class _$RelayPolicy_UnderBytesCopyWithImpl<$Res>
+    implements $RelayPolicy_UnderBytesCopyWith<$Res> {
+  _$RelayPolicy_UnderBytesCopyWithImpl(this._self, this._then);
+
+  final RelayPolicy_UnderBytes _self;
+  final $Res Function(RelayPolicy_UnderBytes) _then;
+
+  /// Create a copy of RelayPolicy
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? limit = null,
+  }) {
+    return _then(RelayPolicy_UnderBytes(
+      limit: null == limit
+          ? _self.limit
+          : limit // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_AskEachTime extends RelayPolicy {
+  const RelayPolicy_AskEachTime() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy_AskEachTime);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy.askEachTime()';
+  }
+}
+
+/// @nodoc
+
+class RelayPolicy_Always extends RelayPolicy {
+  const RelayPolicy_Always() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is RelayPolicy_Always);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'RelayPolicy.always()';
+  }
+}
+
+/// @nodoc
+mixin _$ShareSignal {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ShareSignal);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ShareSignal()';
+  }
+}
+
+/// @nodoc
+class $ShareSignalCopyWith<$Res> {
+  $ShareSignalCopyWith(ShareSignal _, $Res Function(ShareSignal) __);
+}
+
+/// Adds pattern-matching-related methods to [ShareSignal].
+extension ShareSignalPatterns on ShareSignal {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(ShareSignal_Ask value)? ask,
+    TResult Function(ShareSignal_Offer value)? offer,
+    TResult Function(ShareSignal_Accept value)? accept,
+    TResult Function(ShareSignal_Refuse value)? refuse,
+    TResult Function(ShareSignal_Transport value)? transport,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask(_that);
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that);
+      case ShareSignal_Accept() when accept != null:
+        return accept(_that);
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(ShareSignal_Ask value) ask,
+    required TResult Function(ShareSignal_Offer value) offer,
+    required TResult Function(ShareSignal_Accept value) accept,
+    required TResult Function(ShareSignal_Refuse value) refuse,
+    required TResult Function(ShareSignal_Transport value) transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask():
+        return ask(_that);
+      case ShareSignal_Offer():
+        return offer(_that);
+      case ShareSignal_Accept():
+        return accept(_that);
+      case ShareSignal_Refuse():
+        return refuse(_that);
+      case ShareSignal_Transport():
+        return transport(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(ShareSignal_Ask value)? ask,
+    TResult? Function(ShareSignal_Offer value)? offer,
+    TResult? Function(ShareSignal_Accept value)? accept,
+    TResult? Function(ShareSignal_Refuse value)? refuse,
+    TResult? Function(ShareSignal_Transport value)? transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask(_that);
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that);
+      case ShareSignal_Accept() when accept != null:
+        return accept(_that);
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? ask,
+    TResult Function(ShareOffer offer)? offer,
+    TResult Function()? accept,
+    TResult Function(RefusalReason reason)? refuse,
+    TResult Function(TransferSignal signal)? transport,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask();
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that.offer);
+      case ShareSignal_Accept() when accept != null:
+        return accept();
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that.signal);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() ask,
+    required TResult Function(ShareOffer offer) offer,
+    required TResult Function() accept,
+    required TResult Function(RefusalReason reason) refuse,
+    required TResult Function(TransferSignal signal) transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask():
+        return ask();
+      case ShareSignal_Offer():
+        return offer(_that.offer);
+      case ShareSignal_Accept():
+        return accept();
+      case ShareSignal_Refuse():
+        return refuse(_that.reason);
+      case ShareSignal_Transport():
+        return transport(_that.signal);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? ask,
+    TResult? Function(ShareOffer offer)? offer,
+    TResult? Function()? accept,
+    TResult? Function(RefusalReason reason)? refuse,
+    TResult? Function(TransferSignal signal)? transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask();
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that.offer);
+      case ShareSignal_Accept() when accept != null:
+        return accept();
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that.signal);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Ask extends ShareSignal {
+  const ShareSignal_Ask() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ShareSignal_Ask);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ShareSignal.ask()';
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Offer extends ShareSignal {
+  const ShareSignal_Offer({required this.offer}) : super._();
+
+  final ShareOffer offer;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ShareSignal_OfferCopyWith<ShareSignal_Offer> get copyWith =>
+      _$ShareSignal_OfferCopyWithImpl<ShareSignal_Offer>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ShareSignal_Offer &&
+            (identical(other.offer, offer) || other.offer == offer));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, offer);
+
+  @override
+  String toString() {
+    return 'ShareSignal.offer(offer: $offer)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ShareSignal_OfferCopyWith<$Res>
+    implements $ShareSignalCopyWith<$Res> {
+  factory $ShareSignal_OfferCopyWith(
+          ShareSignal_Offer value, $Res Function(ShareSignal_Offer) _then) =
+      _$ShareSignal_OfferCopyWithImpl;
+  @useResult
+  $Res call({ShareOffer offer});
+}
+
+/// @nodoc
+class _$ShareSignal_OfferCopyWithImpl<$Res>
+    implements $ShareSignal_OfferCopyWith<$Res> {
+  _$ShareSignal_OfferCopyWithImpl(this._self, this._then);
+
+  final ShareSignal_Offer _self;
+  final $Res Function(ShareSignal_Offer) _then;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? offer = null,
+  }) {
+    return _then(ShareSignal_Offer(
+      offer: null == offer
+          ? _self.offer
+          : offer // ignore: cast_nullable_to_non_nullable
+              as ShareOffer,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Accept extends ShareSignal {
+  const ShareSignal_Accept() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ShareSignal_Accept);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ShareSignal.accept()';
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Refuse extends ShareSignal {
+  const ShareSignal_Refuse({required this.reason}) : super._();
+
+  final RefusalReason reason;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ShareSignal_RefuseCopyWith<ShareSignal_Refuse> get copyWith =>
+      _$ShareSignal_RefuseCopyWithImpl<ShareSignal_Refuse>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ShareSignal_Refuse &&
+            (identical(other.reason, reason) || other.reason == reason));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reason);
+
+  @override
+  String toString() {
+    return 'ShareSignal.refuse(reason: $reason)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ShareSignal_RefuseCopyWith<$Res>
+    implements $ShareSignalCopyWith<$Res> {
+  factory $ShareSignal_RefuseCopyWith(
+          ShareSignal_Refuse value, $Res Function(ShareSignal_Refuse) _then) =
+      _$ShareSignal_RefuseCopyWithImpl;
+  @useResult
+  $Res call({RefusalReason reason});
+
+  $RefusalReasonCopyWith<$Res> get reason;
+}
+
+/// @nodoc
+class _$ShareSignal_RefuseCopyWithImpl<$Res>
+    implements $ShareSignal_RefuseCopyWith<$Res> {
+  _$ShareSignal_RefuseCopyWithImpl(this._self, this._then);
+
+  final ShareSignal_Refuse _self;
+  final $Res Function(ShareSignal_Refuse) _then;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? reason = null,
+  }) {
+    return _then(ShareSignal_Refuse(
+      reason: null == reason
+          ? _self.reason
+          : reason // ignore: cast_nullable_to_non_nullable
+              as RefusalReason,
+    ));
+  }
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $RefusalReasonCopyWith<$Res> get reason {
+    return $RefusalReasonCopyWith<$Res>(_self.reason, (value) {
+      return _then(_self.copyWith(reason: value));
+    });
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Transport extends ShareSignal {
+  const ShareSignal_Transport({required this.signal}) : super._();
+
+  final TransferSignal signal;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ShareSignal_TransportCopyWith<ShareSignal_Transport> get copyWith =>
+      _$ShareSignal_TransportCopyWithImpl<ShareSignal_Transport>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ShareSignal_Transport &&
+            (identical(other.signal, signal) || other.signal == signal));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, signal);
+
+  @override
+  String toString() {
+    return 'ShareSignal.transport(signal: $signal)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ShareSignal_TransportCopyWith<$Res>
+    implements $ShareSignalCopyWith<$Res> {
+  factory $ShareSignal_TransportCopyWith(ShareSignal_Transport value,
+          $Res Function(ShareSignal_Transport) _then) =
+      _$ShareSignal_TransportCopyWithImpl;
+  @useResult
+  $Res call({TransferSignal signal});
+
+  $TransferSignalCopyWith<$Res> get signal;
+}
+
+/// @nodoc
+class _$ShareSignal_TransportCopyWithImpl<$Res>
+    implements $ShareSignal_TransportCopyWith<$Res> {
+  _$ShareSignal_TransportCopyWithImpl(this._self, this._then);
+
+  final ShareSignal_Transport _self;
+  final $Res Function(ShareSignal_Transport) _then;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? signal = null,
+  }) {
+    return _then(ShareSignal_Transport(
+      signal: null == signal
+          ? _self.signal
+          : signal // ignore: cast_nullable_to_non_nullable
+              as TransferSignal,
+    ));
+  }
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $TransferSignalCopyWith<$Res> get signal {
+    return $TransferSignalCopyWith<$Res>(_self.signal, (value) {
+      return _then(_self.copyWith(signal: value));
+    });
+  }
+}
+
+/// @nodoc
+mixin _$SyncVerdict {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is SyncVerdict);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'SyncVerdict()';
+  }
+}
+
+/// @nodoc
+class $SyncVerdictCopyWith<$Res> {
+  $SyncVerdictCopyWith(SyncVerdict _, $Res Function(SyncVerdict) __);
+}
+
+/// Adds pattern-matching-related methods to [SyncVerdict].
+extension SyncVerdictPatterns on SyncVerdict {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(SyncVerdict_Hold value)? hold,
+    TResult Function(SyncVerdict_Adopt value)? adopt,
+    TResult Function(SyncVerdict_Nudge value)? nudge,
+    TResult Function(SyncVerdict_Seek value)? seek,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold(_that);
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(SyncVerdict_Hold value) hold,
+    required TResult Function(SyncVerdict_Adopt value) adopt,
+    required TResult Function(SyncVerdict_Nudge value) nudge,
+    required TResult Function(SyncVerdict_Seek value) seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold():
+        return hold(_that);
+      case SyncVerdict_Adopt():
+        return adopt(_that);
+      case SyncVerdict_Nudge():
+        return nudge(_that);
+      case SyncVerdict_Seek():
+        return seek(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(SyncVerdict_Hold value)? hold,
+    TResult? Function(SyncVerdict_Adopt value)? adopt,
+    TResult? Function(SyncVerdict_Nudge value)? nudge,
+    TResult? Function(SyncVerdict_Seek value)? seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold(_that);
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? hold,
+    TResult Function(BigInt posMs, bool playing, BigInt seq)? adopt,
+    TResult Function(double rate)? nudge,
+    TResult Function(BigInt posMs)? seek,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold();
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that.posMs, _that.playing, _that.seq);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that.rate);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that.posMs);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() hold,
+    required TResult Function(BigInt posMs, bool playing, BigInt seq) adopt,
+    required TResult Function(double rate) nudge,
+    required TResult Function(BigInt posMs) seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold():
+        return hold();
+      case SyncVerdict_Adopt():
+        return adopt(_that.posMs, _that.playing, _that.seq);
+      case SyncVerdict_Nudge():
+        return nudge(_that.rate);
+      case SyncVerdict_Seek():
+        return seek(_that.posMs);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? hold,
+    TResult? Function(BigInt posMs, bool playing, BigInt seq)? adopt,
+    TResult? Function(double rate)? nudge,
+    TResult? Function(BigInt posMs)? seek,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case SyncVerdict_Hold() when hold != null:
+        return hold();
+      case SyncVerdict_Adopt() when adopt != null:
+        return adopt(_that.posMs, _that.playing, _that.seq);
+      case SyncVerdict_Nudge() when nudge != null:
+        return nudge(_that.rate);
+      case SyncVerdict_Seek() when seek != null:
+        return seek(_that.posMs);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Hold extends SyncVerdict {
+  const SyncVerdict_Hold() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is SyncVerdict_Hold);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'SyncVerdict.hold()';
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Adopt extends SyncVerdict {
+  const SyncVerdict_Adopt(
+      {required this.posMs, required this.playing, required this.seq})
+      : super._();
+
+  final BigInt posMs;
+  final bool playing;
+  final BigInt seq;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $SyncVerdict_AdoptCopyWith<SyncVerdict_Adopt> get copyWith =>
+      _$SyncVerdict_AdoptCopyWithImpl<SyncVerdict_Adopt>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is SyncVerdict_Adopt &&
+            (identical(other.posMs, posMs) || other.posMs == posMs) &&
+            (identical(other.playing, playing) || other.playing == playing) &&
+            (identical(other.seq, seq) || other.seq == seq));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, posMs, playing, seq);
+
+  @override
+  String toString() {
+    return 'SyncVerdict.adopt(posMs: $posMs, playing: $playing, seq: $seq)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $SyncVerdict_AdoptCopyWith<$Res>
+    implements $SyncVerdictCopyWith<$Res> {
+  factory $SyncVerdict_AdoptCopyWith(
+          SyncVerdict_Adopt value, $Res Function(SyncVerdict_Adopt) _then) =
+      _$SyncVerdict_AdoptCopyWithImpl;
+  @useResult
+  $Res call({BigInt posMs, bool playing, BigInt seq});
+}
+
+/// @nodoc
+class _$SyncVerdict_AdoptCopyWithImpl<$Res>
+    implements $SyncVerdict_AdoptCopyWith<$Res> {
+  _$SyncVerdict_AdoptCopyWithImpl(this._self, this._then);
+
+  final SyncVerdict_Adopt _self;
+  final $Res Function(SyncVerdict_Adopt) _then;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? posMs = null,
+    Object? playing = null,
+    Object? seq = null,
+  }) {
+    return _then(SyncVerdict_Adopt(
+      posMs: null == posMs
+          ? _self.posMs
+          : posMs // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+      playing: null == playing
+          ? _self.playing
+          : playing // ignore: cast_nullable_to_non_nullable
+              as bool,
+      seq: null == seq
+          ? _self.seq
+          : seq // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Nudge extends SyncVerdict {
+  const SyncVerdict_Nudge({required this.rate}) : super._();
+
+  final double rate;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $SyncVerdict_NudgeCopyWith<SyncVerdict_Nudge> get copyWith =>
+      _$SyncVerdict_NudgeCopyWithImpl<SyncVerdict_Nudge>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is SyncVerdict_Nudge &&
+            (identical(other.rate, rate) || other.rate == rate));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, rate);
+
+  @override
+  String toString() {
+    return 'SyncVerdict.nudge(rate: $rate)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $SyncVerdict_NudgeCopyWith<$Res>
+    implements $SyncVerdictCopyWith<$Res> {
+  factory $SyncVerdict_NudgeCopyWith(
+          SyncVerdict_Nudge value, $Res Function(SyncVerdict_Nudge) _then) =
+      _$SyncVerdict_NudgeCopyWithImpl;
+  @useResult
+  $Res call({double rate});
+}
+
+/// @nodoc
+class _$SyncVerdict_NudgeCopyWithImpl<$Res>
+    implements $SyncVerdict_NudgeCopyWith<$Res> {
+  _$SyncVerdict_NudgeCopyWithImpl(this._self, this._then);
+
+  final SyncVerdict_Nudge _self;
+  final $Res Function(SyncVerdict_Nudge) _then;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? rate = null,
+  }) {
+    return _then(SyncVerdict_Nudge(
+      rate: null == rate
+          ? _self.rate
+          : rate // ignore: cast_nullable_to_non_nullable
+              as double,
+    ));
+  }
+}
+
+/// @nodoc
+
+class SyncVerdict_Seek extends SyncVerdict {
+  const SyncVerdict_Seek({required this.posMs}) : super._();
+
+  final BigInt posMs;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $SyncVerdict_SeekCopyWith<SyncVerdict_Seek> get copyWith =>
+      _$SyncVerdict_SeekCopyWithImpl<SyncVerdict_Seek>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is SyncVerdict_Seek &&
+            (identical(other.posMs, posMs) || other.posMs == posMs));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, posMs);
+
+  @override
+  String toString() {
+    return 'SyncVerdict.seek(posMs: $posMs)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $SyncVerdict_SeekCopyWith<$Res>
+    implements $SyncVerdictCopyWith<$Res> {
+  factory $SyncVerdict_SeekCopyWith(
+          SyncVerdict_Seek value, $Res Function(SyncVerdict_Seek) _then) =
+      _$SyncVerdict_SeekCopyWithImpl;
+  @useResult
+  $Res call({BigInt posMs});
+}
+
+/// @nodoc
+class _$SyncVerdict_SeekCopyWithImpl<$Res>
+    implements $SyncVerdict_SeekCopyWith<$Res> {
+  _$SyncVerdict_SeekCopyWithImpl(this._self, this._then);
+
+  final SyncVerdict_Seek _self;
+  final $Res Function(SyncVerdict_Seek) _then;
+
+  /// Create a copy of SyncVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? posMs = null,
+  }) {
+    return _then(SyncVerdict_Seek(
+      posMs: null == posMs
+          ? _self.posMs
+          : posMs // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+mixin _$TogetherContent {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TogetherContent);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TogetherContent()';
+  }
+}
+
+/// @nodoc
+class $TogetherContentCopyWith<$Res> {
+  $TogetherContentCopyWith(
+      TogetherContent _, $Res Function(TogetherContent) __);
+}
+
+/// Adds pattern-matching-related methods to [TogetherContent].
+extension TogetherContentPatterns on TogetherContent {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(TogetherContent_LocalFile value)? localFile,
+    TResult Function(TogetherContent_Youtube value)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(TogetherContent_LocalFile value) localFile,
+    required TResult Function(TogetherContent_Youtube value) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile():
+        return localFile(_that);
+      case TogetherContent_Youtube():
+        return youtube(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(TogetherContent_LocalFile value)? localFile,
+    TResult? Function(TogetherContent_Youtube value)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(BigInt durationMs, Recording? recording)? localFile,
+    TResult Function(String videoId)? youtube,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that.durationMs, _that.recording);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(BigInt durationMs, Recording? recording)
+        localFile,
+    required TResult Function(String videoId) youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile():
+        return localFile(_that.durationMs, _that.recording);
+      case TogetherContent_Youtube():
+        return youtube(_that.videoId);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(BigInt durationMs, Recording? recording)? localFile,
+    TResult? Function(String videoId)? youtube,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TogetherContent_LocalFile() when localFile != null:
+        return localFile(_that.durationMs, _that.recording);
+      case TogetherContent_Youtube() when youtube != null:
+        return youtube(_that.videoId);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class TogetherContent_LocalFile extends TogetherContent {
+  const TogetherContent_LocalFile({required this.durationMs, this.recording})
+      : super._();
+
+  final BigInt durationMs;
+  final Recording? recording;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TogetherContent_LocalFileCopyWith<TogetherContent_LocalFile> get copyWith =>
+      _$TogetherContent_LocalFileCopyWithImpl<TogetherContent_LocalFile>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TogetherContent_LocalFile &&
+            (identical(other.durationMs, durationMs) ||
+                other.durationMs == durationMs) &&
+            (identical(other.recording, recording) ||
+                other.recording == recording));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, durationMs, recording);
+
+  @override
+  String toString() {
+    return 'TogetherContent.localFile(durationMs: $durationMs, recording: $recording)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TogetherContent_LocalFileCopyWith<$Res>
+    implements $TogetherContentCopyWith<$Res> {
+  factory $TogetherContent_LocalFileCopyWith(TogetherContent_LocalFile value,
+          $Res Function(TogetherContent_LocalFile) _then) =
+      _$TogetherContent_LocalFileCopyWithImpl;
+  @useResult
+  $Res call({BigInt durationMs, Recording? recording});
+}
+
+/// @nodoc
+class _$TogetherContent_LocalFileCopyWithImpl<$Res>
+    implements $TogetherContent_LocalFileCopyWith<$Res> {
+  _$TogetherContent_LocalFileCopyWithImpl(this._self, this._then);
+
+  final TogetherContent_LocalFile _self;
+  final $Res Function(TogetherContent_LocalFile) _then;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? durationMs = null,
+    Object? recording = freezed,
+  }) {
+    return _then(TogetherContent_LocalFile(
+      durationMs: null == durationMs
+          ? _self.durationMs
+          : durationMs // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+      recording: freezed == recording
+          ? _self.recording
+          : recording // ignore: cast_nullable_to_non_nullable
+              as Recording?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TogetherContent_Youtube extends TogetherContent {
+  const TogetherContent_Youtube({required this.videoId}) : super._();
+
+  final String videoId;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TogetherContent_YoutubeCopyWith<TogetherContent_Youtube> get copyWith =>
+      _$TogetherContent_YoutubeCopyWithImpl<TogetherContent_Youtube>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TogetherContent_Youtube &&
+            (identical(other.videoId, videoId) || other.videoId == videoId));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, videoId);
+
+  @override
+  String toString() {
+    return 'TogetherContent.youtube(videoId: $videoId)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TogetherContent_YoutubeCopyWith<$Res>
+    implements $TogetherContentCopyWith<$Res> {
+  factory $TogetherContent_YoutubeCopyWith(TogetherContent_Youtube value,
+          $Res Function(TogetherContent_Youtube) _then) =
+      _$TogetherContent_YoutubeCopyWithImpl;
+  @useResult
+  $Res call({String videoId});
+}
+
+/// @nodoc
+class _$TogetherContent_YoutubeCopyWithImpl<$Res>
+    implements $TogetherContent_YoutubeCopyWith<$Res> {
+  _$TogetherContent_YoutubeCopyWithImpl(this._self, this._then);
+
+  final TogetherContent_Youtube _self;
+  final $Res Function(TogetherContent_Youtube) _then;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? videoId = null,
+  }) {
+    return _then(TogetherContent_Youtube(
+      videoId: null == videoId
+          ? _self.videoId
+          : videoId // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+mixin _$TransferSignal {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TransferSignal);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TransferSignal()';
+  }
+}
+
+/// @nodoc
+class $TransferSignalCopyWith<$Res> {
+  $TransferSignalCopyWith(TransferSignal _, $Res Function(TransferSignal) __);
+}
+
+/// Adds pattern-matching-related methods to [TransferSignal].
+extension TransferSignalPatterns on TransferSignal {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(TransferSignal_Offer value)? offer,
+    TResult Function(TransferSignal_Answer value)? answer,
+    TResult Function(TransferSignal_Ice value)? ice,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(TransferSignal_Offer value) offer,
+    required TResult Function(TransferSignal_Answer value) answer,
+    required TResult Function(TransferSignal_Ice value) ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer():
+        return offer(_that);
+      case TransferSignal_Answer():
+        return answer(_that);
+      case TransferSignal_Ice():
+        return ice(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(TransferSignal_Offer value)? offer,
+    TResult? Function(TransferSignal_Answer value)? answer,
+    TResult? Function(TransferSignal_Ice value)? ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String sdp)? offer,
+    TResult Function(String sdp)? answer,
+    TResult Function(String candidate, String? sdpMid, int? sdpMLineIndex)? ice,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that.sdp);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that.sdp);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that.candidate, _that.sdpMid, _that.sdpMLineIndex);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String sdp) offer,
+    required TResult Function(String sdp) answer,
+    required TResult Function(
+            String candidate, String? sdpMid, int? sdpMLineIndex)
+        ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer():
+        return offer(_that.sdp);
+      case TransferSignal_Answer():
+        return answer(_that.sdp);
+      case TransferSignal_Ice():
+        return ice(_that.candidate, _that.sdpMid, _that.sdpMLineIndex);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String sdp)? offer,
+    TResult? Function(String sdp)? answer,
+    TResult? Function(String candidate, String? sdpMid, int? sdpMLineIndex)?
+        ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that.sdp);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that.sdp);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that.candidate, _that.sdpMid, _that.sdpMLineIndex);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class TransferSignal_Offer extends TransferSignal {
+  const TransferSignal_Offer({required this.sdp}) : super._();
+
+  final String sdp;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferSignal_OfferCopyWith<TransferSignal_Offer> get copyWith =>
+      _$TransferSignal_OfferCopyWithImpl<TransferSignal_Offer>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferSignal_Offer &&
+            (identical(other.sdp, sdp) || other.sdp == sdp));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sdp);
+
+  @override
+  String toString() {
+    return 'TransferSignal.offer(sdp: $sdp)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferSignal_OfferCopyWith<$Res>
+    implements $TransferSignalCopyWith<$Res> {
+  factory $TransferSignal_OfferCopyWith(TransferSignal_Offer value,
+          $Res Function(TransferSignal_Offer) _then) =
+      _$TransferSignal_OfferCopyWithImpl;
+  @useResult
+  $Res call({String sdp});
+}
+
+/// @nodoc
+class _$TransferSignal_OfferCopyWithImpl<$Res>
+    implements $TransferSignal_OfferCopyWith<$Res> {
+  _$TransferSignal_OfferCopyWithImpl(this._self, this._then);
+
+  final TransferSignal_Offer _self;
+  final $Res Function(TransferSignal_Offer) _then;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sdp = null,
+  }) {
+    return _then(TransferSignal_Offer(
+      sdp: null == sdp
+          ? _self.sdp
+          : sdp // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TransferSignal_Answer extends TransferSignal {
+  const TransferSignal_Answer({required this.sdp}) : super._();
+
+  final String sdp;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferSignal_AnswerCopyWith<TransferSignal_Answer> get copyWith =>
+      _$TransferSignal_AnswerCopyWithImpl<TransferSignal_Answer>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferSignal_Answer &&
+            (identical(other.sdp, sdp) || other.sdp == sdp));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sdp);
+
+  @override
+  String toString() {
+    return 'TransferSignal.answer(sdp: $sdp)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferSignal_AnswerCopyWith<$Res>
+    implements $TransferSignalCopyWith<$Res> {
+  factory $TransferSignal_AnswerCopyWith(TransferSignal_Answer value,
+          $Res Function(TransferSignal_Answer) _then) =
+      _$TransferSignal_AnswerCopyWithImpl;
+  @useResult
+  $Res call({String sdp});
+}
+
+/// @nodoc
+class _$TransferSignal_AnswerCopyWithImpl<$Res>
+    implements $TransferSignal_AnswerCopyWith<$Res> {
+  _$TransferSignal_AnswerCopyWithImpl(this._self, this._then);
+
+  final TransferSignal_Answer _self;
+  final $Res Function(TransferSignal_Answer) _then;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sdp = null,
+  }) {
+    return _then(TransferSignal_Answer(
+      sdp: null == sdp
+          ? _self.sdp
+          : sdp // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TransferSignal_Ice extends TransferSignal {
+  const TransferSignal_Ice(
+      {required this.candidate, this.sdpMid, this.sdpMLineIndex})
+      : super._();
+
+  final String candidate;
+  final String? sdpMid;
+  final int? sdpMLineIndex;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferSignal_IceCopyWith<TransferSignal_Ice> get copyWith =>
+      _$TransferSignal_IceCopyWithImpl<TransferSignal_Ice>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferSignal_Ice &&
+            (identical(other.candidate, candidate) ||
+                other.candidate == candidate) &&
+            (identical(other.sdpMid, sdpMid) || other.sdpMid == sdpMid) &&
+            (identical(other.sdpMLineIndex, sdpMLineIndex) ||
+                other.sdpMLineIndex == sdpMLineIndex));
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(runtimeType, candidate, sdpMid, sdpMLineIndex);
+
+  @override
+  String toString() {
+    return 'TransferSignal.ice(candidate: $candidate, sdpMid: $sdpMid, sdpMLineIndex: $sdpMLineIndex)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferSignal_IceCopyWith<$Res>
+    implements $TransferSignalCopyWith<$Res> {
+  factory $TransferSignal_IceCopyWith(
+          TransferSignal_Ice value, $Res Function(TransferSignal_Ice) _then) =
+      _$TransferSignal_IceCopyWithImpl;
+  @useResult
+  $Res call({String candidate, String? sdpMid, int? sdpMLineIndex});
+}
+
+/// @nodoc
+class _$TransferSignal_IceCopyWithImpl<$Res>
+    implements $TransferSignal_IceCopyWith<$Res> {
+  _$TransferSignal_IceCopyWithImpl(this._self, this._then);
+
+  final TransferSignal_Ice _self;
+  final $Res Function(TransferSignal_Ice) _then;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? candidate = null,
+    Object? sdpMid = freezed,
+    Object? sdpMLineIndex = freezed,
+  }) {
+    return _then(TransferSignal_Ice(
+      candidate: null == candidate
+          ? _self.candidate
+          : candidate // ignore: cast_nullable_to_non_nullable
+              as String,
+      sdpMid: freezed == sdpMid
+          ? _self.sdpMid
+          : sdpMid // ignore: cast_nullable_to_non_nullable
+              as String?,
+      sdpMLineIndex: freezed == sdpMLineIndex
+          ? _self.sdpMLineIndex
+          : sdpMLineIndex // ignore: cast_nullable_to_non_nullable
+              as int?,
+    ));
+  }
+}
+
+/// @nodoc
+mixin _$TransferVerdict {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TransferVerdict);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TransferVerdict()';
+  }
+}
+
+/// @nodoc
+class $TransferVerdictCopyWith<$Res> {
+  $TransferVerdictCopyWith(
+      TransferVerdict _, $Res Function(TransferVerdict) __);
+}
+
+/// Adds pattern-matching-related methods to [TransferVerdict].
+extension TransferVerdictPatterns on TransferVerdict {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(TransferVerdict_Allow value)? allow,
+    TResult Function(TransferVerdict_NeedsConsent value)? needsConsent,
+    TResult Function(TransferVerdict_Refuse value)? refuse,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow(_that);
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(TransferVerdict_Allow value) allow,
+    required TResult Function(TransferVerdict_NeedsConsent value) needsConsent,
+    required TResult Function(TransferVerdict_Refuse value) refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow():
+        return allow(_that);
+      case TransferVerdict_NeedsConsent():
+        return needsConsent(_that);
+      case TransferVerdict_Refuse():
+        return refuse(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(TransferVerdict_Allow value)? allow,
+    TResult? Function(TransferVerdict_NeedsConsent value)? needsConsent,
+    TResult? Function(TransferVerdict_Refuse value)? refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow(_that);
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? allow,
+    TResult Function(BigInt relayedBytes)? needsConsent,
+    TResult Function(RefusalReason reason)? refuse,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow();
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that.relayedBytes);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() allow,
+    required TResult Function(BigInt relayedBytes) needsConsent,
+    required TResult Function(RefusalReason reason) refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow():
+        return allow();
+      case TransferVerdict_NeedsConsent():
+        return needsConsent(_that.relayedBytes);
+      case TransferVerdict_Refuse():
+        return refuse(_that.reason);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? allow,
+    TResult? Function(BigInt relayedBytes)? needsConsent,
+    TResult? Function(RefusalReason reason)? refuse,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferVerdict_Allow() when allow != null:
+        return allow();
+      case TransferVerdict_NeedsConsent() when needsConsent != null:
+        return needsConsent(_that.relayedBytes);
+      case TransferVerdict_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class TransferVerdict_Allow extends TransferVerdict {
+  const TransferVerdict_Allow() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TransferVerdict_Allow);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TransferVerdict.allow()';
+  }
+}
+
+/// @nodoc
+
+class TransferVerdict_NeedsConsent extends TransferVerdict {
+  const TransferVerdict_NeedsConsent({required this.relayedBytes}) : super._();
+
+  final BigInt relayedBytes;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferVerdict_NeedsConsentCopyWith<TransferVerdict_NeedsConsent>
+      get copyWith => _$TransferVerdict_NeedsConsentCopyWithImpl<
+          TransferVerdict_NeedsConsent>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferVerdict_NeedsConsent &&
+            (identical(other.relayedBytes, relayedBytes) ||
+                other.relayedBytes == relayedBytes));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, relayedBytes);
+
+  @override
+  String toString() {
+    return 'TransferVerdict.needsConsent(relayedBytes: $relayedBytes)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferVerdict_NeedsConsentCopyWith<$Res>
+    implements $TransferVerdictCopyWith<$Res> {
+  factory $TransferVerdict_NeedsConsentCopyWith(
+          TransferVerdict_NeedsConsent value,
+          $Res Function(TransferVerdict_NeedsConsent) _then) =
+      _$TransferVerdict_NeedsConsentCopyWithImpl;
+  @useResult
+  $Res call({BigInt relayedBytes});
+}
+
+/// @nodoc
+class _$TransferVerdict_NeedsConsentCopyWithImpl<$Res>
+    implements $TransferVerdict_NeedsConsentCopyWith<$Res> {
+  _$TransferVerdict_NeedsConsentCopyWithImpl(this._self, this._then);
+
+  final TransferVerdict_NeedsConsent _self;
+  final $Res Function(TransferVerdict_NeedsConsent) _then;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? relayedBytes = null,
+  }) {
+    return _then(TransferVerdict_NeedsConsent(
+      relayedBytes: null == relayedBytes
+          ? _self.relayedBytes
+          : relayedBytes // ignore: cast_nullable_to_non_nullable
+              as BigInt,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TransferVerdict_Refuse extends TransferVerdict {
+  const TransferVerdict_Refuse({required this.reason}) : super._();
+
+  final RefusalReason reason;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferVerdict_RefuseCopyWith<TransferVerdict_Refuse> get copyWith =>
+      _$TransferVerdict_RefuseCopyWithImpl<TransferVerdict_Refuse>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferVerdict_Refuse &&
+            (identical(other.reason, reason) || other.reason == reason));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reason);
+
+  @override
+  String toString() {
+    return 'TransferVerdict.refuse(reason: $reason)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferVerdict_RefuseCopyWith<$Res>
+    implements $TransferVerdictCopyWith<$Res> {
+  factory $TransferVerdict_RefuseCopyWith(TransferVerdict_Refuse value,
+          $Res Function(TransferVerdict_Refuse) _then) =
+      _$TransferVerdict_RefuseCopyWithImpl;
+  @useResult
+  $Res call({RefusalReason reason});
+
+  $RefusalReasonCopyWith<$Res> get reason;
+}
+
+/// @nodoc
+class _$TransferVerdict_RefuseCopyWithImpl<$Res>
+    implements $TransferVerdict_RefuseCopyWith<$Res> {
+  _$TransferVerdict_RefuseCopyWithImpl(this._self, this._then);
+
+  final TransferVerdict_Refuse _self;
+  final $Res Function(TransferVerdict_Refuse) _then;
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? reason = null,
+  }) {
+    return _then(TransferVerdict_Refuse(
+      reason: null == reason
+          ? _self.reason
+          : reason // ignore: cast_nullable_to_non_nullable
+              as RefusalReason,
+    ));
+  }
+
+  /// Create a copy of TransferVerdict
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $RefusalReasonCopyWith<$Res> get reason {
+    return $RefusalReasonCopyWith<$Res>(_self.reason, (value) {
+      return _then(_self.copyWith(reason: value));
+    });
   }
 }
 

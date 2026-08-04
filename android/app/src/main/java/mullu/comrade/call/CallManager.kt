@@ -2012,6 +2012,22 @@ object CallManager {
             .createPeerConnectionFactory()
     }
 
+    /**
+     * The one [PeerConnectionFactory] for this process, built on demand.
+     *
+     * Shared with the file-transfer path rather than duplicated, because
+     * `PeerConnectionFactory.initialize` is a process-global native init that
+     * must run exactly once — a second factory is not an extra resource, it is
+     * a crash waiting for the second caller. Sharing the *factory* is not
+     * sharing the *connection*: a transfer still builds its own
+     * [PeerConnection] from it, which is the whole point (separate congestion
+     * control, separate ICE server list).
+     */
+    internal fun sharedFactory(context: Context): PeerConnectionFactory? {
+        ensureFactory(context)
+        return factory
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private fun sendSignal(s: Session, signal: CallSignal) {

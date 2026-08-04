@@ -55,6 +55,12 @@
          "dataSync" is the closest stock foregroundServiceType to "maintaining
          a network connection and delivering the data it carries". -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Watch/listen together keeps playing while the app is backgrounded, so
+         putting the phone down does not stop the film for both people. Required
+         alongside the matching foregroundServiceType on Android 14+ (see
+         together/TogetherService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- ProximityScreenControl (CallScreen.kt) holds a PROXIMITY_SCREEN_OFF_WAKE_LOCK
          for the duration of a call. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -173,6 +179,14 @@
             android:name=".RelayConnectionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Keeps a watch-together session playing while the app is
+             backgrounded. Framework MediaSession, no media3 dependency — see
+             TogetherService's doc comment. -->
+        <service
+            android:name=".together.TogetherService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <!-- Downloads an on-device model (speech / companion) in the
              background with progress in the notification bar, so the transfer

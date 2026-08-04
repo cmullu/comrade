@@ -155,6 +155,7 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each finding is labele
 | P4 | L | **[fact] Sakha sync payload grows without bound.** Every `publish_sync` encodes the full doc state from `StateVector::default()` (`sakha.rs:175-179`), so event size grows with ledger history for the life of the pairing. |
 | P5 | L | **[judgment] Triple websocket pools.** Sabha, Vault, and Sakha each construct their own `nostr_sdk::Client` (`runtime.rs:201-215`), tripling connections to the same relays; nostr-sdk supports a shared client/pool. |
 | P6 | L | **[fact] Timeline reads decrypt the whole cache.** `chitthi_cache()` iterates, decrypts, and sorts every cached row per fetch with no pagination or eviction (`repository.rs:174-178`); fine at prototype scale, a cliff once incoming posts are persisted (Q2). |
+| P7 | L | **[fact, found 2026-08-03 while building §8.2] One desktop object URL per outgoing attachment is never revoked.** `desktop/ui/main.js:2702` mints `URL.createObjectURL(file)` for the optimistic local render of an attachment the user just sent, and stores it on the message. It is created *outside* the bounded LRU that `media_cache.mjs` exists to enforce (`main.js:303`), and `revokeAllMediaUrls` (`main.js:295`, called only from `handleUnlock`) does not know about it — so every attachment sent in a session pins its `File` in the webview heap for the life of the process. Smaller than the leak the media cache was written to fix (this is the user's *own* file, already on their disk, not decrypted plaintext), which is why it is Low and was left rather than fixed silently inside an unrelated change. Fix: put it through the same cache, or revoke it when the optimistic entry is replaced by the round-tripped one. |
 
 **Healthy:** the event bus is a bounded `broadcast::channel(256)` where slow consumers lag rather than block producers (`runtime.rs:41`); heavy relay/decrypt work runs in spawned Tokio tasks off the UI thread (`runtime.rs:233-263`); JNI owns one process-global multi-thread runtime rather than per-call runtimes (`comrade_jni/src/lib.rs:47-55`).
 
@@ -398,7 +399,7 @@ of the load. Mapping each pillar to what exists:
 |---|---|---|
 | **Journal** | Encrypted-at-rest store (Argon2id + AES-256-GCM) seals anything we write; Vosk speech-to-text runs fully on-device; the voice pipeline (`OneShotRecognizer`, wake word) is wired | A `journal` tree + typed repository (entry = text, optional mood, timestamp), a Journal tab (write / dictate / browse by day), and a "dictate → entry" voice command. **Smallest real feature; all pieces exist. Build first.** |
 | **Anonymous thoughts (chitthi / voice)** | Public Chitthi broadcast works; voice dictation works | True anonymity needs **per-post ephemeral keys**: sign each anonymous Chitthi with a throwaway keypair (never the identity key), no reuse across posts, so posts can't be linked to you *or to each other*. Also: strip `created_at` precision, publish via a relay subset. Without this, "anonymous" would be a false promise — the current broadcast is pseudonymous under your permanent key. |
-| **Stay connected to a loved one** | This is exactly what Sakha/Sakhi was built for: a cryptographically isolated couple space (Yrs CRDT + AES-256-GCM) with engine-level tests — plus E2E DMs already shipping. The named-chats/alias work (this PR) makes the loved-one thread feel human | The pairing handshake is engine-complete but unreachable from any UI (A1 in §3.2). Wire pairing + a warm, dedicated "your person" surface: pinned thread, shared journal/ledger, maybe a lightweight "thinking of you" signal. |
+| **Stay connected to a loved one** | This is exactly what Sakha/Sakhi was built for: a cryptographically isolated couple space (Yrs CRDT + AES-256-GCM) with engine-level tests — plus E2E DMs already shipping. The named-chats/alias work (this PR) makes the loved-one thread feel human | The pairing handshake is engine-complete and **reachable from the desktop UI** (`pair_sakha`, `crates/comrade_ui/src/runtime.rs`; invoked from `desktop/ui/main.js`'s Partner modal against a real ECDH+HKDF handshake in `sakha.rs`) — this line and A3 both predate that and were stale until 2026-08-03. Still missing: any Android surface, and the four `comrade_jni` exports the Flutter screen needs. Wire pairing + a warm, dedicated "your person" surface: pinned thread, shared journal/ledger, maybe a lightweight "thinking of you" signal. |
 | **Brainstorming / reflective companion ("therapy")** | Voice in (Vosk) and voice out (TTS) exist; the command dispatcher gives a slot to hang a conversational agent on | The companion itself. **Two honesty gates before building:** (1) an LLM companion is *not therapy* and must never present as one — reflective prompts, journaling nudges, brainstorming, plus crisis-referral hand-offs (e.g. helpline numbers) when distress cues appear; (2) privacy-first means the model should run **on-device** (small quantised model) or not at all — routing raw mental-health disclosures to a cloud API contradicts the product's core promise. Model choice and scope need an owner decision (OQ9). |
 
 **Sequencing recommendation (supersedes §7 order):**
@@ -478,7 +479,8 @@ user has)? Owner call required before any companion code.
 >   (`attention_days()`); the trend chart and the monthly self-check-in are
 >   small follow-ups on top of it.
 > - **Phase 3 — not built, by design.** Loved-one accountability depends on the
->   Sakha pairing UI (pillar 3 above), which is still unreachable from any UI.
+>   Sakha pairing UI (pillar 3 above), which ships on desktop but has no
+>   Android surface — the platform this pillar targets.
 >   OQ13 stays open with it.
 >
 > Both honesty gates hold and are stated in the UI: this is **attention
@@ -602,6 +604,44 @@ is small; the content problem is the real constraint:
   file inside the loved-one space — piggybacks entirely on existing
   channels, no new infrastructure. Builds after the loved-one space
   (pairing UI) exists.
+
+> **Status (2026-08-03, protocol + view-model + bridges landed).** Built as
+> `comrade_core::together` (`crates/comrade_core/src/together.rs`) — a seventh
+> control envelope on the `comrade_core::dm` marker convention — plus the
+> view-model half in `crates/comrade_ui/src/runtime.rs` (`together_start` /
+> `together_join` / `together_set_state` / `together_end` with `RuntimeHandles`
+> twins, `together_report_position`, the `dispatch_incoming_dm` arm, the session
+> loop, five `BridgeEvent` variants), both FFI bridges, six Tauri commands, and
+> the desktop decision module `desktop/ui/together_sync.mjs`. Design record:
+> [`docs/TOGETHER.md`](docs/TOGETHER.md).
+>
+> Three of this section's own assumptions did not survive the code, and the
+> build follows the corrections rather than the sketch:
+>
+> - **"< 300 ms" is not reachable over a relay**, and the reason is sharper than
+>   latency. A DM's `created_at` is whole seconds on the sender's wall clock and
+>   nothing in the repo estimated clock offset, so each heartbeat now carries the
+>   timestamps of the one before it (an NTP probe at zero extra messages).
+>   Measuring the offset also measures its error, giving the rule the module is
+>   built around — *never correct by less than your own measurement error*. Half
+>   a public relay's round trip routinely exceeds 300 ms, so that target sits
+>   under the noise floor. Held instead: **±0.3–0.8 s** on a local file.
+> - **A fast position heartbeat is paid for twice.** Every beat is a persistent
+>   gift wrap and the inbox rewinds two days on every launch, so the cadence
+>   decides how much each later start re-downloads. 10 s, none while paused,
+>   because two local players drift only by crystal error (tens of ppm).
+> - **The loved-one-space precondition does not apply**, because a session is
+>   scoped to any accepted conversation and gated exactly like call signaling.
+>   (The pairing claim it rested on was also stale — see below.)
+>
+> Also **not** built, deliberately and stated in the doc rather than implied: no
+> desktop player surface yet (so no way to start a session from the UI), no
+> Android screen (the five events are dropped explicitly in
+> `RelayConnectionService.kt`), and no YouTube embed on either. `docs/TOGETHER.md`
+> §9 carries the conditions each must meet — in particular that a YouTube embed
+> must be a bare cross-origin iframe with the CSP widened by exactly `frame-src`,
+> never `script-src`, which would put third-party JavaScript in the origin where
+> `withGlobalTauri` exposes every registered command.
 
 ---
 

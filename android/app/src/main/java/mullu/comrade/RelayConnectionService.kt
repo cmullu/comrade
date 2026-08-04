@@ -24,6 +24,8 @@ import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallUiState
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.shortNpub
+import uniffi.comrade_core.SyncVerdict
+import uniffi.comrade_core.TogetherContent
 import uniffi.comrade_ui.BridgeEvent
 
 /**
@@ -469,6 +471,58 @@ object ChatEventRouter {
             // Sakha/ledger sync isn't wired into the Android UI yet
             // (desktop-only via Tauri commands) — drop, like before.
             is BridgeEvent.LedgerUpdated -> Unit
+            // Watch/listen together — see docs/TOGETHER.md. Routed straight to
+            // TogetherManager rather than to a screen, so a session survives the
+            // UI being disposed; the manager owns the player and the foreground
+            // service that keeps it alive while backgrounded.
+            is BridgeEvent.TogetherInvited -> {
+                val invite = event.v1
+                val content = invite.content
+                mullu.comrade.together.TogetherManager.onInvited(
+                    context = context,
+                    peer = invite.peer,
+                    peerLabel = peerLabel(invite.peer),
+                    recording = (content as? TogetherContent.LocalFile)?.recording,
+                    durationMs = (content as? TogetherContent.LocalFile)?.durationMs?.toLong() ?: 0L,
+                    youtube = content is TogetherContent.Youtube,
+                )
+            }
+
+            is BridgeEvent.TogetherJoined -> mullu.comrade.together.TogetherManager.onJoined()
+
+            is BridgeEvent.TogetherCommand -> {
+                val cmd = event.v1
+                mullu.comrade.together.TogetherManager.onCommand(
+                    posMs = cmd.posMs.toLong(),
+                    playing = cmd.playing,
+                    applyInMs = cmd.applyInMs.toLong(),
+                )
+            }
+
+            is BridgeEvent.TogetherCorrection -> {
+                val correction = event.v1
+                when (val verdict = correction.verdict) {
+                    is SyncVerdict.Hold -> Unit
+                    is SyncVerdict.Adopt -> mullu.comrade.together.TogetherManager.onCorrection(
+                        "adopt", verdict.posMs.toLong(), 1f, verdict.playing,
+                    )
+                    is SyncVerdict.Nudge -> mullu.comrade.together.TogetherManager.onCorrection(
+                        "nudge", 0, verdict.rate.toFloat(), true,
+                    )
+                    is SyncVerdict.Seek -> mullu.comrade.together.TogetherManager.onCorrection(
+                        "seek", verdict.posMs.toLong(), 1f, true,
+                    )
+                }
+            }
+
+            // Handing the file over, when only one side has it. Straight to the
+            // manager for the same reason as every other together event: a
+            // transfer must not stop because a screen was disposed.
+            is BridgeEvent.TogetherShare ->
+                mullu.comrade.together.TogetherManager.onShareSignal(context, event.v1.signal)
+
+            is BridgeEvent.TogetherEnded ->
+                mullu.comrade.together.TogetherManager.onEnded(byPeer = event.byPeer)
         }
     }
 }

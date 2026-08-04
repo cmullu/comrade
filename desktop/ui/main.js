@@ -237,6 +237,13 @@
     presence: new Map(),
     replyTo: null, // { id, content, outgoing } while composing a reply
     call: null, // active call session (see newCallState)
+    // Watch/listen together (docs/TOGETHER.md): the local file, its object URL,
+    // the live session id, and the echo suppressor that keeps a remote seek
+    // from being re-broadcast as a local one.
+    together: null,
+    // A file handover in progress, when only one side has what is playing.
+    // Its own RTCPeerConnection, never the call's — see newShareState.
+    share: null,
     // Bounded memory of recently-ended call ids (see call_decisions.mjs
     // rememberEndedCall) — mirrors Android's CallManager.endedCallIds, so a
     // redelivered Offer for a call we already tore down doesn't ring again.
@@ -482,6 +489,13 @@
       // A fresh unlock may be a different identity in the same window: nothing
       // decrypted for the previous one may still be renderable.
       await revokeAllMediaUrls();
+      // The together file is a separate object URL on purpose (an LRU eviction
+      // mid-session would revoke it and kill playback), so it is revoked here
+      // rather than by `revokeAllMediaUrls`.
+      endShare();
+      if (state.together?.objectUrl) URL.revokeObjectURL(state.together.objectUrl);
+      state.together = null;
+      onTogetherOver();
       // A different identity has a different practice: drop the previous
       // one's session, history and half-read text rather than leaving them on
       // screen under the new npub.
@@ -734,6 +748,7 @@
     $("#dm-send").disabled = false;
     renderContacts();
     renderConversation();
+    showTogetherPanel();
     // Opening a conversation clears its unread state and sends read receipts.
     safeInvoke("mark_conversation_read", { peer: key }, { silent: true }).catch(() => {});
     // Pull the full persisted thread — text history plus persisted media
@@ -3215,6 +3230,705 @@
     }
   }
 
+  // ── Watch/listen together ─────────────────────────────────────────────────
+  //
+  // Each side plays its own copy; Comrade only keeps the two clocks together.
+  // All the arithmetic — the clock filter, the drift verdict, the command
+  // arbitration — is `comrade_core::together`, and the echo suppression that
+  // stops a remote seek being re-broadcast as a local one is
+  // `together_sync.mjs`. What is left here is the DOM.
+
+  const togetherSyncReady = import("./together_sync.mjs");
+
+  const $together = {
+    panel: () => $("#together-panel"),
+    status: () => $("#together-status"),
+    player: () => $("#together-player"),
+    invite: () => $("#together-invite"),
+    join: () => $("#together-join"),
+    leave: () => $("#together-leave"),
+    shareStatus: () => $("#together-share-status"),
+  };
+
+  function setTogetherStatus(text) {
+    const el = $together.status();
+    if (el) el.textContent = text;
+  }
+
+  function showTogetherPanel() {
+    const panel = $together.panel();
+    if (panel) panel.hidden = !state.activeContact;
+  }
+
+  /** Load a local file into the player and remember how long it runs. */
+  async function handleTogetherPick(file) {
+    if (!file) return;
+    const player = $together.player();
+    if (!player) return;
+    // One object URL, revoked on replace. Deliberately not the capacity-8 LRU
+    // in media_cache.mjs: an eviction mid-session would revoke this URL and
+    // kill playback.
+    if (state.together?.objectUrl) URL.revokeObjectURL(state.together.objectUrl);
+    const objectUrl = URL.createObjectURL(file);
+    const { createEchoSuppressor } = await togetherSyncReady;
+    state.together = Object.assign(state.together || {}, {
+      file,
+      objectUrl,
+      durationMs: 0,
+      suppressor: state.together?.suppressor || createEchoSuppressor({ now: () => performance.now() }),
+    });
+    player.src = objectUrl;
+    player.hidden = false;
+    await new Promise((resolve) => {
+      player.onloadedmetadata = resolve;
+      setTimeout(resolve, 5000); // a file we cannot measure is still playable
+    });
+    state.together.durationMs = Math.round((player.duration || 0) * 1000) || 0;
+    const invite = $together.invite();
+    if (invite) invite.disabled = !state.activeContact;
+    setTogetherStatus("Ready to invite");
+  }
+
+  async function handleTogetherInvite() {
+    if (!state.activeContact || !state.together?.file) return;
+    try {
+      const session = await safeInvoke("together_start", {
+        peer: state.activeContact,
+        contentJson: JSON.stringify({
+          kind: "local_file",
+          duration_ms: state.together.durationMs,
+          recording: null,
+        }),
+      });
+      state.together.sessionId = session.session_id;
+      state.together.weLead = true;
+      setTogetherStatus("Invited — waiting for them");
+      $together.leave().hidden = false;
+    } catch {
+      /* toasted */
+    }
+  }
+
+  async function handleTogetherJoin() {
+    try {
+      await safeInvoke("together_join", {});
+      $together.join().hidden = true;
+      $together.leave().hidden = false;
+      setTogetherStatus("Together");
+      // We have no copy of what they are playing: say so, which is what starts
+      // the handover. If we *do* have one, the person picks it themselves.
+      if (!state.together?.file) {
+        setShareStatus("Asking them to send it…");
+        await sendShareSignal({ share: "ask" });
+      }
+    } catch {
+      /* toasted */
+    }
+  }
+
+  /**
+   * They invited us. The session already exists in the runtime — joining is the
+   * user gesture, which is also what unlocks programmatic `play()` in a
+   * webview, so it is a button rather than an automatic yes.
+   */
+  async function onTogetherInvited(p) {
+    const { createEchoSuppressor } = await togetherSyncReady;
+    state.together = Object.assign(state.together || {}, {
+      sessionId: p.session_id,
+      weLead: false,
+      peerDurationMs: p.content?.duration_ms ?? 0,
+      suppressor: state.together?.suppressor || createEchoSuppressor({ now: () => performance.now() }),
+    });
+    showTogetherPanel();
+    $together.join().hidden = false;
+    setTogetherStatus(
+      state.together.file
+        ? "They want to watch together"
+        : "They want to watch together — you don't have it, so they can send it",
+    );
+  }
+
+  async function handleTogetherLeave() {
+    endShare();
+    try {
+      await safeInvoke("together_end", {});
+    } catch {
+      /* toasted */
+    }
+    onTogetherOver();
+  }
+
+  function onTogetherOver() {
+    const player = $together.player();
+    if (player) player.pause();
+    if (state.together) state.together.sessionId = null;
+    $together.join().hidden = true;
+    $together.leave().hidden = true;
+    setTogetherStatus("Not in a session");
+  }
+
+  /**
+   * Run the operations a verdict or a command produced, arming the echo
+   * suppressor for each one *before* touching the element.
+   *
+   * The order matters and is the bug this design exists to prevent: assigning
+   * `currentTime` fires `seeked` asynchronously, so a latch set after the
+   * assignment is already too late, and assigning a value the element already
+   * holds fires no event at all — which is why entries expire on a deadline
+   * rather than waiting to be popped.
+   */
+  function runTogetherPlan(plan) {
+    const player = $together.player();
+    if (!player || !state.together?.suppressor || !plan) return;
+    for (const entry of plan.expect || []) state.together.suppressor.expect(entry);
+    for (const op of plan.ops || []) {
+      switch (op.kind) {
+        case "seek":
+          player.currentTime = op.secs;
+          break;
+        case "play":
+          player.play().catch(() => {});
+          break;
+        case "pause":
+          player.pause();
+          break;
+        case "rate":
+          player.playbackRate = op.value;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  /** A remote play/pause/seek won the ordering: apply it without echoing it. */
+  async function onTogetherCommand(p) {
+    if (!state.together) return;
+    const { planApply } = await togetherSyncReady;
+    const player = $together.player();
+    if (!player || !state.together) return;
+    const apply = () => {
+      const plan = planApply(
+        { kind: "adopt", pos_ms: p.pos_ms, playing: p.playing },
+        { playing: !player.paused, positionSecs: player.currentTime },
+      );
+      runTogetherPlan(plan);
+    };
+    // Non-zero only on a transport fast enough to schedule ahead; over a relay
+    // `pos_ms` already carries the flight time and this is zero.
+    if (p.apply_in_ms > 0) setTimeout(apply, p.apply_in_ms);
+    else apply();
+  }
+
+  /** A drift verdict arrived. Only the follower gets these — core decides. */
+  async function onTogetherCorrection(p) {
+    if (!state.together) return;
+    const { planApply } = await togetherSyncReady;
+    const player = $together.player();
+    if (!player || !state.together) return;
+    const plan = planApply(p.verdict, {
+      playing: !player.paused,
+      positionSecs: player.currentTime,
+    });
+    runTogetherPlan(plan);
+    setTogetherStatus("catching up…");
+  }
+
+  /** Our own player moved. Send it only if the person did it, not if we did. */
+  async function onTogetherLocalEvent(type) {
+    if (!state.together?.sessionId || !state.together.suppressor) return;
+    const { classifyLocalEvent } = await togetherSyncReady;
+    const player = $together.player();
+    if (!player || !state.together?.sessionId) return;
+    const { emit } = classifyLocalEvent(
+      { type, positionSecs: player.currentTime, playing: !player.paused },
+      state.together.suppressor,
+    );
+    if (!emit) return; // our own doing, echoed back by the element
+    await safeInvoke(
+      "together_set_state",
+      {
+        posMs: Math.round(emit.positionSecs * 1000),
+        playing: emit.playing,
+        effectiveInMs: 0,
+      },
+      { silent: true },
+    ).catch(() => {});
+  }
+
+  /** Feed the runtime our playhead so the drift verdict has something true. */
+  function reportTogetherPosition() {
+    const player = $together.player();
+    if (!player || !state.together?.sessionId) return;
+    safeInvoke(
+      "together_report_position",
+      {
+        posMs: Math.round(player.currentTime * 1000),
+        playing: !player.paused,
+        // A browser cannot ask its audio stack how far behind the speaker is.
+        // Zero is honest — "unmeasured" — and costs only the accuracy it
+        // cannot supply.
+        outputLatencyMs: 0,
+      },
+      { silent: true },
+    ).catch(() => {});
+  }
+
+  // ── Handing the file over ─────────────────────────────────────────────────
+  //
+  // `together` assumes both people already have what they are playing. When
+  // only one does, the one who has it sends it — over a **separate**
+  // `RTCPeerConnection` from any call, for two reasons that both matter:
+  //
+  // - *Congestion.* One connection means one SCTP association and one
+  //   congestion controller, where a multi-gigabyte push and a voice stream
+  //   compete and the voice loses. Two connections cost one extra ICE
+  //   negotiation and buy complete isolation: a call cannot be degraded by a
+  //   transfer it knows nothing about.
+  // - *Policy.* The transfer connection is built from its own ICE list
+  //   (`share_ice_servers`, which drops TURN under a direct-only policy), so a
+  //   relay candidate is never gathered. The call keeps its TURN fallback,
+  //   because a relayed *call* is a few tens of kilobits and entirely
+  //   reasonable while a relayed film is not.
+  //
+  // The negotiation rides the together control channel, so it inherits the
+  // acceptance gate, the sixty-second age gate and the session scoping. The
+  // sender offers, because the sender is the side that opens the data channel.
+
+  const shareTransferReady = import("./share_transfer.mjs");
+
+  /** How many chunks to have in flight before asking for the next window. */
+  const SHARE_REQUEST_WINDOW = 64;
+
+  function newShareState(base) {
+    return Object.assign(
+      {
+        role: null, // "sender" | "receiver"
+        peer: null,
+        sessionId: null,
+        offer: null, // the ShareOffer both sides agree on
+        file: null, // sender: the File being read
+        tracker: null, // receiver: which chunks have landed
+        parts: null, // receiver: the bytes, by chunk index
+        pc: null,
+        channel: null,
+        pump: null,
+        pendingIce: [],
+        // Sender: the half-open range the receiver last asked for. On the
+        // session rather than in a closure so it survives the gap between the
+        // channel opening and the policy verdict letting the pump start.
+        cursor: null,
+        remoteSet: false,
+        judged: false,
+        objectUrl: null,
+        done: false,
+      },
+      base,
+    );
+  }
+
+  async function sendShareSignal(signal) {
+    try {
+      await safeInvoke("together_share", { signalJson: JSON.stringify(signal) }, { silent: true });
+    } catch {
+      // A lost negotiation step fails the transfer, not the session — the
+      // watch-together part keeps working with whatever each side already has.
+    }
+  }
+
+  function endShare({ toast } = {}) {
+    const s = state.share;
+    if (!s) return;
+    state.share = null;
+    try {
+      s.pump?.stop();
+      s.channel?.close();
+      s.pc?.close();
+    } catch {
+      /* already torn down */
+    }
+    if (s.objectUrl) URL.revokeObjectURL(s.objectUrl);
+    if (toast) showToast(toast, "warn");
+  }
+
+  /**
+   * Build the transfer connection. Deliberately not `setupPeer`: that one
+   * attaches microphone and camera tracks and is owned by `state.call`.
+   */
+  async function newTransferPeer() {
+    const servers = (await safeInvoke("share_ice_servers", {}, { silent: true })) || [];
+    return new RTCPeerConnection({ iceServers: normalizeIce(servers) });
+  }
+
+  /** Trickle our candidates for the *transfer* connection, not the call's. */
+  function wireTransferIce(pc) {
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      sendShareSignal({
+        share: "transport",
+        signal: {
+          kind: "ice",
+          candidate: ev.candidate.candidate,
+          sdp_mid: ev.candidate.sdpMid == null ? undefined : ev.candidate.sdpMid,
+          sdp_m_line_index:
+            ev.candidate.sdpMLineIndex == null ? undefined : ev.candidate.sdpMLineIndex,
+        },
+      });
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") judgeSharePath();
+      else if (pc.connectionState === "failed") {
+        endShare({ toast: "Couldn't open a route to send the file." });
+      }
+    };
+  }
+
+  /**
+   * Inspect the path ICE actually chose and ask core whether it may carry this.
+   *
+   * The second line of the policy, after the structural one: even with no TURN
+   * configured a peer-reflexive path can turn out to be relayed at the far end,
+   * and `share_transfer_verdict` classifies a pair as relayed if *either* end
+   * is. An unsettled report reads as unknown, which is refused and retried
+   * rather than waved through.
+   */
+  async function judgeSharePath() {
+    const s = state.share;
+    if (!s || s.judged || !s.pc || !s.offer) return;
+    const { selectedPairTypes, describeVerdict } = await shareTransferReady;
+    if (state.share !== s) return;
+    let types = null;
+    try {
+      types = selectedPairTypes(await s.pc.getStats());
+    } catch {
+      /* treated as unknown below */
+    }
+    if (state.share !== s) return;
+    const verdict = await safeInvoke(
+      "share_transfer_verdict",
+      {
+        localCandidateType: types?.local || "",
+        remoteCandidateType: types?.remote || "",
+        totalBytes: s.offer.total_bytes,
+      },
+      { silent: true },
+    );
+    const plan = describeVerdict(verdict);
+    if (plan.retryable) {
+      // ICE has not settled. Look again shortly rather than failing a transfer
+      // that was about to be fine.
+      setTimeout(() => judgeSharePath(), 1000);
+      return;
+    }
+    if (!plan.proceed) {
+      // Tell them why, and tell the other side too — they are looking at a
+      // progress bar that would otherwise sit at zero forever.
+      sendShareSignal({ share: "refuse", reason: verdict?.reason ?? { kind: "path_unknown" } });
+      endShare({ toast: plan.message });
+      return;
+    }
+    s.judged = true;
+    setShareStatus(`Sending over a ${verdict.path === "host" ? "local" : "direct"} connection…`);
+    if (s.role === "sender") startShareSending();
+  }
+
+  /** Sender: read the requested ranges off disk and push them, with backpressure. */
+  async function startShareSending() {
+    const s = state.share;
+    if (!s || !s.channel || s.pump) return;
+    const { CHUNK_BYTES, chunkRange, createTransferPump, frameChunk } = await shareTransferReady;
+    if (state.share !== s || !s.channel) return;
+
+    // Reading is async and the pump is synchronous, so a small read-ahead sits
+    // between them: the pump takes only what is already in hand, and a refill
+    // kicks it again. Without this the pump would either block or busy-wait.
+    const ready = [];
+    let reading = false;
+    async function refill() {
+      const cursor = s.cursor;
+      if (reading || !cursor || state.share !== s) return;
+      reading = true;
+      try {
+        while (cursor && cursor.next < cursor.end && ready.length < SHARE_REQUEST_WINDOW) {
+          const index = cursor.next;
+          const range = chunkRange(s.offer, index);
+          if (!range) break;
+          const slice = s.file.slice(range[0], range[0] + range[1]);
+          const bytes = new Uint8Array(await slice.arrayBuffer());
+          if (state.share !== s) return;
+          ready.push(frameChunk(index, bytes));
+          cursor.next += 1;
+        }
+      } catch (e) {
+        endShare({ toast: `Couldn't read the file — ${errText(e)}` });
+        return;
+      } finally {
+        reading = false;
+      }
+      s.pump?.kick();
+    }
+
+    s.pump = createTransferPump({
+      channel: s.channel,
+      chunkBytes: CHUNK_BYTES,
+      nextChunks: (budget) => {
+        const batch = ready.splice(0, budget);
+        refill();
+        return batch;
+      },
+      isDone: () => s.done,
+      onError: (e) => endShare({ toast: `The transfer stopped — ${errText(e)}` }),
+    });
+    refill();
+  }
+
+  /** Receiver: bank a chunk, keep the request window topped up, play when we can. */
+  async function onShareChunk(data) {
+    const s = state.share;
+    if (!s || !s.tracker) return;
+    const { chunkFrameFits, parseChunkFrame } = await shareTransferReady;
+    if (state.share !== s) return;
+    const frame = parseChunkFrame(data);
+    // A peer can put anything on this channel. A wrong index writes bytes into
+    // the wrong place and a wrong length shifts everything after it, so both
+    // are checked here rather than left for the hash at the very end.
+    if (!frame || !chunkFrameFits(s.offer, frame.index, frame.payload.byteLength)) return;
+    if (!s.tracker.accept(frame.index)) return;
+    s.parts[frame.index] = frame.payload;
+
+    setShareStatus(`Receiving — ${Math.round(s.tracker.fraction() * 100)}%`);
+    if (s.tracker.isComplete()) {
+      finishShareReceive();
+      return;
+    }
+    // Ask for the next window as the current one drains, anchored at the
+    // playhead so a seek costs one request rather than a re-download.
+    const posMs = Math.round(($together.player()?.currentTime || 0) * 1000);
+    const req = s.tracker.nextRequest(posMs, SHARE_REQUEST_WINDOW);
+    if (req && s.channel?.readyState === "open") {
+      s.channel.send(JSON.stringify(req));
+    }
+  }
+
+  async function finishShareReceive() {
+    const s = state.share;
+    if (!s || s.done) return;
+    s.done = true;
+    const blob = new Blob(s.parts.filter(Boolean), { type: "application/octet-stream" });
+    // Integrity, once, at the end: SubtleCrypto has no streaming digest, so a
+    // per-chunk hash is not available to a webview. This is why the framing
+    // checks above exist — they catch the failures a whole-file hash would only
+    // report after the whole file.
+    try {
+      const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+      const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      if (hex.toLowerCase() !== String(s.offer.sha256).toLowerCase()) {
+        endShare({ toast: "The file that arrived isn't the one that was sent." });
+        return;
+      }
+    } catch (e) {
+      endShare({ toast: `Couldn't verify the file — ${errText(e)}` });
+      return;
+    }
+    if (state.share !== s) return;
+    s.objectUrl = URL.createObjectURL(blob);
+    const player = $together.player();
+    if (player) {
+      player.src = s.objectUrl;
+      player.hidden = false;
+    }
+    setShareStatus("Ready — you both have it now.");
+    s.pump?.stop();
+  }
+
+  function setShareStatus(text) {
+    const el = $together.shareStatus();
+    if (el) el.textContent = text;
+  }
+
+  /** Sender: offer what we have, once they say they don't have it. */
+  async function offerShare(file, durationMs) {
+    const s = state.share;
+    if (!s || s.role !== "sender" || !file) return;
+    const { CHUNK_BYTES } = await shareTransferReady;
+    let sha256 = "";
+    try {
+      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      sha256 = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    } catch (e) {
+      endShare({ toast: `Couldn't read the file — ${errText(e)}` });
+      return;
+    }
+    if (state.share !== s) return;
+    s.file = file;
+    s.offer = {
+      total_bytes: file.size,
+      chunk_bytes: CHUNK_BYTES,
+      sha256,
+      duration_ms: durationMs || 0,
+    };
+    setShareStatus("Waiting for them to accept…");
+    await sendShareSignal({ share: "offer", offer: s.offer });
+  }
+
+  /** Sender: they accepted, so build the connection and open the channel. */
+  async function beginShareNegotiation() {
+    const s = state.share;
+    if (!s || s.role !== "sender" || s.pc) return;
+    try {
+      s.pc = await newTransferPeer();
+    } catch (e) {
+      endShare({ toast: `Couldn't start the transfer — ${errText(e)}` });
+      return;
+    }
+    if (state.share !== s) {
+      s.pc.close();
+      return;
+    }
+    wireTransferIce(s.pc);
+    // Ordered and reliable: the receiver asks for ranges and expects them
+    // whole. Unreliable delivery would mean re-implementing retransmission on
+    // top of a stack that already has it.
+    s.channel = s.pc.createDataChannel("comrade-share", { ordered: true });
+    s.channel.binaryType = "arraybuffer";
+    // Installed here rather than alongside the pump: the receiver asks as soon
+    // as the channel opens, which is *while* the policy check is still running.
+    // A handler attached after the verdict would miss that first request, and
+    // nothing re-sends it — the transfer would sit at zero forever.
+    s.channel.onmessage = (ev) => {
+      try {
+        const req = JSON.parse(typeof ev.data === "string" ? ev.data : "");
+        if (Number.isInteger(req?.from) && Number.isInteger(req?.count)) {
+          s.cursor = { next: req.from, end: req.from + req.count };
+          s.pump?.kick();
+        }
+      } catch {
+        /* not a request; the sender has nothing else to read on this channel */
+      }
+    };
+    try {
+      const offer = await s.pc.createOffer();
+      await s.pc.setLocalDescription(offer);
+      await sendShareSignal({ share: "transport", signal: { kind: "offer", sdp: offer.sdp } });
+    } catch (e) {
+      endShare({ toast: `Couldn't start the transfer — ${errText(e)}` });
+    }
+  }
+
+  /** Both sides: one step of the negotiation arrived over the session channel. */
+  async function onShareTransport(signal) {
+    const s = state.share;
+    if (!s) return;
+    try {
+      if (signal.kind === "offer") {
+        if (!s.pc) {
+          s.pc = await newTransferPeer();
+          if (state.share !== s) {
+            s.pc.close();
+            return;
+          }
+          wireTransferIce(s.pc);
+          s.pc.ondatachannel = (ev) => {
+            s.channel = ev.channel;
+            s.channel.binaryType = "arraybuffer";
+            s.channel.onmessage = (m) => onShareChunk(m.data);
+            const askForTheFirstWindow = () => {
+              const req = s.tracker?.nextRequest(0, SHARE_REQUEST_WINDOW);
+              if (req && s.channel?.readyState === "open") s.channel.send(JSON.stringify(req));
+            };
+            s.channel.onopen = askForTheFirstWindow;
+            // A channel handed over already open fires no `onopen` at all.
+            if (s.channel.readyState === "open") askForTheFirstWindow();
+          };
+        }
+        await s.pc.setRemoteDescription({ type: "offer", sdp: signal.sdp });
+        s.remoteSet = true;
+        await flushShareIce();
+        const answer = await s.pc.createAnswer();
+        await s.pc.setLocalDescription(answer);
+        await sendShareSignal({ share: "transport", signal: { kind: "answer", sdp: answer.sdp } });
+      } else if (signal.kind === "answer") {
+        if (!s.pc) return;
+        await s.pc.setRemoteDescription({ type: "answer", sdp: signal.sdp });
+        s.remoteSet = true;
+        await flushShareIce();
+      } else if (signal.kind === "ice") {
+        const candidate = {
+          candidate: signal.candidate,
+          sdpMid: signal.sdp_mid ?? null,
+          sdpMLineIndex: signal.sdp_m_line_index ?? null,
+        };
+        // Buffer until the remote description exists, exactly as the call path
+        // does — an early candidate is dropped by the browser otherwise.
+        if (!s.remoteSet) s.pendingIce.push(candidate);
+        else await s.pc?.addIceCandidate(candidate);
+      }
+    } catch (e) {
+      endShare({ toast: `The transfer couldn't connect — ${errText(e)}` });
+    }
+  }
+
+  async function flushShareIce() {
+    const s = state.share;
+    if (!s || !s.pc) return;
+    const queued = s.pendingIce.splice(0);
+    for (const c of queued) {
+      try {
+        await s.pc.addIceCandidate(c);
+      } catch {
+        /* a candidate we cannot use is not a failed transfer */
+      }
+    }
+  }
+
+  /** The one entry point: a share signal arrived inside the together session. */
+  async function onTogetherShare(p) {
+    const signal = p && p.signal;
+    if (!signal) return;
+    switch (signal.share) {
+      case "ask": {
+        // They don't have it. Offer ours if we picked a local file.
+        if (!state.together?.file) return;
+        state.share = newShareState({
+          role: "sender",
+          peer: p.peer,
+          sessionId: p.session_id,
+        });
+        await offerShare(state.together.file, state.together.durationMs);
+        break;
+      }
+      case "offer": {
+        const { createTracker } = await shareTransferReady;
+        state.share = newShareState({
+          role: "receiver",
+          peer: p.peer,
+          sessionId: p.session_id,
+          offer: signal.offer,
+        });
+        state.share.tracker = createTracker(signal.offer);
+        state.share.parts = new Array(state.share.tracker.chunkCount).fill(null);
+        setShareStatus(`They can send it — ${Math.round(signal.offer.total_bytes / 1048576)} MB.`);
+        await sendShareSignal({ share: "accept" });
+        break;
+      }
+      case "accept":
+        await beginShareNegotiation();
+        break;
+      case "refuse": {
+        const { describeVerdict } = await shareTransferReady;
+        const plan = describeVerdict({ verdict: "refuse", reason: signal.reason });
+        endShare({ toast: plan.message });
+        break;
+      }
+      case "transport":
+        await onShareTransport(signal.signal);
+        break;
+      default:
+        // An unknown step from a newer build: ignore rather than guess.
+        break;
+    }
+  }
+
   // ── Milestone 3: real-time event wiring ───────────────────────────────────
   async function wireEvents() {
     try {
@@ -3250,6 +3964,20 @@
           onComradeNudge(p);
         } else if (p.type === "ledger_updated") {
           onLedgerUpdated(p);
+        } else if (p.type === "together_invited") {
+          onTogetherInvited(p);
+        } else if (p.type === "together_joined") {
+          setTogetherStatus("Together");
+        } else if (p.type === "together_command") {
+          onTogetherCommand(p);
+        } else if (p.type === "together_correction") {
+          onTogetherCorrection(p);
+        } else if (p.type === "together_ended") {
+          endShare();
+          onTogetherOver();
+          showToast(p.by_peer ? "They left the session" : "Session ended", "info");
+        } else if (p.type === "together_share") {
+          onTogetherShare(p);
         }
       });
     } catch (e) {
@@ -3296,6 +4024,23 @@
       handleDmInput(e);
     });
     $("#dm-send").addEventListener("click", handleDmSend);
+
+    // Watch/listen together. The player's own events are the only source of
+    // "the person did something" — `timeupdate` is deliberately not among them
+    // (it fires four times a second and says nothing anyone chose), and
+    // `ratechange` is never signalled because a rate trim is a local
+    // correction, not news.
+    $("#together-pick").addEventListener("click", () => $("#together-file").click());
+    $("#together-file").addEventListener("change", (e) => handleTogetherPick(e.target.files?.[0]));
+    $("#together-invite").addEventListener("click", handleTogetherInvite);
+    $("#together-join").addEventListener("click", handleTogetherJoin);
+    $("#together-leave").addEventListener("click", handleTogetherLeave);
+    for (const type of ["play", "pause", "seeked", "ended"]) {
+      $("#together-player").addEventListener(type, () => onTogetherLocalEvent(type));
+    }
+    // Feed the runtime our playhead on a slow timer. Not a producer on the
+    // event bus: the runtime only emits when the drift verdict is not `hold`.
+    setInterval(reportTogetherPosition, 1000);
     $("#dm-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();

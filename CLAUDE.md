@@ -58,6 +58,18 @@ is that no lane accumulates lint debt while the others hold.
 
 ## Traps
 
+- **The sandbox's Rust is older than CI's.** CI pins `dtolnay/rust-toolchain@stable`,
+  which is whatever stable is *today*; the container image is a snapshot and can
+  be several releases behind. Clippy gains lints in every release, so a clean
+  `-D warnings` locally is **not** proof of a clean one in CI — this has already
+  turned a branch red on `manual_checked_ops`, a lint that did not exist in the
+  image. Run `rustup update stable` before trusting a clippy run.
+- **`app/` breaks on a new `BridgeEvent` variant, and so does `android/`.** Both
+  match it exhaustively — the Kotlin `when` in `RelayConnectionService.kt` and
+  the Dart `switch` in `rust_comrade_repository.dart`. The Kotlin one fails the
+  Android lane; the Dart one fails *four* Flutter jobs at once (analyze, test,
+  APK, Linux bundle). Neither is in `ci.yml`, so checking only that workflow
+  will miss it.
 - **Gradle needs Rust.** Kotlin compile depends on `generateUniffiBindings`,
   which builds `comrade_jni` for the host — so even JVM-only unit tests need a
   Rust toolchain.
