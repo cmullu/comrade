@@ -9,6 +9,7 @@ import 'package:comrade/src/data/models.dart';
 import 'package:comrade/src/screens/chats/conversation_screen.dart';
 import 'package:comrade/src/state/chat_providers.dart';
 import 'package:comrade/src/util/attachment_caption.dart';
+import 'package:comrade/src/util/chat_thread.dart';
 import 'package:comrade/src/util/message_reactions.dart';
 import 'package:comrade/src/widgets/media_attachment.dart';
 import 'package:flutter/material.dart';
@@ -437,6 +438,35 @@ void main() {
       expect(find.textContaining('🎤 Voice message'), findsWidgets);
       expect(find.byKey(const Key('dm-reply-chip')), findsNothing,
           reason: 'sending clears the reply');
+    });
+  });
+
+  group('tapping a quote to go to the original', () {
+    testWidgets('the message being quoted is highlighted on arrival',
+        (WidgetTester tester) async {
+      // The seeded thread has "Safe travels." replying to "Boarded 🙂". Tapping
+      // its quote must land on the original *and* say which one it landed on —
+      // the scroll alone does not, which is what the highlight is for.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.alice), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('quote-target-highlight')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('quoted-preview-tap')));
+      await tester.pump();
+      expect(find.byKey(const Key('quote-target-highlight')), findsOneWidget);
+
+      // And it lets go on its own — a flash, not a selection that has to be
+      // dismissed. `pumpAndSettle` alone would not get there: the highlight is
+      // cleared by a timer, not by an animation finishing.
+      await tester.pump(quoteHighlightDuration + const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('quote-target-highlight')), findsNothing);
     });
   });
 

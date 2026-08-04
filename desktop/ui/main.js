@@ -93,6 +93,23 @@
   const opensFullScreen = (mime) =>
     attachmentCaption ? attachmentCaption.opensFullScreen(mime) : false;
 
+  // ── Chat thread rules (desktop/ui/chat_thread.mjs) ─────────────────────────
+  // Where tapping a reply's quote goes, and how long the arrival flashes.
+  // Mirrored in the Flutter app and on Android. Loaded the same way as the
+  // modules above; both call sites run only after a thread is on screen, so the
+  // module has long since resolved.
+  let chatThread = null;
+  import("./chat_thread.mjs")
+    .then((m) => {
+      chatThread = m;
+    })
+    .catch(() => {});
+
+  // Degraded, not wrong: before the handle resolves a quote simply is not
+  // tappable, which is exactly what it did before this existed.
+  const quoteScrollTargetId = (msgs, replyToId) =>
+    chatThread ? chatThread.quoteScrollTargetId(msgs, replyToId) : null;
+
   // ── Focus view decisions (desktop/ui/focus_view.mjs) ───────────────────────
   // Countdown formatting, which duration chip is selected, and where the
   // reader is. Loaded the same way as the modules above. Every call site here
@@ -1044,6 +1061,9 @@
 
   function textBubble(m) {
     const wrap = el("div", { class: "bubble " + (m.outgoing ? "out" : "in") });
+    // The anchor a quote tap scrolls to. Only messages a relay has confirmed
+    // have an id, and only those can be a reply target in the first place.
+    if (m.id) wrap.dataset.msgId = m.id;
     if (m.reply_to) wrap.append(quotePreview(m.reply_to));
     wrap.append(el("span", { class: "bubble-text", text: m.content }));
     wrap.append(
@@ -1061,7 +1081,14 @@
 
   // ── Milestone 6: replies, receipts, requests, calls ───────────────────────
 
-  /** A quoted preview of the replied-to message, looked up in the open thread. */
+  /**
+   * A quoted preview of the replied-to message, looked up in the open thread.
+   *
+   * Tappable when the original is in the thread, so a reply can be followed back
+   * to what it answers. When it is not — history older than what is loaded — the
+   * quote still says "Original message" but is inert: offering a tap that cannot
+   * work is worse than not offering one.
+   */
   function quotePreview(replyToId) {
     const msgs = state.dms.get(state.activeContact) || [];
     const q = msgs.find((x) => x.id && x.id === replyToId);
@@ -1069,11 +1096,54 @@
       ? q.content ||
         (q.media ? mediaQuoteLabel(q.media.mime, q.media.caption) : "message")
       : "Original message";
-    return el(
-      "div",
-      { class: "bubble-quote" },
+    const targetId = quoteScrollTargetId(msgs, replyToId);
+    if (!targetId) {
+      return el(
+        "div",
+        { class: "bubble-quote" },
+        el("span", { class: "bubble-quote-text", text: text }),
+      );
+    }
+    const node = el(
+      "button",
+      {
+        class: "bubble-quote bubble-quote-link",
+        type: "button",
+        title: "Go to the quoted message",
+        "aria-label": "Go to the quoted message",
+      },
       el("span", { class: "bubble-quote-text", text: text }),
     );
+    node.addEventListener("click", (e) => {
+      // The bubble itself has handlers; a quote tap means "go there", not
+      // "act on this message".
+      e.stopPropagation();
+      goToQuoted(targetId);
+    });
+    return node;
+  }
+
+  /**
+   * Scroll the thread to the message with event id [targetId] and flash it.
+   *
+   * The flash is not decoration. The scroll lands the target somewhere in a
+   * screenful of other messages and says nothing about which one it was; without
+   * the highlight the jump reads as the thread having lost your place.
+   */
+  function goToQuoted(targetId) {
+    const log = $("#dm-log");
+    if (!log) return;
+    const target = log.querySelector(`[data-msg-id="${CSS.escape(targetId)}"]`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Clear any flash still running, so tapping through a chain of replies keeps
+    // exactly one message highlighted — the one you are actually on.
+    for (const prev of log.querySelectorAll(".bubble-jumped")) {
+      prev.classList.remove("bubble-jumped");
+    }
+    target.classList.add("bubble-jumped");
+    const ms = chatThread ? chatThread.QUOTE_HIGHLIGHT_MS : 1400;
+    setTimeout(() => target.classList.remove("bubble-jumped"), ms);
   }
 
   /** Delivery-status ticks for an outgoing bubble. */
@@ -2768,6 +2838,9 @@
   // reply chip, so a button there would set a reply target nothing can show.
   function mediaBubble(m, { repliable = true } = {}) {
     const wrap = el("div", { class: "bubble " + (m.outgoing ? "out" : "in") });
+    // Same anchor as a text bubble: replying to an attachment is expressible, so
+    // jumping back to one has to be too.
+    if (m.id) wrap.dataset.msgId = m.id;
     if (m.media.caption) wrap.append(el("div", { class: "media-caption", text: m.media.caption }));
 
     if (m.media.objectUrl) {

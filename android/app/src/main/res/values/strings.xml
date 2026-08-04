@@ -202,6 +202,7 @@
     <string name="message_action_react">React</string>
     <string name="message_action_copy">Copy text</string>
     <string name="react_more">More emoji</string>
+    <string name="message_goto_quoted">Go to the quoted message</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->

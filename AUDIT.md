@@ -363,7 +363,7 @@ means *feature* parity, not protocol compatibility._
 
 | Session feature | Comrade today | Gap / next step |
 |---|---|---|
-| 1:1 E2E DMs | ✅ NIP-04 Kind-4 DMs, offline history, live delivery, **replies** (NIP-10 `e` tag), **delivered/read receipts** + **emoji reactions** (2026-08-04: sealed DM control envelope, *not* public NIP-25 Kind-7 — a kind-7 reaction would announce to every relay that two keys are talking; one per person per message, withdrawable, replay-proof via store tombstones) | Upgrade to NIP-44 + gift wrap (M1-1) — Session's Signal-protocol-grade encryption is the bar; NIP-04 is deprecated and unauthenticated |
+| 1:1 E2E DMs | ✅ NIP-04 Kind-4 DMs, offline history, live delivery, **replies** (NIP-10 `e` tag, and a reply's quote is tappable — it scrolls to the original and flashes it, all three frontends), **delivered/read receipts** + **emoji reactions** (2026-08-04: sealed DM control envelope, *not* public NIP-25 Kind-7 — a kind-7 reaction would announce to every relay that two keys are talking; one per person per message, withdrawable, replay-proof via store tombstones) | Upgrade to NIP-44 + gift wrap (M1-1) — Session's Signal-protocol-grade encryption is the bar; NIP-04 is deprecated and unauthenticated |
 | Account = keypair, no phone number | ✅ secp256k1 keypair, npub address | — (same model) |
 | Display name + optional avatar | ◐ @handle published/searched (Kind-0, retried + republished as of 2026-07-12); chats titled by handle | Avatars: publish `picture` in Kind-0; render (needs image pipeline on Android) |
 | Local nicknames for contacts | ✅ per-contact alias, editable from the conversation header (2026-07-12) | — |

@@ -17,6 +17,7 @@ import '../../data/comrade_repository.dart';
 import '../../data/models.dart';
 import '../../state/chat_providers.dart';
 import '../../state/providers.dart';
+import '../../theme/comrade_theme.dart';
 import '../../util/attachment_caption.dart';
 import '../../util/chat_thread.dart';
 import '../../widgets/app_chrome.dart';
@@ -45,6 +46,11 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   int _knownItemCount = 0;
   bool _newMessagesBelow = false;
   bool _atBottom = true;
+
+  /// The item key currently flashing because a quote was tapped to reach it,
+  /// plus a token so an older flash's expiry cannot cancel a newer one.
+  String? _highlightKey;
+  int _highlightSeq = 0;
 
   /// Whether the core has been told this composer holds unsent text. Only the
   /// edges are worth a call — the core is idempotent, but a bridge hop per
@@ -163,6 +169,33 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
       await Future<void>.delayed(Duration.zero);
       await WidgetsBinding.instance.endOfFrame;
     }
+  }
+
+  /// Go to the message a reply is quoting, and flash it on arrival.
+  ///
+  /// The flash is not decoration. The scroll lands the target somewhere in a
+  /// screenful of other messages and says nothing about which one it was; without
+  /// the highlight the jump reads as the thread having lost your place. The
+  /// jump-to-latest button appears on the way, which is the way back.
+  ///
+  /// Does nothing when the original is not in the loaded thread — see
+  /// [indexOfEventId]. Staying put is the honest outcome there.
+  Future<void> _goToQuoted(ConversationState state, String? targetId) async {
+    final int? index = indexOfEventId(
+      <String>[for (final ChatItem i in state.items) i.id],
+      targetId,
+    );
+    if (index == null) return;
+    final int seq = ++_highlightSeq;
+    setState(() => _highlightKey = state.items[index].key);
+    // The scroll and the flash's clock run together rather than in sequence. The
+    // flash is measured from the tap; awaiting the scroll first would make its
+    // length depend on how many correction frames the list happened to need.
+    fireAndForget(_jumpToIndex(index, state.items.length));
+    await Future<void>.delayed(quoteHighlightDuration);
+    // Only the newest tap gets to end the flash, so tapping through a chain of
+    // replies keeps highlighting where you actually are.
+    if (mounted && _highlightSeq == seq) setState(() => _highlightKey = null);
   }
 
   void _jumpToLatest({bool animate = true}) {
@@ -325,6 +358,28 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
     );
   }
 
+  /// Tint the whole item — bubble, reactions and all — while it is the target of
+  /// a quote tap. Applied at the item level rather than inside the bubble so a
+  /// jumped-to attachment flashes exactly like a jumped-to message.
+  Widget _highlightWrap(
+    BuildContext context, {
+    required bool highlighted,
+    required Widget child,
+  }) =>
+      AnimatedContainer(
+        key: highlighted ? const Key('quote-target-highlight') : null,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          color: highlighted
+              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.14)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(ComradeRadii.bubble),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: child,
+      );
+
   Widget _thread(BuildContext context, ConversationState state) {
     if (state.items.isEmpty) {
       return Padding(
@@ -363,26 +418,33 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
                     DaySeparator(dayLabel(item.createdAt, nowSecs)),
                   if (item.key == state.unreadBoundaryKey)
                     const UnreadSeparator(),
-                  switch (item) {
-                    MediaChatItem(:final MediaMessageInfo media) =>
-                      MediaAttachmentBubble(
-                        media,
-                        onReply: () => _startReply(item),
-                        onLongPress: () => _openActions(item, state),
-                        chips: state.chipsFor(item.id),
-                        onToggleReaction: (String e) =>
-                            _toggleReaction(item, e),
-                      ),
-                    TextChatItem(:final MessageInfo message) => MessageBubble(
-                        message: message,
-                        quotedText: state.quoted(message.replyTo)?.preview,
-                        onReply: () => _startReply(item),
-                        onLongPress: () => _openActions(item, state),
-                        chips: state.chipsFor(item.id),
-                        onToggleReaction: (String e) =>
-                            _toggleReaction(item, e),
-                      ),
-                  },
+                  _highlightWrap(
+                    context,
+                    highlighted: item.key == _highlightKey,
+                    child: switch (item) {
+                      MediaChatItem(:final MediaMessageInfo media) =>
+                        MediaAttachmentBubble(
+                          media,
+                          onReply: () => _startReply(item),
+                          onLongPress: () => _openActions(item, state),
+                          chips: state.chipsFor(item.id),
+                          onToggleReaction: (String e) =>
+                              _toggleReaction(item, e),
+                        ),
+                      TextChatItem(:final MessageInfo message) => MessageBubble(
+                          message: message,
+                          quotedText: state.quoted(message.replyTo)?.preview,
+                          onQuotedTap: state.quoted(message.replyTo) == null
+                              ? null
+                              : () => _goToQuoted(state, message.replyTo),
+                          onReply: () => _startReply(item),
+                          onLongPress: () => _openActions(item, state),
+                          chips: state.chipsFor(item.id),
+                          onToggleReaction: (String e) =>
+                              _toggleReaction(item, e),
+                        ),
+                    },
+                  ),
                 ],
               ),
             );

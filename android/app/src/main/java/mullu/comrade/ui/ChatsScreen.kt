@@ -4,6 +4,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -19,10 +20,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -87,6 +90,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.R
@@ -547,6 +551,9 @@ fun ConversationScreen(
     // the watermark advances — Telegram leaves the line where you found it for
     // the rest of the visit, which is what makes it useful to read down to.
     var unreadBoundaryKey by remember(peer) { mutableStateOf<String?>(null) }
+    // The item flashing because its quote was tapped to reach it. Keyed on the
+    // item key, not the index, for the same reason as the unread boundary above.
+    var highlightKey by remember(peer) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val context = LocalContext.current
@@ -627,6 +634,30 @@ fun ConversationScreen(
             }
             if (failure != null) error = failure.message ?: "Could not react."
             fresh?.let { reactions = it }
+        }
+    }
+
+    /**
+     * Go to the message a reply is quoting, and flash it on arrival.
+     *
+     * The flash is not decoration. The scroll lands the target somewhere in a
+     * screenful of other messages and says nothing about which one it was; without
+     * the highlight the jump reads as the thread having lost your place. The
+     * jump-to-latest button appears on the way, which is the way back.
+     *
+     * Does nothing when the original is not in the loaded thread — see
+     * [indexOfEventId]. Staying put is the honest outcome there.
+     */
+    fun goToQuoted(targetId: String?) {
+        val index = indexOfEventId(chatItems.map { it.eventId }, targetId) ?: return
+        val key = chatItems[index].key
+        highlightKey = key
+        scope.launch {
+            listState.animateScrollToItem(index)
+            delay(QUOTE_HIGHLIGHT_MS)
+            // Only the newest tap gets to end the flash, so tapping through a
+            // chain of replies keeps highlighting where you actually are.
+            if (highlightKey == key) highlightKey = null
         }
     }
 
@@ -1031,6 +1062,18 @@ fun ConversationScreen(
                     // own list items), so item indices keep matching `chatItems`
                     // and the scroll arithmetic above stays honest.
                     val prevAt = chatItems.getOrNull(index - 1)?.createdAt
+                    // Tinted while this item is the target of a quote tap, and
+                    // animated so the flash fades rather than blinking. Around the
+                    // bubble only, not the separators above it: a target that
+                    // happens to open a new day must not tint that day's header.
+                    val highlight by animateColorAsState(
+                        targetValue = if (item.key == highlightKey) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                        } else {
+                            Color.Transparent
+                        },
+                        label = "quote-target-highlight",
+                    )
                     Column(Modifier.fillMaxWidth()) {
                         if (startsNewDay(prevAt, item.createdAt)) {
                             DaySeparator(dayLabel(item.createdAt, nowSecs))
@@ -1068,85 +1111,93 @@ fun ConversationScreen(
                                 onLongClick = { actingOn = item },
                             )
                         val chips = chipsByTarget[item.eventId].orEmpty()
-                        when (item) {
-                            is ChatItem.MediaItem -> SwipeToReply(
-                                onReply = { replyingTo = item },
-                                modifier = gestureModifier,
-                            ) {
-                                Column(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalAlignment = if (item.info.outgoing) {
-                                        Alignment.End
-                                    } else {
-                                        Alignment.Start
-                                    },
-                                ) {
-                                    MediaAttachmentBubble(
-                                        item.info,
-                                        onReply = { replyingTo = item },
-                                    )
-                                    ReactionChips(chips) { toggleReaction(item, it) }
-                                }
-                            }
-                            is ChatItem.TextItem -> {
-                                val msg = item.msg
-                                val quoted = msg.replyTo?.let { byId[it] }
-                                SwipeToReply(
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(highlight, RoundedCornerShape(18.dp)),
+                        ) {
+                            when (item) {
+                                is ChatItem.MediaItem -> SwipeToReply(
                                     onReply = { replyingTo = item },
                                     modifier = gestureModifier,
                                 ) {
-                                Column(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalAlignment = if (msg.outgoing) Alignment.End else Alignment.Start,
-                                ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(
-                                            topStart = 18.dp,
-                                            topEnd = 18.dp,
-                                            bottomStart = if (msg.outgoing) 18.dp else 6.dp,
-                                            bottomEnd = if (msg.outgoing) 6.dp else 18.dp,
-                                        ),
-                                        color = if (msg.outgoing) {
-                                            MaterialTheme.colorScheme.primaryContainer
+                                    Column(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalAlignment = if (item.info.outgoing) {
+                                            Alignment.End
                                         } else {
-                                            MaterialTheme.colorScheme.surfaceVariant
+                                            Alignment.Start
                                         },
-                                        tonalElevation = 1.dp,
-                                        modifier = Modifier.widthIn(max = 300.dp),
                                     ) {
-                                        Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
-                                            if (quoted != null) {
-                                                QuotedPreview(quoted.preview)
-                                            }
-                                            Text(msg.content, style = MaterialTheme.typography.bodyLarge)
-                                            Row(
-                                                modifier = Modifier
-                                                    .align(Alignment.End)
-                                                    .padding(top = 2.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        MediaAttachmentBubble(
+                                            item.info,
+                                            onReply = { replyingTo = item },
+                                        )
+                                        ReactionChips(chips) { toggleReaction(item, it) }
+                                    }
+                                }
+                                is ChatItem.TextItem -> {
+                                    val msg = item.msg
+                                    val quoted = msg.replyTo?.let { byId[it] }
+                                    SwipeToReply(
+                                        onReply = { replyingTo = item },
+                                        modifier = gestureModifier,
+                                    ) {
+                                        Column(
+                                            Modifier.fillMaxWidth(),
+                                            horizontalAlignment = if (msg.outgoing) Alignment.End else Alignment.Start,
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(
+                                                    topStart = 18.dp,
+                                                    topEnd = 18.dp,
+                                                    bottomStart = if (msg.outgoing) 18.dp else 6.dp,
+                                                    bottomEnd = if (msg.outgoing) 6.dp else 18.dp,
+                                                ),
+                                                color = if (msg.outgoing) {
+                                                    MaterialTheme.colorScheme.primaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.surfaceVariant
+                                                },
+                                                tonalElevation = 1.dp,
+                                                modifier = Modifier.widthIn(max = 300.dp),
                                             ) {
-                                                Text(
-                                                    clockTime(msg.createdAt),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.outline,
-                                                )
-                                                if (msg.outgoing) {
-                                                    Text(
-                                                        statusGlyph(msg.status),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = if (msg.status == "read") {
-                                                            MaterialTheme.colorScheme.primary
-                                                        } else {
-                                                            MaterialTheme.colorScheme.outline
-                                                        },
-                                                    )
+                                                Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                                                    if (quoted != null) {
+                                                        QuotedPreview(quoted.preview) {
+                                                            goToQuoted(msg.replyTo)
+                                                        }
+                                                    }
+                                                    Text(msg.content, style = MaterialTheme.typography.bodyLarge)
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .align(Alignment.End)
+                                                            .padding(top = 2.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                    ) {
+                                                        Text(
+                                                            clockTime(msg.createdAt),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.outline,
+                                                        )
+                                                        if (msg.outgoing) {
+                                                            Text(
+                                                                statusGlyph(msg.status),
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = if (msg.status == "read") {
+                                                                    MaterialTheme.colorScheme.primary
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.outline
+                                                                },
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             }
+                                            ReactionChips(chips) { toggleReaction(item, it) }
                                         }
                                     }
-                                    ReactionChips(chips) { toggleReaction(item, it) }
-                                }
                                 }
                             }
                         }
@@ -1565,24 +1616,51 @@ private fun UnreadSeparator(label: String) {
     }
 }
 
-/** A small quoted line rendered above a reply's own text. */
+/**
+ * A small quoted line rendered above a reply's own text.
+ *
+ * Tapping it goes to the message being quoted. [onTap] is null when there is
+ * nowhere to go — the original is outside the loaded history — and then the quote
+ * renders with no tap target and no accent bar, so a tap that could not work is
+ * never offered. Mirrors `message_bubble.dart`'s `QuotedPreview`.
+ */
 @Composable
-private fun QuotedPreview(text: String) {
+private fun QuotedPreview(text: String, onTap: (() -> Unit)? = null) {
+    val label = stringResource(R.string.message_goto_quoted)
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = 4.dp),
+            .padding(bottom = 4.dp)
+            .then(
+                if (onTap == null) {
+                    Modifier
+                } else {
+                    Modifier.clickable(onClickLabel = label, onClick = onTap)
+                },
+            ),
     ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // The accent bar is the affordance: it says "this points at something
+            // else", which is what makes the tap discoverable at all.
+            if (onTap != null) {
+                Box(
+                    Modifier
+                        .width(3.dp)
+                        .height(28.dp)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
     }
 }
 

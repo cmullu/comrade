@@ -152,6 +152,63 @@ void main() {
       expect(find.text('Safe travels.'), findsOneWidget);
     });
 
+    testWidgets('tapping the quote asks to go to the message it points at',
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      var wentTo = false;
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm2',
+              peer: 'npub1x',
+              content: 'Safe travels.',
+              createdAt: 1752321600,
+              outgoing: true,
+              replyTo: 'm1',
+            ),
+            quotedText: 'Boarded',
+            onQuotedTap: () => wentTo = true,
+            onReply: () {},
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('quoted-preview-tap')));
+      await tester.pumpAndSettle();
+      expect(wentTo, isTrue);
+    });
+
+    testWidgets('a quote with nowhere to go offers no tap target',
+        (WidgetTester tester) async {
+      // The original is outside the loaded history: the quote still says what was
+      // replied to, but a tap could not work, so it must not look tappable.
+      final repo = await unlockedFake();
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm2',
+              peer: 'npub1x',
+              content: 'Safe travels.',
+              createdAt: 1752321600,
+              outgoing: true,
+              replyTo: 'gone',
+            ),
+            quotedText: 'Boarded',
+            onReply: () {},
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Boarded'), findsOneWidget);
+      expect(find.byKey(const Key('quoted-preview-tap')), findsNothing);
+    });
+
     testWidgets('swiping a bubble rightward starts a reply',
         (WidgetTester tester) async {
       // Reply moved off the long press and onto the swipe (Telegram's split), so

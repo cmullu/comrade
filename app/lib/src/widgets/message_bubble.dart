@@ -112,21 +112,31 @@ class UnreadSeparator extends StatelessWidget {
 }
 
 /// A small quoted line rendered above a reply's own text.
+///
+/// Tapping it goes to the message being quoted. [onTap] is null when there is
+/// nowhere to go — the original is outside the loaded history — and then the
+/// quote renders as plain text with no tap target, so a tap that could not
+/// work is not offered in the first place.
 class QuotedPreview extends StatelessWidget {
-  const QuotedPreview(this.text, {super.key});
+  const QuotedPreview(this.text, {this.onTap, super.key});
 
   final String text;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final ColorScheme colors = Theme.of(context).colorScheme;
-    return Container(
+    final Widget body = Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 4),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: colors.surface.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(ComradeRadii.extraSmall),
+        // The accent bar is the affordance: it says "this is a pointer at
+        // something else", which is what makes the tap discoverable at all.
+        border: onTap == null
+            ? null
+            : Border(left: BorderSide(color: colors.primary, width: 3)),
       ),
       child: Text(
         text,
@@ -137,6 +147,21 @@ class QuotedPreview extends StatelessWidget {
             .bodySmall
             ?.copyWith(color: colors.onSurfaceVariant),
       ),
+    );
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: onTap == null
+          ? body
+          : Semantics(
+              button: true,
+              label: 'Go to the quoted message',
+              child: InkWell(
+                key: const Key('quoted-preview-tap'),
+                onTap: onTap,
+                borderRadius: BorderRadius.circular(ComradeRadii.extraSmall),
+                child: body,
+              ),
+            ),
     );
   }
 }
@@ -438,12 +463,17 @@ class MessageBubble extends StatelessWidget {
     this.chips = const <ReactionChip>[],
     this.onToggleReaction,
     this.quotedText,
+    this.onQuotedTap,
     this.maxWidth = 300,
     super.key,
   });
 
   final MessageInfo message;
   final String? quotedText;
+
+  /// Go to the message this one is replying to. Null when the original is not in
+  /// the loaded thread, which leaves the quote un-tappable rather than dead.
+  final VoidCallback? onQuotedTap;
   final VoidCallback onReply;
 
   /// Opens the reaction/action sheet. Optional so existing callers and tests that
@@ -481,7 +511,8 @@ class MessageBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          if (quotedText != null) QuotedPreview(quotedText!),
+          if (quotedText != null)
+            QuotedPreview(quotedText!, onTap: onQuotedTap),
           Text(msg.content, style: Theme.of(context).textTheme.bodyLarge),
           Padding(
             padding: const EdgeInsets.only(top: 2),
