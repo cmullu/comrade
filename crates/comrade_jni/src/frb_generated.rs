@@ -2285,6 +2285,7 @@ fn wire__crate__api__share_transfer_verdict_impl(
             let api_path = <crate::api::IcePathKind>::sse_decode(&mut deserializer);
             let api_total_bytes = <u64>::sse_decode(&mut deserializer);
             let api_policy = <crate::api::RelayPolicy>::sse_decode(&mut deserializer);
+            let api_consent_granted = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, ()>((move || {
@@ -2292,6 +2293,7 @@ fn wire__crate__api__share_transfer_verdict_impl(
                         api_path,
                         api_total_bytes,
                         api_policy,
+                        api_consent_granted,
                     ))?;
                     Ok(output_ok)
                 })())

@@ -184,6 +184,32 @@ pub fn decide(path: IcePathKind, total_bytes: u64, policy: RelayPolicy) -> Trans
     }
 }
 
+/// [`decide`], plus the answer to the question it may have asked.
+///
+/// Consent can do exactly one thing: turn [`TransferVerdict::NeedsConsent`]
+/// into [`TransferVerdict::Allow`]. It can never move a [`TransferVerdict::Refuse`],
+/// and that asymmetry is the point — `consent_granted` arrives from a frontend,
+/// which is the least trustworthy input this module takes, and a frontend that
+/// passed `true` unconditionally (through a bug, or because someone wired the
+/// dialog's dismiss to the wrong branch) would otherwise defeat
+/// [`RelayPolicy::DirectOnly`] entirely. Under this shape the worst such a bug
+/// can do is skip a question the policy chose to ask.
+///
+/// Consent is per-call rather than remembered here because this module holds no
+/// state: "they said yes" belongs to one transfer, and a yes that outlived its
+/// session would be a yes to a file nobody was asked about.
+pub fn decide_with_consent(
+    path: IcePathKind,
+    total_bytes: u64,
+    policy: RelayPolicy,
+    consent_granted: bool,
+) -> TransferVerdict {
+    match decide(path, total_bytes, policy) {
+        TransferVerdict::NeedsConsent { .. } if consent_granted => TransferVerdict::Allow,
+        other => other,
+    }
+}
+
 /// Whether a transfer connection built under `policy` may be offered TURN.
 ///
 /// This is the *structural* half of the enforcement. Under
@@ -340,6 +366,59 @@ mod tests {
                 relayed_bytes: FILM
             }
         );
+    }
+
+    #[test]
+    fn saying_yes_answers_the_question_that_was_actually_asked() {
+        assert_eq!(
+            decide_with_consent(IcePathKind::Relay, FILM, RelayPolicy::AskEachTime, true),
+            TransferVerdict::Allow
+        );
+        assert_eq!(
+            decide_with_consent(IcePathKind::Relay, FILM, RelayPolicy::AskEachTime, false),
+            TransferVerdict::NeedsConsent {
+                relayed_bytes: FILM
+            },
+            "not answering is not the same as saying yes"
+        );
+    }
+
+    /// The property the whole shape of [`decide_with_consent`] exists to hold:
+    /// `consent_granted` comes from a frontend, and a frontend that passed
+    /// `true` unconditionally must not be able to defeat the policy. The worst
+    /// it can do is skip a question that was going to be asked.
+    #[test]
+    fn consent_can_never_move_a_refusal() {
+        let refusing = [
+            (IcePathKind::Relay, RelayPolicy::DirectOnly),
+            (IcePathKind::Relay, RelayPolicy::UnderBytes { limit: TRACK }),
+            (IcePathKind::Unknown, RelayPolicy::AskEachTime),
+            (IcePathKind::Unknown, RelayPolicy::Always),
+        ];
+        for (path, policy) in refusing {
+            let without = decide(path, FILM, policy);
+            let with = decide_with_consent(path, FILM, policy, true);
+            assert!(
+                matches!(without, TransferVerdict::Refuse { .. }),
+                "{path:?}/{policy:?} should refuse before consent is considered"
+            );
+            assert_eq!(
+                with, without,
+                "{path:?}/{policy:?} changed its answer because a frontend claimed consent"
+            );
+        }
+    }
+
+    /// Consent is not a way to ask for something the policy never questioned.
+    #[test]
+    fn consent_on_an_already_allowed_transfer_changes_nothing() {
+        for policy in [RelayPolicy::DirectOnly, RelayPolicy::AskEachTime] {
+            assert_eq!(
+                decide_with_consent(IcePathKind::Host, FILM, policy, true),
+                TransferVerdict::Allow,
+                "a direct path was never the policy's business"
+            );
+        }
     }
 
     /// "We could not tell" must never be read as "it was fine".

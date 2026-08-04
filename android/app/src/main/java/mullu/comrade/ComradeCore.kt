@@ -947,8 +947,14 @@ object ComradeCore {
         localCandidateType: String,
         remoteCandidateType: String,
         totalBytes: Long,
+        consentGranted: Boolean = false,
     ): uniffi.comrade_ui.ShareVerdictDto =
-        ffi.shareTransferVerdict(localCandidateType, remoteCandidateType, totalBytes.toULong())
+        ffi.shareTransferVerdict(
+            localCandidateType,
+            remoteCandidateType,
+            totalBytes.toULong(),
+            consentGranted,
+        )
 
     /** How many chunks may go into a data channel currently holding this much. */
     fun shareChunksToSend(bufferedBytes: Long): Int =
@@ -959,10 +965,15 @@ object ComradeCore {
         runCatching { ffi.shareRelayPolicy() }
             .getOrDefault(uniffi.comrade_core.RelayPolicy.DirectOnly)
 
-    /** Change it. Takes effect on the next transfer connection. */
-    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy) {
-        runCatching { ffi.setShareRelayPolicy(policy) }
-    }
+    /**
+     * Change it, and remember it. Takes effect on the next transfer connection.
+     *
+     * Returns whether it was written down: with the vault locked the choice
+     * still applies to this process but will not survive it, and a settings
+     * screen that showed a saved preference which was not saved would be lying.
+     */
+    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy): Boolean =
+        runCatching { ffi.setShareRelayPolicy(policy) }.isSuccess
 
     data class CallRecordInfo(
         val id: String,

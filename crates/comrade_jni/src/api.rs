@@ -1087,12 +1087,17 @@ pub fn share_classify_path(local_type: String, remote_type: String) -> IcePathKi
 }
 
 /// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+///
+/// `consent_granted` answers a question a previous call asked by returning
+/// `NeedsConsent`. It can only turn that into `Allow`; a refusal stays refused
+/// however insistently a frontend claims consent.
 pub fn share_transfer_verdict(
     path: IcePathKind,
     total_bytes: u64,
     policy: RelayPolicy,
+    consent_granted: bool,
 ) -> TransferVerdict {
-    comrade_core::share::transport::decide(path, total_bytes, policy)
+    comrade_core::share::transport::decide_with_consent(path, total_bytes, policy, consent_granted)
 }
 
 /// Whether a transfer connection built under `policy` may be offered TURN.

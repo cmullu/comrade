@@ -74,12 +74,15 @@ const ATTENTION_META_TREE: &str = "attention_meta";
 const CALLS_TREE: &str = "call_log";
 /// Last known presence of a comrade, keyed by their npub.
 const PRESENCE_TREE: &str = "peer_presence";
+/// Transfer preferences: the relay policy for peer-to-peer file handover.
+const SHARE_META_TREE: &str = "share_meta";
 
 const IDENTITY_KEY: &str = "self";
 const LEDGER_SNAPSHOT_KEY: &str = "hisab_kitab";
 const LEDGER_STATE_KEY: &str = "hisab_kitab_state";
 const READING_KEY: &str = "current";
 const ATTENTION_PREFS_KEY: &str = "prefs";
+const SHARE_PREFS_KEY: &str = "prefs";
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -275,6 +278,37 @@ pub struct ReadingState {
 pub struct AttentionPrefs {
     #[serde(default)]
     pub doom_packages: Vec<String>,
+}
+
+/// Transfer preferences — currently just what this device does when the only
+/// path to a peer is a relay.
+///
+/// The policy is stored as a string rather than as `comrade_core`'s
+/// `RelayPolicy` because this crate deliberately has no `comrade_core`
+/// dependency (see the crate docs on cycles); the mapping lives in
+/// `comrade_ui`, the same way [`ConversationMeta::state`] is a string here and
+/// an enum upstream.
+///
+/// Inside the encrypted vault because it is read only after unlock, and because
+/// a device that relays bulk is a fact about how someone uses the app. An
+/// unrecognised value must read as the safe policy, never as permission — see
+/// `comrade_ui`'s mapping and its test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharePrefs {
+    /// `"direct_only"` (default), `"under_bytes"`, `"ask_each_time"`, `"always"`.
+    pub relay_policy: String,
+    /// The allowance, meaningful only when `relay_policy` is `"under_bytes"`.
+    #[serde(default)]
+    pub relay_limit_bytes: u64,
+}
+
+impl Default for SharePrefs {
+    fn default() -> Self {
+        Self {
+            relay_policy: "direct_only".to_string(),
+            relay_limit_bytes: 0,
+        }
+    }
 }
 
 /// Per-peer conversation gate — the storage half of message requests. A DM from
@@ -722,6 +756,20 @@ impl EncryptedStore {
     pub fn load_attention_prefs(&self) -> Result<AttentionPrefs, StorageError> {
         Ok(self
             .get(ATTENTION_META_TREE, ATTENTION_PREFS_KEY)?
+            .unwrap_or_default())
+    }
+
+    // Share --------------------------------------------------------------------
+
+    /// Persist the transfer preferences (relay policy).
+    pub fn save_share_prefs(&self, prefs: &SharePrefs) -> Result<(), StorageError> {
+        self.put(SHARE_META_TREE, SHARE_PREFS_KEY, prefs)
+    }
+
+    /// The transfer preferences; the direct-only default when never saved.
+    pub fn load_share_prefs(&self) -> Result<SharePrefs, StorageError> {
+        Ok(self
+            .get(SHARE_META_TREE, SHARE_PREFS_KEY)?
             .unwrap_or_default())
     }
 
