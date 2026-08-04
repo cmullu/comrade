@@ -263,6 +263,11 @@
     // A file handover in progress, when only one side has what is playing.
     // Its own RTCPeerConnection, never the call's — see newShareState.
     share: null,
+    // The large-attachment card: an offer waiting to be answered, or the live
+    // transfer's progress. Separate from `share` because a card exists before
+    // there is an engine (an offer nobody has accepted) and after there is not
+    // (a received file nobody has saved yet).
+    handoff: null,
     // Bounded memory of recently-ended call ids (see call_decisions.mjs
     // rememberEndedCall) — mirrors Android's CallManager.endedCallIds, so a
     // redelivered Offer for a call we already tore down doesn't ring again.
@@ -446,11 +451,17 @@
   // leaves nothing behind — and unlike the Android and Flutter ports, a video
   // really does play, because a blob URL is in memory and needs no file on disk
   // (AUDIT S-4).
-  async function openAttachmentPreview(file, seedCaption) {
+  // `route` is the core's answer for this size (`attachment_route_for_bytes`), and
+  // the sheet says which road it names: "encrypted and uploaded" and "straight to
+  // their device, while they are at it" are different promises, and the sender is
+  // about to make one of them. `note` is the one thing the road cannot promise —
+  // that they are online — when this device cannot tell.
+  async function openAttachmentPreview(file, seedCaption, { route = null, note = null } = {}) {
     // Awaited here rather than read off the module-level handle: this is the one
     // call site that needs *every* rule at once, and awaiting removes any
     // question of whether the handle has been assigned yet.
     const rules = await attachmentCaptionReady;
+    const { previewRouteLine } = await handoffReady;
     const { attachmentPreviewKind, attachmentPreviewDetail, normalizeCaption } = rules;
     const mime = file.type || "application/octet-stream";
     const url = URL.createObjectURL(file);
@@ -540,6 +551,15 @@
               onClick: () => finish(null),
             }),
           ),
+          // Which road this file takes, and what that road costs. Above the
+          // caption box rather than under Send: it can change the sender's mind
+          // about the file, and it should do that before they write anything.
+          el("div", {
+            class: `attach-preview-route${route === "peer_to_peer" ? " is-direct" : ""}`,
+            id: "attachment-preview-route",
+            text: previewRouteLine(route, file.size),
+          }),
+          note ? el("div", { class: "attach-preview-note", text: note }) : null,
           // Only the picture scrolls. The heading, the caption box and the two
           // buttons stay put, because on a short window they are the parts that
           // must not go looking for a scrollbar.
@@ -647,6 +667,10 @@
       // mid-session would revoke it and kill playback), so it is revoked here
       // rather than by `revokeAllMediaUrls`.
       endShare();
+      // Same rule, same reason: a received attachment nobody saved yet is
+      // plaintext this window is holding, and it belongs to the identity that
+      // was just replaced (AUDIT S-4).
+      clearHandoffCard();
       if (state.together?.objectUrl) URL.revokeObjectURL(state.together.objectUrl);
       state.together = null;
       onTogetherOver();
@@ -903,6 +927,9 @@
     renderContacts();
     renderConversation();
     showTogetherPanel();
+    // A transfer belongs to one conversation, so its card follows the one on
+    // screen rather than floating over whoever is open.
+    renderHandoffCard();
     // Opening a conversation clears its unread state and sends read receipts.
     safeInvoke("mark_conversation_read", { peer: key }, { silent: true }).catch(() => {});
     // Pull the full persisted thread — text history plus persisted media
@@ -2931,24 +2958,64 @@
     }
     const { captionForAttachment, captionConsumesDraft, attachmentRejection } =
       await attachmentCaptionReady;
+    const { attachmentSendPlan, handoffPresencePlan } = await handoffReady;
+    // Which road, from the core. Not a 10 MB comparison here: the threshold *is*
+    // the hosted ceiling, and a frontend holding its own copy is a frontend that
+    // disagrees the day that number moves.
+    let route = null;
+    try {
+      route = await safeInvoke("attachment_route_for_bytes", { totalBytes: file.size }, {
+        silent: true,
+      });
+    } catch {
+      /* no route is refused below, never guessed at */
+    }
     // Before the preview, not after the upload: composing a caption for a file
-    // that was never going to fit is the one bit of work worth not wasting.
-    const refusal = attachmentRejection(file.name, file.size);
-    if (refusal) {
-      showToast(refusal, "warn");
+    // that was never going to be sent is the one bit of work worth not wasting.
+    // The shared 10 MB rule still decides the hosted road and only that road —
+    // over the cap the question is no longer "may this be sent" but "which way".
+    const plan = attachmentSendPlan({
+      bytes: file.size,
+      route,
+      hostedRefusal: attachmentRejection(file.name, file.size),
+    });
+    if (plan.refusal) {
+      showToast(plan.refusal, "warn");
       return;
+    }
+    // The first of the two honest failures, and the only one that can be checked
+    // before anything is sent: there is no store-and-forward on this road.
+    let routeNote = null;
+    if (plan.road === "peer_to_peer") {
+      const presence = handoffPresencePlan(presenceOf(targetPubkey));
+      if (presence.blocked) {
+        showToast(presence.warning, "warn");
+        return;
+      }
+      routeNote = presence.warning;
     }
     const mime = file.type || "application/octet-stream";
     const replyPending = !!state.replyTo;
     const draft = composer ? composer.value : "";
     const consumed = captionConsumesDraft(draft, replyPending);
-    const caption = await openAttachmentPreview(
-      file,
-      captionForAttachment(draft, replyPending),
-    );
+    const caption = await openAttachmentPreview(file, captionForAttachment(draft, replyPending), {
+      route,
+      note: routeNote,
+    });
     // Backed out. Nothing was read, nothing was encrypted, and the draft is
     // still where they left it.
     if (caption === null) return;
+
+    if (plan.road === "peer_to_peer") {
+      // No upload, no host, no third copy: the bytes go straight to their
+      // device, and the card below is where the rest of it happens.
+      const offered = await startHandoffSend(file, targetPubkey, caption, mime);
+      if (offered && consumed && composer) {
+        composer.value = "";
+        reportDraftEdit();
+      }
+      return;
+    }
 
     let base64;
     try {
@@ -3579,7 +3646,7 @@
       // the handover. If we *do* have one, the person picks it themselves.
       if (!state.together?.file) {
         setShareStatus("Asking them to send it…");
-        await sendShareSignal({ share: "ask" });
+        await sendShareSignal({ step: "ask" });
       }
     } catch {
       /* toasted */
@@ -3757,12 +3824,35 @@
 
   const shareTransferReady = import("./share_transfer.mjs");
 
+  // The same pump, pointed at an attachment instead of a track. Everything that
+  // differs between the two — which envelope a step rides in, what to believe
+  // from an incoming offer, which road a file takes and what each road costs —
+  // is `handoff_transfer.mjs`, so the driving code below is the same code for
+  // both and `together` cannot regress by being read wrongly.
+  const handoffReady = import("./handoff_transfer.mjs");
+
   /** How many chunks to have in flight before asking for the next window. */
   const SHARE_REQUEST_WINDOW = 64;
+
+  /**
+   * SHA-256 of a buffer, hex. One copy: the sender fingerprints what it offers
+   * and the receiver checks what arrived, and those two must agree.
+   */
+  async function sha256Hex(buffer) {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
 
   function newShareState(base) {
     return Object.assign(
       {
+        // Which protocol carries this transfer's steps: a watch-together
+        // handover inside a session, or an attachment handoff scoped by a
+        // transfer id. The only thing the driver branches on.
+        kind: "together",
+        transferId: null,
+        // Handoff only: the name, type and caption that came with the offer.
+        attachment: null,
         role: null, // "sender" | "receiver"
         peer: null,
         sessionId: null,
@@ -3787,13 +3877,62 @@
     );
   }
 
-  async function sendShareSignal(signal) {
+  /**
+   * Put one abstract step of the negotiation on whichever wire this transfer is
+   * using.
+   *
+   * The driver below never writes `{"share":…}` or `{"handoff":…}` itself: the
+   * two encodings live side by side in `handoff_transfer.mjs`, where a step a
+   * protocol cannot express comes back as null and is dropped here rather than
+   * being sent as something the far end cannot parse.
+   */
+  async function sendShareSignal(step) {
+    const s = state.share;
+    if (!s) return;
+    const { encodeTogetherStep, encodeHandoffStep } = await handoffReady;
+    if (state.share !== s) return;
+    if (s.kind === "handoff") {
+      const signal = encodeHandoffStep(step);
+      if (!signal) return;
+      await sendHandoffSignal(s.peer, s.transferId, signal);
+      return;
+    }
+    const signal = encodeTogetherStep(step);
+    if (!signal) return;
     try {
       await safeInvoke("together_share", { signalJson: JSON.stringify(signal) }, { silent: true });
     } catch {
       // A lost negotiation step fails the transfer, not the session — the
       // watch-together part keeps working with whatever each side already has.
     }
+  }
+
+  /** One handoff signal to one peer, outside any session. */
+  async function sendHandoffSignal(peer, transferId, signal) {
+    if (!peer || !transferId) return;
+    try {
+      await safeInvoke(
+        "attachment_handoff_send",
+        { peer, transferId, signalJson: JSON.stringify(signal) },
+        { silent: true },
+      );
+    } catch {
+      // Same bargain as above: a lost step fails this transfer and nothing else.
+      // There is no store-and-forward here, so there is nothing to retry into.
+    }
+  }
+
+  /**
+   * Where the receiver's requests are anchored.
+   *
+   * A together handover asks from the playhead, so a seek costs one request
+   * rather than a re-download. A handoff has no playhead — nobody is watching an
+   * attachment arrive — so it asks from the beginning and the tracker's
+   * earliest-gap fallback does the rest.
+   */
+  function transferPositionMs(s) {
+    if (!s || s.kind !== "together") return 0;
+    return Math.round(($together.player()?.currentTime || 0) * 1000);
   }
 
   function endShare({ toast } = {}) {
@@ -3808,10 +3947,25 @@
       /* already torn down */
     }
     if (s.objectUrl) URL.revokeObjectURL(s.objectUrl);
+    // The plaintext goes now, not whenever the next transfer happens to
+    // overwrite it (AUDIT S-4). `parts` is up to a quarter of a gigabyte of
+    // received file and `file` is the sender's own pick; a reference kept on a
+    // dead transfer is a reference the tab cannot reclaim.
+    s.parts = null;
+    s.file = null;
     // A question about a transfer that no longer exists must not stay on
     // screen — answering it would act on a session that is already gone.
     s.awaitingConsent = false;
     renderShareConsent(s, "");
+    if (s.kind === "handoff" && state.handoff && state.handoff.transferId === s.transferId) {
+      // The card outlives the engine only to say what happened, and only when
+      // there is nothing left to press.
+      if (state.handoff.phase !== "done") {
+        state.handoff.phase = "failed";
+        state.handoff.status = toast || "The transfer stopped.";
+        renderHandoffCard();
+      }
+    }
     if (toast) showToast(toast, "warn");
   }
 
@@ -3829,7 +3983,7 @@
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return;
       sendShareSignal({
-        share: "transport",
+        step: "transport",
         signal: {
           kind: "ice",
           candidate: ev.candidate.candidate,
@@ -3859,7 +4013,13 @@
   async function judgeSharePath() {
     const s = state.share;
     if (!s || s.judged || !s.pc || !s.offer) return;
-    const { selectedPairTypes, describeVerdict } = await shareTransferReady;
+    const { selectedPairTypes } = await shareTransferReady;
+    // A handoff's refusal carries one thing a together handover's cannot: the
+    // hosted road is still there for a smaller file, and saying so is the
+    // difference between "it failed" and "here is what would work".
+    const { describeHandoffVerdict } = await handoffReady;
+    const { describeVerdict } = await shareTransferReady;
+    const describe = s.kind === "handoff" ? describeHandoffVerdict : describeVerdict;
     if (state.share !== s) return;
     let types = null;
     try {
@@ -3891,7 +4051,7 @@
       /* handled by describeVerdict(null) below */
     }
     if (state.share !== s) return;
-    const plan = describeVerdict(verdict);
+    const plan = describe(verdict);
     if (plan.retryable) {
       // ICE has not settled. Look again shortly rather than failing a transfer
       // that was about to be fine.
@@ -3908,12 +4068,17 @@
     if (!plan.proceed) {
       // Tell them why, and tell the other side too — they are looking at a
       // progress bar that would otherwise sit at zero forever.
-      sendShareSignal({ share: "refuse", reason: verdict?.reason ?? { kind: "path_unknown" } });
+      sendShareSignal({ step: "refuse", reason: verdict?.reason ?? { kind: "path_unknown" } });
       endShare({ toast: plan.message });
       return;
     }
     s.judged = true;
-    setShareStatus(`Sending over a ${verdict.path === "host" ? "local" : "direct"} connection…`);
+    const where = verdict.path === "host" ? "local" : "direct";
+    setShareStatus(
+      s.role === "sender"
+        ? `Sending over a ${where} connection…`
+        : `Receiving over a ${where} connection…`,
+    );
     if (s.role === "sender") startShareSending();
   }
 
@@ -3964,7 +4129,7 @@
       if (state.share !== s) return;
       s.awaitingConsent = false;
       renderShareConsent(s, "");
-      sendShareSignal({ share: "refuse", reason: { kind: "relay_forbidden" } });
+      sendShareSignal({ step: "refuse", reason: { kind: "relay_forbidden" } });
       endShare({ toast: "Didn't send it." });
     };
     const row = document.createElement("div");
@@ -3977,8 +4142,10 @@
   async function startShareSending() {
     const s = state.share;
     if (!s || !s.channel || s.pump) return;
-    const { CHUNK_BYTES, chunkRange, createTransferPump, frameChunk } = await shareTransferReady;
+    const { CHUNK_BYTES, chunkCount, chunkRange, createTransferPump, frameChunk } =
+      await shareTransferReady;
     if (state.share !== s || !s.channel) return;
+    const total = chunkCount(s.offer);
 
     // Reading is async and the pump is synchronous, so a small read-ahead sits
     // between them: the pump takes only what is already in hand, and a refill
@@ -4006,6 +4173,11 @@
       } finally {
         reading = false;
       }
+      // Reported here as well as from the pump: the pump stops asking once the
+      // last batch is in hand, so a progress line driven only from there is
+      // permanently one window short of finishing — it read 92% at the end of a
+      // completed 768-chunk transfer, which is a lie of exactly one window.
+      if (total > 0 && s.cursor) reportTransferProgress(s, Math.min(s.cursor.next / total, 1));
       s.pump?.kick();
     }
 
@@ -4015,6 +4187,13 @@
       nextChunks: (budget) => {
         const batch = ready.splice(0, budget);
         refill();
+        // Chunks read to satisfy what the receiver asked for. It runs ahead of
+        // true delivery by at most the send buffer's 1 MB high-water mark, which
+        // is the closest a sender can get: nothing on this channel acknowledges
+        // a chunk, and the next range request is the only evidence either way.
+        if (total > 0 && s.cursor) {
+          reportTransferProgress(s, Math.min(s.cursor.next / total, 1));
+        }
         return batch;
       },
       isDone: () => s.done,
@@ -4037,15 +4216,15 @@
     if (!s.tracker.accept(frame.index)) return;
     s.parts[frame.index] = frame.payload;
 
-    setShareStatus(`Receiving — ${Math.round(s.tracker.fraction() * 100)}%`);
+    reportTransferProgress(s, s.tracker.fraction());
     if (s.tracker.isComplete()) {
       finishShareReceive();
       return;
     }
-    // Ask for the next window as the current one drains, anchored at the
-    // playhead so a seek costs one request rather than a re-download.
-    const posMs = Math.round(($together.player()?.currentTime || 0) * 1000);
-    const req = s.tracker.nextRequest(posMs, SHARE_REQUEST_WINDOW);
+    // Ask for the next window as the current one drains, anchored where this
+    // kind of transfer reads from — a playhead for a handover, the start for an
+    // attachment.
+    const req = s.tracker.nextRequest(transferPositionMs(s), SHARE_REQUEST_WINDOW);
     if (req && s.channel?.readyState === "open") {
       s.channel.send(JSON.stringify(req));
     }
@@ -4055,14 +4234,27 @@
     const s = state.share;
     if (!s || s.done) return;
     s.done = true;
-    const blob = new Blob(s.parts.filter(Boolean), { type: "application/octet-stream" });
+    // The handoff's plaintext MIME type is the one thing the hosted path
+    // deliberately does not carry (it uploads `application/octet-stream` so the
+    // host learns nothing). Here there is no host, and the only reader is the
+    // person being sent the file, who needs it to open what arrived.
+    const mime =
+      s.kind === "handoff"
+        ? String(s.attachment?.mime_type || "application/octet-stream")
+            .trim()
+            .toLowerCase()
+        : "application/octet-stream";
+    const blob = new Blob(s.parts.filter(Boolean), { type: mime });
+    // The chunk views go now. They are the whole file a second time over, and
+    // holding them while the digest below allocates a contiguous copy is the
+    // one moment this path is at three times the file's size instead of two.
+    s.parts = null;
     // Integrity, once, at the end: SubtleCrypto has no streaming digest, so a
     // per-chunk hash is not available to a webview. This is why the framing
     // checks above exist — they catch the failures a whole-file hash would only
     // report after the whole file.
     try {
-      const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
-      const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      const hex = await sha256Hex(await blob.arrayBuffer());
       if (hex.toLowerCase() !== String(s.offer.sha256).toLowerCase()) {
         endShare({ toast: "The file that arrived isn't the one that was sent." });
         return;
@@ -4072,6 +4264,10 @@
       return;
     }
     if (state.share !== s) return;
+    if (s.kind === "handoff") {
+      finishHandoffReceive(s, blob);
+      return;
+    }
     s.objectUrl = URL.createObjectURL(blob);
     const player = $together.player();
     if (player) {
@@ -4083,8 +4279,35 @@
   }
 
   function setShareStatus(text) {
+    const s = state.share;
+    if (s && s.kind === "handoff") {
+      if (state.handoff && state.handoff.transferId === s.transferId) {
+        state.handoff.status = text;
+        renderHandoffCard();
+      }
+      return;
+    }
     const el = $together.shareStatus();
     if (el) el.textContent = text;
+  }
+
+  /**
+   * Progress, from the tracker's own fraction.
+   *
+   * Rate-limited to a change in the whole percent, because a 16 KiB chunk on a
+   * 250 MB file is sixteen thousand of these and rebuilding a card that often
+   * would cost more than the transfer.
+   */
+  async function reportTransferProgress(s, fraction) {
+    const { progressLabel } = await handoffReady;
+    if (!s || state.share !== s) return;
+    const label = progressLabel(s.role, fraction);
+    if (label === s.lastProgressLabel) return;
+    s.lastProgressLabel = label;
+    if (s.kind === "handoff" && state.handoff && state.handoff.transferId === s.transferId) {
+      state.handoff.fraction = fraction;
+    }
+    setShareStatus(label);
   }
 
   /** Sender: offer what we have, once they say they don't have it. */
@@ -4094,8 +4317,7 @@
     const { CHUNK_BYTES } = await shareTransferReady;
     let sha256 = "";
     try {
-      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-      sha256 = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      sha256 = await sha256Hex(await file.arrayBuffer());
     } catch (e) {
       endShare({ toast: `Couldn't read the file — ${errText(e)}` });
       return;
@@ -4109,7 +4331,7 @@
       duration_ms: durationMs || 0,
     };
     setShareStatus("Waiting for them to accept…");
-    await sendShareSignal({ share: "offer", offer: s.offer });
+    await sendShareSignal({ step: "offer", offer: s.offer });
   }
 
   /** Sender: they accepted, so build the connection and open the channel. */
@@ -4147,10 +4369,36 @@
         /* not a request; the sender has nothing else to read on this channel */
       }
     };
+    if (s.kind === "handoff") {
+      // The only completion signal a sender can have. Nothing on this channel
+      // acknowledges a chunk, but a receiver that has verified the file closes
+      // the channel (see finishHandoffReceive) — so a close with everything
+      // queued means it landed, and a close before that means it did not.
+      // Scoped to a handoff: a together handover's channel outlives the file,
+      // because the session is still running.
+      s.channel.onclose = () => {
+        if (state.share !== s) return;
+        const done = s.cursor && s.offer && s.cursor.next * s.offer.chunk_bytes >= s.offer.total_bytes;
+        if (done) {
+          if (state.handoff && state.handoff.transferId === s.transferId) {
+            state.handoff.phase = "done";
+            state.handoff.fraction = 1;
+            // What this device actually knows: every chunk went across. Whether
+            // the far end liked the fingerprint is theirs to say, and it does not
+            // say it — so this does not claim they have a good copy.
+            state.handoff.status = "Sent — all of it went across.";
+            renderHandoffCard();
+          }
+          endShare();
+        } else {
+          endShare({ toast: "The transfer stopped before it finished." });
+        }
+      };
+    }
     try {
       const offer = await s.pc.createOffer();
       await s.pc.setLocalDescription(offer);
-      await sendShareSignal({ share: "transport", signal: { kind: "offer", sdp: offer.sdp } });
+      await sendShareSignal({ step: "transport", signal: { kind: "offer", sdp: offer.sdp } });
     } catch (e) {
       endShare({ toast: `Couldn't start the transfer — ${errText(e)}` });
     }
@@ -4187,7 +4435,7 @@
         await flushShareIce();
         const answer = await s.pc.createAnswer();
         await s.pc.setLocalDescription(answer);
-        await sendShareSignal({ share: "transport", signal: { kind: "answer", sdp: answer.sdp } });
+        await sendShareSignal({ step: "transport", signal: { kind: "answer", sdp: answer.sdp } });
       } else if (signal.kind === "answer") {
         if (!s.pc) return;
         await s.pc.setRemoteDescription({ type: "answer", sdp: signal.sdp });
@@ -4222,15 +4470,47 @@
     }
   }
 
+  /**
+   * The three steps that mean the same thing on both wires.
+   *
+   * Returns whether the step was handled, so each protocol's own entry point can
+   * deal with the ones only it has — a together handover's `ask`, a handoff's
+   * `decline` and `withdraw` — without either of them re-implementing ICE.
+   */
+  async function onCommonTransferStep(step) {
+    switch (step.step) {
+      case "accept":
+        await beginShareNegotiation();
+        return true;
+      case "refuse": {
+        const s = state.share;
+        const { describeVerdict } = await shareTransferReady;
+        const { describeHandoffVerdict } = await handoffReady;
+        const describe = s?.kind === "handoff" ? describeHandoffVerdict : describeVerdict;
+        const plan = describe({ verdict: "refuse", reason: step.reason });
+        endShare({ toast: plan.message });
+        return true;
+      }
+      case "transport":
+        await onShareTransport(step.signal);
+        return true;
+      default:
+        return false;
+    }
+  }
+
   /** The one entry point: a share signal arrived inside the together session. */
   async function onTogetherShare(p) {
     const signal = p && p.signal;
     if (!signal) return;
-    switch (signal.share) {
+    const { decodeTogetherSignal } = await handoffReady;
+    const step = decodeTogetherSignal(signal);
+    switch (step.step) {
       case "ask": {
         // They don't have it. Offer ours if we picked a local file.
         if (!state.together?.file) return;
         state.share = newShareState({
+          kind: "together",
           role: "sender",
           peer: p.peer,
           sessionId: p.session_id,
@@ -4241,33 +4521,338 @@
       case "offer": {
         const { createTracker } = await shareTransferReady;
         state.share = newShareState({
+          kind: "together",
           role: "receiver",
           peer: p.peer,
           sessionId: p.session_id,
-          offer: signal.offer,
+          offer: step.offer,
         });
-        state.share.tracker = createTracker(signal.offer);
+        state.share.tracker = createTracker(step.offer);
         state.share.parts = new Array(state.share.tracker.chunkCount).fill(null);
-        setShareStatus(`They can send it — ${Math.round(signal.offer.total_bytes / 1048576)} MB.`);
-        await sendShareSignal({ share: "accept" });
+        setShareStatus(`They can send it — ${Math.round(step.offer.total_bytes / 1048576)} MB.`);
+        await sendShareSignal({ step: "accept" });
         break;
       }
-      case "accept":
-        await beginShareNegotiation();
-        break;
-      case "refuse": {
-        const { describeVerdict } = await shareTransferReady;
-        const plan = describeVerdict({ verdict: "refuse", reason: signal.reason });
-        endShare({ toast: plan.message });
-        break;
-      }
-      case "transport":
-        await onShareTransport(signal.signal);
-        break;
       default:
-        // An unknown step from a newer build: ignore rather than guess.
+        // Anything else is a step both protocols share, or one from a newer
+        // build — which is ignored rather than guessed at.
+        await onCommonTransferStep(step);
         break;
     }
+  }
+
+  // ── Large attachments: the same pump, no session ───────────────────────────
+  //
+  // A handoff is scoped by a transfer id rather than by a session, so this entry
+  // point does the scoping the session used to do for `together`: a signal
+  // naming a transfer this window is not running cannot steer the one it is, and
+  // a step only *our* side could legitimately send is dropped rather than obeyed.
+
+  /** One step of a large-attachment handoff arrived over the DM channel. */
+  async function onAttachmentHandoff(p) {
+    if (!p || !p.transfer_id || !p.signal) return;
+    const h = await handoffReady;
+    const step = h.decodeHandoffSignal(p.signal);
+    const s = state.share;
+
+    if (h.signalIsForTransfer(s, p.transfer_id)) {
+      if (s.peer !== p.peer) return; // the id is right and the peer is not
+      if (!h.peerStepIsPlausible(s.role, step.step)) return;
+      switch (step.step) {
+        case "decline":
+          endShare({ toast: `${displayName(p.peer)} didn't take the file.` });
+          return;
+        case "withdraw":
+          endShare({ toast: "They took the offer back." });
+          return;
+        default:
+          await onCommonTransferStep(step);
+          return;
+      }
+    }
+
+    // Not our live transfer. The only step that can start one is an offer;
+    // everything else names a transfer that does not exist here, which is what
+    // the 128-bit id exists to make un-guessable.
+    if (step.step !== "offer") {
+      // Except a withdrawal of the offer currently on screen, which has no
+      // engine behind it yet.
+      if (step.step === "withdraw" && state.handoff?.transferId === p.transfer_id) {
+        clearHandoffCard();
+        showToast("They took the offer back.", "info");
+      }
+      return;
+    }
+    if (s || (state.handoff && state.handoff.phase !== "done" && state.handoff.phase !== "failed")) {
+      // One at a time in this window, and deliberately no automatic answer: the
+      // protocol's refusals are all about relays, and `decline` means a person
+      // said no. Neither is true here, so the sender is left waiting — which is
+      // honest — and the person is told why they are not being asked.
+      showToast(
+        `${displayName(p.peer)} wants to send you a file — finish the current transfer first.`,
+        "info",
+      );
+      return;
+    }
+    state.handoff = {
+      transferId: p.transfer_id,
+      peer: p.peer,
+      role: "receiver",
+      attachment: step.attachment,
+      plan: h.offerCardPlan(step.attachment),
+      phase: "offered",
+      status: null,
+      fraction: 0,
+      objectUrl: null,
+    };
+    renderHandoffCard();
+    if (state.activeContact !== p.peer) {
+      showToast(`${displayName(p.peer)} wants to send you a file`, "info");
+    }
+  }
+
+  /** Receiver: yes. This is what authorises the sender to build a connection. */
+  async function acceptHandoffOffer() {
+    const card = state.handoff;
+    if (!card || card.phase !== "offered" || card.role !== "receiver") return;
+    if (!card.plan.canAccept) return;
+    const { createTracker } = await shareTransferReady;
+    if (state.handoff !== card) return;
+    const offer = card.attachment.shape;
+    state.share = newShareState({
+      kind: "handoff",
+      role: "receiver",
+      peer: card.peer,
+      transferId: card.transferId,
+      attachment: card.attachment,
+      offer,
+    });
+    state.share.tracker = createTracker(offer);
+    state.share.parts = new Array(state.share.tracker.chunkCount).fill(null);
+    card.phase = "receiving";
+    card.status = "Waiting for the connection…";
+    renderHandoffCard();
+    await sendShareSignal({ step: "accept" });
+  }
+
+  /** Receiver: no. A person saying no is not a network fact, so it is a decline. */
+  async function declineHandoffOffer() {
+    const card = state.handoff;
+    if (!card || card.role !== "receiver") return;
+    const signal = (await handoffReady).encodeHandoffStep({ step: "decline" });
+    await sendHandoffSignal(card.peer, card.transferId, signal);
+    if (state.share?.transferId === card.transferId) endShare();
+    clearHandoffCard();
+  }
+
+  /** Sender: take the offer back, so their card stops being answerable. */
+  async function withdrawHandoffOffer() {
+    const card = state.handoff;
+    if (!card || card.role !== "sender") return;
+    const signal = (await handoffReady).encodeHandoffStep({ step: "withdraw" });
+    await sendHandoffSignal(card.peer, card.transferId, signal);
+    if (state.share?.transferId === card.transferId) endShare();
+    clearHandoffCard();
+  }
+
+  /**
+   * Sender: fingerprint the file, offer it, and wait to be told yes.
+   *
+   * The whole file goes through memory once here, because `crypto.subtle.digest`
+   * takes a buffer and there is no streaming digest in a webview. That is the
+   * reason `MAX_HANDOFF_BYTES` exists and the reason it is checked *before* this
+   * is called rather than inside it.
+   */
+  async function startHandoffSend(file, peer, caption, mime) {
+    const { CHUNK_BYTES } = await shareTransferReady;
+    const h = await handoffReady;
+    let sha256;
+    try {
+      sha256 = await sha256Hex(await file.arrayBuffer());
+    } catch (e) {
+      showToast(`Couldn't read the file — ${errText(e)}`, "error");
+      return false;
+    }
+    const transferId = h.newTransferId((n) => crypto.getRandomValues(new Uint8Array(n)));
+    const attachment = {
+      shape: {
+        total_bytes: file.size,
+        chunk_bytes: CHUNK_BYTES,
+        sha256,
+        // A duration nobody measured. Zero is honest — the receiver has no
+        // playhead for an attachment, so nothing reads this.
+        duration_ms: 0,
+      },
+      mime_type: mime,
+      file_name: file.name || "",
+      caption,
+    };
+    endShare();
+    clearHandoffCard();
+    state.share = newShareState({
+      kind: "handoff",
+      role: "sender",
+      peer,
+      transferId,
+      attachment,
+      offer: attachment.shape,
+      file,
+    });
+    state.handoff = {
+      transferId,
+      peer,
+      role: "sender",
+      attachment,
+      plan: h.offerCardPlan(attachment),
+      phase: "offered",
+      status: "Waiting for them to accept…",
+      fraction: 0,
+      objectUrl: null,
+    };
+    renderHandoffCard();
+    await sendShareSignal({ step: "offer", attachment });
+    return true;
+  }
+
+  /** Receiver: it arrived, it is what was offered, and it is theirs to save. */
+  function finishHandoffReceive(s, blob) {
+    const card = state.handoff;
+    s.pump?.stop();
+    // Closing is the message. There is no "got it all" step in the protocol and
+    // there does not need to be one: the receiver has nothing left to ask for,
+    // and a sender watching the channel close with everything queued has learned
+    // the only fact it wanted (see the sender's `onclose`).
+    try {
+      s.channel?.close();
+    } catch {
+      /* already gone; the sender will see that too */
+    }
+    if (!card || card.transferId !== s.transferId) return;
+    if (card.objectUrl) URL.revokeObjectURL(card.objectUrl);
+    card.objectUrl = URL.createObjectURL(blob);
+    card.phase = "done";
+    card.fraction = 1;
+    card.status = "It's here, and it's the file they sent.";
+    renderHandoffCard();
+  }
+
+  /**
+   * Drop the card and everything it was holding.
+   *
+   * The object URL is the received plaintext: revoked here rather than on the
+   * next transfer, so a file that has been saved (or dismissed unsaved) stops
+   * costing the webview anything — AUDIT S-4's rule that decrypted media must
+   * not outlive the moment it was wanted.
+   */
+  function clearHandoffCard() {
+    if (state.handoff?.objectUrl) URL.revokeObjectURL(state.handoff.objectUrl);
+    state.handoff = null;
+    renderHandoffCard();
+  }
+
+  /**
+   * The card: what is being offered, how far it has got, and the only buttons
+   * that can actually do something.
+   *
+   * Accept is absent — not disabled — for an offer this window cannot complete,
+   * because a button that cannot work is worse than no button. What it *is*
+   * cannot complete for comes from `offerCardPlan`, where it is tested.
+   */
+  function renderHandoffCard() {
+    const host = $("#handoff-card");
+    if (!host) return;
+    host.innerHTML = "";
+    const card = state.handoff;
+    if (!card || (state.activeContact && card.peer !== state.activeContact)) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const plan = card.plan;
+    const rows = [
+      el(
+        "div",
+        { class: "handoff-head" },
+        el("span", { class: "handoff-glyph", text: plan.glyph }),
+        el(
+          "div",
+          { class: "handoff-titles" },
+          el("div", {
+            class: "handoff-kind",
+            text:
+              card.role === "receiver"
+                ? `${displayName(card.peer)} is sending a ${plan.kind.toLowerCase()}`
+                : `Sending a ${plan.kind.toLowerCase()}`,
+          }),
+          el("div", { class: "handoff-detail", text: `${plan.name} · ${plan.sizeText}` }),
+        ),
+      ),
+      plan.caption ? el("div", { class: "handoff-caption", text: plan.caption }) : null,
+      plan.refusal ? el("div", { class: "handoff-refusal", text: plan.refusal }) : null,
+      card.status ? el("div", { class: "handoff-status", text: card.status }) : null,
+    ];
+    if (card.phase === "receiving" || card.phase === "sending" || card.fraction > 0) {
+      const bar = el("div", { class: "handoff-bar" });
+      const fill = el("div", { class: "handoff-bar-fill" });
+      fill.style.width = `${Math.round(Math.max(0, Math.min(1, card.fraction)) * 100)}%`;
+      bar.append(fill);
+      rows.push(bar);
+    }
+    const actions = el("div", { class: "handoff-actions" });
+    if (card.phase === "offered" && card.role === "receiver") {
+      if (plan.canAccept) {
+        actions.append(
+          el("button", {
+            class: "btn btn-primary btn-sm",
+            id: "handoff-accept",
+            text: "Accept",
+            onClick: acceptHandoffOffer,
+          }),
+        );
+      }
+      actions.append(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          id: "handoff-decline",
+          text: "Decline",
+          onClick: declineHandoffOffer,
+        }),
+      );
+    } else if (card.role === "sender" && card.phase !== "done" && card.phase !== "failed") {
+      actions.append(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          id: "handoff-withdraw",
+          text: "Cancel",
+          onClick: withdrawHandoffOffer,
+        }),
+      );
+    }
+    if (card.phase === "done" && card.objectUrl) {
+      // A real anchor with `download`: the browser writes the file, under a name
+      // this UI sanitised, to wherever that person's downloads go. Nothing in
+      // the webview ever treats the peer's name as a path.
+      const save = el("a", {
+        class: "btn btn-primary btn-sm",
+        id: "handoff-save",
+        href: card.objectUrl,
+        download: plan.name,
+        text: "Save",
+      });
+      actions.append(save);
+    }
+    if (card.phase === "done" || card.phase === "failed") {
+      actions.append(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          id: "handoff-dismiss",
+          text: "Dismiss",
+          onClick: clearHandoffCard,
+        }),
+      );
+    }
+    rows.push(actions);
+    host.append(...rows.filter(Boolean));
   }
 
   // ── Milestone 3: real-time event wiring ───────────────────────────────────
@@ -4319,6 +4904,8 @@
           showToast(p.by_peer ? "They left the session" : "Session ended", "info");
         } else if (p.type === "together_share") {
           onTogetherShare(p);
+        } else if (p.type === "attachment_handoff") {
+          onAttachmentHandoff(p);
         }
       });
     } catch (e) {
@@ -4746,6 +5333,17 @@
           mockFocus.reading = null;
           return had;
         }
+        // Large attachments. The 10 MB here is a stand-in for
+        // `comrade_core::handoff::route_for_bytes`, which is the only place the
+        // real answer comes from — this exists so browser preview can open the
+        // sheet and read the line, not so the rule lives in two places.
+        case "attachment_route_for_bytes":
+          return Number(args.totalBytes) > 10 * 1024 * 1024 ? "peer_to_peer" : "hosted";
+        case "attachment_handoff_send":
+          // Nothing to deliver to in preview: there is no second device, and
+          // pretending one accepted would be the one lie this mock must not
+          // tell — the whole point of the card is that a real peer has to agree.
+          return null;
 
         default:
           throw `mock backend: unknown command '${cmd}'`;
