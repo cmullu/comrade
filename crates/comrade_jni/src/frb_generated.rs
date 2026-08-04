@@ -3932,10 +3932,14 @@ impl SseDecode for crate::api::FoundProfileDto {
         let mut var_npub = <String>::sse_decode(deserializer);
         let mut var_name = <Option<String>>::sse_decode(deserializer);
         let mut var_about = <Option<String>>::sse_decode(deserializer);
+        let mut var_picture = <Option<String>>::sse_decode(deserializer);
+        let mut var_nip05 = <Option<String>>::sse_decode(deserializer);
         return crate::api::FoundProfileDto {
             npub: var_npub,
             name: var_name,
             about: var_about,
+            picture: var_picture,
+            nip05: var_nip05,
         };
     }
 }
@@ -4563,9 +4567,15 @@ impl SseDecode for crate::api::ProfileDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_npub = <String>::sse_decode(deserializer);
         let mut var_username = <Option<String>>::sse_decode(deserializer);
+        let mut var_about = <Option<String>>::sse_decode(deserializer);
+        let mut var_picture = <Option<String>>::sse_decode(deserializer);
+        let mut var_avatarCached = <bool>::sse_decode(deserializer);
         return crate::api::ProfileDto {
             npub: var_npub,
             username: var_username,
+            about: var_about,
+            picture: var_picture,
+            avatar_cached: var_avatarCached,
         };
     }
 }
@@ -6959,6 +6969,8 @@ impl SseEncode for crate::api::FoundProfileDto {
         <String>::sse_encode(self.npub, serializer);
         <Option<String>>::sse_encode(self.name, serializer);
         <Option<String>>::sse_encode(self.about, serializer);
+        <Option<String>>::sse_encode(self.picture, serializer);
+        <Option<String>>::sse_encode(self.nip05, serializer);
     }
 }
 
@@ -7480,6 +7492,9 @@ impl SseEncode for crate::api::ProfileDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.npub, serializer);
         <Option<String>>::sse_encode(self.username, serializer);
+        <Option<String>>::sse_encode(self.about, serializer);
+        <Option<String>>::sse_encode(self.picture, serializer);
+        <bool>::sse_encode(self.avatar_cached, serializer);
     }
 }
 

@@ -165,6 +165,36 @@ const PROFILE_TTL_SECS: u64 = 24 * 60 * 60;
 const PROFILE_NEGATIVE_TTL_SECS: u64 = 5 * 60;
 /// Upper bound on network fetches per [`ComradeRuntime::refresh_peer_profiles`] call.
 const PROFILE_REFRESH_CAP: usize = 16;
+/// Encrypted-store tree holding vetted avatar *bytes*, keyed by their SHA-256.
+///
+/// A separate tree, and content-addressed, for two reasons. `EncryptedStore::put`
+/// serialises through `serde_json`, so a `Vec<u8>` field on
+/// [`PeerProfileRecord`] would be stored as a JSON array of decimal numbers —
+/// roughly four bytes on disk per byte of image. And keying by hash means two
+/// peers who publish the same picture share one copy. `put_bytes` is the raw
+/// path; `DEVICE_SEED_KEY` already uses it for the same reason.
+const PEER_AVATAR_BLOBS_TREE: &str = "peer_avatar_blobs";
+/// Re-fetch a cached avatar after this long. Much longer than the profile TTL:
+/// people change their handle far more often than their picture, and each refetch
+/// costs a whole image.
+const AVATAR_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// How long a failed or refused avatar fetch is left alone before another try, so
+/// a dead URL is not re-attempted on every sweep.
+const AVATAR_NEGATIVE_TTL_SECS: u64 = 15 * 60;
+/// Upper bound on avatar downloads per refresh sweep. Lower than the profile
+/// cap: each of these is an image, not a line of JSON.
+const AVATAR_FETCH_CAP: usize = 8;
+/// The longest bio this build will store or publish. Matches the caption bound,
+/// so the two peer-chosen free-text fields agree.
+const MAX_ABOUT_LEN: usize = 512;
+/// Settings key for the user's own bio.
+///
+/// Not in the `StoredIdentity` label, which is where the @handle lives: that slot
+/// holds one string and already overloads `"primary"` as a legacy no-username
+/// marker. A second meaning on it would be a third thing one field means.
+const PROFILE_ABOUT_KEY: &str = "profile_about";
+/// Settings key for whether peer-published pictures may be fetched at all.
+const REMOTE_AVATARS_KEY: &str = "remote_avatars";
 /// Publish attempts before giving up until the next launch (see
 /// [`publish_profile_with_retry`]).
 const PUBLISH_ATTEMPTS: u32 = 5;
@@ -882,6 +912,62 @@ fn to_npub(pubkey: &str) -> String {
 pub struct ProfileDto {
     pub npub: String,
     pub username: Option<String>,
+    /// The user's own bio, as this device has it. Editable — see
+    /// [`ComradeRuntime::set_about`].
+    #[serde(default)]
+    pub about: Option<String>,
+    /// The `picture` URL currently published for this identity. Shown to the user
+    /// because it is what everybody else sees, and because it is public.
+    #[serde(default)]
+    pub picture: Option<String>,
+    /// Whether the bytes of that picture are in the local cache, i.e. whether a
+    /// real avatar can be drawn rather than initials.
+    #[serde(default)]
+    pub avatar_cached: bool,
+}
+
+/// Everything a profile page draws for a peer, from the local cache alone — one
+/// call, no relay, works with no connection at all.
+///
+/// Assembled from three places that a frontend would otherwise have to join
+/// itself: the saved contact (alias, comrade), the cached Kind-0 record (handle,
+/// bio, picture, nip05) and presence recomputed against the clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct PeerProfileDto {
+    pub npub: String,
+    /// The user-chosen local alias (petname). Empty = none set. First in the
+    /// display precedence alias → name → key, and the only one of the three the
+    /// peer cannot influence.
+    pub alias: String,
+    /// The peer's own published @handle — a self-declared claim, never an
+    /// identifier.
+    pub name: Option<String>,
+    pub about: Option<String>,
+    /// The `picture` URL as published. Handed over so a page can say "they have a
+    /// picture we have not loaded"; a frontend must never fetch it itself.
+    pub picture: Option<String>,
+    /// Unverified: the core does not check NIP-05, so this carries no flag a UI
+    /// could turn into a checkmark.
+    pub nip05: Option<String>,
+    pub lud16: Option<String>,
+    /// Whether vetted bytes for `picture` are cached right now — the
+    /// avatar-vs-initials test, and the only avatar question a renderer asks.
+    pub avatar_cached: bool,
+    pub contact: bool,
+    pub comrade: bool,
+    /// Whether this peer is blocked. Reported so the page can say so; there is no
+    /// unblock command to pair with it, and inventing a button would be a switch
+    /// that does nothing.
+    pub blocked: bool,
+    /// Recomputed against the current clock, never a stored flag — and always
+    /// `false` for a peer who is not a comrade, because presence only flows
+    /// between comrades.
+    pub online: bool,
+    pub last_seen_at: u64,
+    pub peer_marked_us: bool,
+    /// When the cached record was last written. Lets a page say "as of …" rather
+    /// than presenting a day-old bio as live truth.
+    pub updated_at: u64,
 }
 
 /// A profile discovered via relay search. `npub` is the identity; `name` is a
@@ -891,6 +977,14 @@ pub struct FoundProfileDto {
     pub npub: String,
     pub name: Option<String>,
     pub about: Option<String>,
+    /// The `picture` URL as published. Handed over so a row can show that a
+    /// picture *exists*; a frontend must never fetch it for a stranger.
+    #[serde(default)]
+    pub picture: Option<String>,
+    /// A NIP-05 address, unverified — the core does not check it, so no frontend
+    /// is given a boolean it could draw a checkmark from.
+    #[serde(default)]
+    pub nip05: Option<String>,
 }
 
 /// A saved contact: an npub pinned on first add (trust-on-first-use) with a
@@ -983,15 +1077,55 @@ pub struct MetricDto {
 /// self-declared, non-unique handle — a display aid, never an identifier.
 /// Every field defaults so rows written by older builds keep deserialising
 /// when the record grows (e.g. the planned avatar field).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PeerProfileRecord {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     about: Option<String>,
+    /// The `picture` URL exactly as the peer published it. Kept even when the
+    /// bytes are never fetched, so a profile page can say "they have a picture we
+    /// have not loaded" instead of implying they have none.
+    #[serde(default)]
+    picture: Option<String>,
+    #[serde(default)]
+    nip05: Option<String>,
+    #[serde(default)]
+    lud16: Option<String>,
+    /// SHA-256 of the *vetted* avatar bytes in [`PEER_AVATAR_BLOBS_TREE`].
+    /// `Some` is exactly "an avatar is cached", so a contact row costs the same
+    /// single store read it already paid for `name`.
+    #[serde(default)]
+    avatar_sha256: Option<String>,
+    /// The sniffed type of those bytes — never the one the host declared.
+    #[serde(default)]
+    avatar_mime: Option<String>,
+    #[serde(default)]
+    avatar_fetched_at: u64,
+    /// When a fetch last failed or was refused, driving the negative TTL so a
+    /// broken URL is not retried on every sweep.
+    #[serde(default)]
+    avatar_failed_at: u64,
     /// When this record was last written (unix seconds) — drives the TTL.
     #[serde(default)]
     updated_at: u64,
+}
+
+/// What a caller *learned* about a peer's profile — every field optional,
+/// because almost no caller learns all of them at once.
+///
+/// This exists so [`merge_peer_profile`] can be the only writer. A caller that
+/// means "I learned a name" must not thereby claim "and there is no bio", which
+/// is exactly what a whole-record write does.
+#[derive(Debug, Clone, Default)]
+struct PeerProfilePatch {
+    name: Option<String>,
+    about: Option<String>,
+    picture: Option<String>,
+    nip05: Option<String>,
+    lud16: Option<String>,
+    avatar: Option<(String, String)>,
+    avatar_failed: bool,
 }
 
 /// A private journal entry as the frontend sees it. Journal entries are
@@ -1412,10 +1546,24 @@ impl ComradeRuntime {
     /// Abort any in-flight profile-publish retry loop and start one for
     /// `name`. Last spawn wins — the relays only ever see the newest handle.
     fn spawn_profile_publish(&mut self, sabha: Arc<SabhaEngine>, name: String) {
+        // Leave: a launch republish and a handle change have no opinion about the
+        // bio, and must not overwrite one the user set from another Nostr client.
+        // This is the property `merged_metadata_preserves_foreign_profile_fields`
+        // has always pinned, kept intact now that clearing is expressible.
+        self.spawn_profile_publish_with(sabha, name, OwnedMetadataEdit::Leave);
+    }
+
+    /// As [`Self::spawn_profile_publish`], but saying what to do with the bio.
+    fn spawn_profile_publish_with(
+        &mut self,
+        sabha: Arc<SabhaEngine>,
+        name: String,
+        about: OwnedMetadataEdit,
+    ) {
         if let Some(task) = self.publish_task.take() {
             task.abort();
         }
-        self.publish_task = Some(tokio::spawn(publish_profile_with_retry(sabha, name)));
+        self.publish_task = Some(tokio::spawn(publish_profile_with_retry(sabha, name, about)));
     }
 
     // ── Event bus ──────────────────────────────────────────────────────────
@@ -2793,10 +2941,154 @@ impl ComradeRuntime {
     /// The local profile: npub plus the chosen @handle (if set).
     pub fn profile(&self) -> Result<ProfileDto, UiError> {
         let id = self.ui.current_identity().ok_or(UiError::NoIdentity)?;
+        // The bio and picture live in the store, so they read as `None` while the
+        // vault is locked — the same way this method already tolerates having no
+        // store at all rather than failing.
+        let own = self
+            .ui
+            .store_ref()
+            .and_then(|store| cached_peer_profile(store, &id.npub));
         Ok(ProfileDto {
             npub: id.npub,
             username: self.ui.username(),
+            about: self.ui.store_ref().and_then(stored_about),
+            picture: own.as_ref().and_then(|r| r.picture.clone()),
+            avatar_cached: own.is_some_and(|r| r.avatar_sha256.is_some()),
         })
+    }
+
+    /// Everything a profile page draws for one peer, from the local cache alone.
+    ///
+    /// No relay round trip, so it works offline and returns instantly; a caller
+    /// that wants fresher data runs [`Self::refresh_peer_profiles`] and reads
+    /// again. Accepts an npub or hex key, and resolves to the canonical npub the
+    /// contact is stored under.
+    pub fn peer_profile(&self, npub: &str) -> Result<PeerProfileDto, UiError> {
+        let canonical = self.canonical_contact_npub(npub)?;
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let contact = store
+            .get_contact(&canonical)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let record = cached_peer_profile(store, &canonical).unwrap_or_default();
+        let presence = store
+            .get_peer_presence(&canonical)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let now = now_secs();
+        let comrade = contact.as_ref().is_some_and(|c| c.comrade);
+        let blocked = store
+            .get_conversation_meta(&canonical)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.state == STATE_BLOCKED);
+        Ok(PeerProfileDto {
+            alias: contact
+                .as_ref()
+                .and_then(|c| user_alias(&c.petname, &canonical))
+                .unwrap_or_default(),
+            name: record.name,
+            about: record.about,
+            picture: record.picture,
+            nip05: record.nip05,
+            lud16: record.lud16,
+            avatar_cached: record.avatar_sha256.is_some(),
+            contact: contact.is_some(),
+            comrade,
+            blocked,
+            // Presence only flows between comrades, so a non-comrade is never
+            // "online" however recent their last beacon looks.
+            online: comrade
+                && presence
+                    .as_ref()
+                    .is_some_and(|p| p.online && is_online_at(p.expires_at, now)),
+            last_seen_at: presence.as_ref().map_or(0, |p| p.last_seen_at),
+            peer_marked_us: presence.as_ref().is_some_and(|p| p.peer_marked_us),
+            updated_at: record.updated_at,
+            npub: canonical,
+        })
+    }
+
+    /// A peer's cached avatar bytes, base64-encoded, or `None` to draw initials.
+    ///
+    /// Reads the encrypted store and never the network — so this is safe to call
+    /// while rendering, and calling it can never disclose anything to anyone. The
+    /// fetch that fills the cache is a separate, gated decision.
+    pub fn peer_avatar(&self, npub: &str) -> Result<Option<MediaBytesDto>, UiError> {
+        let canonical = self.canonical_contact_npub(npub)?;
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let Some(record) = cached_peer_profile(store, &canonical) else {
+            return Ok(None);
+        };
+        let (Some(sha), Some(mime)) = (record.avatar_sha256, record.avatar_mime) else {
+            return Ok(None);
+        };
+        let Some(bytes) = store
+            .get_bytes(PEER_AVATAR_BLOBS_TREE, &sha)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+        else {
+            // The record points at bytes that are gone. Initials, not an error:
+            // there is nothing the user could do about it and nothing is broken.
+            return Ok(None);
+        };
+        Ok(Some(MediaBytesDto {
+            mime_type: mime,
+            base64: B64.encode(bytes),
+        }))
+    }
+
+    /// Whether peer-published pictures may be fetched at all.
+    ///
+    /// Default **on**, which is a deliberate trade the owner made explicitly: a
+    /// profile page whose avatars are all initials until someone finds a setting
+    /// is a worse product, and the fetch is narrowed instead — accepted contacts
+    /// only, and every guard in [`comrade_core::avatar`]. The switch exists
+    /// because the cost is a real one and belongs to the user.
+    pub fn remote_avatars_enabled(&self) -> Result<bool, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .get::<bool>(SETTINGS_TREE, REMOTE_AVATARS_KEY)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .unwrap_or(true))
+    }
+
+    /// Turn peer-published picture fetching on or off.
+    pub fn set_remote_avatars_enabled(&self, on: bool) -> Result<(), UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        store
+            .put(SETTINGS_TREE, REMOTE_AVATARS_KEY, &on)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))
+    }
+
+    /// Set (or clear, with an empty string) this identity's bio, and republish.
+    ///
+    /// Stripped of control characters and bounded — our own text should not carry
+    /// a newline that would forge a second line on somebody else's profile page
+    /// either. Persisted locally first, so an offline edit sticks and republishes
+    /// on the next launch, which is how the handle already behaves.
+    pub async fn set_about(&mut self, about: &str) -> Result<ProfileDto, UiError> {
+        let cleaned = sanitise_untrusted_text(about, MAX_ABOUT_LEN);
+        {
+            let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+            if cleaned.is_empty() {
+                let _ = store.delete(SETTINGS_TREE, PROFILE_ABOUT_KEY);
+            } else {
+                store
+                    .put(SETTINGS_TREE, PROFILE_ABOUT_KEY, &cleaned)
+                    .map_err(|e| UiError::Storage(e.to_string()))?;
+            }
+            store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+        }
+        // Republish so the change reaches the network. An empty bio publishes as
+        // `Clear`, which is the case `Option<&str>` could not express at all.
+        if let (Some(sabha), Some(handle)) = (self.sabha.clone(), self.ui.username()) {
+            let edit = if cleaned.is_empty() {
+                OwnedMetadataEdit::Clear
+            } else {
+                OwnedMetadataEdit::Set(cleaned)
+            };
+            self.spawn_profile_publish_with(sabha, handle, edit);
+        }
+        self.profile()
     }
 
     /// Claim a display handle for this identity.
@@ -5686,13 +5978,97 @@ fn timestamped_store_id(created_at: u64) -> String {
     format!("{created_at:020}-{}", &tail[..12])
 }
 
-/// The peer's published @handle from the local profile cache, if known.
-fn cached_peer_name(store: &comrade_storage::EncryptedStore, npub: &str) -> Option<String> {
+/// This identity's own bio, from the settings tree.
+///
+/// A free function taking the store, matching the other cache readers here, so
+/// [`ComradeRuntime::profile`] can call it without caring whether the vault
+/// happens to be unlocked.
+fn stored_about(store: &comrade_storage::EncryptedStore) -> Option<String> {
+    store
+        .get::<String>(SETTINGS_TREE, PROFILE_ABOUT_KEY)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+}
+
+/// The peer's whole cached profile, not just the handle.
+///
+/// The accessor that was missing: `about` has been persisted by
+/// [`cache_found_profiles`] and [`ProfileRefresher::run`] since bios were first
+/// cached, and nothing could read it back — every reader went through
+/// [`cached_peer_name`], which takes `.name` and drops the rest. A profile page
+/// for an existing contact had no way to reach their bio at all.
+fn cached_peer_profile(
+    store: &comrade_storage::EncryptedStore,
+    npub: &str,
+) -> Option<PeerProfileRecord> {
     store
         .get::<PeerProfileRecord>(PEER_PROFILES_TREE, npub)
         .ok()
         .flatten()
-        .and_then(|r| r.name)
+}
+
+/// The peer's published @handle from the local profile cache, if known.
+fn cached_peer_name(store: &comrade_storage::EncryptedStore, npub: &str) -> Option<String> {
+    cached_peer_profile(store, npub).and_then(|r| r.name)
+}
+
+/// Fold what we just learned into the cached record, leaving alone anything the
+/// caller had no opinion about.
+///
+/// **The only writer of [`PEER_PROFILES_TREE`].** `store_profile_record` is the
+/// raw put and must not be called from anywhere else. The reason is a bug this
+/// replaces: `cache_pushed_peer_name` built a whole record with `about: None`, so
+/// a peer's profile-share envelope — which arrives when a request is accepted —
+/// erased any bio already cached for them. Nothing read `about`, so nothing
+/// noticed; the moment a profile page renders one, it becomes "their bio vanished
+/// when I accepted them". Every new field would have inherited the same shape.
+fn merge_peer_profile(
+    store: &comrade_storage::EncryptedStore,
+    npub: &str,
+    patch: PeerProfilePatch,
+) -> bool {
+    let mut record = cached_peer_profile(store, npub).unwrap_or_default();
+    let now = now_secs();
+    // A `None` in the patch means "learned nothing about this", never "it is
+    // empty" — the whole point of the merge.
+    if patch.name.is_some() {
+        record.name = patch.name;
+    }
+    if patch.about.is_some() {
+        record.about = patch.about;
+    }
+    if patch.picture.is_some() {
+        // A changed URL invalidates the cached bytes: they are the old picture.
+        if record.picture != patch.picture {
+            record.avatar_sha256 = None;
+            record.avatar_mime = None;
+            record.avatar_fetched_at = 0;
+            record.avatar_failed_at = 0;
+        }
+        record.picture = patch.picture;
+    }
+    if patch.nip05.is_some() {
+        record.nip05 = patch.nip05;
+    }
+    if patch.lud16.is_some() {
+        record.lud16 = patch.lud16;
+    }
+    if let Some((sha, mime)) = patch.avatar {
+        record.avatar_sha256 = Some(sha);
+        record.avatar_mime = Some(mime);
+        record.avatar_fetched_at = now;
+        record.avatar_failed_at = 0;
+    }
+    if patch.avatar_failed {
+        // Stamp the failure and nothing else. A refresh that could not reach the
+        // host must not throw away a picture we already have — the same reasoning
+        // the refresher already applies to a name a silent relay set did not
+        // return.
+        record.avatar_failed_at = now;
+    }
+    record.updated_at = now;
+    store_profile_record(store, npub, &record)
 }
 
 /// Legacy builds auto-filled an empty alias with the first 12 characters of
@@ -5720,6 +6096,10 @@ fn found_profile_dto(pk: &PublicKey, meta: Option<&Metadata>) -> FoundProfileDto
         npub: pk.to_bech32().unwrap_or_else(|_| pk.to_hex()),
         name: meta.and_then(display_name_of),
         about: meta.and_then(|m| m.about.clone()),
+        // Carried so a search row can say "has a picture" and still draw initials.
+        // Nothing is ever fetched for a stranger — see `may_fetch_avatar`.
+        picture: meta.and_then(|m| m.picture.clone()),
+        nip05: meta.and_then(|m| m.nip05.clone()),
     }
 }
 
@@ -5750,18 +6130,22 @@ fn cache_found_profiles(
     let Some(store) = store else {
         return;
     };
-    let now = now_secs();
     let mut wrote = false;
     for profile in found {
         if profile.name.is_none() {
             continue; // nothing displayable; don't shadow a future fetch
         }
-        let record = PeerProfileRecord {
-            name: profile.name.clone(),
-            about: profile.about.clone(),
-            updated_at: now,
-        };
-        wrote |= store_profile_record(store, &profile.npub, &record);
+        wrote |= merge_peer_profile(
+            store,
+            &profile.npub,
+            PeerProfilePatch {
+                name: profile.name.clone(),
+                about: profile.about.clone(),
+                picture: profile.picture.clone(),
+                nip05: profile.nip05.clone(),
+                ..Default::default()
+            },
+        );
     }
     if wrote {
         if let Err(e) = store.flush() {
@@ -5832,12 +6216,14 @@ fn ensure_pending(store: Option<&Arc<comrade_storage::EncryptedStore>>, peer_npu
 
 /// Cache a peer's shared display handle (from a profile-share envelope).
 fn cache_pushed_peer_name(store: &comrade_storage::EncryptedStore, npub: &str, name: &str) {
-    let record = PeerProfileRecord {
+    // A profile share carries a handle and nothing else, so it must claim nothing
+    // else. This used to write a whole record with `about: None` and erase a bio
+    // we already had — see `merge_peer_profile`.
+    let learned = PeerProfilePatch {
         name: Some(name.to_string()),
-        about: None,
-        updated_at: now_secs(),
+        ..Default::default()
     };
-    if store_profile_record(store, npub, &record) {
+    if merge_peer_profile(store, npub, learned) {
         let _ = store.flush();
     }
 }
@@ -7104,18 +7490,22 @@ impl ProfileRefresher {
         let mut changed = 0usize;
         for (npub, pk, previous) in stale {
             let meta = found.get(&pk);
-            let record = PeerProfileRecord {
-                // A silent relay set must not erase a name we already knew.
-                name: meta
-                    .and_then(display_name_of)
-                    .or_else(|| previous.as_ref().and_then(|p| p.name.clone())),
-                about: meta
-                    .and_then(|m| m.about.clone())
-                    .or_else(|| previous.as_ref().and_then(|p| p.about.clone())),
-                updated_at: now,
+            // A silent relay set must not erase what we already knew — which is
+            // now the merge's default rather than an `.or_else` per field, so a
+            // field added later inherits the behaviour instead of forgetting it.
+            let learned = PeerProfilePatch {
+                name: meta.and_then(display_name_of),
+                about: meta.and_then(|m| m.about.clone()),
+                picture: meta.and_then(|m| m.picture.clone()),
+                nip05: meta.and_then(|m| m.nip05.clone()),
+                lud16: meta.and_then(|m| m.lud16.clone()),
+                ..Default::default()
             };
-            let name_changed = record.name != previous.as_ref().and_then(|p| p.name.clone());
-            if store_profile_record(&self.store, &npub, &record) {
+            let name_changed = learned
+                .name
+                .as_ref()
+                .is_some_and(|n| Some(n) != previous.as_ref().and_then(|p| p.name.as_ref()));
+            if merge_peer_profile(&self.store, &npub, learned) {
                 wrote = true;
                 if name_changed {
                     changed += 1;
@@ -7127,7 +7517,140 @@ impl ProfileRefresher {
                 warn!("failed to flush profile cache: {e}");
             }
         }
+        self.refresh_avatars().await;
         Ok(changed)
+    }
+
+    /// Second phase: fetch the pictures the first phase just discovered.
+    ///
+    /// Folded into the same sweep rather than given its own entry point, because
+    /// this is the code that already learned the `picture` URLs, both frontends
+    /// already call `refresh_peer_profiles`, and one cap is easier to reason about
+    /// than two.
+    ///
+    /// Every skip below is a deliberate gate, not an optimisation:
+    ///
+    /// - the setting is off → nothing is fetched, at all, for anyone;
+    /// - the peer is not accepted and not a saved contact → opening a stranger's
+    ///   profile must never make this device call a host they chose;
+    /// - a blocked peer → we do not fetch anything on their behalf;
+    /// - the bytes are already cached and fresh → an avatar changes far less often
+    ///   than a handle, hence [`AVATAR_TTL_SECS`];
+    /// - a recent failure → [`AVATAR_NEGATIVE_TTL_SECS`] stops a dead URL being
+    ///   retried on every single sweep.
+    ///
+    /// Errors are never propagated: a picture that will not load is a cosmetic
+    /// problem, and failing the whole profile refresh over one would cost the
+    /// handles too.
+    async fn refresh_avatars(&self) {
+        let enabled = self
+            .store
+            .get::<bool>(SETTINGS_TREE, REMOTE_AVATARS_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(true);
+        if !enabled {
+            return;
+        }
+        let now = now_secs();
+        let mut due: Vec<(String, String)> = Vec::new();
+        let contacts: std::collections::HashSet<String> = self
+            .store
+            .list_contacts()
+            .map(|cs| cs.into_iter().map(|c| c.npub).collect())
+            .unwrap_or_default();
+        for npub in contacts.iter() {
+            if due.len() >= AVATAR_FETCH_CAP {
+                break;
+            }
+            let Some(record) = cached_peer_profile(&self.store, npub) else {
+                continue;
+            };
+            let Some(url) = record.picture.clone() else {
+                continue;
+            };
+            // Blocked is checked here rather than filtered above, so the reason a
+            // peer was skipped stays visible at the point of the decision.
+            let blocked = self
+                .store
+                .get_conversation_meta(npub)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.state == STATE_BLOCKED);
+            if blocked {
+                continue;
+            }
+            let cached_fresh = record.avatar_sha256.is_some()
+                && now.saturating_sub(record.avatar_fetched_at) < AVATAR_TTL_SECS;
+            if cached_fresh {
+                continue;
+            }
+            if now.saturating_sub(record.avatar_failed_at) < AVATAR_NEGATIVE_TTL_SECS {
+                continue;
+            }
+            due.push((npub.clone(), url));
+        }
+        if due.is_empty() {
+            return;
+        }
+        let mut wrote = false;
+        for (npub, url) in due {
+            match comrade_core::media::fetch_avatar(&url).await {
+                Ok((bytes, mime)) => {
+                    let sha = comrade_core::crypto::sha256_hex(&bytes);
+                    if let Err(e) = self.store.put_bytes(PEER_AVATAR_BLOBS_TREE, &sha, &bytes) {
+                        warn!("failed to cache avatar bytes: {e}");
+                        continue;
+                    }
+                    wrote |= merge_peer_profile(
+                        &self.store,
+                        &npub,
+                        PeerProfilePatch {
+                            avatar: Some((sha, mime)),
+                            ..Default::default()
+                        },
+                    );
+                }
+                Err(e) => {
+                    // Stamp the failure and keep whatever picture we already had.
+                    tracing::debug!("avatar fetch failed for {npub}: {e}");
+                    wrote |= merge_peer_profile(
+                        &self.store,
+                        &npub,
+                        PeerProfilePatch {
+                            avatar_failed: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        if wrote {
+            if let Err(e) = self.store.flush() {
+                warn!("failed to flush avatar cache: {e}");
+            }
+        }
+    }
+}
+
+/// An owned [`comrade_core::sabha::MetadataEdit`], for crossing a task boundary.
+///
+/// `MetadataEdit` borrows, which is right at the publish call and wrong for a
+/// `tokio::spawn` that outlives the caller's stack frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OwnedMetadataEdit {
+    Leave,
+    Set(String),
+    Clear,
+}
+
+impl OwnedMetadataEdit {
+    fn as_edit(&self) -> comrade_core::sabha::MetadataEdit<'_> {
+        match self {
+            OwnedMetadataEdit::Leave => comrade_core::sabha::MetadataEdit::Leave,
+            OwnedMetadataEdit::Set(v) => comrade_core::sabha::MetadataEdit::Set(v),
+            OwnedMetadataEdit::Clear => comrade_core::sabha::MetadataEdit::Clear,
+        }
     }
 }
 
@@ -7139,13 +7662,24 @@ impl ProfileRefresher {
 /// nothing. `publish_profile` itself waits (bounded) for a connection; this
 /// wrapper keeps trying across transient failures. It is also spawned on
 /// every launch (Kind-0 is replaceable, so republishing is idempotent).
-async fn publish_profile_with_retry(sabha: Arc<SabhaEngine>, name: String) {
+async fn publish_profile_with_retry(
+    sabha: Arc<SabhaEngine>,
+    name: String,
+    about: OwnedMetadataEdit,
+) {
     // Make sure dials were at least initiated, even if the feed loop that
     // normally calls connect() hasn't run yet. Idempotent.
     sabha.connect().await;
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 1..=PUBLISH_ATTEMPTS {
-        match sabha.publish_profile(&name, None).await {
+        let patch = comrade_core::sabha::ProfilePatch {
+            name: &name,
+            about: about.as_edit(),
+            // A handle or bio publish never touches the picture: that has its own
+            // path, and clobbering it here would drop an avatar set elsewhere.
+            picture: comrade_core::sabha::MetadataEdit::Leave,
+        };
+        match sabha.publish_profile_patch(patch).await {
             Ok(_) => {
                 tracing::info!(attempt, "profile handle published to relays");
                 return;
@@ -8295,6 +8829,379 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_profile_joins_the_contact_the_cache_and_presence() {
+        // The one call a profile page makes. Without it a frontend would have to
+        // join three stores itself, and each one would join them differently.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+
+        rt.add_contact(&peer, "Chas").unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                name: Some("charlie".into()),
+                about: Some("gardener".into()),
+                picture: Some("https://example.com/c.png".into()),
+                nip05: Some("charlie@example.com".into()),
+                ..Default::default()
+            },
+        );
+
+        let p = rt.peer_profile(&peer).unwrap();
+        assert_eq!(p.npub, peer);
+        assert_eq!(p.alias, "Chas", "the alias the *user* chose comes first");
+        assert_eq!(p.name.as_deref(), Some("charlie"));
+        assert_eq!(p.about.as_deref(), Some("gardener"));
+        assert_eq!(p.picture.as_deref(), Some("https://example.com/c.png"));
+        assert_eq!(p.nip05.as_deref(), Some("charlie@example.com"));
+        assert!(p.contact);
+        assert!(!p.comrade);
+        assert!(!p.blocked);
+        assert!(
+            !p.avatar_cached,
+            "a URL is not bytes; nothing has been fetched"
+        );
+        assert!(
+            !p.online,
+            "presence only flows between comrades, so a plain contact is never online"
+        );
+        assert!(p.updated_at > 0, "the page can say how fresh this is");
+    }
+
+    #[tokio::test]
+    async fn a_stranger_has_a_profile_too_rather_than_an_error() {
+        // Opening the profile of someone who is not a contact is the ordinary
+        // case for a message request — it must render, not fail.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+
+        let p = rt.peer_profile(&peer).unwrap();
+        assert_eq!(p.npub, peer, "the key is the one thing always known");
+        assert_eq!(p.alias, "");
+        assert_eq!(p.name, None);
+        assert!(!p.contact);
+        assert!(!p.avatar_cached);
+    }
+
+    #[tokio::test]
+    async fn peer_profile_and_peer_avatar_need_an_unlocked_vault() {
+        let rt = ComradeRuntime::new();
+        assert!(matches!(
+            rt.peer_profile("npub1anything"),
+            Err(UiError::VaultLocked) | Err(UiError::Engine(_))
+        ));
+        assert!(matches!(
+            rt.remote_avatars_enabled(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.set_remote_avatars_enabled(false),
+            Err(UiError::VaultLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_avatar_record_pointing_at_missing_bytes_reads_as_initials() {
+        // Not an error: there is nothing the user could do, and nothing is broken.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                avatar: Some(("sha-with-no-blob".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(rt.peer_avatar(&peer).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_cached_avatar_comes_back_base64_with_its_sniffed_type() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        store
+            .put_bytes(PEER_AVATAR_BLOBS_TREE, "abc", b"\x89PNG-ish")
+            .unwrap();
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                avatar: Some(("abc".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+
+        let bytes = rt.peer_avatar(&peer).unwrap().expect("cached avatar");
+        assert_eq!(bytes.mime_type, "image/png");
+        assert_eq!(B64.decode(bytes.base64).unwrap(), b"\x89PNG-ish");
+        assert!(rt.peer_profile(&peer).unwrap().avatar_cached);
+    }
+
+    #[tokio::test]
+    async fn remote_avatars_default_to_on_and_survive_a_round_trip() {
+        // Default on is an explicit owner decision, not an accident of `unwrap_or`.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(rt.remote_avatars_enabled().unwrap(), "default is on");
+        rt.set_remote_avatars_enabled(false).unwrap();
+        assert!(!rt.remote_avatars_enabled().unwrap());
+        rt.set_remote_avatars_enabled(true).unwrap();
+        assert!(rt.remote_avatars_enabled().unwrap());
+    }
+
+    #[tokio::test]
+    async fn set_about_strips_controls_bounds_length_and_clears_on_empty() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        rt.ui.generate_identity().unwrap();
+
+        let p = rt.set_about("  gardener\n, occasionally  ").await.unwrap();
+        assert_eq!(
+            p.about.as_deref(),
+            Some("gardener, occasionally"),
+            "our own text should not carry a newline onto somebody else's page either"
+        );
+
+        let long = "x".repeat(MAX_ABOUT_LEN + 50);
+        let p = rt.set_about(&long).await.unwrap();
+        assert_eq!(p.about.as_deref().map(str::len), Some(MAX_ABOUT_LEN));
+
+        // Empty clears — the case a plain `Option<&str>` could not express.
+        let p = rt.set_about("   ").await.unwrap();
+        assert_eq!(p.about, None);
+        assert_eq!(rt.profile().unwrap().about, None, "and it stays cleared");
+    }
+
+    #[tokio::test]
+    async fn a_profile_share_no_longer_erases_a_cached_bio() {
+        // The bug this fixes, and it fails before the merge writer exists.
+        //
+        // `cache_pushed_peer_name` built a whole `PeerProfileRecord` with
+        // `about: None`, so a peer's profile-share envelope — which arrives
+        // exactly when a message request is accepted — wiped any bio already
+        // cached for them. Nothing read `about`, so nothing ever noticed. The
+        // moment a profile page renders one it becomes "their bio vanished when I
+        // accepted them", reported as data loss and reproducible only by
+        // accepting a request.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+
+        // A search or a refresh cached everything the relay knew.
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                name: Some("charlie".into()),
+                about: Some("gardener, occasionally".into()),
+                picture: Some("https://example.com/c.png".into()),
+                nip05: Some("charlie@example.com".into()),
+                ..Default::default()
+            },
+        );
+
+        // Then they accepted, and pushed us their handle over the DM channel.
+        cache_pushed_peer_name(store, &peer, "charlie");
+
+        let after = cached_peer_profile(store, &peer).expect("record still there");
+        assert_eq!(after.name.as_deref(), Some("charlie"));
+        assert_eq!(
+            after.about.as_deref(),
+            Some("gardener, occasionally"),
+            "a share that carries only a handle must not claim there is no bio"
+        );
+        assert_eq!(
+            after.picture.as_deref(),
+            Some("https://example.com/c.png"),
+            "nor that there is no picture"
+        );
+        assert_eq!(after.nip05.as_deref(), Some("charlie@example.com"));
+    }
+
+    #[tokio::test]
+    async fn profile_rows_written_by_older_builds_still_deserialise() {
+        // The record grew from three fields to ten. Every one of them defaults, so
+        // a row a shipped build wrote must still read back — this puts the exact
+        // bytes an older build stored, rather than a struct this build built, which
+        // is the only version of the test that proves anything.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        for (npub, json, name, about, updated) in [
+            (
+                "npub_three_field",
+                br#"{"name":"charlie","about":"bio","updated_at":7}"#.as_slice(),
+                Some("charlie"),
+                Some("bio"),
+                7u64,
+            ),
+            // Older still: before `about` was cached at all.
+            (
+                "npub_one_field",
+                br#"{"name":"dana"}"#.as_slice(),
+                Some("dana"),
+                None,
+                0,
+            ),
+        ] {
+            store.put_bytes(PEER_PROFILES_TREE, npub, json).unwrap();
+            let r = cached_peer_profile(store, npub)
+                .unwrap_or_else(|| panic!("{npub} no longer deserialises"));
+            assert_eq!(r.name.as_deref(), name);
+            assert_eq!(r.about.as_deref(), about);
+            assert_eq!(r.updated_at, updated);
+            assert_eq!(
+                r.picture, None,
+                "a field the writer never knew reads as None"
+            );
+            assert_eq!(r.avatar_sha256, None);
+            assert_eq!(r.avatar_failed_at, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changed_picture_url_invalidates_the_cached_bytes() {
+        // The bytes we hold are the *old* picture. Keeping them against a new URL
+        // would show a contact's previous avatar indefinitely.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        let peer = "npub_picture_change";
+
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/one.png".into()),
+                avatar: Some(("deadbeef".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+        assert!(cached_peer_profile(store, peer)
+            .unwrap()
+            .avatar_sha256
+            .is_some());
+
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/two.png".into()),
+                ..Default::default()
+            },
+        );
+        let after = cached_peer_profile(store, peer).unwrap();
+        assert_eq!(
+            after.picture.as_deref(),
+            Some("https://example.com/two.png")
+        );
+        assert_eq!(
+            after.avatar_sha256, None,
+            "the cached bytes are the old picture and must not survive the URL change"
+        );
+
+        // Re-publishing the *same* URL must not throw away a good cache, or every
+        // refresh sweep would re-download every avatar.
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                avatar: Some(("cafe".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/two.png".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cached_peer_profile(store, peer)
+                .unwrap()
+                .avatar_sha256
+                .as_deref(),
+            Some("cafe"),
+            "an unchanged URL is not a reason to refetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_avatar_fetch_keeps_the_picture_already_cached() {
+        // A refresh that could not reach the host must not blank an avatar we
+        // already have — the same discipline the name refresh already applies.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        let peer = "npub_failed_fetch";
+
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/a.png".into()),
+                avatar: Some(("abc123".into(), "image/webp".into())),
+                ..Default::default()
+            },
+        );
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                avatar_failed: true,
+                ..Default::default()
+            },
+        );
+
+        let after = cached_peer_profile(store, peer).unwrap();
+        assert_eq!(after.avatar_sha256.as_deref(), Some("abc123"));
+        assert_eq!(after.avatar_mime.as_deref(), Some("image/webp"));
+        assert!(
+            after.avatar_failed_at > 0,
+            "the failure is stamped so the negative TTL can hold off a retry"
+        );
+    }
+
+    #[tokio::test]
     async fn legacy_placeholder_petnames_no_longer_mask_published_names() {
         // Old builds auto-filled an empty alias with the first 12 chars of
         // the npub. Those placeholders must read as "no alias" so the peer's
@@ -8334,8 +9241,8 @@ mod tests {
                 &peer,
                 &PeerProfileRecord {
                     name: Some("charlie".into()),
-                    about: None,
                     updated_at: 1,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -8386,8 +9293,8 @@ mod tests {
                 &peer,
                 &PeerProfileRecord {
                     name: Some("charlie".into()),
-                    about: None,
                     updated_at: 1,
+                    ..Default::default()
                 },
             )
             .unwrap();

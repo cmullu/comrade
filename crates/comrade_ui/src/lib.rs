@@ -52,9 +52,10 @@ pub use runtime::{
     CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto,
     IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto, RuntimeHandles,
-    SakhaStatusDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto,
-    TogetherInviteDto, TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
+    MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
+    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto,
+    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
+    TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

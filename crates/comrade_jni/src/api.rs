@@ -81,7 +81,7 @@ pub use comrade_ui::{
     AttachmentHandoffDto, BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto,
     ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
     IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto,
+    MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto, ProfileDto, ReactionDto,
     ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
     TogetherSessionDto, TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
@@ -190,6 +190,9 @@ pub struct _MessageRequestDto {
 pub struct _ProfileDto {
     pub npub: String,
     pub username: Option<String>,
+    pub about: Option<String>,
+    pub picture: Option<String>,
+    pub avatar_cached: bool,
 }
 
 #[frb(mirror(FoundProfileDto))]
@@ -197,6 +200,27 @@ pub struct _FoundProfileDto {
     pub npub: String,
     pub name: Option<String>,
     pub about: Option<String>,
+    pub picture: Option<String>,
+    pub nip05: Option<String>,
+}
+
+#[frb(mirror(PeerProfileDto))]
+pub struct _PeerProfileDto {
+    pub npub: String,
+    pub alias: String,
+    pub name: Option<String>,
+    pub about: Option<String>,
+    pub picture: Option<String>,
+    pub nip05: Option<String>,
+    pub lud16: Option<String>,
+    pub avatar_cached: bool,
+    pub contact: bool,
+    pub comrade: bool,
+    pub blocked: bool,
+    pub online: bool,
+    pub last_seen_at: u64,
+    pub peer_marked_us: bool,
+    pub updated_at: u64,
 }
 
 #[frb(mirror(ContactDto))]
@@ -927,6 +951,32 @@ pub fn profile() -> Result<ProfileDto, UiError> {
 
 pub async fn set_username(name: String) -> Result<ProfileDto, UiError> {
     runtime().write().await.set_username(&name).await
+}
+
+/// Set (or clear, with an empty string) this identity's bio, and republish.
+pub async fn set_about(about: String) -> Result<ProfileDto, UiError> {
+    runtime().write().await.set_about(&about).await
+}
+
+/// Everything a profile page draws for one peer, from the local cache alone —
+/// no relay round trip, so it answers offline and immediately.
+pub fn peer_profile(npub: String) -> Result<PeerProfileDto, UiError> {
+    runtime().blocking_read().peer_profile(&npub)
+}
+
+/// A peer's cached avatar bytes, or `None` to draw initials. Reads the encrypted
+/// store and never the network, so calling it discloses nothing to anyone.
+pub fn peer_avatar(npub: String) -> Result<Option<MediaBytesDto>, UiError> {
+    runtime().blocking_read().peer_avatar(&npub)
+}
+
+/// Whether peer-published pictures may be fetched at all (default on).
+pub fn remote_avatars_enabled() -> Result<bool, UiError> {
+    runtime().blocking_read().remote_avatars_enabled()
+}
+
+pub fn set_remote_avatars_enabled(on: bool) -> Result<(), UiError> {
+    runtime().blocking_read().set_remote_avatars_enabled(on)
 }
 
 pub fn add_contact(npub: String, alias: String) -> Result<ContactDto, UiError> {

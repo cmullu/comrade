@@ -18,8 +18,8 @@ use comrade_ui::{
     AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto, CallSessionDto,
     ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto,
     FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto,
-    MediaMessageDto, MessageDto, MessageRequestDto, PresenceDto, ProfileDto, ReadingDto,
-    SakhaStatusDto, TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    MediaMessageDto, MessageDto, MessageRequestDto, PeerProfileDto, PresenceDto, ProfileDto,
+    ReadingDto, SakhaStatusDto, TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -692,6 +692,71 @@ pub async fn set_username(
         .await
         .set_username(&name)
         .await
+        .map_err(|e| e.to_string())
+}
+
+/// Set (or clear, with an empty string) this identity's bio, and republish.
+#[tauri::command]
+pub async fn set_about(
+    state: tauri::State<'_, Runtime>,
+    about: String,
+) -> Result<ProfileDto, String> {
+    state
+        .write()
+        .await
+        .set_about(&about)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Everything a profile page draws for one peer, from the local cache alone —
+/// no relay round trip, so it answers offline and immediately.
+#[tauri::command]
+pub async fn peer_profile(
+    state: tauri::State<'_, Runtime>,
+    npub: String,
+) -> Result<PeerProfileDto, String> {
+    state
+        .read()
+        .await
+        .peer_profile(&npub)
+        .map_err(|e| e.to_string())
+}
+
+/// A peer's cached avatar bytes, base64, or `None` to draw initials. Reads the
+/// encrypted store and never the network.
+#[tauri::command]
+pub async fn peer_avatar(
+    state: tauri::State<'_, Runtime>,
+    npub: String,
+) -> Result<Option<MediaBytesDto>, String> {
+    state
+        .read()
+        .await
+        .peer_avatar(&npub)
+        .map_err(|e| e.to_string())
+}
+
+/// Whether peer-published pictures may be fetched at all (default on).
+#[tauri::command]
+pub async fn remote_avatars_enabled(state: tauri::State<'_, Runtime>) -> Result<bool, String> {
+    state
+        .read()
+        .await
+        .remote_avatars_enabled()
+        .map_err(|e| e.to_string())
+}
+
+/// Turn peer-published picture fetching on or off.
+#[tauri::command]
+pub async fn set_remote_avatars_enabled(
+    state: tauri::State<'_, Runtime>,
+    on: bool,
+) -> Result<(), String> {
+    state
+        .read()
+        .await
+        .set_remote_avatars_enabled(on)
         .map_err(|e| e.to_string())
 }
 
