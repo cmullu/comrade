@@ -401,4 +401,27 @@
     <string name="attention_explainer_title">About Focus</string>
     <string name="attention_explainer_body">These tools are for practising attention, not for fixing it, and Comrade will not pretend otherwise. There is decent evidence that using your phone more deliberately, reading longer things, and sleeping better all help you concentrate — and no good evidence that any app “restores” anyone\'s brain. So you\'ll find no scores here, no levels, and nothing telling you that you failed. Everything stays on this phone.</string>
     <string name="attention_explainer_ok">Got it</string>
+
+    <!-- Watch/listen together (docs/TOGETHER.md). The status wording is
+         deliberately never "synced" or "in sync" — we do not know that, and a
+         green tick beside two players a second apart is the small lie this app
+         avoids. -->
+    <string name="together_notification_title">Watching together</string>
+    <string name="together_notification_with">With %1$s</string>
+    <string name="together_leave">Leave</string>
+    <string name="together_title">Watch together</string>
+    <string name="together_invite_action">Watch together</string>
+    <string name="together_pick_file">Open a file you both have</string>
+    <string name="together_invited">%1$s wants to watch %2$s with you</string>
+    <string name="together_join">Join</string>
+    <string name="together_not_now">Not now</string>
+    <string name="together_waiting_for_them">waiting for them to open it</string>
+    <string name="together_open_your_copy">open your copy to start</string>
+    <string name="together_together">together</string>
+    <string name="together_catching_up">catching up\u2026</string>
+    <string name="together_lost_track">we\u2019ve lost track of them</string>
+    <string name="together_they_paused">%1$s paused</string>
+    <!-- The honest limit, shown permanently under the player. -->
+    <string name="together_accuracy_note">Positions travel over the network, so you\u2019ll be within about a second of each other \u2014 not frame-perfect.</string>
+    <string name="together_background_note">This keeps playing when you leave the app.</string>
 </resources>

@@ -831,6 +831,59 @@ object ComradeCore {
         rethrowing("Hangup") { runBlocking { ffi.hangupCall(peer, callId, media, reason) } }
     }
 
+    // ── Watch/listen together ───────────────────────────────────────────────
+    //
+    // The engine, the clock arithmetic and every timing rule live in
+    // `comrade_core::together`; these are the thinnest possible wrappers over
+    // it. See `docs/TOGETHER.md`.
+
+    /** Invite `peer` to watch or listen to `content` together. */
+    fun togetherStartTyped(peer: String, content: uniffi.comrade_core.TogetherContent) {
+        rethrowing("Watch together") { runBlocking { ffi.togetherStart(peer, content) } }
+    }
+
+    /** Accept the invitation we were sent. */
+    fun togetherJoinTyped() {
+        rethrowing("Join") { runBlocking { ffi.togetherJoin() } }
+    }
+
+    /**
+     * Play, pause or seek — one call, because all three are one statement.
+     *
+     * `effectiveInMs` is a promise that we will apply the same change on our own
+     * player at that instant. A native player can defer a few tens of
+     * milliseconds imperceptibly, and then both sides change state on the *same*
+     * tick instead of one chasing the other. Pass 0 to apply immediately and let
+     * the other side project instead.
+     */
+    fun togetherSetStateTyped(posMs: Long, playing: Boolean, effectiveInMs: Long) {
+        rethrowing("Together state") {
+            runBlocking {
+                ffi.togetherSetState(posMs.toULong(), playing, effectiveInMs.toULong())
+            }
+        }
+    }
+
+    /** Leave the session. */
+    fun togetherEndTyped() {
+        rethrowing("Leave") { runBlocking { ffi.togetherEnd() } }
+    }
+
+    /**
+     * Tell the core where our player is. Synchronous and cheap by design — it is
+     * called several times a second from the UI thread and sends nothing; see
+     * the Rust doc comment for why it is skipped under contention.
+     */
+    fun togetherReportPosition(posMs: Long, playing: Boolean, outputLatencyMs: Long) {
+        runCatching {
+            ffi.togetherReportPosition(posMs.toULong(), playing, outputLatencyMs.toULong())
+        }
+    }
+
+    /** The live session, if there is one. */
+    fun togetherSessionTyped(): uniffi.comrade_ui.TogetherSessionDto? =
+        runCatching { ffi.togetherSession() }.getOrNull()
+
     data class CallRecordInfo(
         val id: String,
         val peer: String,

@@ -111,9 +111,48 @@ the round trip of a public relay routinely exceeds 300 ms, so §8.2's "target
 | an embedded player that can only seek | ±1.2–2.5 s |
 | over a future WebRTC data channel (§8.1) | ±20–60 ms plausible |
 
+`ClockFilter` also tracks **frequency**, not just phase. NTP disciplines both,
+and an offset alone is correct only at the instant it was measured — it then
+decays at whatever the two crystals differ by. Regressing offset against time
+gives that rate in ppm and carries it forward, which is what lets the heartbeat
+be slow *and* the sync be tight instead of trading one for the other. It refuses
+to guess from fewer than four probes or a baseline under 45 s (over ten seconds,
+a millisecond of jitter reads as 100 ppm — five times any real crystal), and
+clamps the result, because a clock being *stepped* is a phase event and
+extrapolating it as a frequency would push the playhead forever.
+
 The clock estimate is an **input** to `sync_verdict`, not baked into it, so a
 lower-latency transport tightens all of this with no policy change and no new
 tests.
+
+### Timelines, not positions — the thing everyone else gets wrong
+
+Syncplay and the browser watch-party services trade *positions* — "I am at
+42:00" — and act on arrival. That is wrong by exactly the flight time, on every
+command, and it is invisible because both sides agree on the number they
+exchanged. It is also why none of them beat about a hundred milliseconds.
+
+A position means nothing without the instant it was true at. So a `state` command
+carries `effective_at_ms`, and the receiver **evaluates that timeline at its own
+now** rather than adopting a stale number: a command that took 400 ms to arrive
+lands 400 ms further along. On a transport fast enough to schedule slightly ahead
+— the local mesh — the sender instead names an instant a few tens of milliseconds
+out and *both* players change state on the same tick, which is how SMPTE and
+AES67 do it. `command_apply` returns exactly those two cases and nothing else.
+
+### Ear to ear, not decoder to decoder
+
+What a listener hears is the decoder position minus that device's audio output
+latency: 20–100 ms on Android, and different between handsets. Two players
+agreeing perfectly on decoder position can still be a tenth of a second apart in
+the room — the error no browser-based implementation can even see. Both sides
+report theirs in the heartbeat, comparison is ear-to-ear, and a seek targets the
+decoder position that lands *audibly* in step.
+
+Stated honestly: on Android this figure is currently an **estimate** from the
+device's low-latency buffer properties, not a measurement, because `MediaPlayer`
+does not hand out its `AudioTrack`. Zero means unmeasured. A true measurement
+needs an `AudioTrack` we own — a Media3 migration — and is the honest follow-up.
 
 One more thing that decides what the UI may claim: **listening together is
 perceptually much harder than watching together.** Two people in one room half
@@ -159,6 +198,14 @@ rather than corrected against.
 | `TOGETHER_SESSION_TTL_SECS` | 45 s | More than four heartbeats, so a couple of dropped beacons cannot end a session someone is still watching. A phone that dies mid-film sends no goodbye; this is what that costs. |
 | `TOGETHER_SIGNAL_MAX_AGE_SECS` | 60 s | Tighter than the call channel's 90 s, because a replayed call offer produces a ring a human can decline while a replayed playhead moves someone's player with no confirmation step. Wider than the TTL, so the TTL stays the single authority on when a session ends. |
 | `TOGETHER_COMMAND_MIN_INTERVAL_MS` | 400 ms | A scrub drag emits ~10 positions a second; sending all of them would be a burst of gift wraps describing somewhere nobody stopped. |
+
+**Transport.** Together signals prefer the **local mesh** when the Saathi engine
+is running, falling back to a relay otherwise. This is the single biggest lever
+on how tight the sync can be, because the deadband is floored by half the round
+trip and a LAN hop is ~1–5 ms against a relay's hundreds. The honest limitation:
+the mesh is only up in the off-grid workspace today. Starting it for a session is
+engine-lifecycle work (AUDIT A1 / `docs/COMMS_ARCHITECTURE.md` ADR-4) and was
+deliberately left out of this change.
 
 **Why the cadence is a real decision, not a default.** Every heartbeat is a
 persistent gift-wrapped event, and the vault inbox rewinds two days on *every*
@@ -230,6 +277,7 @@ And a permanent line under the stage:
 | `comrade_ui::runtime` | `together_start` / `together_join` / `together_set_state` / `together_end` (each a `RuntimeHandles` twin, so no bridge holds the lock across a relay round trip), `together_report_position`, `together_session`, the receive arm in `dispatch_incoming_dm`, the session loop, and five `BridgeEvent` variants. |
 | `comrade_jni`, `desktop/src-tauri` | The same calls over uniffi / flutter_rust_bridge / Tauri commands. `together_report_position` is the one that is **synchronous and skipped under contention**, because a player calls it several times a second from its UI thread — the trade `note_draft` already makes. |
 | `desktop/ui/together_sync.mjs` | Echo suppression, the verdict→player plan, and the status wording. Pure, 20 `node --test` cases. |
+| `android/…/together/` | `TogetherDecisions` (pure: echo ledger, scrubber rules, the two `MediaPlayer` footguns — 20 JVM tests mirroring the desktop vectors), `TogetherPlayer` (`MediaPlayer` + `SEEK_CLOSEST`), `TogetherManager` (session, audio focus, service control), `TogetherService` (foreground `mediaPlayback` + framework `MediaSession`). |
 
 Tests worth knowing about: `crates/comrade_ui/tests/two_peer_integration.rs`
 drives two real runtimes over one in-process relay and proves both halves —
@@ -241,29 +289,36 @@ session in step says nothing at all.
 
 ## 9. What is built, and what is not
 
-Built and tested: the protocol, the view-model, both FFI bridges, the Tauri
-commands, and the desktop decision module.
+Built and tested: the protocol and all of its arithmetic, the view-model, both
+FFI bridges, the Tauri commands, the desktop decision module, and the **Android
+frontend end to end** — player, screen, entry point in the conversation bar, and
+a foreground service so a session keeps playing when the app is backgrounded.
 
-**Not built yet**, and stated here rather than discovered:
+Android specifics worth knowing:
+
+- **`MediaPlayer`, not Media3.** The deciding detail is `seekTo(long,
+  SEEK_CLOSEST)`, which needs API 26 and `minSdk` is 26. The plain `seekTo(int)`
+  lands on the nearest sync frame — with 5–10 s keyframe spacing that is a sync
+  failure dressed up as a working feature. No new dependency.
+- **Background playback is real**, via `FOREGROUND_SERVICE_MEDIA_PLAYBACK` and a
+  **framework** `MediaSession` (`android.media.session`, API 21) rather than
+  `androidx.media3.session` — same media-key routing, no ~2 MB dependency for
+  adaptive streaming this feature does not use.
+- **Audio focus is honoured**: losing it pauses *and tells the peer*, so what
+  they see is "they paused" rather than an unexplained drift.
+
+**Not built**, and stated here rather than discovered:
 
 - **The desktop player surface.** The commands and the decision module are in
   place; the `<video>` element, the file picker and the DOM wiring are not, so
-  there is no way to *start* a session from the desktop UI yet.
-- **Android.** No screen. The five `BridgeEvent` variants are dropped
-  explicitly in `RelayConnectionService`, with a comment saying so — a
-  notification about a session nobody can see or leave would be worse than
-  silence. When it lands, `MediaPlayer` is the right player (`seekTo(long,
-  SEEK_CLOSEST)` needs API 26 and `minSdk` is 26; the plain `seekTo(int)` lands
-  on the nearest sync frame, which with 5–10 s keyframe spacing is a sync
-  failure dressed up as a working feature). No new dependency needed.
-- **YouTube.** The envelope and the id validation support it; no frontend
-  embeds one. When it lands on desktop it must be a **bare cross-origin iframe
-  driven by `postMessage`**, with the CSP widened by exactly `frame-src
+  there is still no way to *start* a session from the desktop UI.
+- **YouTube.** The envelope and the id validation support it; no frontend embeds
+  one. When it lands on desktop it must be a **bare cross-origin iframe driven by
+  `postMessage`**, with the CSP widened by exactly `frame-src
   https://www.youtube-nocookie.com` — and **not** by loading YouTube's
   `iframe_api`, which would need `script-src` and put Google-controlled
   JavaScript inside our own origin, the origin where `withGlobalTauri` exposes
-  `window.__TAURI__` and therefore every registered command. That distinction is
-  the one line to hold.
+  every registered Tauri command. That distinction is the one line to hold.
 
   It also needs saying plainly what a YouTube session costs, because it is the
   first time this app would contact a third party during ordinary use: both
@@ -273,11 +328,21 @@ commands, and the desktop decision module.
   is unavoidable by construction. `youtube-nocookie.com` avoids ad cookies and
   watch history; it does not prevent the IP-level record. It should ship off by
   default, behind one disclosure that says this.
-- **Background playback on Android.** Deliberately out of v1 when it lands:
-  it needs `FOREGROUND_SERVICE_MEDIA_PLAYBACK` and, on targetSdk 34, an active
-  `MediaSession` — which drags a media3 dependency in through the side door.
-  Foreground-only, and the UI should say "leaving the app pauses for both of
-  you" rather than let it be discovered.
+- **A measured output latency on Android** — see §3; today it is an estimate.
+- **Auto-starting the mesh for a session**, so the millisecond tier is available
+  outside the off-grid workspace — see §5.
+
+**On "nanosecond" sync**, since it was asked for directly: it is not reachable by
+any software path on two phones, and the reason is three independent floors, each
+orders of magnitude above it. The transport (a relay is hundreds of milliseconds;
+even the LAN mesh is ~1–5 ms; PTP reaches tens of nanoseconds only with
+hardware-timestamping NICs Android does not expose). The player (Android audio
+output latency is 20–100 ms, and `AudioTrack.getTimestamp` is accurate to about a
+millisecond — you cannot place a playhead more precisely than the player can
+report or act on it). And perception (comb filtering becomes audible around
+5–30 ms; lip-sync tolerance is ±22 ms). What this design does reach — roughly a
+millisecond on a shared network — is below every one of those thresholds, which
+is the point at which there is nothing left to win.
 
 ## 10. Deliberately out of scope
 

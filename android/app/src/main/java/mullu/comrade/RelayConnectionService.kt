@@ -24,6 +24,8 @@ import mullu.comrade.call.CallManager
 import mullu.comrade.call.CallUiState
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.shortNpub
+import uniffi.comrade_core.SyncVerdict
+import uniffi.comrade_core.TogetherContent
 import uniffi.comrade_ui.BridgeEvent
 
 /**
@@ -469,16 +471,53 @@ object ChatEventRouter {
             // Sakha/ledger sync isn't wired into the Android UI yet
             // (desktop-only via Tauri commands) — drop, like before.
             is BridgeEvent.LedgerUpdated -> Unit
-            // Watch/listen together has no Android surface yet: the engine, the
-            // view-model and both bridges are in place, but no screen consumes
-            // these. Dropped deliberately rather than half-handled — a
-            // notification about a session nobody can see or leave would be
-            // worse than silence. See docs/TOGETHER.md.
-            is BridgeEvent.TogetherInvited,
-            is BridgeEvent.TogetherJoined,
-            is BridgeEvent.TogetherCommand,
-            is BridgeEvent.TogetherCorrection,
-            is BridgeEvent.TogetherEnded -> Unit
+            // Watch/listen together — see docs/TOGETHER.md. Routed straight to
+            // TogetherManager rather than to a screen, so a session survives the
+            // UI being disposed; the manager owns the player and the foreground
+            // service that keeps it alive while backgrounded.
+            is BridgeEvent.TogetherInvited -> {
+                val invite = event.v1
+                val content = invite.content
+                mullu.comrade.together.TogetherManager.onInvited(
+                    peer = invite.peer,
+                    peerLabel = peerLabel(invite.peer),
+                    title = when (content) {
+                        is TogetherContent.LocalFile -> content.label ?: ""
+                        is TogetherContent.Youtube -> content.videoId
+                    },
+                    youtube = content is TogetherContent.Youtube,
+                )
+            }
+
+            is BridgeEvent.TogetherJoined -> mullu.comrade.together.TogetherManager.onJoined()
+
+            is BridgeEvent.TogetherCommand -> {
+                val cmd = event.v1
+                mullu.comrade.together.TogetherManager.onCommand(
+                    posMs = cmd.posMs.toLong(),
+                    playing = cmd.playing,
+                    applyInMs = cmd.applyInMs.toLong(),
+                )
+            }
+
+            is BridgeEvent.TogetherCorrection -> {
+                val correction = event.v1
+                when (val verdict = correction.verdict) {
+                    is SyncVerdict.Hold -> Unit
+                    is SyncVerdict.Adopt -> mullu.comrade.together.TogetherManager.onCorrection(
+                        "adopt", verdict.posMs.toLong(), 1f, verdict.playing,
+                    )
+                    is SyncVerdict.Nudge -> mullu.comrade.together.TogetherManager.onCorrection(
+                        "nudge", 0, verdict.rate.toFloat(), true,
+                    )
+                    is SyncVerdict.Seek -> mullu.comrade.together.TogetherManager.onCorrection(
+                        "seek", verdict.posMs.toLong(), 1f, true,
+                    )
+                }
+            }
+
+            is BridgeEvent.TogetherEnded ->
+                mullu.comrade.together.TogetherManager.onEnded(byPeer = event.byPeer)
         }
     }
 }
