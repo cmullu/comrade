@@ -69,6 +69,19 @@
     })
     .catch(() => {});
 
+  // ── Profile page rules (desktop/ui/profile_view.mjs) ───────────────────────
+  // Which rows a profile shows, how a media history splits into tabs, what the
+  // action row offers, how far the avatar shrinks. Pure and tested there, and
+  // mirrored into Kotlin and Dart — see the note on `callDecisionsReady` for why
+  // this file cannot use a static `import`.
+  let profileView = null;
+  const profileViewReady = import("./profile_view.mjs")
+    .then((m) => {
+      profileView = m;
+      return m;
+    })
+    .catch(() => null);
+
   // ── Attachment rules (desktop/ui/attachment_caption.mjs) ───────────────────
   // What a new attachment is captioned with, and how one reads when something
   // quotes it. Mirrored in the Flutter app and on Android — same cases, same
@@ -245,6 +258,12 @@
     // peer pubkey -> [{ id?, content?, media?, created_at, outgoing, upi, status?, reply_to? }]
     dms: new Map(),
     activeContact: null,
+    // Profile page: the npub being looked at, or null for your own. The tab to
+    // return to is remembered because a profile is not itself a tab — it is
+    // reached from context and must go back where it came from.
+    profileTarget: null,
+    profileReturnTab: "vault",
+    profileMediaTab: "media",
     coupleRole: "sakha",
     partnerNpub: null,
     // Milestone 6: comms
@@ -821,11 +840,411 @@
     $("#view-sabha").hidden = name !== "sabha";
     $("#view-vault").hidden = name !== "vault";
     $("#view-focus").hidden = name !== "focus";
+    $("#view-profile").hidden = name !== "profile";
     // The countdown only has to tick while it is being looked at; a session
     // left running behind another tab is still authoritative in the engine,
     // which is where the remaining time comes from on the next paint.
     if (name === "focus") loadFocus();
     else stopFocusTick();
+  }
+
+  // ── Profile page ──────────────────────────────────────────────────────────
+  //
+  // Every decision on this screen comes from `profile_view.mjs`; what is here is
+  // only the DOM. Nothing is fetched for a stranger: the avatar comes out of the
+  // encrypted store via `peer_avatar`, and whether a *fetch* was ever allowed was
+  // decided in the core, not here.
+
+  /** Open the profile of `npub`, or your own when null. */
+  async function openProfile(npub) {
+    // Only remember where to go back to if we are not already on the profile —
+    // otherwise following a link from one profile to another traps the user.
+    if (!document.body.dataset.profileOpen) {
+      state.profileReturnTab =
+        document.querySelector(".tab.is-active")?.dataset.tab || "vault";
+    }
+    document.body.dataset.profileOpen = "1";
+    state.profileTarget = npub || null;
+    state.profileMediaTab = "media";
+    switchTab("profile");
+    await renderProfile();
+  }
+
+  function closeProfile() {
+    delete document.body.dataset.profileOpen;
+    state.profileTarget = null;
+    switchTab(state.profileReturnTab || "vault");
+  }
+
+  /** Revoke and forget the object URL the header avatar is using, if any. */
+  let profileAvatarUrl = null;
+  function releaseProfileAvatar() {
+    if (profileAvatarUrl) {
+      URL.revokeObjectURL(profileAvatarUrl);
+      profileAvatarUrl = null;
+    }
+  }
+
+  async function renderProfile() {
+    const rules = profileView || (await profileViewReady);
+    if (!rules) return; // module still loading; the caller will paint again
+    const isSelf = !state.profileTarget;
+    const peer = state.profileTarget;
+
+    const profile = isSelf
+      ? await safeInvoke("current_profile", {}, { silent: true }).catch(() => null)
+      : await safeInvoke("peer_profile", { npub: peer }, { silent: true }).catch(() => null);
+    if (!profile) {
+      $("#profile-title").textContent = "Profile unavailable";
+      $("#profile-status").textContent = "";
+      $("#profile-rows").replaceChildren();
+      $("#profile-actions").replaceChildren();
+      $("#profile-tabs").replaceChildren();
+      $("#profile-shared-body").replaceChildren();
+      return;
+    }
+
+    // ── Header ──
+    const title = isSelf
+      ? profile.username
+        ? `@${String(profile.username).replace(/^@+/, "")}`
+        : "You"
+      : peerTitleOf(profile);
+    $("#profile-title").textContent = title;
+    $("#profile-status").textContent = isSelf
+      ? "This is you"
+      : peerStatusLine(profile);
+
+    await paintProfileAvatar(profile, isSelf, title);
+
+    // ── Action row ──
+    const actions = rules.actionRow({
+      isSelf,
+      isContact: !!profile.contact,
+      isComrade: !!profile.comrade,
+      isMuted: false,
+      isBlocked: !!profile.blocked,
+    });
+    $("#profile-actions").replaceChildren(
+      ...actions.map((a) => profileActionButton(a, profile, isSelf)),
+    );
+    // A blocked peer gets an explanation instead of a row of buttons, because
+    // `actionRow` deliberately returns nothing for them: there is no unblock
+    // command in the core, and a button that cannot work is worse than absent.
+    if (!actions.length && profile.blocked) {
+      $("#profile-actions").append(
+        el("p", {
+          class: "profile-blocked-note",
+          text: "You blocked this person. Nothing from them reaches you.",
+        }),
+      );
+    }
+
+    // ── Info rows ──
+    const rows = rules.infoRows(profile, { isSelf });
+    $("#profile-rows").replaceChildren(
+      ...rows.map((r) => profileInfoRow(r, isSelf)),
+    );
+
+    // ── Shared media ──
+    if (isSelf) {
+      $("#profile-tabs").replaceChildren();
+      $("#profile-shared-body").replaceChildren();
+      return;
+    }
+    await renderSharedMedia(rules, peer);
+  }
+
+  /** alias → published handle → shortened key, the D1 precedence. */
+  function peerTitleOf(profile) {
+    if (profile.alias) return profile.alias;
+    if (profile.name) return `@${String(profile.name).replace(/^@+/, "")}`;
+    return shortNpub(profile.npub);
+  }
+
+  /**
+   * The line under the name. Delegates to `presenceLabel`, the same function the
+   * conversation header uses, rather than spelling out a second "last seen"
+   * vocabulary — two of those on one frontend is the drift this repo keeps
+   * closing. It returns "" for a non-comrade, which is the one case a profile
+   * page has to answer for itself: on a header the blank is fine, on a page
+   * whose subject is this person it reads as missing.
+   */
+  function peerStatusLine(profile) {
+    const label = presenceLabel({
+      comrade: !!profile.comrade,
+      online: !!profile.online,
+      lastSeenAt: profile.last_seen_at || 0,
+      peerMarkedUs: !!profile.peer_marked_us,
+    });
+    if (label) return label;
+    return profile.contact ? "Contact" : "Not a contact";
+  }
+
+  /**
+   * Draw the avatar: the cached picture when there is one, otherwise the
+   * generated initial. `peer_avatar` reads the encrypted store and never the
+   * network, so this cannot disclose anything by being called.
+   */
+  async function paintProfileAvatar(profile, isSelf, title) {
+    const node = $("#profile-avatar");
+    releaseProfileAvatar();
+    node.replaceChildren();
+    node.style.background = avatarGradient(profile.npub || "");
+    node.textContent = (title || "?").replace(/^@/, "").slice(0, 1).toUpperCase();
+    if (!profile.avatar_cached) return;
+    const bytes = await safeInvoke(
+      "peer_avatar",
+      { npub: profile.npub },
+      { silent: true },
+    ).catch(() => null);
+    if (!bytes || !bytes.base64) return;
+    try {
+      const blob = base64ToBlob(bytes.base64, bytes.mime_type || "image/png");
+      profileAvatarUrl = URL.createObjectURL(blob);
+      node.replaceChildren(
+        el("img", { class: "profile-avatar-img", src: profileAvatarUrl, alt: "" }),
+      );
+    } catch {
+      // Keep the initial. A picture that will not decode is cosmetic.
+    }
+  }
+
+  /** A deterministic gradient from the key, mirroring Android's AvatarPalette. */
+  function avatarGradient(seed) {
+    let h = 0;
+    for (const ch of String(seed)) h = (h * 31 + ch.codePointAt(0)) % 360;
+    return `linear-gradient(135deg, hsl(${h} 55% 42%), hsl(${(h + 40) % 360} 55% 30%))`;
+  }
+
+  function profileInfoRow(row, isSelf) {
+    const label = {
+      bio: "Bio",
+      handle: "Handle",
+      nip05: "Nostr address",
+      lud16: "Lightning address",
+      key: "Public key",
+    }[row.kind] || row.kind;
+    const value = row.value
+      ? el("span", { class: row.kind === "key" ? "mono" : null, text: row.value })
+      : el("span", { class: "profile-row-empty", text: "Not set" });
+    const controls = [];
+    if (row.copyable && row.value) {
+      controls.push(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "Copy",
+          onclick: () => copyToClipboard(row.value, `${label} copied`),
+        }),
+      );
+    }
+    if (isSelf && row.kind === "bio") {
+      controls.push(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: row.value ? "Edit" : "Add",
+          onclick: () => editOwnBio(row.value),
+        }),
+      );
+    }
+    if (isSelf && row.kind === "handle") {
+      controls.push(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "Edit",
+          onclick: () => editOwnHandle(row.value),
+        }),
+      );
+    }
+    return el(
+      "div",
+      { class: `profile-row profile-row-${row.kind}` },
+      el("span", { class: "profile-row-label", text: label }),
+      el("span", { class: "profile-row-value" }, value),
+      el("span", { class: "profile-row-controls" }, controls),
+    );
+  }
+
+  function profileActionButton(action, profile, isSelf) {
+    const peer = profile.npub;
+    const spec = {
+      message: ["Message", () => openConversationFromProfile(peer)],
+      call: ["Call", () => startCallFromProfile(peer)],
+      mute: ["Mute", null],
+      unmute: ["Unmute", null],
+      addContact: ["Add contact", () => addContactFromProfile(peer)],
+      addComrade: ["Add comrade", () => setComradeFromProfile(peer, true)],
+      removeComrade: ["Remove comrade", () => setComradeFromProfile(peer, false)],
+      block: ["Block", () => blockFromProfile(peer)],
+      edit: ["Edit profile", () => editOwnHandle(profile.username || "")],
+      copyKey: ["Copy key", () => copyToClipboard(profile.npub, "Public key copied")],
+    }[action];
+    if (!spec) return null;
+    const [label, handler] = spec;
+    return el("button", {
+      class: `btn ${action === "block" ? "btn-danger" : "btn-ghost"} profile-action`,
+      text: label,
+      // Mute has no desktop backend yet. Rendered disabled and titled, rather
+      // than omitted, because `actionRow` says a contact has one — an absent
+      // control would make the three frontends disagree about the row.
+      disabled: handler ? null : "true",
+      title: handler ? null : "Muting a conversation is not wired up on desktop yet",
+      onclick: handler || undefined,
+    });
+  }
+
+  async function renderSharedMedia(rules, peer) {
+    const [media, messages] = await Promise.all([
+      safeInvoke("media_with", { peer }, { silent: true }).catch(() => []),
+      safeInvoke("messages_with", { peer }, { silent: true }).catch(() => []),
+    ]);
+    const buckets = rules.bucketMedia(media || []);
+    const links = rules.collectLinks(messages || []);
+    const counts = rules.mediaTabCounts(media || []);
+
+    const tabs = [
+      ["media", "Media", counts.media],
+      ["files", "Files", counts.files],
+      ["links", "Links", links.length],
+      ["voice", "Voice", counts.voice],
+    ];
+    if (!tabs.some(([k]) => k === state.profileMediaTab)) {
+      state.profileMediaTab = rules.initialMediaTab(media || []);
+    }
+    $("#profile-tabs").replaceChildren(
+      ...tabs.map(([key, label, n]) =>
+        el("button", {
+          class: `profile-tab${state.profileMediaTab === key ? " is-active" : ""}`,
+          role: "tab",
+          "aria-selected": state.profileMediaTab === key ? "true" : "false",
+          text: `${label} ${n}`,
+          onclick: async () => {
+            state.profileMediaTab = key;
+            await renderProfile();
+          },
+        }),
+      ),
+    );
+
+    const body = $("#profile-shared-body");
+    const tab = state.profileMediaTab;
+    if (tab === "links") {
+      body.replaceChildren(
+        ...(links.length
+          ? links.map((l) =>
+              el(
+                "div",
+                { class: "profile-link-row" },
+                // The host is the prominent element on purpose: the rule returns
+                // it separately so `https://evil.example/?next=paypal.com` cannot
+                // be presented as a PayPal link.
+                el("span", { class: "profile-link-host", text: l.host }),
+                el("span", { class: "profile-link-url mono", text: l.url }),
+                el("button", {
+                  class: "btn btn-ghost btn-sm",
+                  text: "Copy",
+                  onclick: () => copyToClipboard(l.url, "Link copied"),
+                }),
+              ),
+            )
+          : [emptySharedNote("No links yet.")]),
+      );
+      return;
+    }
+    const items = buckets[tab] || [];
+    body.replaceChildren(
+      ...(items.length
+        ? items.map((m) => sharedMediaRow(m))
+        : [emptySharedNote(`Nothing in ${tab} yet.`)]),
+    );
+  }
+
+  function emptySharedNote(text) {
+    return el("p", { class: "profile-empty", text });
+  }
+
+  /**
+   * One row of a shared-media tab. Deliberately not a thumbnail grid: drawing
+   * one would mean downloading and decrypting every blob on the tab, and this
+   * screen is not where someone asked for that. The bubble in the thread already
+   * loads on demand and this row links back to it.
+   */
+  function sharedMediaRow(m) {
+    const kind = m.mime_type || "";
+    const size = Number(m.size || 0);
+    return el(
+      "div",
+      { class: "profile-media-row" },
+      el("span", { class: "profile-media-kind", text: kind || "file" }),
+      el("span", {
+        class: "profile-media-caption",
+        text: m.caption || (m.outgoing ? "Sent" : "Received"),
+      }),
+      el("span", {
+        class: "profile-media-meta",
+        text: `${size ? `${Math.max(1, Math.round(size / 1024))} KB · ` : ""}${relTime(m.created_at)}`,
+      }),
+    );
+  }
+
+  async function copyToClipboard(text, note) {
+    try {
+      await navigator.clipboard.writeText(String(text));
+      showToast(note || "Copied", "success");
+    } catch {
+      showToast("Could not reach the clipboard", "error");
+    }
+  }
+
+  async function editOwnHandle(current) {
+    const next = window.prompt("Your @handle (3–24 letters, numbers or _)", current || "");
+    if (next == null) return;
+    const saved = await safeInvoke("set_username", { name: next });
+    if (saved) {
+      showToast("Handle saved", "success");
+      await renderProfile();
+    }
+  }
+
+  async function editOwnBio(current) {
+    const next = window.prompt("Your bio (leave empty to clear)", current || "");
+    if (next == null) return;
+    const saved = await safeInvoke("set_about", { about: next });
+    if (saved) {
+      showToast(next.trim() ? "Bio saved" : "Bio cleared", "success");
+      await renderProfile();
+    }
+  }
+
+  async function addContactFromProfile(peer) {
+    await safeInvoke("add_contact", { npub: peer, alias: "" });
+    await loadConversations().catch(() => {});
+    await renderProfile();
+  }
+
+  async function setComradeFromProfile(peer, on) {
+    await safeInvoke("set_comrade", { npub: peer, comrade: on });
+    await renderProfile();
+  }
+
+  async function blockFromProfile(peer) {
+    if (!window.confirm("Block this person? Nothing from them will reach you.")) return;
+    await safeInvoke("block_conversation", { peer });
+    showToast("Blocked", "success");
+    closeProfile();
+  }
+
+  function openConversationFromProfile(peer) {
+    closeProfile();
+    switchTab("vault");
+    selectContact(peer);
+  }
+
+  function startCallFromProfile(peer) {
+    closeProfile();
+    switchTab("vault");
+    selectContact(peer);
+    showToast("Use the call button in the conversation header", "info");
   }
 
   // ── Milestone 2/3: Vault DMs ──────────────────────────────────────────────
@@ -1034,7 +1453,15 @@
     const peer = state.activeContact;
     const presence = presenceOf(peer);
     head.append(
-      el("span", { class: "chat-peer mono", text: displayName(peer) }),
+      // Tapping the name opens the profile — Telegram Desktop's own gesture, and
+      // the place the npub now lives in full since the owner call of 2026-07-30
+      // took it out of this header.
+      el("button", {
+        class: "chat-peer mono chat-peer-btn",
+        text: displayName(peer),
+        title: "View profile",
+        onClick: () => openProfile(peer),
+      }),
       el("span", {
         class: "chat-presence" + (presence.online ? " is-online" : ""),
         // Honest about the mutual model: a comrade who hasn't chosen back
@@ -4936,18 +5363,31 @@
       i.type = i.type === "password" ? "text" : "password";
     });
 
-    $("#identity-chip").addEventListener("click", async () => {
+    // The chip now opens your profile rather than copying. The copy affordance
+    // is not lost — it is the key row on the page it opens, which is also the
+    // only place the npub is shown in full.
+    $("#identity-chip").addEventListener("click", () => {
       if (!state.identity) return;
-      try {
-        await navigator.clipboard.writeText(state.identity.npub);
-        showToast("npub copied to clipboard", "success");
-      } catch {
-        showToast("Clipboard unavailable", "error");
-      }
+      openProfile(null);
+    });
+    $("#profile-back").addEventListener("click", closeProfile);
+    // The collapsing header. The *curve* lives in `profile_view.mjs` so all three
+    // frontends shrink identically; this only feeds it a scroll fraction and
+    // writes the result to a custom property.
+    $("#view-profile").addEventListener("scroll", () => {
+      if (!profileView) return;
+      const view = $("#view-profile");
+      const travel = 120; // px of scroll over which the header fully collapses
+      const fraction = Math.min(1, view.scrollTop / travel);
+      const size = profileView.collapsedAvatarSize(fraction, 96, 40);
+      $("#profile-avatar").style.setProperty("--profile-avatar-size", `${size}px`);
     });
 
     for (const t of document.querySelectorAll(".tab"))
-      t.addEventListener("click", () => switchTab(t.dataset.tab));
+      t.addEventListener("click", () => {
+        delete document.body.dataset.profileOpen;
+        switchTab(t.dataset.tab);
+      });
 
     $("#chitthi-input").addEventListener("input", updateCount);
     $("#broadcast-btn").addEventListener("click", handleBroadcast);
@@ -5173,7 +5613,47 @@
         case "announce_presence":
           return 0;
         case "current_profile":
-          return { npub: "npub1mockdev0identity00000000000000000000000000000000", username: "mockuser" };
+          return {
+            npub: "npub1mockdev0identity00000000000000000000000000000000",
+            username: "mockuser",
+            about: "Mock identity, for browser preview.",
+            picture: null,
+            avatar_cached: false,
+          };
+        // Enough of a peer for the profile page to be a real check in the
+        // browser preview rather than an empty box.
+        case "peer_profile":
+          return {
+            npub: args.npub,
+            alias: "",
+            name: "mockpeer",
+            about: "Gardener, occasionally. https://example.com/blog",
+            picture: null,
+            nip05: "mockpeer@example.com",
+            lud16: null,
+            avatar_cached: false,
+            contact: true,
+            comrade: false,
+            blocked: false,
+            online: false,
+            last_seen_at: nowSecs() - 3600,
+            peer_marked_us: false,
+            updated_at: nowSecs() - 120,
+          };
+        case "peer_avatar":
+          return null;
+        case "remote_avatars_enabled":
+          return true;
+        case "set_remote_avatars_enabled":
+          return null;
+        case "set_about":
+          return {
+            npub: "npub1mockdev0identity00000000000000000000000000000000",
+            username: "mockuser",
+            about: args.about || null,
+            picture: null,
+            avatar_cached: false,
+          };
         case "extract_payments": {
           const out = [];
           let m;

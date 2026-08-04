@@ -2493,3 +2493,246 @@ code {
   display: flex;
   gap: 0.5rem;
 }
+
+/* ─── Profile page ────────────────────────────────────────────────────────────
+   Reached from the identity chip and from a conversation header, never from the
+   tab rail — so it has no `.tab` of its own and `switchTab` correctly leaves
+   every rail button deselected while it is open.
+
+   Every value below is an existing `:root` token. No new hex, and no
+   `prefers-color-scheme` block: this file is dark-only by design and a second
+   colour source is how two platforms start rendering visibly different
+   products (SCREEN_INVENTORY D25). */
+.view-profile {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.profile-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-back {
+  align-self: flex-start;
+}
+
+.profile-identity {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* The avatar shrinks with the header on scroll. The *curve* is
+   `collapsedAvatarSize` in profile_view.mjs, shared with the other two
+   frontends; the custom property is only how this renderer applies it. */
+.profile-avatar {
+  --profile-avatar-size: 96px;
+  flex: 0 0 auto;
+  width: var(--profile-avatar-size);
+  height: var(--profile-avatar-size);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: calc(var(--profile-avatar-size) / 2.4);
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  transition: width 120ms linear, height 120ms linear, font-size 120ms linear;
+}
+
+.profile-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-titles {
+  min-width: 0;
+}
+
+.profile-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.profile-status {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.profile-blocked-note {
+  margin: 0;
+  color: var(--warn);
+  font-size: 0.9rem;
+}
+
+.profile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1.25rem;
+}
+
+.profile-rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.profile-row {
+  display: grid;
+  grid-template-columns: 9rem 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.7rem 0.9rem;
+  background: var(--panel);
+}
+
+.profile-row + .profile-row {
+  border-top: 1px solid var(--border);
+}
+
+.profile-row-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* The key is the one row that is never shortened and never omitted. It wraps
+   rather than ellipsing, because half a key is not a key. */
+.profile-row-key .profile-row-value {
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+
+.profile-row-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-row-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.profile-row-controls {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.profile-tabs {
+  display: flex;
+  gap: 0.35rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.profile-tab {
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 0.35rem 0.7rem;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.profile-tab:hover {
+  background: var(--bg-elev);
+}
+
+.profile-tab.is-active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.profile-shared-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.profile-media-row,
+.profile-link-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.profile-media-kind,
+.profile-media-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.profile-media-caption {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The host is prominent and the full URL is quiet, deliberately: the rule hands
+   them back as separate fields so `https://evil.example/?next=paypal.com`
+   cannot be presented as a PayPal link. */
+.profile-link-host {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.profile-link-url {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-empty {
+  margin: 0;
+  padding: 1rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* The conversation header's name is a button now. It must not look like one. */
+.chat-peer-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-peer-btn:hover {
+  text-decoration: underline;
+}
