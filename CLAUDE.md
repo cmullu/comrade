@@ -157,6 +157,12 @@ There is no project-level team config file to write: teams are runtime state
 under `~/.claude/teams/<session>/`, generated per session and not to be
 pre-authored. Roles and spawn prompts are the reusable parts.
 
+**Five agents is the ceiling** — for teams and for dynamic workflows alike.
+`workflowSizeGuideline` is `small` (fewer than 5 agents), which also drops the
+large-run warning threshold from 25 to 5. Five is the natural cap because there
+are exactly five owned file sets; a sixth agent owns nothing and only adds
+conflict risk. Prefer three.
+
 A `TaskCompleted` hook blocks closing a task that adds a `BridgeEvent` variant
 without updating the Kotlin and Dart matches, since the Rust side compiles clean
 and neither lane is in `ci.yml`.

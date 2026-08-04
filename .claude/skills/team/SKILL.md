@@ -86,11 +86,23 @@ the likely cause. Ask for the evidence that would falsify each claim.
 
 ## Sizing and cost
 
-3–5 teammates, 5–6 tasks each. Each teammate is a separate Claude instance with
-its own context, so cost scales roughly linearly — a team is worth it for
-cross-layer features, review panels and murky bugs, and wasteful for anything
-sequential or single-file. Prefer a subagent when only the result matters and no
-worker needs to talk to another.
+**Five agents is the ceiling, not a target.** Prefer three. Each teammate is a
+separate Claude instance with its own context, so cost scales roughly linearly,
+and three focused teammates beat five scattered ones. 5–6 tasks each.
+
+Five is also the natural cap here rather than an arbitrary one: there are exactly
+five owned file sets, so a sixth teammate has nothing of its own to edit and
+becomes a conflict risk. The `feature` formation uses all five only when a change
+genuinely reaches every surface — if it touches two, spawn two.
+
+The same ceiling applies to dynamic workflows: `.claude/settings.json` sets
+`workflowSizeGuideline` to `small` (fewer than 5 agents), which also drops the
+large-run warning threshold from 25 to 5. It is advice to the model, not an
+enforced cap, so do not exceed it without saying why.
+
+A team is worth it for cross-layer features, review panels and murky bugs, and
+wasteful for anything sequential or single-file. Prefer a subagent when only the
+result matters and no worker needs to talk to another.
 
 ## Before you finish
 
