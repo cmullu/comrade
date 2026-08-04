@@ -2,7 +2,7 @@ package mullu.comrade.ui
 
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -86,6 +86,23 @@ private const val CIRCLE_DP = 200
  */
 private const val MIN_SCALE = 0.55f
 private const val MAX_SCALE = 1f
+
+/**
+ * How long the two pieces of text take to change, and how many rows the calming
+ * line reserves.
+ *
+ * Both fades are deliberately slower than a UI transition would normally be. The
+ * shortest phase is two seconds, so there is room, and the point of this screen
+ * is that nothing on it arrives abruptly — a 150ms swap would be correct
+ * elsewhere in the app and wrong here.
+ *
+ * [LINE_ROWS] is a layout fix rather than a typographic one: see the comment at
+ * the call site. Two, because that is what the longest of the shipped lines wraps
+ * to at `titleMedium` on a phone.
+ */
+private const val LINE_FADE_MS = 900
+private const val LABEL_FADE_MS = 450
+private const val LINE_ROWS = 2
 
 /**
  * How long a sit can be set to, in minutes, and which is offered first.
@@ -318,12 +335,26 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
         // because it now turns over on every inhale and every exhale — twice as
         // often as before — and a hard cut at that rate would be a flicker in
         // the corner of someone's eye rather than a line arriving.
-        Crossfade(targetState = line, label = "breathe-line") { current ->
+        Crossfade(
+            targetState = line,
+            animationSpec = tween(durationMillis = LINE_FADE_MS, easing = BREATH_EASING),
+            label = "breathe-line",
+        ) { current ->
             Text(
                 current,
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.primary,
                 textAlign = TextAlign.Center,
+                // The lines are not all the same length, so some wrap to two
+                // rows and some do not — and the column is centred, so a line
+                // arriving one row shorter than the last used to pull the circle,
+                // the progress bar and the chips up by a row and drop them back
+                // on the next change. That reflow is what read as the message
+                // switch "not being quite smooth": the fade itself was fine, the
+                // 200dp circle beside it was hopping. Reserving two rows costs a
+                // row of blank space under the short lines and makes the layout
+                // hold still.
+                minLines = LINE_ROWS,
                 modifier = Modifier.testTag("breathing-line"),
             )
         }
@@ -336,11 +367,25 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
                     .size((CIRCLE_DP * scale.value).dp)
                     .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
             )
-            Text(
-                stringResource(label),
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+            // Crossfaded, where it used to hard-cut. This word changes four
+            // times a cycle and sits dead centre of the one thing the reader is
+            // looking at, so a swap with no transition is the most visible edge
+            // on the screen — and it lands at exactly the moment the circle is
+            // meant to be gliding to a stop. Faster than the calming line's fade
+            // because it is two words rather than a sentence: long enough not to
+            // cut, short enough that "Breathe out" is fully legible well before
+            // the out-breath is under way.
+            Crossfade(
+                targetState = label,
+                animationSpec = tween(durationMillis = LABEL_FADE_MS, easing = BREATH_EASING),
+                label = "breathe-phase",
+            ) { current ->
+                Text(
+                    stringResource(current),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
         }
 
         // How far through the chosen length, with no digits. A five-minute sit
@@ -388,12 +433,22 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
 }
 
 /**
- * Linear, not the default ease: the haptic swells at a constant rate, and a
- * circle that raced ahead and coasted would be pacing a different breath from
- * the one in your hand.
+ * The circle's motion, read straight off [BreathHaptics.curve] — the same
+ * function that shapes the buzz, so the two cannot drift apart.
+ *
+ * This was `LinearEasing` for several releases, on the reasoning that the haptic
+ * swelled at a constant rate and a circle that "raced ahead and coasted would be
+ * pacing a different breath from the one in your hand". The premise was right and
+ * the conclusion was wrong: the answer to keeping them together is to give them
+ * one curve, not to make both of them straight. A constant rate meant the circle
+ * arrived at empty still travelling at full speed and then stopped dead for the
+ * settle, which is what "the transition from breath out and settle is not
+ * natural" describes. A breath has no sharp edge where it turns around.
  */
+private val BREATH_EASING = Easing { fraction -> BreathHaptics.curve(fraction) }
+
 private fun breathTween(phase: BreathPhase) =
-    tween<Float>(durationMillis = phase.seconds * 1_000, easing = LinearEasing)
+    tween<Float>(durationMillis = phase.seconds * 1_000, easing = BREATH_EASING)
 
 /**
  * Which phase [elapsedSeconds] falls in.
