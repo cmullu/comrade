@@ -112,6 +112,15 @@ Codify what the feed already accidentally is, so it can never regress:
   must decide before the vault is unlocked, and a quiet hour that only works
   once you have opened the app is not a quiet hour. Same reasoning, and same
   trade, as `MutedChats`; what it stores is two integers.)*
+  *(Also as built, after a correction: "silenced" means **posted without a
+  sound**, not withheld. The first implementation returned a plain `false` from
+  `NotificationPolicy`, which meant a message arriving at 02:00 never reached
+  the shade at all and was discoverable only by opening the app —
+  indistinguishable, from the user's side, from delivery having failed. The rule
+  now returns `NotifyDecision.Silent` for anything that is still true in the
+  morning (messages, requests, update notices) and `Suppress` only for what will
+  not be — presence and nudges, both of which expire in minutes and would
+  otherwise be found at 08:00 asserting something about last night.)*
 
 *Touches:* `FeedScreen.kt`, `Notifier`, Settings screen, one new pure Kotlin
 rule class + tests. No Rust changes.
@@ -487,7 +496,7 @@ with `VaultLocked`. Three decisions worth naming:
 | Surface | Notes |
 |---|---|
 | **Calm-feed contract** | Documented on `FeedScreen` and now load-bearing: chronological only, no ranking, no autoplay, no counters. Plus the gentle stop — one inline card after 10 unbroken minutes, dismissible for the sitting, quoting **no duration and no count** (a number invites a score). Rule in `attention/ScrollSitting.kt`, 8 tests |
-| **Quiet hours** | `attention/QuietHours.kt` + `NotificationPolicy`: silences messages, requests, presence and update notices in a nightly window — **never a ringing call.** 6 tests on the window arithmetic, where the overnight wrap is the normal case and an empty window (`start == end`) silences nothing rather than the whole day |
+| **Quiet hours** | `attention/QuietHours.kt` + `NotificationPolicy`: in a nightly window, messages / requests / update notices post **silently** (`CHANNEL_MESSAGES_QUIET`, `IMPORTANCE_LOW`) and presence / nudges are dropped as already-stale — **never a ringing call.** 6 tests on the window arithmetic, where the overnight wrap is the normal case and an empty window (`start == end`) silences nothing rather than the whole day |
 | **Usage mirror** | Opt-in `PACKAGE_USAGE_STATS` behind an explainer that states what is read and that it cannot leave the device. `attention/UsageMirror.kt` reduces the event stream to three integers **in memory** and drops it (8 tests, including that overlapping stretches count once, so a day can never exceed itself, and that Comrade excludes its own screen time). Card lives on the Journal tab, self-relative, no red |
 | **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen — paced breathing at 4-4-4-2, 1–5 minutes (rounded to whole breaths, and it stops when the time is up), haptic-paced, and it tells your comrades you might need them |
 | **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |

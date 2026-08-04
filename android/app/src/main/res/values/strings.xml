@@ -212,6 +212,10 @@
 
     <!-- Notifications (settings card + grouping) -->
     <string name="notification_messages_summary">New messages</string>
+    <!-- The "self" name in a MessagingStyle notification. Only ever drawn beside
+         messages we sent, of which an incoming-message notification has none —
+         deliberately not the user's own handle, which is identifying. -->
+    <string name="notification_you">You</string>
     <string name="settings_notifications_title">Notifications</string>
     <string name="settings_notifications_summary">Messages, message requests, calls, comrades coming online and app updates each have their own channel, so you can silence one without silencing the rest.</string>
     <string name="settings_notifications_blocked">Notifications are turned off for Comrade — nothing will reach you while the app is in the background, including calls.</string>

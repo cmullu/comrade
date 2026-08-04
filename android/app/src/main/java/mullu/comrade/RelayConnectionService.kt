@@ -211,6 +211,27 @@ object ChatEventRouter {
         _openConversationPeer.value = peer
     }
 
+    /**
+     * Whether any Activity is currently visible — set from
+     * [MainActivity.onStart]/[MainActivity.onStop].
+     *
+     * Tracked separately from [_openConversationPeer] because the two answer
+     * different questions, and treating the second as if it answered the first
+     * was a bug users would have read as "notifications just stop sometimes".
+     * The open-conversation peer changes on *navigation*; backgrounding the app
+     * is not navigation, so pressing Home with a chat open left that peer
+     * flagged as on-screen forever. Every message from the person the user had
+     * been talking to — the likeliest person to message them — was then
+     * suppressed as "already visible" while the phone sat in a pocket.
+     *
+     * Starts `false`: nothing is visible until an Activity says so, and a
+     * service-only process (background delivery, no Activity) must notify.
+     */
+    private val _appVisible = MutableStateFlow(false)
+    fun setAppVisible(visible: Boolean) {
+        _appVisible.value = visible
+    }
+
     @Volatile private var refreshingNames = false
     @Volatile private var lastNameRefreshAt = 0L
 
@@ -310,15 +331,16 @@ object ChatEventRouter {
     }
 
     /**
-     * Whether a message from [peer] may raise a notification — the thread on
-     * screen, the per-conversation mute, and the nightly quiet window, in one
-     * place so DMs and attachments cannot drift apart. The rule itself is
-     * [NotificationPolicy.shouldNotifyMessage].
+     * What to do about a message from [peer] — the thread on screen, whether the
+     * app is even visible, the per-conversation mute, and the nightly quiet
+     * window, in one place so DMs and attachments cannot drift apart. The rule
+     * itself is [NotificationPolicy.messageDecision].
      */
-    private fun mayNotify(context: Context, peer: String): Boolean =
-        NotificationPolicy.shouldNotifyMessage(
+    private fun messageDecision(context: Context, peer: String): NotifyDecision =
+        NotificationPolicy.messageDecision(
             peer = peer,
             openConversationPeer = _openConversationPeer.value,
+            appVisible = _appVisible.value,
             muted = MutedChats.isMuted(context, peer),
             quietHours = inQuietHours(context),
         )
@@ -353,12 +375,14 @@ object ChatEventRouter {
             is BridgeEvent.IncomingDirectMessage -> {
                 _chatTick.update { it + 1 }
                 val peer = event.v1.sender
-                if (mayNotify(context, peer)) {
+                val decision = messageDecision(context, peer)
+                if (decision != NotifyDecision.Suppress) {
                     Notifier.notifyMessage(
                         context,
                         peer,
                         peerLabel(peer),
                         event.v1.content.ifBlank { "New message" },
+                        silent = decision == NotifyDecision.Silent,
                     )
                 }
             }
@@ -366,23 +390,27 @@ object ChatEventRouter {
                 _requestTick.update { it + 1 }
                 // The requests bucket still fills during quiet hours — only the
                 // buzz waits for morning.
-                if (NotificationPolicy.shouldNotifyRequest(inQuietHours(context))) {
+                val decision = NotificationPolicy.requestDecision(inQuietHours(context))
+                if (decision != NotifyDecision.Suppress) {
                     Notifier.notifyRequest(
                         context,
                         event.v1.peer,
                         event.v1.lastMessage.ifBlank { "New message request" },
+                        silent = decision == NotifyDecision.Silent,
                     )
                 }
             }
             is BridgeEvent.IncomingMedia -> {
                 _chatTick.update { it + 1 }
                 val peer = event.v1.sender
-                if (mayNotify(context, peer)) {
+                val decision = messageDecision(context, peer)
+                if (decision != NotifyDecision.Suppress) {
                     Notifier.notifyMessage(
                         context,
                         peer,
                         peerLabel(peer),
                         "📎 " + event.v1.caption.ifBlank { "Attachment" },
+                        silent = decision == NotifyDecision.Silent,
                     )
                 }
             }
@@ -408,13 +436,14 @@ object ChatEventRouter {
                     // someone who isn't there.
                     Notifier.clearComradeOnline(context, event.peer)
                 } else if (
-                    NotificationPolicy.shouldNotifyPresence(
+                    NotificationPolicy.presenceDecision(
                         peer = event.peer,
                         openConversationPeer = _openConversationPeer.value,
+                        appVisible = _appVisible.value,
                         muted = MutedChats.isMuted(context, event.peer),
                         becameOnline = becameOnline,
                         quietHours = inQuietHours(context),
-                    )
+                    ) != NotifyDecision.Suppress
                 ) {
                     // Don't tell someone their comrade is around while they
                     // are literally looking at that conversation — same rule
@@ -432,12 +461,13 @@ object ChatEventRouter {
                 // those to beacons alone. It is one notification and nothing
                 // else.
                 if (
-                    NotificationPolicy.shouldNotifyNudge(
+                    NotificationPolicy.nudgeDecision(
                         peer = event.peer,
                         openConversationPeer = _openConversationPeer.value,
+                        appVisible = _appVisible.value,
                         muted = MutedChats.isMuted(context, event.peer),
                         quietHours = inQuietHours(context),
-                    )
+                    ) != NotifyDecision.Suppress
                 ) {
                     val title = event.name?.takeIf { it.isNotBlank() } ?: peerLabel(event.peer)
                     Notifier.notifyComradeNudge(context, event.peer, title)
