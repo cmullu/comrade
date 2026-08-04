@@ -54,13 +54,14 @@ pub use comrade_core::handoff::{
 // reason the together wire types are — so a bridge depends on `comrade_ui` alone.
 pub use comrade_core::command::{AppAction, ChatCommand, CommandSpec, Mention, MusicService};
 pub use comrade_core::karya::TaskState;
+pub use runtime::play_route;
 
 pub use runtime::{
     AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto,
     CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto,
     IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PlayPlan, PlayTargetDto,
+    MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PlayPlan, PlayRoute, PlayTargetDto,
     PresenceDto, ProfileDto, ReactionDto, ReadingDto, RuntimeHandles, SakhaStatusDto,
     ShareVerdictDto, TaraMessageDto, TaskDto, TogetherCommandDto, TogetherCorrectionDto,
     TogetherInviteDto, TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,

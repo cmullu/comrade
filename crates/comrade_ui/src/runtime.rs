@@ -603,6 +603,57 @@ pub struct PlayTargetDto {
     pub recording: Option<comrade_core::together::Recording>,
 }
 
+/// What a frontend should actually *do* about a `/play`, once it has looked in
+/// its own library.
+///
+/// [`PlayPlan`] is how far the query got before anyone searched; this is the step
+/// after, and it is separate because only the frontend can search — `MediaStore`
+/// on Android, a file the user picked on desktop. Deciding *here* is what stops
+/// each frontend inventing its own idea of when a `/play` may open a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayRoute {
+    /// This device found its own copy and is confident it is the right one, so a
+    /// session can open on it now.
+    StartTogether,
+    /// We know which recording is meant and this device has no copy of it near
+    /// enough to open unasked. Ask for a file rather than guessing — that is
+    /// [`comrade_core::together::MATCH_CONFIDENT`]'s whole purpose.
+    AskForFile,
+    /// The link names audio no third-party client may decode (Spotify, Apple
+    /// Music). All we can honestly do is say where to open it.
+    OpenElsewhere,
+    /// A YouTube embed, which can be driven in place by a frontend that has a
+    /// webview to drive it in.
+    PlayEmbed,
+    /// Nothing usable in the query.
+    Nothing,
+}
+
+/// Decide [`PlayRoute`] from a resolved query and what the caller's own library
+/// turned up.
+///
+/// `found_local_copy` is the frontend's answer to "is a copy of this on *this*
+/// device, above the confidence bar" — and it is consulted **only** for
+/// [`PlayPlan::FindLocally`]. A caller that has a local file of a Spotify track
+/// still gets [`PlayRoute::OpenElsewhere`]: the plan is about what the *query*
+/// named, and a link to DRM audio does not become playable because something
+/// with a similar title happens to be on the phone.
+pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+    match plan {
+        PlayPlan::Empty => PlayRoute::Nothing,
+        PlayPlan::NameOnly => PlayRoute::OpenElsewhere,
+        PlayPlan::OpenNow => PlayRoute::PlayEmbed,
+        PlayPlan::FindLocally => {
+            if found_local_copy {
+                PlayRoute::StartTogether
+            } else {
+                PlayRoute::AskForFile
+            }
+        }
+    }
+}
+
 /// One step of handing a large attachment over, on its way to the frontend that
 /// owns the peer connection.
 ///
@@ -13145,5 +13196,66 @@ mod tests {
             Some(MusicService::Youtube),
         );
         assert_eq!(t.service, Some(MusicService::Spotify));
+    }
+
+    #[test]
+    fn a_local_copy_is_what_turns_a_query_into_a_session() {
+        // The only branch the library answer decides.
+        assert_eq!(
+            play_route(PlayPlan::FindLocally, true),
+            PlayRoute::StartTogether
+        );
+        // Asking beats guessing: below the confidence bar we do not open a file
+        // on somebody's behalf.
+        assert_eq!(
+            play_route(PlayPlan::FindLocally, false),
+            PlayRoute::AskForFile
+        );
+    }
+
+    #[test]
+    fn a_local_file_does_not_make_a_drm_link_playable() {
+        // The plan describes what the *query* named. Someone with a similarly
+        // titled mp3 on their phone has not acquired the right to decode a
+        // Spotify stream, and a `/play <spotify url>` that quietly started a
+        // session on a different file would put the two of them on different
+        // audio while the UI claimed otherwise.
+        for found in [true, false] {
+            assert_eq!(
+                play_route(PlayPlan::NameOnly, found),
+                PlayRoute::OpenElsewhere,
+                "found={found}",
+            );
+            assert_eq!(
+                play_route(PlayPlan::OpenNow, found),
+                PlayRoute::PlayEmbed,
+                "found={found}",
+            );
+            assert_eq!(
+                play_route(PlayPlan::Empty, found),
+                PlayRoute::Nothing,
+                "found={found}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_plan_routes_somewhere_and_only_one_route_starts_a_session() {
+        // A plan falling through to a route that opens a player would open one
+        // on a query nobody resolved.
+        for plan in [
+            PlayPlan::OpenNow,
+            PlayPlan::FindLocally,
+            PlayPlan::NameOnly,
+            PlayPlan::Empty,
+        ] {
+            for found in [true, false] {
+                let route = play_route(plan, found);
+                if route == PlayRoute::StartTogether {
+                    assert_eq!(plan, PlayPlan::FindLocally, "only a library hit starts one");
+                    assert!(found, "and only when a copy was actually found");
+                }
+            }
+        }
     }
 }

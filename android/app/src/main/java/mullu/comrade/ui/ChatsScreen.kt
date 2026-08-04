@@ -100,6 +100,9 @@ import mullu.comrade.Notifier
 import mullu.comrade.PresenceMonitor
 import mullu.comrade.handoff.AttachmentHandoffManager
 import mullu.comrade.media.VoiceRecorder
+import mullu.comrade.together.LibraryResolver
+import mullu.comrade.together.TogetherManager
+import uniffi.comrade_ui.PlayRoute
 
 /**
  * Identity-stable avatar hues: the same key renders the same colour on every
@@ -897,11 +900,80 @@ fun ConversationScreen(
                 } tab."
             }
 
-            is ComposerPlan.Play ->
-                // The player and the library resolver live in `together/`; this
-                // is the entry point, and wiring it to `TogetherManager` is the
-                // remaining step (`docs/TOGETHER.md` §9).
-                commandNote = "Open Together from the menu to listen to \"${plan.query}\" with them."
+            is ComposerPlan.Play -> {
+                sending = true
+                scope.launch {
+                    // Three steps, and only the middle one is this frontend's:
+                    // core says what the query names, `MediaStore` says whether
+                    // a copy is here, and core turns those two answers into a
+                    // route. Nothing about *when* a session may open is decided
+                    // in this file.
+                    val target = withContext(Dispatchers.IO) {
+                        runCatching { ComradeCore.playQuery(plan.query, plan.service) }.getOrNull()
+                    }
+                    if (target == null) {
+                        // Fail closed, like the grammar above: a query nobody
+                        // resolved must not fall through to a file picker.
+                        commandNote = "Couldn't work out what to play — nothing was sent."
+                        sending = false
+                        return@launch
+                    }
+                    // "Not allowed to look" and "looked, not there" are different
+                    // problems with different next steps, so they are told apart
+                    // before either sentence is chosen. Currently always false —
+                    // the manifest declares no media-read permission; see
+                    // `LibraryResolver.mayRead` and AUDIT.md.
+                    val mayLook = runCatching { LibraryResolver.mayRead(context) }
+                        .getOrDefault(false)
+                    val found = withContext(Dispatchers.IO) {
+                        target.recording?.takeIf { mayLook }?.let { want ->
+                            // Duration is unknown for words the user typed, and
+                            // `match_score` treats an unknown length as neutral
+                            // rather than as a mismatch — that is what lets
+                            // "Kun Faya Kun" match at all.
+                            runCatching { LibraryResolver.resolve(context, want, 0L) }.getOrNull()
+                        }
+                    }
+                    val route = withContext(Dispatchers.IO) {
+                        ComradeCore.playRoute(target.plan, found != null)
+                    }
+                    if (route == null) {
+                        commandNote = "Couldn't work out what to play — nothing was sent."
+                        sending = false
+                        return@launch
+                    }
+                    // Held locally rather than written straight to [commandNote]:
+                    // a note is only cleared when the user taps it, so a
+                    // conditional write would let the previous command's
+                    // sentence stand in for this one's.
+                    var failed: String? = null
+                    if (route == PlayRoute.START_TOGETHER && found != null) {
+                        // A label, not an npub: an invitation that says
+                        // "npub1…" wants to listen with you is unreadable.
+                        val label = withContext(Dispatchers.IO) {
+                            runCatching { ComradeCore.contacts() }.getOrNull()
+                                ?.firstOrNull { it.npub == peer }
+                                ?.let { peerTitle(it.npub, it.alias, it.name) }
+                                ?: shortNpub(peer)
+                        }
+                        runCatching {
+                            TogetherManager.start(context, peer, label, found.uri, found.recording)
+                        }
+                            .onSuccess { clearDraft() }
+                            .onFailure { failed = it.message ?: "Could not start that." }
+                    }
+                    // Said on every route, the successful one included: this
+                    // screen owns no nav state, so it can start the session but
+                    // cannot show it, and a session the user cannot find is the
+                    // same gap the task list had.
+                    commandNote = when {
+                        failed != null -> failed
+                        route == PlayRoute.ASK_FOR_FILE && !mayLook -> ChatCommands.LIBRARY_UNSEEN
+                        else -> ChatCommands.playNote(route, target.service, plan.query)
+                    }
+                    sending = false
+                }
+            }
         }
         return true
     }

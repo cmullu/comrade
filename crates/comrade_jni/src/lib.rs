@@ -80,9 +80,10 @@ use comrade_ui::{
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PlayTargetDto,
-    PresenceDto, ProfileDto, ReactionDto, ReadingDto, ShareVerdictDto, TaraMessageDto, TaskDto,
-    TaskState, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PlayPlan, PlayRoute,
+    PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto, ShareVerdictDto,
+    TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto, UiError,
+    UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -875,6 +876,15 @@ impl Comrade {
     /// How far a `/play` query gets without a network or a library.
     pub fn play_query(&self, query: String, service: Option<MusicService>) -> PlayTargetDto {
         self.inner.blocking_read().play_query(&query, service)
+    }
+
+    /// What to do about a `/play`, once the caller has searched its own library.
+    ///
+    /// `found_local_copy` is only consulted for [`PlayPlan::FindLocally`]; see
+    /// [`comrade_ui::play_route`] for why a local file does not make a DRM link
+    /// playable. Pure, so it takes no lock.
+    pub fn play_route(&self, plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+        comrade_ui::play_route(plan, found_local_copy)
     }
 
     /// Name a piece of work. `peer` of `None` is a note to self, which never

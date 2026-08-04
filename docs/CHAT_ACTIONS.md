@@ -270,10 +270,32 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
   would refuse with "that is not yours to change" is never drawn. A note to self
   now has a surface, so the composer's "Added to your list." is no longer a claim
   about a list nobody could open.
-- **`/play` does not open a session yet.** The command parses, `play_query`
-  resolves links and free text, and Android's `TogetherManager` /
-  `LibraryResolver` already exist — the two are not joined up, so the composer
-  says where to go instead. Desktop has no player at all (`docs/TOGETHER.md` §9).
+- ~~**`/play` does not open a session yet.**~~ **Joined 2026-08-04, and blocked
+  one step further on.** The chain now runs end to end on Android: `play_query`
+  says what the query names, `LibraryResolver` looks for a copy on the phone, and
+  `comrade_ui::play_route` turns those two answers into one of five routes —
+  only one of which starts a session. `/play kun faya kun` in a conversation
+  calls `TogetherManager.start` on the matched file.
+
+  **But the library lookup cannot currently succeed**, and the reason is not in
+  this feature: the manifest declares neither `READ_MEDIA_AUDIO` nor
+  `READ_EXTERNAL_STORAGE`, so every `MediaStore` audio query returns nothing.
+  `LibraryResolver.mayRead` exists so the composer can say *"Comrade can't read
+  your music library"* rather than the false *"no copy of that on this phone"*,
+  and the file-picker path (which needs no permission — SAF grants per file)
+  works either way. Whether Comrade should ask to read someone's music library
+  is a decision for the owner, so it is recorded in `AUDIT.md` rather than made
+  quietly in a manifest. The same gap silently disables
+  `TogetherManager.kt`'s auto-open of an incoming invitation.
+
+  Desktop still has no player at all (`docs/TOGETHER.md` §9), so `/play` there is
+  refused by the `DESKTOP_CAN_PLAY` constant as before. `play_route` is exposed
+  as a Tauri command already, so the day a player lands the decision is not
+  reimplemented in JS.
+
+  Android also cannot *start* a YouTube session: core can carry the invitation,
+  but this app has no player for one and cannot join its own, so `PLAY_EMBED`
+  refuses rather than inviting someone to something we cannot attend.
 - **`/breathe` and friends do not navigate.** `ConversationScreen` owns no nav
   state, so the composer names the tab rather than opening it. One host
   parameter away.
@@ -304,3 +326,5 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
 | `android/…/ui/ChatCommands.kt` | The same decisions, mirroring the desktop vectors case for case. 22 JVM cases; Compose-free. **Never compiled here** — no Android SDK in the container that wrote it. |
 | `desktop/ui/task_list.mjs` · `android/…/ui/TaskList.kt` | Grouping, which buttons a row offers, the subtitle, the empty copy. Mirrored vectors — 15 `node --test` cases, 11 JVM. Note the field names differ on purpose: Tauri sends serde snake_case, uniffi generates camelCase properties — and so is the state a button sends: `wireState()` is lowercase because `TaskState` is `rename_all = "snake_case"`, while Android passes the uniffi enum and has no string to get wrong. |
 | `desktop/ui/main.js` (Tasks tab) · `android/…/ui/TaskListScreen.kt` | The rendering, and nothing else — every decision above it. |
+| `comrade_ui::play_route` | The five things a frontend may do about a `/play`, from the plan plus its own library answer. Only `StartTogether` opens a session, and only on a library hit. 3 tests. |
+| `ChatCommands.playNote` · `LibraryResolver.mayRead` | The sentence for each route, and the one distinction that is not core's to make: "no copy here" versus "not allowed to look". 6 JVM cases. |

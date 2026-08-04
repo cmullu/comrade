@@ -172,6 +172,7 @@ pub fn run() {
             commands::chat_mentions,
             commands::resolve_mentions,
             commands::play_query,
+            commands::play_route,
             commands::assign_task,
             commands::tasks,
             commands::set_task_state,
