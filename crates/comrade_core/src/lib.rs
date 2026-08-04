@@ -39,6 +39,7 @@ uniffi::setup_scaffolding!("comrade_core");
 
 pub mod anon;
 pub mod attention;
+pub mod avatar;
 pub mod call;
 pub mod crypto;
 pub mod dak;

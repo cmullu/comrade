@@ -460,15 +460,47 @@ mod http {
         key: &[u8; 32],
         expected_sha256: Option<&str>,
     ) -> Result<Vec<u8>, MediaError> {
+        let (bytes, _) =
+            fetch_guarded_bytes(url, MAX_ENCRYPTED_MEDIA_BYTES, "media URL", &[]).await?;
+        if let Some(expected) = expected_sha256 {
+            let actual = sha256_hex(&bytes);
+            if actual != expected {
+                return Err(MediaError::Crypto(format!(
+                    "ciphertext hash mismatch: expected {expected}, got {actual}"
+                )));
+            }
+        }
+        aes256gcm_open(key, &bytes).map_err(|e| MediaError::Crypto(e.to_string()))
+    }
+
+    /// Fetch a URL that somebody else chose, with every guard this module has.
+    ///
+    /// The one implementation of the hardening, so the encrypted-media path and
+    /// the profile-picture path cannot drift apart: HTTPS only (case-insensitive,
+    /// fail-closed on anything else), redirects disabled — an `http://` or
+    /// redirected target could leak the client IP or probe internal addresses —
+    /// and the body capped at `max_bytes`, checked against `Content-Length` up
+    /// front and again while streaming, since the header may be absent or lie.
+    ///
+    /// `subject` only names the thing in the refusal message; `allowed_types`
+    /// empty means any, and is checked against the response header rather than
+    /// the bytes, because only the caller knows how to sniff its own format.
+    /// Returns the bytes and the declared content type, if the host sent one.
+    async fn fetch_guarded_bytes(
+        url: &str,
+        max_bytes: usize,
+        subject: &str,
+        allowed_types: &[&str],
+    ) -> Result<(Vec<u8>, Option<String>), MediaError> {
         // URL schemes are case-insensitive; accept HTTPS in any case but keep
         // the fail-closed default for every other (or missing) scheme.
         let is_https = url
             .split_once("://")
             .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"));
         if !is_https {
-            return Err(MediaError::Http(
-                "refusing to fetch a non-HTTPS media URL".into(),
-            ));
+            return Err(MediaError::Http(format!(
+                "refusing to fetch a non-HTTPS {subject}"
+            )));
         }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -490,10 +522,33 @@ mod http {
                 resp.status()
             )));
         }
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string());
+        if !allowed_types.is_empty() {
+            // Judge the bare type, not the parameters — `image/png; charset=x` is
+            // still `image/png`, and a host that adds one is not an attacker.
+            let bare = content_type
+                .as_deref()
+                .and_then(|v| v.split(';').next())
+                .map(|v| v.trim().to_ascii_lowercase());
+            // An absent header is tolerated: plenty of hosts omit it, and the
+            // caller sniffs the bytes anyway. A *present and disallowed* one is
+            // refused before the body is buffered.
+            if let Some(bare) = bare.filter(|v| !v.is_empty()) {
+                if !allowed_types.contains(&bare.as_str()) {
+                    return Err(MediaError::UploadFailed(format!(
+                        "refusing a {subject} served as {bare}"
+                    )));
+                }
+            }
+        }
         if let Some(len) = resp.content_length() {
-            if len > MAX_ENCRYPTED_MEDIA_BYTES as u64 {
+            if len > max_bytes as u64 {
                 return Err(MediaError::UploadFailed(format!(
-                    "blob too large: {len} bytes (limit {MAX_ENCRYPTED_MEDIA_BYTES})"
+                    "blob too large: {len} bytes (limit {max_bytes})"
                 )));
             }
         }
@@ -505,22 +560,64 @@ mod http {
             .await
             .map_err(|e| MediaError::Http(e.to_string()))?
         {
-            if bytes.len() + chunk.len() > MAX_ENCRYPTED_MEDIA_BYTES {
+            if bytes.len() + chunk.len() > max_bytes {
                 return Err(MediaError::UploadFailed(format!(
-                    "blob exceeds the {MAX_ENCRYPTED_MEDIA_BYTES}-byte limit"
+                    "blob exceeds the {max_bytes}-byte limit"
                 )));
             }
             bytes.extend_from_slice(&chunk);
         }
-        if let Some(expected) = expected_sha256 {
-            let actual = sha256_hex(&bytes);
-            if actual != expected {
-                return Err(MediaError::Crypto(format!(
-                    "ciphertext hash mismatch: expected {expected}, got {actual}"
-                )));
-            }
-        }
-        aes256gcm_open(key, &bytes).map_err(|e| MediaError::Crypto(e.to_string()))
+        Ok((bytes, content_type))
+    }
+
+    /// Fetch and vet a peer-published profile picture.
+    ///
+    /// Every guard in [`crate::avatar`] runs — the URL policy before a socket is
+    /// opened, the type and pixel checks on what comes back — plus the shared
+    /// transport hardening above with the avatar's own, much smaller, cap.
+    /// Returns the bytes and the *sniffed* type, never the declared one.
+    ///
+    /// Whether a picture should be fetched **at all** is not decided here: that
+    /// depends on the user's setting and on whether the peer has been accepted,
+    /// both of which live in `comrade_ui`. This is the "is it safe", not the
+    /// "should we ask".
+    pub async fn fetch_avatar(url: &str) -> Result<(Vec<u8>, String), MediaError> {
+        let vetted =
+            crate::avatar::vet_avatar_url(url).map_err(|e| MediaError::Http(e.to_string()))?;
+        let (bytes, declared) = fetch_guarded_bytes(
+            vetted.as_str(),
+            crate::avatar::MAX_AVATAR_BYTES,
+            "profile picture",
+            crate::avatar::AVATAR_MIME_ALLOWLIST,
+        )
+        .await?;
+        let sniffed = crate::avatar::vet_avatar_bytes(&bytes, declared.as_deref())
+            .map_err(|e| MediaError::Http(e.to_string()))?;
+        Ok((bytes, sniffed.to_string()))
+    }
+
+    /// Upload bytes that are **not encrypted** and are meant to be publicly
+    /// fetchable — the one exception in this module.
+    ///
+    /// A Nostr Kind-0 `picture` URL has to be readable by every client on the
+    /// network, so an avatar cannot ride the encrypted pipeline: there is nobody
+    /// to share the key with. The cost, stated rather than buried, because a user
+    /// has to be told it before they agree to it:
+    ///
+    /// - the image is **public**, to anyone who ever sees the profile;
+    /// - it is **permanent** in practice — Blossom hosts are content-addressed
+    ///   and mirror, so clearing the Kind-0 field unpublishes the *pointer*, not
+    ///   the bytes;
+    /// - the bytes are **correlatable** with the npub that published them, and
+    ///   with every other place that image has ever appeared.
+    ///
+    /// Mechanically this is what [`upload_encrypted_blob`] already did — that
+    /// function never encrypted anything, it uploads whatever it is handed — but
+    /// calling it here would leave the one public upload in the codebase reading
+    /// as an encrypted one. A name that asserts a guarantee the code does not
+    /// provide is the bug, even when the bytes are identical.
+    pub async fn upload_public_blob(blob: Vec<u8>, mime_type: &str) -> Result<String, MediaError> {
+        upload_encrypted_blob(blob, mime_type).await
     }
 
     /// How long to wait for a host to *answer at all*.
@@ -732,7 +829,8 @@ mod http {
 
 #[cfg(feature = "media-http")]
 pub use http::{
-    fetch_and_decrypt_media, upload_encrypted_blob, upload_encrypted_blob_to, BlossomUploader,
+    fetch_and_decrypt_media, fetch_avatar, upload_encrypted_blob, upload_encrypted_blob_to,
+    upload_public_blob, BlossomUploader,
 };
 
 // Stubs so the rest of the workspace compiles (and degrades gracefully) when the
@@ -752,6 +850,20 @@ pub async fn fetch_and_decrypt_media(
 pub async fn upload_encrypted_blob(_blob: Vec<u8>, _mime_type: &str) -> Result<String, MediaError> {
     Err(MediaError::Http(
         "media upload requires the `media-http` cargo feature".into(),
+    ))
+}
+
+#[cfg(not(feature = "media-http"))]
+pub async fn upload_public_blob(_blob: Vec<u8>, _mime_type: &str) -> Result<String, MediaError> {
+    Err(MediaError::Http(
+        "publishing a profile picture requires the `media-http` cargo feature".into(),
+    ))
+}
+
+#[cfg(not(feature = "media-http"))]
+pub async fn fetch_avatar(_url: &str) -> Result<(Vec<u8>, String), MediaError> {
+    Err(MediaError::Http(
+        "fetching a profile picture requires the `media-http` cargo feature".into(),
     ))
 }
 
@@ -865,6 +977,39 @@ mod tests {
             assert!(matches!(err, Err(MediaError::Http(_))), "must reject {url}");
         }
     }
+
+    #[cfg(feature = "media-http")]
+    #[tokio::test]
+    async fn avatar_fetch_refuses_a_hostile_url_before_any_request() {
+        // The avatar path is stricter than the media path: as well as the scheme,
+        // a host that is not on the public internet is refused, and so are the
+        // decimal/hex/IPv4-mapped spellings of loopback that a string comparison
+        // walks straight past. None of these touch the network.
+        for url in [
+            "http://example.com/a.png",
+            "file:///etc/passwd",
+            "https://127.0.0.1/a.png",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://2130706433/a.png",
+            "https://[::ffff:127.0.0.1]/a.png",
+            "https://localhost/a.png",
+            "https://printer.local/a.png",
+            "https://intranet/a.png",
+            "https://user:pass@example.com/a.png",
+            "",
+        ] {
+            let err = fetch_avatar(url).await;
+            assert!(
+                matches!(err, Err(MediaError::Http(_))),
+                "must reject {url:?} without opening a socket"
+            );
+        }
+    }
+
+    // The complement — that a *public* URL is not refused by the policy — is
+    // pinned in `avatar::tests::an_ordinary_public_url_survives_all_of_it`, where
+    // it costs no socket. Asserting it here would mean a real connection attempt
+    // to an unroutable address and a test that waits out CONNECT_TIMEOUT.
 
     #[test]
     fn the_single_default_host_is_the_first_of_the_list() {
