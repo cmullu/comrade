@@ -276,6 +276,12 @@ object Notifier {
      */
     @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
     fun notifyUpdateAvailable(context: Context, version: String) {
+        // Not redundant with the services that call this at their own onCreate:
+        // since `update.UpdateCheckJob`, this can be the first thing a process
+        // started only to run the daily check does, and posting to a channel that
+        // does not exist yet is dropped in silence from Android 8 — which would
+        // lose exactly the notice the scheduled check exists to deliver.
+        ensureChannels(context)
         if (!canPost(context)) return
         val n = NotificationCompat.Builder(context, CHANNEL_UPDATES)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)

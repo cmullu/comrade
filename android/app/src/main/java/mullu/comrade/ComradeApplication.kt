@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import mullu.comrade.update.UpdateCheckJob
 
 /**
  * Warms the native core as soon as the process exists, off the main thread,
@@ -61,6 +62,15 @@ open class ComradeApplication : Application() {
         appScope.launch(Dispatchers.IO) {
             runCatching { ComradeCore.initializeEventBridge() }
                 .onFailure { Log.e(TAG, "event bridge init failed", it) }
+        }
+
+        // Off the main thread because it touches SharedPreferences and the job
+        // queue. Idempotent by design — it is a *reconcile*, not a schedule, so
+        // running it at every process start does not reset the period of a job
+        // that is already queued. See UpdateCheckJob.sync.
+        appScope.launch(Dispatchers.IO) {
+            runCatching { UpdateCheckJob.sync(this@ComradeApplication) }
+                .onFailure { Log.w(TAG, "could not reconcile the update check job", it) }
         }
     }
 

@@ -221,7 +221,7 @@
     <string name="settings_updates_title">App updates</string>
     <string name="settings_updates_current">You\'re running %1$s</string>
     <string name="settings_updates_auto_title">Check for updates automatically</string>
-    <string name="settings_updates_auto_summary">Asks github.com once a day whether a newer Comrade has been published. That tells GitHub your IP address and nothing else — no account, no identifier, no message data. With this off, nothing is checked until you tap “Check now”.</string>
+    <string name="settings_updates_auto_summary">Asks github.com once a day whether a newer Comrade has been published, and notifies you if there is — including while Comrade is closed. That tells GitHub your IP address and nothing else — no account, no identifier, no message data. With this off, nothing is checked until you tap “Check now”.</string>
     <string name="settings_updates_check_now">Check now</string>
     <string name="settings_updates_checking">Checking…</string>
     <string name="settings_updates_up_to_date">Up to date, as of %1$s</string>

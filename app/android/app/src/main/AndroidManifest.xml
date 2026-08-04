@@ -56,6 +56,12 @@
          shows the dialog exactly as before. Nothing may assume which happened. -->
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
+    <!-- Lets UpdateCheckJob's daily release check be a *persisted* job, so it
+         survives a reboot. Nothing here runs at boot: this app declares no
+         BOOT_COMPLETED receiver, and the permission's only effect is that
+         JobInfo.setPersisted(true) stops throwing. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- CallService: keeps an in-progress call's process alive while the app
          is backgrounded. Required alongside the matching foregroundServiceType
          on Android 14+ (see CallService/the <service> entry below); video
@@ -209,6 +215,16 @@
             android:name=".update.UpdateDownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Asks GitHub once a day whether a newer Comrade exists, with the app
+             closed, and posts the notification that says so. Persisted, so it
+             survives a reboot; taken out of the queue when auto-check is switched
+             off. BIND_JOB_SERVICE is required by the platform and is what keeps
+             it bindable by the system alone. See UpdateCheckJob. -->
+        <service
+            android:name=".update.UpdateCheckJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!-- Both halves of the install: the "ready to install" notification tap,
              and the PackageInstaller session's status callbacks. An Activity
