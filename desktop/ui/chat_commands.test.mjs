@@ -4,6 +4,7 @@ import {
   ACTION_KEYS,
   ASIDE,
   BLOCKED,
+  CHOOSE,
   DESKTOP_CAN_PLAY,
   DESKTOP_SCREENS,
   HELP,
@@ -11,13 +12,18 @@ import {
   OFFER,
   OPEN,
   SEND,
+  TARA_HERE,
+  TARA_PRIVATE,
+  TARA_SHARED,
   TASK,
+  candidateLabel,
   completionFor,
-  isAsideDraft,
   labelFor,
   offerAffordance,
   pickerRows,
   planFor,
+  taraDraft,
+  withChoices,
 } from "./chat_commands.mjs";
 
 // The bridge shapes, as serde delivers them.
@@ -26,6 +32,14 @@ const task = (text, assignees = []) => ({ kind: "task", text, assignees });
 const offer = (action, targets) => ({ kind: "offer_to", action, targets });
 const mention = (handle) => ({ handle, start: 0, end: handle.length + 1 });
 const resolved = (handle, npub) => ({ handle, npub, candidates: [] });
+const ambiguous = (handle) => ({
+  handle,
+  npub: null,
+  candidates: [
+    { npub: "npub1a", alias: "ana" },
+    { npub: "npub1b", alias: "ana" },
+  ],
+});
 
 test("ordinary text is sent as typed", () => {
   assert.deepEqual(planFor(plain), { action: SEND });
@@ -71,21 +85,40 @@ test("an addressed but empty aside prompts instead of sending an empty turn", ()
   assert.match(p.message, /only you will see it/);
 });
 
-test("the composer looks private from the moment @tara is typed", () => {
-  // Eager on purpose: a private thing that looks like a message is how somebody
-  // sends one by accident.
-  assert.equal(isAsideDraft("@tara "), true);
-  assert.equal(isAsideDraft("@tara"), true);
-  assert.equal(isAsideDraft("@Tara what about"), true);
-  assert.equal(isAsideDraft("/tara hello"), true);
-  assert.equal(isAsideDraft("  @tara hello"), true);
+test("the composer knows the audience from the moment tara is addressed", () => {
+  // Eager on purpose, and now in two directions: `/tara` never leaves the device
+  // and `@tara` reaches the other person. Either label being wrong is how
+  // somebody publishes a private thought, or asks a question the peer never sees.
+  assert.equal(taraDraft("@tara "), TARA_SHARED);
+  assert.equal(taraDraft("@tara"), TARA_SHARED);
+  assert.equal(taraDraft("@Tara what about"), TARA_SHARED);
+  assert.equal(taraDraft("  @tara hello"), TARA_SHARED);
+  assert.equal(taraDraft("/tara hello"), TARA_PRIVATE);
+  assert.equal(taraDraft("/tara"), TARA_PRIVATE);
 });
 
-test("a person whose handle starts with tara is not an aside", () => {
-  assert.equal(isAsideDraft("@taranjeet are you around"), false);
-  assert.equal(isAsideDraft("hello @tara"), false);
-  assert.equal(isAsideDraft(""), false);
-  assert.equal(isAsideDraft(undefined), false);
+test("a person whose handle starts with tara is not tara", () => {
+  assert.equal(taraDraft("@taranjeet are you around"), null);
+  assert.equal(taraDraft("hello @tara"), null);
+  assert.equal(taraDraft(""), null);
+  assert.equal(taraDraft(undefined), null);
+});
+
+// ── Tara in the room (`@tara …`) ──────────────────────────────────────────────
+
+test("shared and private tara are different plans", () => {
+  // Same words, two audiences: one reaches `tara_in_chat` (two messages into the
+  // thread), the other `tara_aside` (nothing sent).
+  const shared = planFor({ kind: "tara_here", text: "what film should we watch" });
+  assert.equal(shared.action, TARA_HERE);
+  assert.equal(shared.text, "what film should we watch");
+  assert.equal(planFor({ kind: "ask_tara", text: "what film should we watch" }).action, ASIDE);
+});
+
+test("an empty shared address says the answer will be seen by both", () => {
+  const p = planFor({ kind: "tara_here", text: " " });
+  assert.equal(p.action, INCOMPLETE);
+  assert.match(p.message, /you'll both see/);
 });
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
@@ -127,8 +160,40 @@ test("two contacts answering to one handle becomes a question, not a coin flip",
       { handle: "ana", npub: null, candidates: [{ npub: "npub1a" }, { npub: "npub1b" }] },
     ],
   });
-  assert.equal(p.action, INCOMPLETE);
-  assert.match(p.message, /More than one contact answers to @ana/);
+  assert.equal(p.action, CHOOSE);
+  assert.equal(p.handle, "ana");
+  assert.equal(p.candidates.length, 2);
+});
+
+test("choosing one of two lets the same draft through", () => {
+  // The fix for the dead end: the old plan said "pick which one" and gave
+  // nothing to pick, so the command could never be completed at all.
+  const mentions = withChoices([ambiguous("ana")], { ana: "npub1b" });
+  const p = planFor(task("do it", [mention("ana")]), { mentions });
+  assert.equal(p.action, TASK);
+  assert.equal(p.peer, "npub1b");
+});
+
+test("a choice that names nobody on the list is ignored", () => {
+  // A pin left over from an earlier draft must not silently retarget a message —
+  // that is the failure the ambiguity exists to prevent, arriving by another door.
+  const stale = withChoices([ambiguous("ana")], { ana: "npub1someone-else" });
+  assert.equal(stale[0].npub, null);
+  assert.equal(planFor(task("do it", [mention("ana")]), { mentions: stale }).action, CHOOSE);
+});
+
+test("a chooser row carries the key because both may share the name", () => {
+  // The usual reason a handle is ambiguous is that both people chose the same
+  // name, so a row showing only the name offers two identical choices.
+  const a = candidateLabel("ana", "npub1aaaaaaaaaaaaaaaaaaaa");
+  const b = candidateLabel("ana", "npub1bbbbbbbbbbbbbbbbbbbb");
+  assert.notEqual(a, b);
+  assert.match(a, /ana/);
+});
+
+test("an ambiguous handle in an offer asks too, rather than picking one", () => {
+  const p = planFor(offer("breathe", [mention("ana")]), { mentions: [ambiguous("ana")] });
+  assert.equal(p.action, CHOOSE);
 });
 
 // ── Offers ───────────────────────────────────────────────────────────────────

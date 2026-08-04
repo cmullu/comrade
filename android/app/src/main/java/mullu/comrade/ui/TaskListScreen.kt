@@ -101,6 +101,12 @@ fun TaskListScreen(modifier: Modifier = Modifier) {
 
     val grouped = remember(tasks) { TaskList.group(tasks) }
 
+    // One `when`, not three early `return@Column`s. Those returns were the only
+    // ones in the whole Android source, and they left this Column emitting a
+    // different number of composable groups before and after `loaded` flipped —
+    // which is precisely the shape that makes Compose's slot table throw on the
+    // recomposition rather than on the first frame. Every other screen here
+    // branches instead of returning; so does this one now.
     Column(modifier = modifier.fillMaxSize()) {
         error?.let {
             Text(
@@ -111,15 +117,12 @@ fun TaskListScreen(modifier: Modifier = Modifier) {
             )
         }
 
-        if (!loaded) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        when {
+            !loaded -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
-            return@Column
-        }
 
-        if (tasks.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            tasks.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     text = TaskList.EMPTY_COPY,
                     style = MaterialTheme.typography.bodyMedium,
@@ -128,28 +131,27 @@ fun TaskListScreen(modifier: Modifier = Modifier) {
                         .testTag("tasks-empty"),
                 )
             }
-            return@Column
-        }
 
-        LazyColumn(modifier = Modifier.fillMaxSize().testTag("task-list")) {
-            // Stable keys, per `.claude/rules/android.md` — without one, list
-            // state reattaches to the wrong row when a task resolves and moves
-            // between the two groups.
-            items(grouped.open, key = { it.id }) { task ->
-                TaskRow(task, names, ::apply)
-                HorizontalDivider()
-            }
-            if (grouped.resolved.isNotEmpty()) {
-                item(key = "resolved-header") {
-                    Text(
-                        text = "Finished",
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
-                }
-                items(grouped.resolved, key = { it.id }) { task ->
+            else -> LazyColumn(modifier = Modifier.fillMaxSize().testTag("task-list")) {
+                // Stable keys, per `.claude/rules/android.md` — without one, list
+                // state reattaches to the wrong row when a task resolves and moves
+                // between the two groups.
+                items(grouped.open, key = { it.id }) { task ->
                     TaskRow(task, names, ::apply)
                     HorizontalDivider()
+                }
+                if (grouped.resolved.isNotEmpty()) {
+                    item(key = "resolved-header") {
+                        Text(
+                            text = "Finished",
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    }
+                    items(grouped.resolved, key = { it.id }) { task ->
+                        TaskRow(task, names, ::apply)
+                        HorizontalDivider()
+                    }
                 }
             }
         }

@@ -717,6 +717,42 @@ object ComradeCore {
     fun taraAsideTyped(text: String): TaraMessageInfo =
         rethrowing("Tara") { ffi.taraAside(text).toInfo() }
 
+    /**
+     * What came back from asking Tara **in** a conversation — the `@tara …`
+     * spelling, which the other person sees.
+     *
+     * [asked] and [answered] are the two messages now in the thread, so a
+     * composer can append them without a reload that would race the relay. Both
+     * are null when [keptPrivate] is true — see [taraInChatTyped].
+     */
+    data class TaraChatTurn(
+        val asked: MessageInfo?,
+        val answered: MessageInfo?,
+        val reply: String,
+        val keptPrivate: Boolean,
+        val crisis: Boolean,
+    )
+
+    private fun uniffi.comrade_ui.TaraChatDto.toInfo() = TaraChatTurn(
+        asked = asked?.toInfo(),
+        answered = answered?.toInfo(),
+        reply = reply,
+        keptPrivate = keptPrivate,
+        crisis = crisis,
+    )
+
+    /**
+     * Ask Tara in front of the person you are talking to. Sends two messages —
+     * the question and her answer — unless the question tripped the distress
+     * detector, in which case **nothing is sent** and `keptPrivate` says so.
+     *
+     * That exception is core's, not this frontend's: see
+     * `RuntimeHandles::tara_in_chat`. A caller must not send the reply itself
+     * when it comes back private.
+     */
+    fun taraInChatTyped(peer: String, text: String): TaraChatTurn =
+        rethrowing("Tara") { runBlocking { ffi.taraInChat(peer, text) }.toInfo() }
+
     // ── Attention (usage mirror · focus · long read — strictly local) ─────────
     //
     // Wellbeing pillar #5 (docs/ATTENTION.md). Nothing here is ever networked,

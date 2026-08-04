@@ -372,6 +372,15 @@
          composer's own words. -->
     <string name="aside_only_you">Only you will see this — it goes to Tara, not to them.</string>
     <string name="aside_placeholder">Think out loud…</string>
+    <!-- `@tara` is the other half of the pair above: same companion, opposite
+         audience. Both labels have to be unmistakable, because the sigil is a
+         single character and getting it wrong either publishes a private thought
+         or hides an answer the other person was waiting for. -->
+    <string name="tara_here_both_see">Tara will answer here — you\'ll both see it.</string>
+    <string name="tara_here_placeholder">Ask Tara, out loud…</string>
+    <!-- Two contacts answer to one handle. Naming the handle matters: the draft
+         may mention several, and this asks about one at a time. -->
+    <string name="mention_which_one">Two contacts answer to @%1$s — which one?</string>
 
     <string name="breathe_title">Take a deep breath</string>
     <string name="breathe_in">Breathe in</string>

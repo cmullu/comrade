@@ -63,7 +63,7 @@ pub use runtime::{
     IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
     MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute,
     PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto, RuntimeHandles,
-    SakhaStatusDto, ShareVerdictDto, TaraMessageDto, TaskDto, TogetherCommandDto,
+    SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto, TogetherCommandDto,
     TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
     TurnServerStatusDto,
 };

@@ -369,6 +369,41 @@ fn third_party_reply(handle: &str) -> String {
     )
 }
 
+// ── Tara in the room ─────────────────────────────────────────────────────────
+//
+// `@tara …` in a conversation asks her **in front of the other person** — the
+// answer is sent to them, like `@Meta AI` in WhatsApp. `/tara …` is the private
+// aside and always was. Two spellings, two audiences, and the composer has to
+// say which one is in the box before the send button is pressed.
+//
+// A shared answer travels as an ordinary message whose text carries
+// [`TARA_CHAT_PREFIX`], because that is the only field there is: `MessageDto`
+// has no "who said this" beyond the thread's two people, and adding one means
+// regenerating `crates/comrade_jni/src/frb_generated.rs`, which no sandbox here
+// can do. So the marker is **rendering, not authentication** — anybody can type
+// "Tara: " themselves, and a frontend must not present a matched line as proof
+// the companion spoke. It is a label on a message you relayed, which is exactly
+// what it is.
+//
+// The exit condition is a field: when `frb_generated.rs` can be regenerated,
+// give the DTO an author and let this prefix go.
+
+/// What a shared Tara line starts with, on the wire and on screen.
+pub const TARA_CHAT_PREFIX: &str = "Tara: ";
+
+/// Render `answer` as the line that goes into the conversation.
+pub fn tara_chat_line(answer: &str) -> String {
+    format!("{TARA_CHAT_PREFIX}{}", answer.trim())
+}
+
+/// The answer inside a shared Tara line, or `None` if `content` is not one.
+///
+/// For frontends that want to draw the line as hers rather than as yours. See
+/// the section note above: a match is a label, not a claim about who spoke.
+pub fn tara_chat_answer(content: &str) -> Option<&str> {
+    content.strip_prefix(TARA_CHAT_PREFIX)
+}
+
 fn contains_word(haystack_norm: &str, cue: &str) -> bool {
     format!(" {haystack_norm} ").contains(&format!(" {cue} "))
 }
@@ -696,6 +731,31 @@ mod tests {
                 r.text
             );
         }
+    }
+
+    // ── Tara in the room ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_shared_line_round_trips_through_its_marker() {
+        let line = tara_chat_line("What's the smallest next step?");
+        assert_eq!(
+            tara_chat_answer(&line),
+            Some("What's the smallest next step?")
+        );
+        // An ordinary message is not a Tara line, whatever it says about her.
+        assert_eq!(tara_chat_answer("Tara said hello"), None);
+        assert_eq!(tara_chat_answer("what did tara say"), None);
+    }
+
+    #[test]
+    fn the_marker_is_a_label_and_the_test_says_so() {
+        // Anybody can type the prefix, and this asserts the honest consequence
+        // rather than a guarantee the wire does not carry: a hand-typed line
+        // matches. A frontend must therefore style a match, never trust it.
+        assert_eq!(
+            tara_chat_answer("Tara: I made this up"),
+            Some("I made this up")
+        );
     }
 
     #[test]

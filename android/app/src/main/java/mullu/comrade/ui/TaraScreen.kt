@@ -378,7 +378,14 @@ private fun ThinkingBubble() {
     TaraBubble(text = ".".repeat(dots), fromTara = true, tag = "tara-thinking")
 }
 
-/** Real places to turn — rendered under any reply that detected distress. */
+/**
+ * Real places to turn — rendered under any reply that detected distress.
+ *
+ * The chat composer cannot use this (its note is one `Text`, not a card slot),
+ * so it renders the same resources as lines through `ChatCommands.crisisLines`.
+ * Both paths exist because the honesty gate (`AUDIT.md` §8) applies to *any*
+ * reply that tripped the detector, not only the ones in this tab.
+ */
 @Composable
 private fun CrisisCard(resources: List<ComradeCore.CrisisResourceInfo>) {
     if (resources.isEmpty()) return

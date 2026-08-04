@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -31,8 +32,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -536,11 +539,27 @@ fun ConversationScreen(
     val pickerRows = remember(draft.text, commandCatalog) {
         ChatCommands.pickerRows(draft.text, commandCatalog)
     }
-    // Decided from the raw text, so it is true the moment `@tara ` is typed —
+    // Decided from the raw text, so it is right the moment `@tara ` is typed —
     // before there is anything to parse. A private thing that looks like a
-    // message is how somebody sends one by accident.
-    val asideDraft = remember(draft.text) { ChatCommands.isAsideDraft(draft.text) }
+    // message is how somebody sends one by accident, and now the reverse is
+    // possible too: `@tara` reaches the other person and `/tara` does not.
+    val taraAudience = remember(draft.text) { ChatCommands.taraDraft(draft.text) }
     var commandNote by remember { mutableStateOf<String?>(null) }
+    // Which contact a user picked for an ambiguous `@handle`, by handle. Kept for
+    // the life of the conversation rather than the draft: someone who has just
+    // said which "ana" they meant should not be asked again on the next command.
+    // `ChatCommands.withChoices` refuses a pin that no longer names a candidate,
+    // so a stale one cannot retarget a message.
+    var mentionChoices by remember(peer) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // The question the composer is currently asking about a handle, if any. Keyed
+    // on `peer` like the rest of the per-thread state: a question raised in one
+    // conversation means nothing in the next.
+    var choosing by remember(peer) { mutableStateOf<ComposerPlan.Choose?>(null) }
+    // A question about an ambiguous handle belongs to the text that raised it, so
+    // editing the box withdraws it rather than leaving a chooser hanging over a
+    // draft it no longer describes. Keyed on the text, so it does not fire on the
+    // recomposition that *shows* the chooser — only when the draft actually moves.
+    LaunchedEffect(draft.text) { choosing = null }
     var emojiOpen by remember { mutableStateOf(false) }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -770,12 +789,12 @@ fun ConversationScreen(
         val command = runCatching { ComradeCore.parseChatCommand(text) }.getOrNull()
         if (command == null) {
             // **Fail closed.** Returning false here would hand the text to
-            // [send], and for `@tara i can't stand my brother` that means
+            // [send], and for `/tara i can't stand my brother` that means
             // sending somebody their own private thought. So anything that
             // *looks* like a command is refused rather than delivered when the
-            // grammar is unreachable — `isAsideDraft` is pure Kotlin and cannot
+            // grammar is unreachable — `taraDraft` is pure Kotlin and cannot
             // itself fail, which is why it can be trusted at this point.
-            if (ChatCommands.isAsideDraft(text) || text.startsWith("/")) {
+            if (ChatCommands.taraDraft(text) != null || text.startsWith("/")) {
                 commandNote = "Couldn't read that command — nothing was sent."
                 return true
             }
@@ -786,7 +805,10 @@ fun ConversationScreen(
         ) {
             return false
         }
-        val mentions = runCatching { ComradeCore.resolveMentions(text) }.getOrDefault(emptyList())
+        val mentions = ChatCommands.withChoices(
+            runCatching { ComradeCore.resolveMentions(text) }.getOrDefault(emptyList()),
+            mentionChoices,
+        )
         val plan = ChatCommands.planFor(command, mentions)
 
         // Empties the composer. Deliberately does **not** touch [commandNote]:
@@ -796,12 +818,21 @@ fun ConversationScreen(
             editDraft(TextFieldValue())
         }
 
+        // Set and cleared in one place, so a chooser cannot outlive the draft
+        // that raised it: any other plan means the question no longer applies.
+        choosing = plan as? ComposerPlan.Choose
+
         when (plan) {
             is ComposerPlan.Send -> return false
 
             // Say why and keep the text: a command the user has to retype is a
             // command they stop using.
             is ComposerPlan.Explain -> commandNote = plan.message
+
+            // Nothing to do here — the chooser is rendered from [choosing] above,
+            // and picking a row re-runs this whole function with the choice
+            // applied. The text stays in the box; it is still what the user meant.
+            is ComposerPlan.Choose -> Unit
 
             is ComposerPlan.Help -> commandNote = commandCatalog.joinToString("\n") {
                 "/${it.name} ${it.argument} — ${it.help}"
@@ -815,8 +846,81 @@ fun ConversationScreen(
                             // Shown in the composer's own note, not as a chat
                             // bubble: this never went anywhere, and putting it in
                             // the thread would make it look as though it had.
-                            commandNote = reply.text
+                            //
+                            // The helplines were missing here until now: an aside
+                            // that tripped the distress detector showed the reply
+                            // alone, so `AUDIT.md` §8's gate held on the Tara tab
+                            // and not in the composer that can reach the same
+                            // engine. The reply text asks the reader to call
+                            // somebody; leaving out *who* was the whole failure.
+                            val helplines = if (reply.crisis) {
+                                ChatCommands.crisisLines(
+                                    withContext(Dispatchers.IO) {
+                                        runCatching { ComradeCore.taraCrisisResources() }
+                                            .getOrDefault(emptyList())
+                                    },
+                                )
+                            } else {
+                                ""
+                            }
+                            commandNote = listOf(reply.text, helplines)
+                                .filter { it.isNotEmpty() }
+                                .joinToString("\n\n")
                             editDraft(TextFieldValue())
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Tara could not answer."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.TaraHere -> {
+                sending = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            ComradeCore.taraInChatTyped(peer, plan.text)
+                        }
+                    }
+                        .onSuccess { turn ->
+                            if (turn.keptPrivate) {
+                                // Core refused to publish this one, and the note
+                                // has to say so: the user asked in the open and
+                                // is owed the fact that nothing was sent, or they
+                                // will assume the other person read it. The
+                                // helplines come with it — `AUDIT.md` §8's gate
+                                // holds wherever a distress reply is shown.
+                                val helplines = if (turn.crisis) {
+                                    ChatCommands.crisisLines(
+                                        withContext(Dispatchers.IO) {
+                                            runCatching { ComradeCore.taraCrisisResources() }
+                                                .getOrDefault(emptyList())
+                                        },
+                                    )
+                                } else {
+                                    ""
+                                }
+                                commandNote = listOf(
+                                    turn.reply,
+                                    "(Kept between us — this one wasn't sent.)",
+                                    helplines,
+                                ).filter { it.isNotEmpty() }.joinToString("\n\n")
+                            } else {
+                                // Both messages are already stored; appending
+                                // them beats a reload, which would race the relay
+                                // and could show the answer before the question.
+                                messages = messages +
+                                    listOfNotNull(turn.asked, turn.answered)
+                                commandNote = null
+                                scope.launch {
+                                    listState.scrollToItem(
+                                        messages.size + mediaItems.size - 1,
+                                    )
+                                }
+                            }
+                            clearDraft()
                             sending = false
                         }
                         .onFailure {
@@ -1635,14 +1739,25 @@ fun ConversationScreen(
         // ones whose meaning changes.
         // The `/` picker sits above the field so choosing a row does not shift
         // the composer under the thumb mid-tap.
+        //
+        // **It scrolls, and it is capped.** A bare `/` matches the whole
+        // catalogue — every command in `comrade_core::command::catalog` — and each
+        // row is two lines, so an uncapped `Column` grew taller than the screen:
+        // the rows past the fold were unreachable and the thread was pushed out
+        // of sight. `heightIn` bounds it to roughly four rows, which is what
+        // leaves the conversation visible while you type.
         if (pickerRows.isNotEmpty()) {
-            Column(
+            LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(max = PICKER_MAX_HEIGHT)
                     .padding(horizontal = 12.dp)
                     .testTag("dm-command-picker"),
             ) {
-                for (spec in pickerRows) {
+                // Keyed by name, per `.claude/rules/android.md`: the list is
+                // re-filtered on every keystroke, and without a key the row state
+                // reattaches to whichever command now sits at that index.
+                items(pickerRows, key = { it.name }) { spec ->
                     Text(
                         text = "/${spec.name}  ${spec.argument}\n${spec.help}",
                         style = MaterialTheme.typography.bodySmall,
@@ -1661,12 +1776,59 @@ fun ConversationScreen(
             }
         }
 
-        // An aside must not look like a message. Said in words as well as in the
-        // field's own styling, because the words are what a first-time user
+        // Two contacts answer to one handle, so ask which — rather than the dead
+        // end this used to be, which said "pick which one" and gave nothing to
+        // pick. The key is on every row: the whole reason the handle is ambiguous
+        // is often that both people also chose the same name.
+        choosing?.let { question ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = PICKER_MAX_HEIGHT)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("dm-mention-chooser"),
+            ) {
+                Text(
+                    text = stringResource(R.string.mention_which_one, question.handle),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                for (candidate in question.candidates) {
+                    Text(
+                        text = ChatCommands.candidateLabel(
+                            peerTitle(candidate.npub, candidate.alias, candidate.name),
+                            candidate.npub,
+                        ),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                mentionChoices = mentionChoices +
+                                    (question.handle to candidate.npub)
+                                // Re-run the same draft, now that the handle
+                                // resolves. The text never left the box, so this
+                                // is the command the user already meant.
+                                runCommand(draft.text.trim())
+                            }
+                            .padding(vertical = 8.dp),
+                    )
+                }
+            }
+        }
+
+        // Tara addressed from a chat must not look like a message — and now must
+        // not look like the *wrong audience* either. Said in words as well as in
+        // the field's own styling, because the words are what a first-time user
         // needs and the styling is what a returning one reads at a glance.
-        if (asideDraft) {
+        taraAudience?.let { audience ->
             Text(
-                text = stringResource(R.string.aside_only_you),
+                text = stringResource(
+                    when (audience) {
+                        ChatCommands.TaraAudience.Private -> R.string.aside_only_you
+                        ChatCommands.TaraAudience.Shared -> R.string.tara_here_both_see
+                    },
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier
@@ -1700,10 +1862,12 @@ fun ConversationScreen(
                 onValueChange = { editDraft(it) },
                 placeholder = {
                     Text(
-                        if (asideDraft) {
-                            stringResource(R.string.aside_placeholder)
-                        } else {
-                            "Message"
+                        when (taraAudience) {
+                            ChatCommands.TaraAudience.Private ->
+                                stringResource(R.string.aside_placeholder)
+                            ChatCommands.TaraAudience.Shared ->
+                                stringResource(R.string.tara_here_placeholder)
+                            null -> "Message"
                         },
                     )
                 },
@@ -1950,6 +2114,16 @@ private fun ComposerActionIcon(
  * app targets without demanding a full swipe across the field.
  */
 private const val SWIPE_THRESHOLD_PX = 64f
+
+/**
+ * How tall the `/` picker and the mention chooser may grow before they scroll.
+ *
+ * Both sit between the thread and the composer, so their height is taken from
+ * the conversation. A bare `/` lists the entire catalogue and two contacts can
+ * answer to one handle — neither list has a small upper bound, and before this
+ * cap the rows past the fold could not be reached at all.
+ */
+private val PICKER_MAX_HEIGHT = 200.dp
 
 /** Centred "Today" / "Yesterday" / "12 Jul 2026" pill between days. */
 @Composable

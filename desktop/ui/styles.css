@@ -2545,6 +2545,37 @@ code {
 .input.composer-aside {
   border-style: dashed;
   background: color-mix(in srgb, var(--panel, #161616) 88%, currentColor 12%);
+}
+
+/* `@tara` is the same companion with the opposite audience, so it gets its own
+   treatment rather than the aside's: solid and tinted, because this text *is*
+   going somewhere. A dashed border here would say "private" about a message the
+   other person is about to read. */
+.input.composer-tara-here {
+  border-style: solid;
+  border-color: var(--accent, #6ea8fe);
+}
+
+/* "Which @ana did you mean?" — the same list shape as the `/` picker, because it
+   is the same gesture: a bounded, scrolling set of rows above the field. */
+.mention-chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  padding: 4px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px;
+  background: var(--panel, #161616);
+}
+
+.chooser-question {
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
 
 /* The relay-consent question. Bordered rather than inline text because it is
    the one thing in this panel that stops until it is answered. */

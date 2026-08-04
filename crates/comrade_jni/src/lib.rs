@@ -82,8 +82,8 @@ use comrade_ui::{
     JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
     MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto,
     PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
-    ShareVerdictDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto,
-    UiError, UpiIntentDto, WorkspaceDto,
+    ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto,
+    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -951,6 +951,15 @@ impl Comrade {
     /// never reaches the peer. See `ComradeRuntime::tara_aside`.
     pub fn tara_aside(&self, text: String) -> Result<TaraMessageDto, UiError> {
         self.inner.blocking_read().tara_aside(&text)
+    }
+
+    /// Ask Tara **in** the conversation — `@tara …`, which the peer sees. The
+    /// counterpart to [`Self::tara_aside`]; see `RuntimeHandles::tara_in_chat`
+    /// for the three ways this differs from a cloud assistant, and for why a
+    /// question that trips the distress detector sends nothing.
+    pub async fn tara_in_chat(&self, peer: String, text: String) -> Result<TaraChatDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.tara_in_chat(&peer, &text).await
     }
 
     // ── Attention (usage mirror · focus sessions · long read) ────────────────
