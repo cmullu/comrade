@@ -2414,11 +2414,16 @@ fn wire__crate__api__together_report_position_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_pos_ms = <u64>::sse_decode(&mut deserializer);
             let api_playing = <bool>::sse_decode(&mut deserializer);
+            let api_output_latency_ms = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, ()>((move || {
                     let output_ok = Result::<_, ()>::Ok({
-                        crate::api::together_report_position(api_pos_ms, api_playing);
+                        crate::api::together_report_position(
+                            api_pos_ms,
+                            api_playing,
+                            api_output_latency_ms,
+                        );
                     })?;
                     Ok(output_ok)
                 })())
@@ -2450,12 +2455,17 @@ fn wire__crate__api__together_set_state_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_pos_ms = <u64>::sse_decode(&mut deserializer);
             let api_playing = <bool>::sse_decode(&mut deserializer);
+            let api_effective_in_ms = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, crate::api::UiError>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::together_set_state(api_pos_ms, api_playing).await?;
+                        let output_ok = crate::api::together_set_state(
+                            api_pos_ms,
+                            api_playing,
+                            api_effective_in_ms,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -3027,6 +3037,7 @@ const _: fn() = || {
         let _: u64 = TogetherCommandDto.pos_ms;
         let _: bool = TogetherCommandDto.playing;
         let _: crate::api::StateChange = TogetherCommandDto.change;
+        let _: u64 = TogetherCommandDto.apply_in_ms;
     }
     match None::<crate::api::TogetherContent>.unwrap() {
         crate::api::TogetherContent::LocalFile { duration_ms, label } => {
@@ -4066,11 +4077,13 @@ impl SseDecode for crate::api::TogetherCommandDto {
         let mut var_posMs = <u64>::sse_decode(deserializer);
         let mut var_playing = <bool>::sse_decode(deserializer);
         let mut var_change = <crate::api::StateChange>::sse_decode(deserializer);
+        let mut var_applyInMs = <u64>::sse_decode(deserializer);
         return crate::api::TogetherCommandDto {
             session_id: var_sessionId,
             pos_ms: var_posMs,
             playing: var_playing,
             change: var_change,
+            apply_in_ms: var_applyInMs,
         };
     }
 }
@@ -5204,6 +5217,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherCommandDto
             self.0.pos_ms.into_into_dart().into_dart(),
             self.0.playing.into_into_dart().into_dart(),
             self.0.change.into_into_dart().into_dart(),
+            self.0.apply_in_ms.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6219,6 +6233,7 @@ impl SseEncode for crate::api::TogetherCommandDto {
         <u64>::sse_encode(self.pos_ms, serializer);
         <bool>::sse_encode(self.playing, serializer);
         <crate::api::StateChange>::sse_encode(self.change, serializer);
+        <u64>::sse_encode(self.apply_in_ms, serializer);
     }
 }
 

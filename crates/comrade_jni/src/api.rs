@@ -426,6 +426,7 @@ pub struct _TogetherCommandDto {
     pub pos_ms: u64,
     pub playing: bool,
     pub change: StateChange,
+    pub apply_in_ms: u64,
 }
 
 #[frb(mirror(TogetherCorrectionDto))]
@@ -992,9 +993,15 @@ pub async fn together_join() -> Result<(), UiError> {
 }
 
 /// See [`broadcast_chitthi`] for the lock discipline.
-pub async fn together_set_state(pos_ms: u64, playing: bool) -> Result<(), UiError> {
+pub async fn together_set_state(
+    pos_ms: u64,
+    playing: bool,
+    effective_in_ms: u64,
+) -> Result<(), UiError> {
     let handles = runtime().read().await.handles();
-    handles.together_set_state(pos_ms, playing).await
+    handles
+        .together_set_state(pos_ms, playing, effective_in_ms)
+        .await
 }
 
 /// See [`broadcast_chitthi`] for the lock discipline.
@@ -1005,9 +1012,9 @@ pub async fn together_end() -> Result<(), UiError> {
 
 /// Report where our own player is. Synchronous and skipped under contention —
 /// see [`Comrade::together_report_position`] in this crate's uniffi half.
-pub fn together_report_position(pos_ms: u64, playing: bool) {
+pub fn together_report_position(pos_ms: u64, playing: bool, output_latency_ms: u64) {
     if let Ok(rt) = runtime().try_read() {
-        rt.together_report_position(pos_ms, playing);
+        rt.together_report_position(pos_ms, playing, output_latency_ms);
     }
 }
 

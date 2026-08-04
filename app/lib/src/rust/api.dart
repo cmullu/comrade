@@ -365,9 +365,12 @@ Future<TogetherSessionDto> togetherStart(
 Future<void> togetherJoin() => RustLib.instance.api.crateApiTogetherJoin();
 
 /// See [`broadcast_chitthi`] for the lock discipline.
-Future<void> togetherSetState({required BigInt posMs, required bool playing}) =>
-    RustLib.instance.api
-        .crateApiTogetherSetState(posMs: posMs, playing: playing);
+Future<void> togetherSetState(
+        {required BigInt posMs,
+        required bool playing,
+        required BigInt effectiveInMs}) =>
+    RustLib.instance.api.crateApiTogetherSetState(
+        posMs: posMs, playing: playing, effectiveInMs: effectiveInMs);
 
 /// See [`broadcast_chitthi`] for the lock discipline.
 Future<void> togetherEnd() => RustLib.instance.api.crateApiTogetherEnd();
@@ -375,9 +378,11 @@ Future<void> togetherEnd() => RustLib.instance.api.crateApiTogetherEnd();
 /// Report where our own player is. Synchronous and skipped under contention —
 /// see [`Comrade::together_report_position`] in this crate's uniffi half.
 Future<void> togetherReportPosition(
-        {required BigInt posMs, required bool playing}) =>
-    RustLib.instance.api
-        .crateApiTogetherReportPosition(posMs: posMs, playing: playing);
+        {required BigInt posMs,
+        required bool playing,
+        required BigInt outputLatencyMs}) =>
+    RustLib.instance.api.crateApiTogetherReportPosition(
+        posMs: posMs, playing: playing, outputLatencyMs: outputLatencyMs);
 
 /// See [`broadcast_chitthi`] for the lock discipline.
 Future<void> hangupCall(
@@ -1270,17 +1275,23 @@ class TogetherCommandDto {
   final BigInt posMs;
   final bool playing;
   final StateChange change;
+  final BigInt applyInMs;
 
   const TogetherCommandDto({
     required this.sessionId,
     required this.posMs,
     required this.playing,
     required this.change,
+    required this.applyInMs,
   });
 
   @override
   int get hashCode =>
-      sessionId.hashCode ^ posMs.hashCode ^ playing.hashCode ^ change.hashCode;
+      sessionId.hashCode ^
+      posMs.hashCode ^
+      playing.hashCode ^
+      change.hashCode ^
+      applyInMs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1290,7 +1301,8 @@ class TogetherCommandDto {
           sessionId == other.sessionId &&
           posMs == other.posMs &&
           playing == other.playing &&
-          change == other.change;
+          change == other.change &&
+          applyInMs == other.applyInMs;
 }
 
 @freezed

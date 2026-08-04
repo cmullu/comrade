@@ -63,10 +63,10 @@ use comrade_core::sakha::{LedgerEntry, SakhaEngine, SakhaSyncCallback};
 use comrade_core::seen::{content_key, SeenSet, CONTENT_KEY_PREFIX};
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
 use comrade_core::together::{
-    describe_state_change, parse_together_envelope, projected_peer_pos_ms, session_is_live_at,
-    signal_is_fresh, sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandStamp,
-    StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope, TogetherSignal,
-    TOGETHER_HEARTBEAT_SECS,
+    command_apply, describe_state_change, parse_together_envelope, projected_peer_pos_ms,
+    session_is_live_at, signal_is_fresh, sync_verdict, valid_youtube_id, ClockEcho, ClockFilter,
+    CommandApply, CommandStamp, StateChange, SyncSample, SyncVerdict, TogetherContent,
+    TogetherEnvelope, TogetherSignal, TOGETHER_HEARTBEAT_SECS,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
@@ -372,9 +372,15 @@ pub struct TogetherSessionDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct TogetherCommandDto {
     pub session_id: String,
+    /// Where to be — already carried forward through the message's flight time,
+    /// so a frontend applies this number as-is and does not compensate again.
     pub pos_ms: u64,
     pub playing: bool,
     pub change: StateChange,
+    /// Wait this long before applying, so both players change state on the same
+    /// instant. Zero means the moment has passed and `pos_ms` already accounts
+    /// for it — the only case a relay-speed transport can produce.
+    pub apply_in_ms: u64,
 }
 
 /// The player should be moved to stay with the other side.
@@ -419,6 +425,11 @@ struct TogetherSession {
     last_heard_ms: u64,
     /// Our clock when we last moved the playhead automatically.
     last_seek_ms: u64,
+    /// How far behind our reported position the sound actually leaves this
+    /// device's speaker, as the frontend measured it. Zero means unmeasured.
+    local_output_latency_ms: u64,
+    /// The same figure for the peer, from their last heartbeat.
+    peer_output_latency_ms: u64,
     clock: ClockFilter,
     /// Our own recent send stamps, so an echo coming back can be matched to the
     /// message that provoked it. Four is plenty: an echo older than that is
@@ -2358,8 +2369,15 @@ impl ComradeRuntime {
     }
 
     /// Play, pause or seek. Delegates to [`RuntimeHandles::together_set_state`].
-    pub async fn together_set_state(&self, pos_ms: u64, playing: bool) -> Result<(), UiError> {
-        self.handles().together_set_state(pos_ms, playing).await
+    pub async fn together_set_state(
+        &self,
+        pos_ms: u64,
+        playing: bool,
+        effective_in_ms: u64,
+    ) -> Result<(), UiError> {
+        self.handles()
+            .together_set_state(pos_ms, playing, effective_in_ms)
+            .await
     }
 
     /// Leave the session. Delegates to [`RuntimeHandles::together_end`].
@@ -2375,11 +2393,19 @@ impl ComradeRuntime {
     /// it only gives the next drift verdict something true to compare against,
     /// so skipping it under contention fails in the harmless direction (the same
     /// trade [`Self::note_draft`] makes).
-    pub fn together_report_position(&self, pos_ms: u64, playing: bool) {
+    /// `output_latency_ms` is how far behind `pos_ms` the sound actually leaves
+    /// this device's speaker — `AudioTrack.getTimestamp` on Android, or zero
+    /// from a player that cannot ask. Zero is honest ("unmeasured"), and costs
+    /// only the accuracy it cannot supply: without it two devices can agree
+    /// perfectly on decoder position and still be a tenth of a second apart in
+    /// the room, which is the error no browser-based implementation can even
+    /// see.
+    pub fn together_report_position(&self, pos_ms: u64, playing: bool, output_latency_ms: u64) {
         if let Ok(mut guard) = self.together.try_lock() {
             if let Some(session) = guard.as_mut() {
                 session.local_pos_ms = pos_ms;
                 session.local_playing = playing;
+                session.local_output_latency_ms = output_latency_ms;
             }
         }
     }
@@ -4540,6 +4566,23 @@ impl RuntimeHandles {
         };
         let peer_pk = parse_pubkey(&peer_hex)?;
         let json = env.to_json().map_err(|e| UiError::Engine(e.to_string()))?;
+        // Prefer the local mesh when one is running. This is the single biggest
+        // lever on how tight the sync can be: the deadband is floored by half
+        // the round trip, and a LAN hop is ~1-5 ms against a relay's hundreds.
+        // A together signal is also exactly the kind of traffic the mesh suits —
+        // small, frequent, and worthless once stale.
+        //
+        // Note the honest limitation: `mesh` is `Some` only while the Saathi
+        // engine is running, which today means the off-grid workspace. Starting
+        // it for a session is engine-lifecycle work (AUDIT A1 /
+        // `docs/COMMS_ARCHITECTURE.md` ADR-4) and deliberately not done here.
+        if let Some(mesh) = &self.mesh {
+            let created = now_secs();
+            let id = local_message_id(&to_npub(&peer_hex), &json, created);
+            if mesh.send(&peer_pk, &id, &json, None, created).await {
+                return Ok(());
+            }
+        }
         vault
             .send_dm(&peer_pk, &json)
             .await
@@ -4592,6 +4635,8 @@ impl RuntimeHandles {
                 peer_at_ms: at_ms,
                 last_heard_ms: at_ms,
                 last_seek_ms: 0,
+                local_output_latency_ms: 0,
+                peer_output_latency_ms: 0,
                 clock: ClockFilter::new(),
                 sent_at_ms: std::collections::VecDeque::new(),
                 echo_back: None,
@@ -4640,7 +4685,13 @@ impl RuntimeHandles {
     /// Play, pause or seek — one signal, because all three are the same
     /// statement. Bumps the Lamport counter, so this command outranks anything
     /// either side had applied before it.
-    pub async fn together_set_state(&self, pos_ms: u64, playing: bool) -> Result<(), UiError> {
+    pub async fn together_set_state(
+        &self,
+        pos_ms: u64,
+        playing: bool,
+        effective_in_ms: u64,
+    ) -> Result<(), UiError> {
+        let at_ms = now_ms();
         {
             let mut guard = self.together.lock().unwrap();
             let session = guard
@@ -4651,8 +4702,17 @@ impl RuntimeHandles {
             session.local_pos_ms = pos_ms;
             session.local_playing = playing;
         }
-        self.send_together(TogetherSignal::State { pos_ms, playing })
-            .await
+        // `effective_in_ms` is a promise by the caller that it will apply the
+        // change at that instant on its own player too. A frontend that can
+        // defer (any native player can) uses it and both sides change state on
+        // the same tick; one that cannot passes 0 and the receiver projects
+        // instead. Either way the receiver never adopts a stale position.
+        self.send_together(TogetherSignal::State {
+            pos_ms,
+            playing,
+            effective_at_ms: Some(at_ms.saturating_add(effective_in_ms)),
+        })
+        .await
     }
 
     /// Leave. Best-effort on the wire — a session the other side never hears
@@ -4710,6 +4770,7 @@ impl RuntimeHandles {
                     pos_ms: s.local_pos_ms,
                     playing: s.local_playing,
                     applied_seq: s.applied.seq,
+                    output_latency_ms: s.local_output_latency_ms,
                 })
         };
         if let Some(beat) = beat {
@@ -5731,6 +5792,8 @@ fn handle_together_envelope(
             peer_at_ms: env.at_ms,
             last_heard_ms: at,
             last_seek_ms: 0,
+            local_output_latency_ms: 0,
+            peer_output_latency_ms: 0,
             clock: ClockFilter::new(),
             sent_at_ms: std::collections::VecDeque::new(),
             echo_back: Some(ClockEcho {
@@ -5782,7 +5845,11 @@ fn handle_together_envelope(
                 by_peer: true,
             });
         }
-        TogetherSignal::State { pos_ms, playing } => {
+        TogetherSignal::State {
+            pos_ms,
+            playing,
+            effective_at_ms,
+        } => {
             let incoming = CommandStamp::new(env.seq, peer_npub, !playing);
             if !incoming.wins_over(&session.applied) {
                 // Either a redelivered copy, or our own command outranks theirs
@@ -5791,6 +5858,21 @@ fn handle_together_envelope(
                 tracing::debug!(session = %env.session_id, "together command did not win");
                 return;
             }
+            let clock = session.clock.estimate(at);
+            // The instant this state took effect on their clock. Absent means
+            // "when I sent it", which is what a sender with no way to schedule
+            // ahead of its own transport says.
+            let effective = effective_at_ms.unwrap_or(env.at_ms);
+            let apply = command_apply(pos_ms, effective, playing, &clock, at);
+            // **This is the improvement over a position-swapping protocol.** We
+            // do not adopt `pos_ms` — that number was true when they sent it,
+            // and adopting it verbatim lands us behind by exactly the flight
+            // time, every time, invisibly, because both sides agree on the
+            // number they exchanged. We evaluate their timeline at *our* now.
+            let (landed_ms, apply_in_ms) = match apply {
+                CommandApply::Now { pos_ms, .. } => (pos_ms, 0),
+                CommandApply::At { pos_ms, in_ms, .. } => (pos_ms, in_ms),
+            };
             let expected = projected_peer_pos_ms(&SyncSample {
                 local_pos_ms: session.local_pos_ms,
                 local_playing: session.local_playing,
@@ -5801,35 +5883,40 @@ fn handle_together_envelope(
                 peer_at_ms: session.peer_at_ms,
                 now_ms: at,
                 last_seek_ms: session.last_seek_ms,
-                clock: session.clock.estimate(at),
+                clock,
                 we_lead: session.we_lead,
+                local_output_latency_ms: session.local_output_latency_ms,
+                peer_output_latency_ms: session.peer_output_latency_ms,
             })
             .max(0) as u64;
-            let change = describe_state_change(session.peer_playing, playing, expected, pos_ms);
+            let change = describe_state_change(session.peer_playing, playing, expected, landed_ms);
             session.applied = incoming;
+            // Their anchor is what they said, at the instant they said it held.
             session.peer_pos_ms = pos_ms;
             session.peer_playing = playing;
-            session.peer_at_ms = env.at_ms;
-            // A command is not a correction: we take it wholesale.
-            session.local_pos_ms = pos_ms;
+            session.peer_at_ms = effective;
+            session.local_pos_ms = landed_ms;
             session.local_playing = playing;
             let session_id = session.id.clone();
             drop(guard);
             let _ = tx.send(BridgeEvent::TogetherCommand(TogetherCommandDto {
                 session_id,
-                pos_ms,
+                pos_ms: landed_ms,
                 playing,
                 change,
+                apply_in_ms,
             }));
         }
         TogetherSignal::Heartbeat {
             pos_ms,
             playing,
             applied_seq,
+            output_latency_ms,
         } => {
             session.peer_pos_ms = pos_ms;
             session.peer_playing = playing;
             session.peer_at_ms = env.at_ms;
+            session.peer_output_latency_ms = output_latency_ms;
             let clock = session.clock.estimate(at);
             let sample = SyncSample {
                 local_pos_ms: session.local_pos_ms,
@@ -5843,6 +5930,8 @@ fn handle_together_envelope(
                 last_seek_ms: session.last_seek_ms,
                 clock,
                 we_lead: session.we_lead,
+                local_output_latency_ms: session.local_output_latency_ms,
+                peer_output_latency_ms: output_latency_ms,
             };
             let verdict = sync_verdict(&sample, session.content.tuning());
             if matches!(verdict, SyncVerdict::Hold) {
@@ -5874,7 +5963,7 @@ fn handle_together_envelope(
                 session_id,
                 verdict,
                 drift_ms,
-                quality_ms: clock.uncertainty_ms(),
+                quality_ms: clock.uncertainty_at(at),
             }));
         }
     }
@@ -9543,10 +9632,12 @@ mod tests {
             TogetherSignal::State {
                 pos_ms: 2_520_000,
                 playing: false,
+                effective_at_ms: None,
             },
             TogetherSignal::State {
                 pos_ms: 0,
                 playing: true,
+                effective_at_ms: None,
             },
         ] {
             let body = together_json("s1", 9, signal);
@@ -9584,6 +9675,7 @@ mod tests {
             TogetherSignal::State {
                 pos_ms: 1_000,
                 playing: true,
+                effective_at_ms: None,
             },
         );
         let mut msg = incoming(&hex, "e1", &body);
@@ -9712,6 +9804,7 @@ mod tests {
             TogetherSignal::State {
                 pos_ms: 5_000,
                 playing: true,
+                effective_at_ms: None,
             },
         );
         // Two different wrapper ids carrying the same command — which is what a
@@ -9728,6 +9821,142 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "the same command must not be applied twice"
+        );
+    }
+
+    /// The improvement over every position-swapping watch-party protocol,
+    /// asserted end-to-end: a command that spent time in flight must land where
+    /// the sender *is*, not where they *were*. Adopting the number verbatim
+    /// leaves you behind by exactly the flight time, every time — and invisibly,
+    /// because both sides agree on the number they exchanged.
+    #[tokio::test]
+    async fn a_command_that_spent_time_in_flight_lands_where_the_sender_is_now() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s1",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        let mut msg = incoming(&hex, "e1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherInvited(_)
+        ));
+
+        // They started playing at 60.000s, and it took 400 ms to reach us.
+        let flight_ms = 400u64;
+        let body = TogetherEnvelope::new(
+            "s1",
+            2,
+            now_ms(),
+            None,
+            TogetherSignal::State {
+                pos_ms: 60_000,
+                playing: true,
+                effective_at_ms: Some(now_ms().saturating_sub(flight_ms)),
+            },
+        )
+        .to_json()
+        .unwrap();
+        let mut m = incoming(&hex, "e2", &body);
+        m.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, m);
+
+        let BridgeEvent::TogetherCommand(cmd) = rx.try_recv().unwrap() else {
+            panic!("expected a command");
+        };
+        assert!(cmd.playing);
+        // Allow a little slack for the clock read between building and handling.
+        let advanced = cmd.pos_ms as i64 - 60_000;
+        assert!(
+            (advanced - flight_ms as i64).abs() <= 50,
+            "expected ~{flight_ms}ms of flight added back, got {advanced}ms — \
+             adopting the sender's stale number is the bug this test exists for"
+        );
+        assert_eq!(cmd.apply_in_ms, 0, "the moment has already passed");
+    }
+
+    /// A sender on a transport fast enough to schedule ahead makes both players
+    /// change state on the same instant, rather than one chasing the other.
+    #[tokio::test]
+    async fn a_command_scheduled_ahead_asks_the_player_to_wait() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s1",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        let mut msg = incoming(&hex, "e1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        let _ = rx.try_recv();
+
+        let body = TogetherEnvelope::new(
+            "s1",
+            2,
+            now_ms(),
+            None,
+            TogetherSignal::State {
+                pos_ms: 60_000,
+                playing: true,
+                effective_at_ms: Some(now_ms() + 250),
+            },
+        )
+        .to_json()
+        .unwrap();
+        let mut m = incoming(&hex, "e2", &body);
+        m.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, m);
+
+        let BridgeEvent::TogetherCommand(cmd) = rx.try_recv().unwrap() else {
+            panic!("expected a command");
+        };
+        assert!(
+            cmd.apply_in_ms > 0 && cmd.apply_in_ms <= 250,
+            "got {}",
+            cmd.apply_in_ms
+        );
+        assert_eq!(
+            cmd.pos_ms, 60_000,
+            "a scheduled command needs no compensation"
         );
     }
 
@@ -9783,6 +10012,7 @@ mod tests {
                     pos_ms: 60_000,
                     playing: true,
                     applied_seq: 1,
+                    output_latency_ms: 0,
                 },
             );
             let mut m = incoming(&hex, &format!("hb{i}"), &beat);
@@ -9820,6 +10050,8 @@ mod tests {
             peer_at_ms: now_ms(),
             last_heard_ms: now_ms(),
             last_seek_ms: 0,
+            local_output_latency_ms: 0,
+            peer_output_latency_ms: 0,
             clock: ClockFilter::new(),
             sent_at_ms: std::collections::VecDeque::new(),
             echo_back: None,

@@ -250,10 +250,14 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiTogetherJoin();
 
   Future<void> crateApiTogetherReportPosition(
-      {required BigInt posMs, required bool playing});
+      {required BigInt posMs,
+      required bool playing,
+      required BigInt outputLatencyMs});
 
   Future<void> crateApiTogetherSetState(
-      {required BigInt posMs, required bool playing});
+      {required BigInt posMs,
+      required bool playing,
+      required BigInt effectiveInMs});
 
   Future<TogetherSessionDto> crateApiTogetherStart(
       {required String peer, required TogetherContent content});
@@ -1964,12 +1968,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<void> crateApiTogetherReportPosition(
-      {required BigInt posMs, required bool playing}) {
+      {required BigInt posMs,
+      required bool playing,
+      required BigInt outputLatencyMs}) {
     return handler.executeNormal(NormalTask(
       callFfi: (port_) {
         final serializer = SseSerializer(generalizedFrbRustBinding);
         sse_encode_u_64(posMs, serializer);
         sse_encode_bool(playing, serializer);
+        sse_encode_u_64(outputLatencyMs, serializer);
         pdeCallFfi(generalizedFrbRustBinding, serializer,
             funcId: 69, port: port_);
       },
@@ -1978,7 +1985,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         decodeErrorData: null,
       ),
       constMeta: kCrateApiTogetherReportPositionConstMeta,
-      argValues: [posMs, playing],
+      argValues: [posMs, playing, outputLatencyMs],
       apiImpl: this,
     ));
   }
@@ -1986,17 +1993,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiTogetherReportPositionConstMeta =>
       const TaskConstMeta(
         debugName: 'together_report_position',
-        argNames: ['posMs', 'playing'],
+        argNames: ['posMs', 'playing', 'outputLatencyMs'],
       );
 
   @override
   Future<void> crateApiTogetherSetState(
-      {required BigInt posMs, required bool playing}) {
+      {required BigInt posMs,
+      required bool playing,
+      required BigInt effectiveInMs}) {
     return handler.executeNormal(NormalTask(
       callFfi: (port_) {
         final serializer = SseSerializer(generalizedFrbRustBinding);
         sse_encode_u_64(posMs, serializer);
         sse_encode_bool(playing, serializer);
+        sse_encode_u_64(effectiveInMs, serializer);
         pdeCallFfi(generalizedFrbRustBinding, serializer,
             funcId: 70, port: port_);
       },
@@ -2005,14 +2015,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         decodeErrorData: sse_decode_ui_error,
       ),
       constMeta: kCrateApiTogetherSetStateConstMeta,
-      argValues: [posMs, playing],
+      argValues: [posMs, playing, effectiveInMs],
       apiImpl: this,
     ));
   }
 
   TaskConstMeta get kCrateApiTogetherSetStateConstMeta => const TaskConstMeta(
         debugName: 'together_set_state',
-        argNames: ['posMs', 'playing'],
+        argNames: ['posMs', 'playing', 'effectiveInMs'],
       );
 
   @override
@@ -2985,13 +2995,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TogetherCommandDto dco_decode_together_command_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return TogetherCommandDto(
       sessionId: dco_decode_String(arr[0]),
       posMs: dco_decode_u_64(arr[1]),
       playing: dco_decode_bool(arr[2]),
       change: dco_decode_state_change(arr[3]),
+      applyInMs: dco_decode_u_64(arr[4]),
     );
   }
 
@@ -4090,11 +4101,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     final var_posMs = sse_decode_u_64(deserializer);
     final var_playing = sse_decode_bool(deserializer);
     final var_change = sse_decode_state_change(deserializer);
+    final var_applyInMs = sse_decode_u_64(deserializer);
     return TogetherCommandDto(
         sessionId: var_sessionId,
         posMs: var_posMs,
         playing: var_playing,
-        change: var_change);
+        change: var_change,
+        applyInMs: var_applyInMs);
   }
 
   @protected
@@ -5059,6 +5072,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.posMs, serializer);
     sse_encode_bool(self.playing, serializer);
     sse_encode_state_change(self.change, serializer);
+    sse_encode_u_64(self.applyInMs, serializer);
   }
 
   @protected

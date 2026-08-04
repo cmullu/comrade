@@ -959,9 +959,21 @@ impl Comrade {
     }
 
     /// Play, pause or seek — one call, because all three are one statement.
-    pub async fn together_set_state(&self, pos_ms: u64, playing: bool) -> Result<(), UiError> {
+    ///
+    /// `effective_in_ms` is a promise by the caller that it will apply the same
+    /// change on its own player at that instant. A native player can defer a few
+    /// tens of milliseconds imperceptibly, and then both sides change state on
+    /// the *same* tick instead of one chasing the other. Pass 0 if you cannot.
+    pub async fn together_set_state(
+        &self,
+        pos_ms: u64,
+        playing: bool,
+        effective_in_ms: u64,
+    ) -> Result<(), UiError> {
         let handles = self.inner.read().await.handles();
-        handles.together_set_state(pos_ms, playing).await
+        handles
+            .together_set_state(pos_ms, playing, effective_in_ms)
+            .await
     }
 
     /// Leave the session.
@@ -977,9 +989,9 @@ impl Comrade {
     /// its UI thread, and a position report is not worth waiting on a vault
     /// unlock for. Missing one only means the next drift verdict compares
     /// against a slightly older number.
-    pub fn together_report_position(&self, pos_ms: u64, playing: bool) {
+    pub fn together_report_position(&self, pos_ms: u64, playing: bool, output_latency_ms: u64) {
         if let Ok(rt) = self.inner.try_read() {
-            rt.together_report_position(pos_ms, playing);
+            rt.together_report_position(pos_ms, playing, output_latency_ms);
         }
     }
 

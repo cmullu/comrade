@@ -1111,7 +1111,7 @@ async fn accepted_peers_start_join_pause_and_end_a_session() {
     .expect("alice hears bob join");
 
     // ── Bob pauses; alice is told, and told what it was ────────────────────
-    bob.together_set_state(60_000, false).await.unwrap();
+    bob.together_set_state(60_000, false, 0).await.unwrap();
     let command = wait_for(&mut alice_events, RECV_TIMEOUT, |e| {
         matches!(e, BridgeEvent::TogetherCommand(_))
     })

@@ -410,10 +410,11 @@ pub async fn together_set_state(
     state: tauri::State<'_, Runtime>,
     pos_ms: u64,
     playing: bool,
+    effective_in_ms: u64,
 ) -> Result<(), String> {
     let handles = state.read().await.handles();
     handles
-        .together_set_state(pos_ms, playing)
+        .together_set_state(pos_ms, playing, effective_in_ms)
         .await
         .map_err(|e| e.to_string())
 }
@@ -437,8 +438,12 @@ pub async fn together_report_position(
     state: tauri::State<'_, Runtime>,
     pos_ms: u64,
     playing: bool,
+    output_latency_ms: u64,
 ) -> Result<(), String> {
-    state.read().await.together_report_position(pos_ms, playing);
+    state
+        .read()
+        .await
+        .together_report_position(pos_ms, playing, output_latency_ms);
     Ok(())
 }
 

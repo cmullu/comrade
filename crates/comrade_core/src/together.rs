@@ -140,6 +140,11 @@ pub const TOGETHER_CORRECTION_WINDOW_MS: u64 = 10_000;
 /// seconds is worse than being a couple of seconds out.
 pub const TOGETHER_MIN_SEEK_INTERVAL_MS: u64 = 5_000;
 
+/// How far ahead a peer may schedule a command before we stop trusting it and
+/// just apply it. Comfortably past a local-mesh round trip, nowhere near long
+/// enough to be worth holding a timer for on a stranger's say-so.
+pub const TOGETHER_MAX_SCHEDULE_MS: u64 = 2_000;
+
 /// The uncertainty we assume before any round trip has been measured.
 /// Deliberately pessimistic and deliberately **not zero**: "we have not
 /// measured" must never read as "we are certain".
@@ -149,6 +154,25 @@ pub const TOGETHER_UNMEASURED_UNCERTAINTY_MS: u64 = 1_500;
 /// the heartbeat cadence, short enough that an NTP step on either device ages
 /// out of the estimate within two windows.
 pub const CLOCK_PROBE_WINDOW_MS: u64 = 120_000;
+
+/// How many probes a frequency estimate needs before it means anything.
+pub const CLOCK_MIN_SKEW_PROBES: usize = 4;
+
+/// And how long they must span. Below this the slope is mostly network jitter:
+/// a 1 ms jitter over a 10 s baseline reads as 100 ppm, which is five times any
+/// real crystal error.
+pub const CLOCK_MIN_SKEW_SPAN_MS: u64 = 45_000;
+
+/// The ceiling on a believable frequency difference. Consumer crystals are
+/// specified to a few tens of ppm; anything past this is a clock being *stepped*
+/// (NTP correcting, someone changing the time), which is a phase event and must
+/// not be re-read as a frequency and then extrapolated forever.
+pub const CLOCK_MAX_SKEW_PPM: f64 = 200.0;
+
+/// The frequency error assumed to survive the regression, used to grow the
+/// uncertainty of a stale estimate. At 5 ppm a minute-old estimate has drifted
+/// 0.3 ms — small, but it is the term that used to be silently zero.
+pub const CLOCK_RESIDUAL_SKEW_PPM: f64 = 5.0;
 
 /// How many probes [`ClockFilter`] keeps. The minimum filter needs candidates;
 /// it does not need history.
@@ -326,7 +350,24 @@ pub enum TogetherSignal {
     /// reporting one would only tempt the leader to correct toward it.
     Join,
     /// Play, pause and seek — see the note above.
-    State { pos_ms: u64, playing: bool },
+    ///
+    /// `pos_ms` is the playhead **at `effective_at_ms`**, not at send time and
+    /// not on arrival. That is the difference between this and every
+    /// position-swapping watch-party protocol: a command that takes 300 ms to
+    /// arrive costs nothing, because the receiver evaluates the timeline at its
+    /// own now instead of adopting a stale number.
+    ///
+    /// Absent means "effective when I sent it" — the envelope's own `at_ms` —
+    /// which is what a relay-speed sender should say. A sender on a transport
+    /// fast enough to schedule ahead (the local mesh) sets it a little in the
+    /// future, and then *both* players change state on the same instant rather
+    /// than one chasing the other.
+    State {
+        pos_ms: u64,
+        playing: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_at_ms: Option<u64>,
+    },
     /// Where I am now, and the last command I had applied when I said so.
     ///
     /// `applied_seq` is what lets the receiver tell "their position follows from
@@ -337,6 +378,11 @@ pub enum TogetherSignal {
         pos_ms: u64,
         playing: bool,
         applied_seq: u64,
+        /// How far behind `pos_ms` the sound actually leaving this device's
+        /// speaker is. Zero means "not measured" — honest, and what any player
+        /// that cannot ask its audio stack will send.
+        #[serde(default)]
+        output_latency_ms: u64,
     },
     /// "I'm leaving." Also the decline: a `Start` answered with `End` is a no,
     /// and the initiator deliberately cannot tell the two apart.
@@ -516,11 +562,24 @@ pub struct ClockProbe {
 }
 
 /// What we currently believe about the peer's clock, and how sure we are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Two terms, not one. NTP disciplines *phase* and *frequency*, and so does
+/// this: an offset alone is only correct at the instant it was measured, and
+/// decays at the rate the two crystals differ. Tracking the rate as well means a
+/// projection stays good between probes — which is what lets the heartbeat be
+/// slow *and* the sync be tight, instead of trading one for the other.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClockEstimate {
+    /// Peer clock minus ours, in milliseconds, **at [`Self::measured_at_ms`]**.
     pub offset_ms: i64,
     /// `None` until a round trip has actually been measured.
     pub rtt_ms: Option<u64>,
+    /// How fast the peer's clock runs relative to ours, in parts per million.
+    /// Positive means theirs gains. Zero until enough probes span enough time to
+    /// measure it — a guessed frequency is worse than none.
+    pub skew_ppm: f64,
+    /// Our clock when the offset was measured; the skew projects from here.
+    pub measured_at_ms: u64,
 }
 
 impl ClockEstimate {
@@ -529,23 +588,43 @@ impl ClockEstimate {
         Self {
             offset_ms: 0,
             rtt_ms: None,
+            skew_ppm: 0.0,
+            measured_at_ms: 0,
         }
     }
 
-    /// How wrong the projection built on this could be.
+    /// The offset projected to `now_ms`, carrying the measured frequency
+    /// forward. With a typical ±20 ppm crystal pair this is worth ~1 ms per
+    /// minute of probe age — small, but it is exactly the error that used to
+    /// grow silently between heartbeats.
+    pub fn offset_at(&self, now_ms: u64) -> i64 {
+        if self.rtt_ms.is_none() {
+            return self.offset_ms;
+        }
+        let elapsed = now_ms.saturating_sub(self.measured_at_ms) as f64;
+        self.offset_ms + (self.skew_ppm * elapsed / 1_000_000.0).round() as i64
+    }
+
+    /// How wrong a projection built on this could be, **at `now_ms`**.
     ///
-    /// Half the round trip when we have one — the one-way delay we cannot
-    /// observe directly — and a deliberately pessimistic constant when we do
-    /// not. Never zero: [`sync_verdict`] refuses to correct inside this figure,
-    /// so a zero here would mean "correct on any evidence at all".
-    pub fn uncertainty_ms(&self) -> u64 {
-        self.rtt_ms
-            .map(|rtt| rtt / 2)
-            .unwrap_or(TOGETHER_UNMEASURED_UNCERTAINTY_MS)
+    /// Half the round trip — the one-way delay we cannot observe directly —
+    /// plus what the frequency estimate itself could have drifted since it was
+    /// taken. Never zero: [`sync_verdict`] refuses to correct inside this
+    /// figure, so a zero would mean "correct on any evidence at all".
+    pub fn uncertainty_at(&self, now_ms: u64) -> u64 {
+        let Some(rtt) = self.rtt_ms else {
+            return TOGETHER_UNMEASURED_UNCERTAINTY_MS;
+        };
+        let elapsed = now_ms.saturating_sub(self.measured_at_ms) as f64;
+        // A residual frequency error of this much is assumed to survive the
+        // regression; it bounds how fast a stale estimate goes bad.
+        let residual = (CLOCK_RESIDUAL_SKEW_PPM * elapsed / 1_000_000.0).round() as u64;
+        rtt / 2 + residual
     }
 }
 
-/// A bounded ring of recent probes, reporting the least-delayed one.
+/// A bounded ring of recent probes, reporting the least-delayed one and the
+/// frequency difference across all of them.
 ///
 /// The minimum filter is the standard NTP trick and it earns its place twice
 /// here: the probe that queued least is the one whose "both directions took the
@@ -595,15 +674,20 @@ impl ClockFilter {
 
     /// The best estimate at `now_ms`, ignoring probes that have aged out.
     pub fn estimate(&self, now_ms: u64) -> ClockEstimate {
-        self.probes
+        let live: Vec<&ClockProbe> = self
+            .probes
             .iter()
             .filter(|p| now_ms.saturating_sub(p.at_ms) <= CLOCK_PROBE_WINDOW_MS)
-            .min_by_key(|p| p.rtt_ms)
-            .map(|p| ClockEstimate {
-                offset_ms: p.offset_ms,
-                rtt_ms: Some(p.rtt_ms),
-            })
-            .unwrap_or_else(ClockEstimate::unmeasured)
+            .collect();
+        let Some(best) = live.iter().min_by_key(|p| p.rtt_ms) else {
+            return ClockEstimate::unmeasured();
+        };
+        ClockEstimate {
+            offset_ms: best.offset_ms,
+            rtt_ms: Some(best.rtt_ms),
+            skew_ppm: skew_ppm(&live),
+            measured_at_ms: best.at_ms,
+        }
     }
 
     /// How many probes are being kept. Bounded by [`CLOCK_PROBE_RING`].
@@ -613,6 +697,119 @@ impl ClockFilter {
 
     pub fn is_empty(&self) -> bool {
         self.probes.is_empty()
+    }
+}
+
+/// Least-squares slope of offset against time, in ppm — the two crystals'
+/// frequency difference.
+///
+/// Returns zero unless there are enough probes over a long enough span to mean
+/// anything: over a short baseline the slope is dominated by network jitter, and
+/// a frequency estimate built from noise is worse than admitting we have none,
+/// because it keeps *accumulating* after the probes stop.
+///
+/// The result is clamped to [`CLOCK_MAX_SKEW_PPM`]. Consumer crystals are
+/// specified to a few tens of ppm; anything past this is a clock being stepped
+/// (NTP correcting, a user changing the time), which is a *phase* event and must
+/// not be mistaken for a frequency.
+fn skew_ppm(probes: &[&ClockProbe]) -> f64 {
+    if probes.len() < CLOCK_MIN_SKEW_PROBES {
+        return 0.0;
+    }
+    let (first, last) = (probes[0], probes[probes.len() - 1]);
+    let span = last.at_ms.saturating_sub(first.at_ms);
+    if span < CLOCK_MIN_SKEW_SPAN_MS {
+        return 0.0;
+    }
+    let n = probes.len() as f64;
+    let mean_t = probes.iter().map(|p| p.at_ms as f64).sum::<f64>() / n;
+    let mean_o = probes.iter().map(|p| p.offset_ms as f64).sum::<f64>() / n;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for p in probes {
+        let dt = p.at_ms as f64 - mean_t;
+        num += dt * (p.offset_ms as f64 - mean_o);
+        den += dt * dt;
+    }
+    if den <= 0.0 {
+        return 0.0;
+    }
+    // Slope is ms of offset per ms of time; ppm is that times 1e6.
+    let slope = num / den * 1_000_000.0;
+    if !slope.is_finite() {
+        return 0.0;
+    }
+    slope.clamp(-CLOCK_MAX_SKEW_PPM, CLOCK_MAX_SKEW_PPM)
+}
+
+/// Where a playhead is at `at_ms`, given that it was at `anchor_pos_ms` at
+/// `anchor_at_ms` and whether it is running. All four times must be on the same
+/// clock; the caller converts.
+///
+/// This is the semantic the whole design rests on, and it is the one thing every
+/// browser-based watch-party gets wrong: a position is meaningless without the
+/// instant it was true at. "I am at 42:00" acted on 300 ms later puts you 300 ms
+/// behind, every single time, and the error is invisible because both sides
+/// agree on the number they exchanged. An *anchor* has no such failure mode —
+/// arriving late costs nothing, because the receiver evaluates the timeline at
+/// its own now rather than adopting a stale instant.
+pub fn timeline_pos_ms(anchor_pos_ms: u64, anchor_at_ms: u64, playing: bool, at_ms: u64) -> u64 {
+    if !playing {
+        return anchor_pos_ms;
+    }
+    anchor_pos_ms.saturating_add(at_ms.saturating_sub(anchor_at_ms))
+}
+
+/// What to do with a command that has just arrived.
+///
+/// Commands carry the instant they take effect, so a receiver has two honest
+/// options and never needs a third: if that instant is still ahead, wait for it
+/// and both players change state on the same tick; if it has passed, evaluate
+/// the timeline and land where the sender already is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandApply {
+    /// Apply now, at this position — the effective instant has passed, so the
+    /// position has been carried forward to compensate for the flight.
+    Now { pos_ms: u64, playing: bool },
+    /// Wait `in_ms`, then apply. Only reachable when the transport is fast
+    /// enough for the sender to schedule ahead of it — the local mesh, not a
+    /// relay.
+    At {
+        pos_ms: u64,
+        playing: bool,
+        in_ms: u64,
+    },
+}
+
+/// Turn an incoming command into one of the two above.
+///
+/// `effective_at_ms` is on the *peer's* clock; `clock` converts it. A command
+/// scheduled further ahead than [`TOGETHER_MAX_SCHEDULE_MS`] is applied now
+/// instead of trusted — a peer that asks us to pause in an hour is either broken
+/// or hostile, and either way we are not holding a timer for it.
+pub fn command_apply(
+    anchor_pos_ms: u64,
+    effective_at_ms: u64,
+    playing: bool,
+    clock: &ClockEstimate,
+    now_ms: u64,
+) -> CommandApply {
+    // Peer instant → our clock.
+    let effective_here = effective_at_ms as i64 - clock.offset_at(now_ms);
+    let ahead = effective_here - now_ms as i64;
+    if ahead > 0 && (ahead as u64) <= TOGETHER_MAX_SCHEDULE_MS {
+        return CommandApply::At {
+            pos_ms: anchor_pos_ms,
+            playing,
+            in_ms: ahead as u64,
+        };
+    }
+    // It has already taken effect (or is absurdly far off). Evaluate the
+    // timeline rather than adopting the sender's stale number.
+    let elapsed = (-ahead).max(0) as u64;
+    CommandApply::Now {
+        pos_ms: timeline_pos_ms(anchor_pos_ms, 0, playing, elapsed),
+        playing,
     }
 }
 
@@ -645,6 +842,19 @@ pub struct SyncSample {
     pub clock: ClockEstimate,
     /// Whether *we* started this session. The starter leads.
     pub we_lead: bool,
+    /// How far *behind* our reported position the sound actually leaving the
+    /// speaker is, in milliseconds.
+    ///
+    /// A player's `getCurrentPosition` is where the decoder is, not where the
+    /// listener is: on Android the audio HAL buffer alone is 20-100 ms, and it
+    /// differs between two handsets. Two players agreeing perfectly on decoder
+    /// position can therefore still be a tenth of a second apart in the room,
+    /// which is exactly the error a browser-based implementation cannot even
+    /// see. `AudioTrack.getTimestamp` measures it; zero means "not measured",
+    /// which costs nothing but is not a claim that it is zero.
+    pub local_output_latency_ms: u64,
+    /// The same figure for the peer, as they reported it.
+    pub peer_output_latency_ms: u64,
 }
 
 /// What to do about the peer's reported position.
@@ -709,8 +919,8 @@ pub fn sync_verdict(s: &SyncSample, t: SyncTuning) -> SyncVerdict {
     }
 
     let peer_pos_now = projected_peer_pos_ms(s);
-    let drift_ms = s.local_pos_ms as i64 - peer_pos_now;
-    let deadband = t.min_deadband_ms.max(s.clock.uncertainty_ms()) as i64;
+    let drift_ms = local_audible_pos_ms(s) - peer_pos_now;
+    let deadband = t.min_deadband_ms.max(s.clock.uncertainty_at(s.now_ms)) as i64;
     if drift_ms.abs() <= deadband {
         return SyncVerdict::Hold;
     }
@@ -734,7 +944,9 @@ pub fn sync_verdict(s: &SyncSample, t: SyncTuning) -> SyncVerdict {
     }
 
     SyncVerdict::Seek {
-        pos_ms: peer_pos_now.max(0) as u64,
+        // Their audible position, expressed as the decoder position *we* must
+        // ask for to be audible in the same place.
+        pos_ms: (peer_pos_now + s.local_output_latency_ms as i64).max(0) as u64,
     }
 }
 
@@ -742,9 +954,21 @@ pub fn sync_verdict(s: &SyncSample, t: SyncTuning) -> SyncVerdict {
 /// how long ago that was. Exposed because a UI wants the same number to show a
 /// drift figure.
 pub fn projected_peer_pos_ms(s: &SyncSample) -> i64 {
-    let sent_in_our_clock = s.peer_at_ms as i64 - s.clock.offset_ms;
-    let elapsed = (s.now_ms as i64 - sent_in_our_clock).max(0);
-    s.peer_pos_ms as i64 + if s.peer_playing { elapsed } else { 0 }
+    // Their anchor instant, on our clock, with the frequency difference carried
+    // forward rather than assumed away.
+    let anchored_here = s.peer_at_ms as i64 - s.clock.offset_at(s.now_ms);
+    let elapsed = (s.now_ms as i64 - anchored_here).max(0);
+    let decoder = s.peer_pos_ms as i64 + if s.peer_playing { elapsed } else { 0 };
+    // Compare ear to ear, not decoder to decoder: what each side *hears* is its
+    // decoder position minus its own output latency, and those differ per
+    // handset.
+    decoder - s.peer_output_latency_ms as i64
+}
+
+/// Where our own listener actually is — decoder position less our output
+/// latency, the same correction applied to the peer above.
+pub fn local_audible_pos_ms(s: &SyncSample) -> i64 {
+    s.local_pos_ms as i64 - s.local_output_latency_ms as i64
 }
 
 /// The rate that closes `drift_ms` over [`TOGETHER_CORRECTION_WINDOW_MS`],
@@ -826,11 +1050,13 @@ mod tests {
             TogetherSignal::State {
                 pos_ms: 2_520_000,
                 playing: true,
+                effective_at_ms: Some(1_700_000_000_500),
             },
             TogetherSignal::Heartbeat {
                 pos_ms: 2_530_000,
                 playing: true,
                 applied_seq: 4,
+                output_latency_ms: 45,
             },
             TogetherSignal::End,
         ];
@@ -1071,7 +1297,7 @@ mod tests {
 
         let estimate = filter.estimate(t4 as u64);
         assert_eq!(estimate.offset_ms, offset);
-        assert_eq!(estimate.uncertainty_ms(), one_way as u64);
+        assert_eq!(estimate.uncertainty_at(t4 as u64), one_way as u64);
     }
 
     #[test]
@@ -1127,11 +1353,247 @@ mod tests {
         let estimate = ClockEstimate::unmeasured();
         assert_eq!(estimate.rtt_ms, None);
         assert_eq!(
-            estimate.uncertainty_ms(),
+            estimate.uncertainty_at(0),
             TOGETHER_UNMEASURED_UNCERTAINTY_MS
         );
-        assert!(estimate.uncertainty_ms() > 0);
+        assert!(estimate.uncertainty_at(0) > 0);
         assert_eq!(ClockFilter::new().estimate(0), estimate);
+    }
+
+    // ── Frequency, not just phase ────────────────────────────────────────────
+
+    /// Two crystals differing by a known amount must be measured as that
+    /// amount — this is the term that used to be silently zero and let a
+    /// projection rot between heartbeats.
+    #[test]
+    fn the_filter_measures_the_two_clocks_frequency_difference() {
+        let mut filter = ClockFilter::new();
+        let skew_ppm = 40.0; // their clock gains 40µs per second
+        let one_way = 25i64;
+        let base = 1_000_000i64;
+        for i in 0..8i64 {
+            let t1 = base + i * 15_000;
+            let offset = 1_000.0 + skew_ppm * (t1 - base) as f64 / 1_000_000.0;
+            let t2 = t1 + one_way + offset as i64;
+            let t3 = t2 + 5;
+            let t4 = t3 - offset as i64 + one_way;
+            filter.observe(t1 as u64, t2 as u64, t3 as u64, t4 as u64);
+        }
+        let est = filter.estimate((base + 7 * 15_000) as u64);
+        assert!(
+            (est.skew_ppm - skew_ppm).abs() < 8.0,
+            "expected ~{skew_ppm} ppm, got {}",
+            est.skew_ppm
+        );
+    }
+
+    #[test]
+    fn a_frequency_is_not_guessed_from_too_few_or_too_short_a_baseline() {
+        // Plenty of probes, but all within a few seconds.
+        let mut filter = ClockFilter::new();
+        for i in 0..8u64 {
+            let t1 = 1_000_000 + i * 500;
+            filter.observe(t1, t1 + 60, t1 + 65, t1 + 125);
+        }
+        assert_eq!(
+            filter.estimate(1_004_000).skew_ppm,
+            0.0,
+            "a slope over a short baseline is jitter, and extrapolating it is worse than nothing"
+        );
+
+        // A long baseline but only two probes.
+        let mut filter = ClockFilter::new();
+        filter.observe(0, 60, 65, 125);
+        filter.observe(120_000, 120_060, 120_065, 120_125);
+        assert_eq!(filter.estimate(120_125).skew_ppm, 0.0);
+    }
+
+    /// A clock being *stepped* is a phase event. Mistaking it for a frequency
+    /// and extrapolating would keep pushing the playhead long after the step.
+    #[test]
+    fn a_clock_step_is_clamped_rather_than_extrapolated_forever() {
+        let mut filter = ClockFilter::new();
+        let base = 1_000_000i64;
+        for i in 0..8i64 {
+            let t1 = base + i * 15_000;
+            // Half-way through, the peer's clock jumps a whole second.
+            let offset = if i < 4 { 0i64 } else { 1_000 };
+            let t2 = t1 + 25 + offset;
+            let t3 = t2 + 5;
+            let t4 = t3 - offset + 25;
+            filter.observe(t1 as u64, t2 as u64, t3 as u64, t4 as u64);
+        }
+        let est = filter.estimate((base + 7 * 15_000) as u64);
+        assert!(
+            est.skew_ppm.abs() <= CLOCK_MAX_SKEW_PPM,
+            "a step must not read as an unbounded frequency: {}",
+            est.skew_ppm
+        );
+    }
+
+    #[test]
+    fn the_offset_is_carried_forward_at_the_measured_rate() {
+        let est = ClockEstimate {
+            offset_ms: 100,
+            rtt_ms: Some(40),
+            skew_ppm: 50.0,
+            measured_at_ms: 1_000_000,
+        };
+        assert_eq!(est.offset_at(1_000_000), 100);
+        // 60 s later at 50 ppm the peer's clock has gained 3 ms.
+        assert_eq!(est.offset_at(1_060_000), 103);
+    }
+
+    #[test]
+    fn an_estimate_gets_less_certain_as_it_ages() {
+        let est = ClockEstimate {
+            offset_ms: 0,
+            rtt_ms: Some(40),
+            skew_ppm: 0.0,
+            measured_at_ms: 1_000_000,
+        };
+        let fresh = est.uncertainty_at(1_000_000);
+        let stale = est.uncertainty_at(1_600_000);
+        assert_eq!(fresh, 20);
+        assert!(
+            stale > fresh,
+            "a ten-minute-old estimate is not as good as new"
+        );
+        // An unmeasured clock is pessimistic and never claims to age well.
+        assert_eq!(
+            ClockEstimate::unmeasured().uncertainty_at(9_999_999),
+            TOGETHER_UNMEASURED_UNCERTAINTY_MS
+        );
+    }
+
+    // ── Timelines, not positions ─────────────────────────────────────────────
+
+    #[test]
+    fn a_timeline_is_evaluated_at_the_asking_time() {
+        assert_eq!(timeline_pos_ms(60_000, 1_000, true, 1_500), 60_500);
+        assert_eq!(timeline_pos_ms(60_000, 1_000, false, 9_999), 60_000);
+        // Asking about the past never runs the playhead backwards.
+        assert_eq!(timeline_pos_ms(60_000, 5_000, true, 1_000), 60_000);
+    }
+
+    /// The improvement over every position-swapping protocol, asserted: a
+    /// command that took 300 ms to arrive lands where the sender *is*, not where
+    /// they *were*.
+    #[test]
+    fn a_late_command_lands_where_the_sender_is_now() {
+        let clock = ClockEstimate {
+            offset_ms: 0,
+            rtt_ms: Some(600),
+            skew_ppm: 0.0,
+            measured_at_ms: 1_000_000,
+        };
+        // They said "playing, at 60.000s" effective at their 1_000_000; we are
+        // reading it 300 ms later.
+        let apply = command_apply(60_000, 1_000_000, true, &clock, 1_000_300);
+        assert_eq!(
+            apply,
+            CommandApply::Now {
+                pos_ms: 60_300,
+                playing: true
+            },
+            "the flight time must be added back, or every command lands late"
+        );
+        // A paused command has no timeline to advance.
+        assert_eq!(
+            command_apply(60_000, 1_000_000, false, &clock, 1_000_300),
+            CommandApply::Now {
+                pos_ms: 60_000,
+                playing: false
+            }
+        );
+    }
+
+    /// On a transport fast enough to schedule ahead, both players change state
+    /// on the same instant instead of one chasing the other.
+    #[test]
+    fn a_command_scheduled_ahead_is_waited_for() {
+        let clock = ClockEstimate {
+            offset_ms: 0,
+            rtt_ms: Some(4),
+            skew_ppm: 0.0,
+            measured_at_ms: 1_000_000,
+        };
+        assert_eq!(
+            command_apply(60_000, 1_000_050, true, &clock, 1_000_000),
+            CommandApply::At {
+                pos_ms: 60_000,
+                playing: true,
+                in_ms: 50
+            }
+        );
+    }
+
+    #[test]
+    fn a_command_scheduled_absurdly_far_ahead_is_applied_instead_of_trusted() {
+        let clock = ClockEstimate {
+            offset_ms: 0,
+            rtt_ms: Some(4),
+            skew_ppm: 0.0,
+            measured_at_ms: 1_000_000,
+        };
+        let apply = command_apply(60_000, 1_000_000 + 3_600_000, true, &clock, 1_000_000);
+        assert!(
+            matches!(apply, CommandApply::Now { .. }),
+            "we do not hold an hour-long timer on a peer's say-so"
+        );
+    }
+
+    #[test]
+    fn the_clock_offset_is_applied_when_scheduling() {
+        // Their clock reads four seconds ahead of ours.
+        let clock = ClockEstimate {
+            offset_ms: 4_000,
+            rtt_ms: Some(4),
+            skew_ppm: 0.0,
+            measured_at_ms: 1_000_000,
+        };
+        // "Effective at my 1_004_050" == our 1_000_050.
+        assert_eq!(
+            command_apply(60_000, 1_004_050, true, &clock, 1_000_000),
+            CommandApply::At {
+                pos_ms: 60_000,
+                playing: true,
+                in_ms: 50
+            }
+        );
+    }
+
+    // ── Ear to ear, not decoder to decoder ───────────────────────────────────
+
+    /// Two players agreeing perfectly on decoder position can still be a tenth
+    /// of a second apart in the room, because their audio stacks buffer
+    /// differently. Nothing browser-based can see this; a native player can.
+    #[test]
+    fn output_latency_is_compensated_on_both_sides() {
+        let mut s = follower(60_000, 60_000, measured(20));
+        // Decoders agree exactly, so a naive implementation sees zero drift…
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+        // …but ours is 30 ms behind the speaker and theirs is 130 ms behind, so
+        // what the two people *hear* is 100 ms apart.
+        s.local_output_latency_ms = 30;
+        s.peer_output_latency_ms = 130;
+        let drift = local_audible_pos_ms(&s) - projected_peer_pos_ms(&s);
+        assert_eq!(
+            drift, 100,
+            "we are ahead by the difference in their latencies"
+        );
+    }
+
+    #[test]
+    fn a_seek_targets_the_decoder_position_that_lands_audibly_in_step() {
+        let mut s = follower(90_000, 60_000, measured(20));
+        s.local_output_latency_ms = 200;
+        let SyncVerdict::Seek { pos_ms } = sync_verdict(&s, fine()) else {
+            panic!("expected a seek");
+        };
+        // Their ear is at 60_000; ours lags its decoder by 200 ms, so the
+        // decoder has to be asked for 60_200 to be audible in the same place.
+        assert_eq!(pos_ms, 60_200);
     }
 
     // ── The verdict ──────────────────────────────────────────────────────────
@@ -1140,6 +1602,8 @@ mod tests {
         ClockEstimate {
             offset_ms: 0,
             rtt_ms: Some(rtt_ms),
+            skew_ppm: 0.0,
+            measured_at_ms: 1_000_000,
         }
     }
 
@@ -1157,6 +1621,8 @@ mod tests {
             last_seek_ms: 0,
             clock,
             we_lead: false,
+            local_output_latency_ms: 0,
+            peer_output_latency_ms: 0,
         }
     }
 
@@ -1334,6 +1800,8 @@ mod tests {
         s.clock = ClockEstimate {
             offset_ms: 4_000,
             rtt_ms: Some(100),
+            skew_ppm: 0.0,
+            measured_at_ms: 1_000_000,
         };
         s.peer_at_ms = 1_004_000; // = our 1_000_000
         s.now_ms = 1_000_250;
@@ -1435,13 +1903,15 @@ mod tests {
     fn only_a_command_is_ordered() {
         assert!(TogetherSignal::State {
             pos_ms: 0,
-            playing: true
+            playing: true,
+            effective_at_ms: None,
         }
         .is_command());
         assert!(!TogetherSignal::Heartbeat {
             pos_ms: 0,
             playing: true,
-            applied_seq: 1
+            applied_seq: 1,
+            output_latency_ms: 0,
         }
         .is_command());
         assert!(!TogetherSignal::Join.is_command());
