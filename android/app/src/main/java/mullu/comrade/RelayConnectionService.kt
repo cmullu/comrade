@@ -562,15 +562,23 @@ object ChatEventRouter {
             is BridgeEvent.TogetherEnded ->
                 mullu.comrade.together.TogetherManager.onEnded(byPeer = event.byPeer)
 
-            // Handing a large attachment over. The protocol and its gate are in
-            // place (`comrade_core::handoff`) and this event is what a transfer
-            // would be driven from — but nothing drives it yet: the data-channel
-            // half still has to be lifted out of `together.ShareTransfer`, which
-            // is today hard-wired to a listening session's file and playhead.
-            // Deliberately inert rather than half-wired, so no UI can offer a
-            // large send that would never complete. See D21 in
-            // `app/lib/SCREEN_INVENTORY.md`.
-            is BridgeEvent.AttachmentHandoff -> Unit
+            // Handing a large attachment over (`comrade_core::handoff`). Straight
+            // to the manager, not to a screen, for the reason that matters most
+            // here: a 400 MB transfer must not die because a thread was
+            // navigated away from. The runtime has already established that this
+            // peer is an accepted conversation — the same gate a call signal
+            // clears — but says nothing about the signal's *contents*, so the
+            // manager checks every peer-chosen field before it reaches a
+            // filesystem or a screen. See D21a in `app/lib/SCREEN_INVENTORY.md`.
+            is BridgeEvent.AttachmentHandoff -> {
+                val handoff = event.v1
+                mullu.comrade.handoff.AttachmentHandoffManager.onSignal(
+                    context = context,
+                    peer = handoff.peer,
+                    transferId = handoff.transferId,
+                    signal = handoff.signal,
+                )
+            }
         }
     }
 }

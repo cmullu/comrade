@@ -131,6 +131,28 @@ class AttachmentCaptionTest {
     }
 
     @Test
+    fun theOtherRoadHasNoCeilingToRefuseAgainst() {
+        // The 10 MB limit is what the hosted path can encrypt and what a Blossom
+        // operator will take; neither applies device to device.
+        assertNull(peerToPeerAttachmentRejection("holiday.mp4", MAX_ATTACHMENT_BYTES + 1))
+        assertNull(peerToPeerAttachmentRejection("holiday.mp4", 4L * 1024 * 1024 * 1024))
+    }
+
+    @Test
+    fun anEmptyFileIsStillRefusedOnTheOtherRoad() {
+        // Not a size problem: a cancelled camera hands back zero bytes, and they
+        // are unopenable however they travel.
+        assertEquals(
+            "\"cap.jpg\" is empty — there is nothing to send.",
+            peerToPeerAttachmentRejection("cap.jpg", 0),
+        )
+        assertEquals(
+            "That file is empty — there is nothing to send.",
+            peerToPeerAttachmentRejection("  ", -1),
+        )
+    }
+
+    @Test
     fun thePreviewKindIsWhatTheSheetRenders() {
         assertEquals(AttachmentPreviewKind.Image, attachmentPreviewKind("image/png"))
         assertEquals(AttachmentPreviewKind.Video, attachmentPreviewKind("VIDEO/MP4"))

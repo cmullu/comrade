@@ -97,6 +97,7 @@ import mullu.comrade.R
 import mullu.comrade.ComradeCore
 import mullu.comrade.Notifier
 import mullu.comrade.PresenceMonitor
+import mullu.comrade.handoff.AttachmentHandoffManager
 import mullu.comrade.media.VoiceRecorder
 
 /**
@@ -777,12 +778,46 @@ fun ConversationScreen(
     fun sendAttachment(pending: PendingAttachment, caption: String) {
         if (attaching) return
         pendingAttachment = null
+        // Past the hosted ceiling the file does not go through a host at all: it
+        // is handed to the other device over a data channel, which the manager
+        // owns so that leaving this screen does not kill a 400 MB transfer. It
+        // deliberately produces no chat bubble — there is no NIP-94 event to make
+        // one from — so the handoff panel is what reports it.
+        if (pending.peerToPeer) {
+            val uri = pending.uri
+            if (uri == null) {
+                error = "Lost track of that file — pick it again."
+                return
+            }
+            val refusal = AttachmentHandoffManager.offer(
+                context = context,
+                peer = peer,
+                uri = uri,
+                fileName = pending.name,
+                mimeType = pending.mime,
+                caption = caption,
+                sizeBytes = pending.sizeBytes,
+            )
+            if (refusal != null) {
+                error = refusal
+                return
+            }
+            error = null
+            if (pending.consumesDraft) editDraft(TextFieldValue())
+            return
+        }
+        // Non-null for every hosted attachment: the road was chosen from the size
+        // and the bytes were read for exactly this call.
+        val bytes = pending.bytes ?: run {
+            error = "Lost track of that file — pick it again."
+            return
+        }
         attaching = true
         error = null
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    ComradeCore.sendMediaBytesTyped(peer, pending.mime, caption, pending.bytes)
+                    ComradeCore.sendMediaBytesTyped(peer, pending.mime, caption, bytes)
                 }
             }.onSuccess {
                 attaching = false
@@ -817,8 +852,36 @@ fun ConversationScreen(
             name = name,
             mime = mime,
             bytes = bytes,
+            uri = null,
+            sizeBytes = bytes.size.toLong(),
             seedCaption = captionForAttachment(draft.text, replyPending),
             consumesDraft = captionConsumesDraft(draft.text, replyPending),
+            // Anything held in memory took the hosted road to get here: the cap
+            // is what made reading it safe.
+            peerToPeer = false,
+        )
+    }
+
+    // A pick too large for the hosted road. The bytes stay where they are — the
+    // URI is what gets sent from, a chunk at a time — so nothing about a 400 MB
+    // file is ever in memory on this side.
+    fun offerLargeAttachment(name: String, mime: String, uri: Uri, sizeBytes: Long) {
+        val refusal = peerToPeerAttachmentRejection(name, sizeBytes)
+        if (refusal != null) {
+            error = refusal
+            return
+        }
+        error = null
+        val replyPending = replyingTo != null
+        pendingAttachment = PendingAttachment(
+            name = name,
+            mime = mime,
+            bytes = null,
+            uri = uri,
+            sizeBytes = sizeBytes,
+            seedCaption = captionForAttachment(draft.text, replyPending),
+            consumesDraft = captionConsumesDraft(draft.text, replyPending),
+            peerToPeer = true,
         )
     }
 
@@ -833,20 +896,37 @@ fun ConversationScreen(
             runCatching {
                 withContext(Dispatchers.IO) {
                     val described = describePickedFile(context, uri)
-                    // Refuse from the provider's own size where it reports one,
-                    // rather than slurping a 1 GB video into memory to learn it
-                    // is a 1 GB video.
-                    val declared = described.size
+                    // The size decides the road, so it is worth two cheap
+                    // questions before the expensive one: the provider's own
+                    // column, then the descriptor's `statSize`. Reading a 1 GB
+                    // video into memory to learn that it is a 1 GB video is what
+                    // both of them avoid.
+                    val declared = described.size ?: pickedFileLength(context, uri)
+                    val peerToPeer = declared != null &&
+                        ComradeCore.attachmentRouteForBytes(declared) ==
+                        uniffi.comrade_core.AttachmentRoute.PEER_TO_PEER
+                    if (peerToPeer) {
+                        peerToPeerAttachmentRejection(described.name, declared ?: 0)
+                            ?.let { throw IllegalStateException(it) }
+                        // No bytes: the transfer reads them from the provider as
+                        // the receiver asks for them.
+                        return@withContext PickedFile(described.name, described.mime, declared, null)
+                    }
                     if (declared != null) {
                         attachmentRejection(described.name, declared)
                             ?.let { throw IllegalStateException(it) }
                     }
                     val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                         ?: throw IllegalStateException("Could not read the file.")
-                    Triple(described.name, described.mime, bytes)
+                    PickedFile(described.name, described.mime, declared, bytes)
                 }
-            }.onSuccess { (name, mime, bytes) ->
-                offerAttachment(name, mime, bytes)
+            }.onSuccess { picked ->
+                val bytes = picked.bytes
+                if (bytes != null) {
+                    offerAttachment(picked.name, picked.mime, bytes)
+                } else {
+                    offerLargeAttachment(picked.name, picked.mime, uri, picked.size ?: 0)
+                }
             }.onFailure {
                 error = it.message ?: "Could not read the file."
             }
@@ -1236,6 +1316,10 @@ fun ConversationScreen(
                 }
             }
         }
+
+        // A large attachment being handed straight to this peer, if there is
+        // one. Rendered from the manager's flow, so it survives this screen.
+        AttachmentHandoffPanel(peer)
 
         error?.let {
             Text(
@@ -1981,3 +2065,19 @@ fun RequestsScreen(
         }
     }
 }
+
+/**
+ * What a pick turned out to be, once the provider has been asked.
+ *
+ * [bytes] is null for a file taking the peer-to-peer road: it was deliberately
+ * not read, because the point of that road is that a 400 MB attachment never has
+ * to fit in memory. [size] is null only when neither the provider's `SIZE` column
+ * nor the descriptor's `statSize` knew — in which case the bytes were read and
+ * their length is the answer.
+ */
+private class PickedFile(
+    val name: String,
+    val mime: String,
+    val size: Long?,
+    val bytes: ByteArray?,
+)

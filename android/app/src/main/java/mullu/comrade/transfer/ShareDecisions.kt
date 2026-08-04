@@ -1,11 +1,11 @@
-package mullu.comrade.together
+package mullu.comrade.transfer
 
 import uniffi.comrade_core.RefusalReason
 import uniffi.comrade_ui.ShareVerdictDto
 
 /**
  * The file-handover arithmetic, with **zero Android imports** so it runs on the
- * JVM in [mullu.comrade.together.ShareDecisionsTest].
+ * JVM in [mullu.comrade.transfer.ShareDecisionsTest].
  *
  * Every function here is a port of `comrade_core::share`, and the Rust test
  * vectors are ported alongside them — the same arrangement

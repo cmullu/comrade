@@ -14,6 +14,7 @@ import {
   mediaQuoteLabel,
   normalizeCaption,
   opensFullScreen,
+  peerToPeerAttachmentRejection,
 } from "./attachment_caption.mjs";
 
 // Mirrored in `app/test/attachment_caption_test.dart` and
@@ -111,6 +112,32 @@ test("an empty pick is refused before anything is encrypted", () => {
   assert.equal(
     attachmentRejection("cap.jpg", 0),
     '"cap.jpg" is empty — there is nothing to send.',
+  );
+});
+
+test("the other road has no ceiling to refuse against", () => {
+  // The 10 MB limit is what the hosted path can encrypt and what a Blossom
+  // operator will take; neither applies device to device.
+  assert.equal(
+    peerToPeerAttachmentRejection("holiday.mp4", MAX_ATTACHMENT_BYTES + 1),
+    null,
+  );
+  assert.equal(
+    peerToPeerAttachmentRejection("holiday.mp4", 4 * 1024 * 1024 * 1024),
+    null,
+  );
+});
+
+test("an empty file is still refused on the other road", () => {
+  // Not a size problem: a cancelled camera hands back zero bytes, and they are
+  // unopenable however they travel.
+  assert.equal(
+    peerToPeerAttachmentRejection("cap.jpg", 0),
+    '"cap.jpg" is empty — there is nothing to send.',
+  );
+  assert.equal(
+    peerToPeerAttachmentRejection("  ", -1),
+    "That file is empty — there is nothing to send.",
   );
 });
 

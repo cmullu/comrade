@@ -195,6 +195,18 @@ pub fn attachment_route_for_bytes(total_bytes: u64) -> AttachmentRoute {
     comrade_core::handoff::route_for_bytes(total_bytes)
 }
 
+/// A fresh id scoping every signal of one attachment handoff.
+///
+/// Exported rather than minted per frontend because the id *is* the replay
+/// guard: 128 bits from the same CSPRNG everywhere, so no frontend can weaken it
+/// to a counter or a timestamp that a third party could predict and use to
+/// inject an `Accept` for a transfer nobody offered. See
+/// `comrade_core::handoff::new_transfer_id`.
+#[uniffi::export]
+pub fn new_attachment_transfer_id() -> String {
+    comrade_core::handoff::new_transfer_id()
+}
+
 #[uniffi::export]
 pub fn all_workspaces() -> Vec<WorkspaceKeyLabel> {
     AppWorkspace::all()

@@ -1,4 +1,4 @@
-package mullu.comrade.together
+package mullu.comrade.transfer
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
