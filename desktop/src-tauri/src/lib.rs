@@ -171,6 +171,18 @@ pub fn run() {
             commands::clear_tara_thread,
             commands::tara_opener,
             commands::tara_crisis_resources,
+            // In-chat commands (grammar in `comrade_core::command`)
+            commands::parse_chat_command,
+            commands::chat_command_catalog,
+            commands::chat_mentions,
+            commands::resolve_mentions,
+            commands::play_query,
+            commands::play_route,
+            commands::assign_task,
+            commands::tasks,
+            commands::set_task_state,
+            commands::offer_action,
+            commands::tara_aside,
             // Attention (usage mirror · focus sessions · long read — local only)
             commands::record_attention_day,
             commands::attention_days,

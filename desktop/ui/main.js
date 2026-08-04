@@ -137,6 +137,31 @@
     })
     .catch(() => {});
 
+  // ── In-chat command decisions (desktop/ui/chat_commands.mjs) ───────────────
+  // What the composer does with a parsed command, the `/` picker's rows, and
+  // the sentences for the cases desktop cannot serve. The *grammar* is
+  // `comrade_core::command`, reached over the bridge — nothing here re-parses
+  // composer text, because a second grammar is exactly how `/pay` drifted.
+  let chatCommands = null;
+  import("./chat_commands.mjs")
+    .then((m) => {
+      chatCommands = m;
+    })
+    .catch(() => {});
+
+  /** Command specs from core, fetched once after unlock for the `/` picker. */
+  let commandCatalog = [];
+
+  // ── Task list decisions (desktop/ui/task_list.mjs) ─────────────────────────
+  // Grouping, which buttons a row offers (mirroring `karya::may_transition`),
+  // the subtitle and the empty-state copy. Loaded like the modules above.
+  let taskList = null;
+  import("./task_list.mjs")
+    .then((m) => {
+      taskList = m;
+    })
+    .catch(() => {});
+
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
 
@@ -722,6 +747,10 @@
       // resolved (completed or lapsed) the moment the vault opens, not
       // whenever the user happens to visit the tab.
       await loadFocus();
+      // One list of commands, from core, so the `/` picker can never offer
+      // something this build does not have — or miss something it does.
+      commandCatalog =
+        (await safeInvoke("chat_command_catalog", {}, { silent: true })) || [];
     } catch {
       /* error already toasted */
     } finally {
@@ -831,6 +860,74 @@
   }
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
+  /**
+   * Draw the task list.
+   *
+   * Which buttons a row gets is `task_list.mjs`'s call, not this function's —
+   * it mirrors `karya::may_transition`, so a control core would refuse with
+   * "that is not yours to change" is never rendered.
+   */
+  async function loadTasks() {
+    const host = $("#task-list");
+    if (!host || !taskList) return;
+    const tasks = await safeInvoke("tasks", {}, { silent: true });
+    host.innerHTML = "";
+    if (!tasks) return;
+    if (!tasks.length) {
+      host.append(el("p", { class: "muted task-empty", text: taskList.emptyCopy() }));
+      return;
+    }
+    // Names, not keys — `displayName` is the same published-handle-then-short-key
+    // helper the chat list and every other surface here already uses.
+    const nameFor = displayName;
+    const { open, resolved } = taskList.groupTasks(tasks);
+    const section = (rows, heading) => {
+      if (!rows.length) return;
+      if (heading) host.append(el("h4", { class: "task-heading", text: heading }));
+      for (const t of rows) host.append(taskRow(t, nameFor));
+    };
+    section(open, null);
+    section(resolved, "Finished");
+  }
+
+  /** One task row: what it is, whose it is, and only the buttons core accepts. */
+  function taskRow(task, nameFor) {
+    const row = el("div", { class: task.state === "open" ? "task-row" : "task-row is-done" });
+    row.append(el("div", { class: "task-text", text: task.text }));
+    const badge = taskList.stateLabel(task.state);
+    row.append(
+      el("div", {
+        class: "task-sub muted",
+        text: taskList.subtitleFor(task, nameFor) + (badge ? ` · ${badge}` : ""),
+      }),
+    );
+    const actions = taskList.actionsFor(task);
+    if (actions.length) {
+      const bar = el("div", { class: "task-actions" });
+      for (const action of actions) {
+        bar.append(
+          el("button", {
+            class: "btn btn-small",
+            type: "button",
+            text: { done: "Done", decline: "Decline", withdraw: "Withdraw" }[action],
+            onclick: async () => {
+              // `wireState` and not a literal: the casing is a serde contract
+              // (`TaskState` is snake_case, so "Done" is rejected outright) and
+              // it belongs somewhere a test can hold it. Not named `state`
+              // either — that is the module-wide app state, and shadowing it
+              // here would be a trap for the next reader.
+              const next = taskList.wireState(action);
+              const moved = await safeInvoke("set_task_state", { id: task.id, taskState: next });
+              if (moved) loadTasks();
+            },
+          }),
+        );
+      }
+      row.append(bar);
+    }
+    return row;
+  }
+
   function switchTab(name) {
     for (const t of document.querySelectorAll(".tab")) {
       const on = t.dataset.tab === name;
@@ -841,6 +938,8 @@
     $("#view-vault").hidden = name !== "vault";
     $("#view-focus").hidden = name !== "focus";
     $("#view-profile").hidden = name !== "profile";
+    $("#view-tasks").hidden = name !== "tasks";
+    if (name === "tasks") loadTasks();
     // The countdown only has to tick while it is being looked at; a session
     // left running behind another tab is still authoritative in the engine,
     // which is where the remaining time comes from on the next paint.
@@ -1394,10 +1493,149 @@
   }
 
   /** Send the composed DM to the active contact (real end-to-end send). */
+  /**
+   * Act on an in-chat command, or return false to let the text be sent.
+   *
+   * The grammar is `comrade_core::command` over the bridge; the decision about
+   * what this window does with the result is `chat_commands.mjs`. Everything
+   * here is the third thing — actually doing it.
+   */
+  async function handleChatCommand(text) {
+    if (!chatCommands) {
+      // **Fail closed.** The module is loaded with a dynamic import whose
+      // `.catch` swallows failure, so `chatCommands` can stay null for the whole
+      // session — and returning false here hands the text to `send_dm`. For
+      // `@tara i can't stand my brother` that means sending somebody their own
+      // private thought, so anything command-shaped is refused instead.
+      if (/^\s*[/@]/.test(text)) {
+        showToast("Couldn't load the command list — nothing was sent.", "warn");
+        return true;
+      }
+      return false;
+    }
+    const command = await safeInvoke("parse_chat_command", { text }, { silent: true });
+    if (!command || command.kind === "plain" || command.kind === "pay") return false;
+
+    const mentions =
+      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [];
+    const plan = chatCommands.planFor(command, { mentions });
+    const input = $("#dm-input");
+
+    switch (plan.action) {
+      case chatCommands.SEND:
+        return false;
+
+      case chatCommands.INCOMPLETE:
+      case chatCommands.BLOCKED:
+        // Say why, and leave the text in the box — a command the user has to
+        // retype is a command they stop using.
+        showToast(plan.message, "warn");
+        return true;
+
+      case chatCommands.HELP:
+        showCommandHelp();
+        input.value = "";
+        clearComposerCommandUi();
+        return true;
+
+      case chatCommands.ASIDE: {
+        const reply = await safeInvoke("tara_aside", { text: plan.text });
+        if (reply) {
+          // Rendered as a toast rather than a chat bubble on purpose: this never
+          // went anywhere and putting it in the thread would make it look like
+          // it did. The desktop has no Tara surface yet
+          // (`docs/FRONTEND_STRATEGY.md`), so a toast is the honest maximum.
+          showToast(reply.text, reply.crisis ? "warn" : "info");
+          if (reply.crisis) {
+            const lines = await safeInvoke("tara_crisis_resources", {}, { silent: true });
+            for (const r of lines || []) showToast(`${r.name}: ${r.contact}`, "warn");
+          }
+          input.value = "";
+          clearComposerCommandUi();
+        }
+        return true;
+      }
+
+      case chatCommands.TASK: {
+        const task = await safeInvoke("assign_task", {
+          peer: plan.peer,
+          text: plan.text,
+        });
+        if (task) {
+          showToast(plan.peer ? "Asked them." : "Added to your list.", "info");
+          input.value = "";
+          clearComposerCommandUi();
+          renderConversation();
+        }
+        return true;
+      }
+
+      case chatCommands.OFFER: {
+        const outcome = await safeInvoke("offer_action", {
+          action: plan.appAction,
+          peers: plan.peers,
+        });
+        if (outcome) {
+          // A deliberate command that silently did nothing reads as a bug, and
+          // *which* of the three reasons applied is the part worth saying — a
+          // bare count used to make "not your comrade" read as "throttled".
+          if (outcome.sent.length) {
+            showToast("Sent.", "info");
+            input.value = "";
+            clearComposerCommandUi();
+          } else if (outcome.not_comrades.length) {
+            showToast("Mark them a comrade first — this only goes to comrades.", "warn");
+          } else if (outcome.on_cooldown.length) {
+            showToast("They were told recently — leaving them be for now.", "info");
+          } else {
+            showToast("Couldn't reach them just now.", "warn");
+          }
+        }
+        return true;
+      }
+
+      case chatCommands.OPEN:
+        // Both the focus timer and the reader live in the Focus tab on desktop,
+        // and `planFor` has already refused every other action for this window,
+        // so there is exactly one destination to reach.
+        switchTab("focus");
+        input.value = "";
+        clearComposerCommandUi();
+        return true;
+
+      default:
+        return false;
+    }
+  }
+
+  /** Reset the picker, the hint and the aside styling after a command runs. */
+  function clearComposerCommandUi() {
+    renderCommandPicker(null);
+    const hint = $("#dm-command-hint");
+    if (hint) {
+      hint.hidden = true;
+      hint.textContent = "";
+    }
+    const note = $("#dm-aside-note");
+    if (note) note.hidden = true;
+    $("#dm-input").classList.remove("composer-aside");
+  }
+
+  /** `/help` — the catalogue as a list of toasts is unreadable, so it fills the
+   * picker instead, which is already the right shape for it. */
+  function showCommandHelp() {
+    renderCommandPicker(commandCatalog);
+  }
+
   async function handleDmSend() {
     const input = $("#dm-input");
     const content = input.value.trim();
     if (!content) return;
+    // A command is handled before the "select a conversation" check, because
+    // `/breathe`, `/help` and an aside are all things you can mean with no
+    // thread open — and before the peer check, because an aside must never be
+    // able to reach `send_dm` at all.
+    if (await handleChatCommand(content)) return;
     if (!state.activeContact) {
       showToast("Select a conversation first", "warn");
       return;
@@ -1420,6 +1658,7 @@
       const preview = $("#dm-upi-preview");
       preview.hidden = true;
       preview.innerHTML = "";
+      clearComposerCommandUi();
       clearReply();
       const list = state.dms.get(state.activeContact) || [];
       list.push({
@@ -3509,6 +3748,79 @@
     box.scrollTop = box.scrollHeight;
   }
 
+  // Live command feedback in the DM composer: the `/` picker, the mention
+  // chips, and the aside styling. Debounced with the UPI preview because they
+  // all read the same keystroke.
+  const handleDmCommandInput = debounce(async () => {
+    if (!chatCommands) return;
+    const text = $("#dm-input").value;
+
+    // Aside styling is decided from the raw text, not a parse, so it is true
+    // from the moment `@tara ` is typed — before there is anything to parse.
+    const aside = chatCommands.isAsideDraft(text);
+    $("#dm-input").classList.toggle("composer-aside", aside);
+    const asideNote = $("#dm-aside-note");
+    if (asideNote) asideNote.hidden = !aside;
+
+    renderCommandPicker(chatCommands.pickerRows(text, commandCatalog));
+
+    // The hint line: what will happen if Enter is pressed now.
+    const hint = $("#dm-command-hint");
+    if (!hint) return;
+    if (!text.startsWith("/") && !aside) {
+      hint.hidden = true;
+      hint.textContent = "";
+      return;
+    }
+    const command = await safeInvoke("parse_chat_command", { text }, { silent: true });
+    if (!command) {
+      hint.hidden = true;
+      return;
+    }
+    const mentions =
+      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [];
+    const plan = chatCommands.planFor(command, { mentions });
+    if (plan.message) {
+      hint.textContent = plan.message;
+      hint.hidden = false;
+    } else {
+      hint.hidden = true;
+      hint.textContent = "";
+    }
+  }, 200);
+
+  /** Draw (or clear) the `/` command picker. */
+  function renderCommandPicker(rows) {
+    const box = $("#dm-command-picker");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!rows) {
+      box.hidden = true;
+      return;
+    }
+    for (const spec of rows) {
+      box.append(
+        el(
+          "button",
+          {
+            class: "command-row",
+            type: "button",
+            onclick: () => {
+              $("#dm-input").value = chatCommands.completionFor(spec);
+              $("#dm-input").focus();
+              renderCommandPicker(null);
+              handleDmCommandInput();
+            },
+          },
+          el("span", { class: "command-name", text: `/${spec.name}` }),
+          el("span", { class: "command-arg", text: spec.argument || "" }),
+          el("span", { class: "command-help", text: spec.help || "" }),
+        ),
+      );
+    }
+    box.hidden = false;
+  }
+
   // Live UPI /pay detection in the DM composer (real extract_payments command).
   const handleDmInput = debounce(async () => {
     const text = $("#dm-input").value;
@@ -5403,6 +5715,7 @@
     $("#dm-input").addEventListener("input", (e) => {
       reportDraftEdit();
       handleDmInput(e);
+      handleDmCommandInput(e);
     });
     $("#dm-send").addEventListener("click", handleDmSend);
 
@@ -5547,6 +5860,32 @@
     let ws = wsOf("Base");
     const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     const re = /\/pay\s+(\d+(?:\.\d{1,2})?)\s+to\s+([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)/gi;
+    // Two rows so the Tasks panel is previewable without a backend: one asked of
+    // you (Done/Decline) and one note to self (all three).
+    const mockTasks = [
+      {
+        id: "mock-1",
+        text: "get some work done (mock)",
+        assigner: "npub1stranger00000000000000000000000000000000000000000",
+        assignee: "npub1mockdev0identity00000000000000000000000000000000",
+        created_at: Math.floor(Date.now() / 1000) - 600,
+        updated_at: Math.floor(Date.now() / 1000) - 600,
+        state: "open",
+        assigned_by_me: false,
+        mine_to_do: true,
+      },
+      {
+        id: "mock-2",
+        text: "water the plants (mock)",
+        assigner: "npub1mockdev0identity00000000000000000000000000000000",
+        assignee: null,
+        created_at: Math.floor(Date.now() / 1000) - 1200,
+        updated_at: Math.floor(Date.now() / 1000) - 1200,
+        state: "open",
+        assigned_by_me: true,
+        mine_to_do: true,
+      },
+    ];
     const ICE_DEMO = [
       { urls: ["stun:stun.l.google.com:19302"], username: null, credential: null },
     ];
@@ -5662,6 +6001,90 @@
             out.push({ amount_inr: parseFloat(m[1]), vpa: m[2], uri: `upi://pay?pa=${m[2]}&am=${m[1]}` });
           return out;
         }
+        // The in-chat command grammar lives in Rust; these mocks stand in for
+        // it so the composer is previewable in a plain browser, exactly as the
+        // `/pay` regex above does. They are deliberately crude — the real
+        // grammar has 43 tests and this has none, so anything subtle must be
+        // checked in the Tauri shell.
+        case "chat_command_catalog":
+          return [
+            { name: "task", aliases: ["todo"], argument: "<what needs doing> [@who]", help: "Name a piece of work", takes_mention: true },
+            { name: "tara", aliases: [], argument: "<what you want to think through>", help: "A private aside — only you see it", takes_mention: false },
+            { name: "comrade-breathe", aliases: [], argument: "@who", help: "Ask a comrade to take a deep breath", takes_mention: true },
+            { name: "breathe", aliases: ["breath"], argument: "", help: "Take a deep breath", takes_mention: false },
+            { name: "help", aliases: ["commands"], argument: "", help: "List what you can type here", takes_mention: false },
+          ];
+        case "parse_chat_command": {
+          const t = (args.text || "").trim();
+          if (/^@tara(\s|$)/i.test(t))
+            return { kind: "ask_tara", text: t.replace(/^@tara\s*/i, "") };
+          if (!t.startsWith("/")) return { kind: "plain" };
+          const [head, ...rest] = t.slice(1).split(/\s+/);
+          const body = rest.join(" ");
+          const at = [...body.matchAll(/(?:^|\s)@([a-z0-9_]{3,24})/gi)].map((m) => ({
+            handle: m[1].toLowerCase(),
+            start: m.index || 0,
+            end: (m.index || 0) + m[1].length + 1,
+          }));
+          if (head === "task") return { kind: "task", text: body.replace(/(?:^|\s)@[a-z0-9_]{3,24}/gi, "").trim(), assignees: at };
+          if (head === "tara") return { kind: "ask_tara", text: body };
+          if (head === "breathe" || head === "breath") return { kind: "open", action: "breathe" };
+          if (head === "comrade-breathe") return { kind: "offer_to", action: "breathe", targets: at };
+          if (head === "help" || head === "commands") return { kind: "help" };
+          if (head === "pay") return { kind: "pay" };
+          return { kind: "unknown", name: head };
+        }
+        case "resolve_mentions":
+          return [...(args.text || "").matchAll(/(?:^|\s)@([a-z0-9_]{3,24})/gi)].map((m) => ({
+            handle: m[1].toLowerCase(),
+            start: m.index || 0,
+            end: (m.index || 0) + m[1].length + 1,
+            npub: "npub1mockcontact000000000000000000000000000000000000",
+            candidates: [],
+          }));
+        case "tasks":
+          return mockTasks;
+        case "set_task_state": {
+          const t = mockTasks.find((x) => x.id === args.id);
+          // Deliberately not lowercased: `TaskState` is snake_case on the wire,
+          // so the real backend rejects "Done". A forgiving mock here would
+          // have let exactly that bug through to a build nobody can run.
+          // `STATES` is task_list.mjs's own list, so the mock cannot drift from
+          // the contract the panel is written against. Reachable only from that
+          // panel, which does not render until the module has loaded.
+          if (!taskList.STATES.includes(args.taskState)) {
+            throw new Error(`set_task_state: unknown state ${args.taskState}`);
+          }
+          if (t) t.state = args.taskState;
+          return t || null;
+        }
+        case "assign_task":
+          return {
+            id: "mock-task",
+            text: args.text,
+            assigner: "npub1mockdev0identity00000000000000000000000000000000",
+            assignee: args.peer || null,
+            created_at: Math.floor(Date.now() / 1000),
+            updated_at: Math.floor(Date.now() / 1000),
+            state: "open",
+            assigned_by_me: true,
+            mine_to_do: !args.peer,
+          };
+        case "offer_action":
+          return {
+            sent: args.peers || [],
+            not_comrades: [],
+            on_cooldown: [],
+            failed: [],
+          };
+        case "tara_aside":
+          return {
+            id: "mock-aside",
+            text: "(mock) What's the first thing you'd want to change about it?",
+            from_tara: true,
+            crisis: false,
+            created_at: Math.floor(Date.now() / 1000),
+          };
         case "pair_sakha":
           mockSakha.paired = true;
           mockSakha.partnerNpub = args.partnerPubkey;

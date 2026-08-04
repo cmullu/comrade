@@ -581,6 +581,16 @@ object CallManager {
         }
         val appCtx = context.applicationContext
         _state.value = CallUiState.Connecting(s.peer, s.peerLabel, s.isVideo, incoming = true)
+        // Armed *here*, before any of the fallible setup below, for the same
+        // reason startOutgoingCall arms its ring timeout before placing the
+        // call: everything that follows runs on IO and can fail or die, and
+        // several of those paths used to return early — leaving the screen on
+        // the "Connecting…" set one line above with nothing left to end it.
+        // The timeout is the only thing that makes a stuck call terminate, so
+        // it must not itself be downstream of the code that gets stuck. This
+        // replaces the ring timeout armed when the offer arrived, which is
+        // correct: the user has answered, so "missed" no longer applies.
+        armTimeout(s, CONNECT_TIMEOUT_MS, HangupReason.FAILED, "failed")
         io.launch {
             // Synchronous native init (PeerConnectionFactory.initialize +
             // EglBase.create()) — off the caller's (Compose click) thread,
@@ -603,8 +613,6 @@ object CallManager {
                         MediaConstraints(), // Empty constraints for Answers
                     )
                 }
-                // Answered — now fail with "Couldn't connect" if ICE never completes.
-                armTimeout(s, CONNECT_TIMEOUT_MS, HangupReason.FAILED, "failed")
             }
         }
     }
@@ -1216,7 +1224,17 @@ object CallManager {
         // AudioSource.MIC is exactly the contention that must not happen.
         // Resumed once the call ends, in endWith.
         WakeWordService.pause(MicHolder.CALL)
-        val fac = factory ?: return false
+        // No factory means native WebRTC init did not complete (see
+        // ensureFactory). This used to `return false` silently, and every
+        // caller of setupPeer returns early on false — so on the callee path
+        // that skipped arming the connect timeout too, and the call sat on
+        // "Connecting…" with nothing left watching it. End it honestly, the
+        // same way the createPeerConnection failure below does.
+        val fac = factory ?: run {
+            Log.e(TAG, "no PeerConnectionFactory — native WebRTC init failed, callId=${s.callId}")
+            endWith(HangupReason.FAILED, "failed", sendHangup = true)
+            return false
+        }
         val config = rtcConfig(iceServers)
         val pc = fac.createPeerConnection(config, peerObserver(s)) ?: run {
             Log.e(TAG, "createPeerConnection returned null")
@@ -1996,20 +2014,44 @@ object CallManager {
     // starts its own) can't double-initialise, while a main-thread call
     // control (`@Synchronized` on `this`) is never blocked behind the
     // multi-second native build. See [factoryLock].
+    /**
+     * Build the process-wide [PeerConnectionFactory] if it does not exist yet.
+     *
+     * Every failure is swallowed *here*, deliberately, and reported by leaving
+     * [factory] null for [setupPeer] to turn into an honest "couldn't connect".
+     * The reason is the shape of the callers: both call-setup paths invoke this
+     * from inside an `io.launch`, and on the callee path the coroutine that
+     * follows it is the one that arms the connect timeout. A throw out of here
+     * therefore killed that coroutine *before* anything was watching the call,
+     * and the only visible result was "Connecting…" that never resolved —
+     * a native-init failure presenting as a hang rather than as a failure.
+     *
+     * `initialize` is a process-global native init and the GL context can fail
+     * on emulators and unusual devices, so this is a real path, not a
+     * defensive flourish.
+     */
     private fun ensureFactory(context: Context) = synchronized(factoryLock) {
         if (factory != null) return@synchronized
         val app = context.applicationContext
         appContext = app
-        PeerConnectionFactory.initialize(
-            PeerConnectionFactory.InitializationOptions.builder(app)
-                .createInitializationOptions(),
-        )
-        val egl = EglBase.create()
-        eglBase = egl
-        factory = PeerConnectionFactory.builder()
-            .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
-            .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
-            .createPeerConnectionFactory()
+        runCatching {
+            PeerConnectionFactory.initialize(
+                PeerConnectionFactory.InitializationOptions.builder(app)
+                    .createInitializationOptions(),
+            )
+            val egl = EglBase.create()
+            eglBase = egl
+            factory = PeerConnectionFactory.builder()
+                .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
+                .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
+                .createPeerConnectionFactory()
+        }.onFailure {
+            Log.e(TAG, "WebRTC native init failed; calls cannot connect on this device", it)
+            // Leave eglBase/factory as they are: a half-built factory is worse
+            // than none, and setupPeer's null check is the single place that
+            // decides what a missing factory means for a call.
+            factory = null
+        }
     }
 
     /**

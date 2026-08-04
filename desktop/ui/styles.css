@@ -2476,6 +2476,76 @@ code {
   background: #000;
 }
 
+/* ── In-chat commands (see desktop/ui/chat_commands.mjs) ──────────────────── */
+
+/* The `/` picker sits above the field, so choosing a row does not shift the
+   composer under the pointer mid-click. */
+.command-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  padding: 4px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px;
+  background: var(--panel, #161616);
+}
+
+.command-row {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, auto) 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-row:hover,
+.command-row:focus-visible {
+  background: var(--hover, #232323);
+}
+
+.command-name {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-weight: 600;
+}
+
+.command-arg {
+  font-family: var(--mono, ui-monospace, monospace);
+  opacity: 0.55;
+}
+
+.command-help {
+  opacity: 0.75;
+}
+
+/* What will happen if Enter is pressed now — including why it will not. */
+.command-hint {
+  margin: 0 0 4px;
+  opacity: 0.8;
+}
+
+/* An aside must not look like a message, or somebody sends one by accident.
+   Both the note and the field itself change, so the difference is visible
+   whether or not the note is in view. */
+.aside-note {
+  margin: 0 0 4px;
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.input.composer-aside {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--panel, #161616) 88%, currentColor 12%);
+
 /* The relay-consent question. Bordered rather than inline text because it is
    the one thing in this panel that stops until it is answered. */
 .share-consent {
@@ -2735,4 +2805,67 @@ code {
 
 .chat-peer-btn:hover {
   text-decoration: underline;
+}
+
+/* ── Task list (see desktop/ui/task_list.mjs) ─────────────────────────────── */
+
+.view-tasks {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+.task-heading {
+  margin: 20px 0 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+
+.task-text {
+  font-size: 0.98rem;
+}
+
+/* A finished task reads as finished before the badge is read. */
+.task-row.is-done .task-text {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.task-sub {
+  font-size: 0.85rem;
+}
+
+.task-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.btn-small {
+  padding: 3px 10px;
+  font-size: 0.85rem;
+}
+
+.task-empty {
+  max-width: 32rem;
+  margin: 12vh auto;
+  text-align: center;
+  line-height: 1.6;
 }

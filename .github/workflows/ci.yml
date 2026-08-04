@@ -63,6 +63,18 @@ jobs:
       - name: cargo test (media-http)
         run: cargo test -p comrade_core -p comrade_ui --features comrade_ui/media-http --locked
 
+      # `/play <free text>` resolves a name through a public catalogue, and the
+      # guards on that request (HTTPS-only, no redirects, bounded read) plus the
+      # response parser only compile under `catalogue-http`. Same argument as
+      # the lane above: a guard behind a feature with no lane never runs.
+      - name: cargo test (catalogue-http)
+        run: cargo test -p comrade_core --features catalogue-http --locked
+
+      # Clippy too, or the feature-gated half accumulates the lint debt the
+      # default build is held free of.
+      - name: cargo clippy (catalogue-http)
+        run: cargo clippy -p comrade_core --all-targets --features catalogue-http --locked -- -D warnings
+
   # The desktop Tauri crate is excluded from the workspace (needs system
   # webview libs), so it gets its own compile+lint lane — without this it is
   # never built by any automated process (audit T2/O1).

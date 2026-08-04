@@ -15,11 +15,13 @@
 use std::sync::Arc;
 
 use comrade_ui::{
-    AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto, CallSessionDto,
-    ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto,
-    FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto,
-    MediaMessageDto, MessageDto, MessageRequestDto, PeerProfileDto, PresenceDto, ProfileDto,
-    ReadingDto, SakhaStatusDto, TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    AppAction, AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto,
+    CallSessionDto, ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto,
+    ConversationDto, CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto,
+    IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
+    MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
+    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraMessageDto,
+    TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -1025,6 +1027,133 @@ pub async fn tara_crisis_resources(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<CrisisResourceDto>, String> {
     Ok(state.read().await.tara_crisis_resources())
+}
+
+// ── In-chat commands, tasks and offers ─────────────────────────────────────────
+
+/// What the text in a composer means. Pure — the composer calls this as the user
+/// types, which is what drives the `/` picker and the mention chips.
+#[tauri::command]
+pub async fn parse_chat_command(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<ChatCommand, String> {
+    Ok(state.read().await.parse_chat_command(&text))
+}
+
+/// Every command the composer offers, for `/`-autocomplete and `/help`.
+#[tauri::command]
+pub async fn chat_command_catalog(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Vec<CommandSpec>, String> {
+    Ok(state.read().await.chat_command_catalog())
+}
+
+/// Every `@handle` in `text`, unresolved.
+#[tauri::command]
+pub async fn chat_mentions(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<Vec<Mention>, String> {
+    Ok(state.read().await.chat_mentions(&text))
+}
+
+/// Every `@handle` in `text`, resolved against the saved contacts. A match with
+/// no `npub` but a non-empty `candidates` is an ambiguity to ask about.
+#[tauri::command]
+pub async fn resolve_mentions(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<Vec<MentionMatchDto>, String> {
+    state
+        .read()
+        .await
+        .resolve_mentions(&text)
+        .map_err(|e| e.to_string())
+}
+
+/// How far a `/play` query gets without a network or a library.
+#[tauri::command]
+pub async fn play_query(
+    state: tauri::State<'_, Runtime>,
+    query: String,
+    service: Option<MusicService>,
+) -> Result<PlayTargetDto, String> {
+    Ok(state.read().await.play_query(&query, service))
+}
+
+/// What to do about a `/play`, once the caller has searched its own library.
+///
+/// Pure, so it never touches the runtime — it is a command only so the decision
+/// stays in one place across the frontends rather than being reimplemented in JS
+/// the day desktop grows a player (`docs/TOGETHER.md` §9).
+#[tauri::command]
+pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+    comrade_ui::play_route(plan, found_local_copy)
+}
+
+/// Name a piece of work. `peer` of `None` is a note to self — no relay.
+#[tauri::command]
+pub async fn assign_task(
+    state: tauri::State<'_, Runtime>,
+    peer: Option<String>,
+    text: String,
+) -> Result<TaskDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .assign_task(peer, &text)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Every task this device knows about, newest first.
+#[tauri::command]
+pub async fn tasks(state: tauri::State<'_, Runtime>) -> Result<Vec<TaskDto>, String> {
+    state.read().await.tasks().map_err(|e| e.to_string())
+}
+
+/// Move a task to `state_name` and tell the other party.
+#[tauri::command]
+pub async fn set_task_state(
+    state: tauri::State<'_, Runtime>,
+    id: String,
+    task_state: TaskState,
+) -> Result<TaskDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .set_task_state(&id, task_state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Offer an in-app action to comrades. The outcome names who was told and why
+/// the others were not — a bare count could not tell "the cooldown is running"
+/// from "that person is not your comrade".
+#[tauri::command]
+pub async fn offer_action(
+    state: tauri::State<'_, Runtime>,
+    action: AppAction,
+    peers: Vec<String>,
+) -> Result<OfferOutcomeDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .offer_action(action, peers)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Say something to Tara from inside a conversation — a private aside that never
+/// reaches the peer.
+#[tauri::command]
+pub async fn tara_aside(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<TaraMessageDto, String> {
+    state
+        .read()
+        .await
+        .tara_aside(&text)
+        .map_err(|e| e.to_string())
 }
 
 // ── Attention (usage mirror · focus sessions · long read) ──────────────────────

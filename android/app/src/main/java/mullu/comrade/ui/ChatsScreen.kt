@@ -79,6 +79,7 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
@@ -99,6 +100,9 @@ import mullu.comrade.Notifier
 import mullu.comrade.PresenceMonitor
 import mullu.comrade.handoff.AttachmentHandoffManager
 import mullu.comrade.media.VoiceRecorder
+import mullu.comrade.together.LibraryResolver
+import mullu.comrade.together.TogetherManager
+import uniffi.comrade_ui.PlayRoute
 
 /**
  * Identity-stable avatar hues: the same key renders the same colour on every
@@ -522,6 +526,21 @@ fun ConversationScreen(
         draft = next
         if (next.text.isBlank()) ComradeCore.abandonDraft(peer) else ComradeCore.noteDraft(peer)
     }
+
+    // ── In-chat commands (grammar in `comrade_core::command`) ────────────────
+    //
+    // The `/` picker's rows, and whether the composer currently holds a private
+    // aside. Both are derived from the draft rather than stored, so they cannot
+    // fall out of step with what is actually in the box.
+    val commandCatalog = remember { runCatching { ComradeCore.chatCommandCatalog() }.getOrDefault(emptyList()) }
+    val pickerRows = remember(draft.text, commandCatalog) {
+        ChatCommands.pickerRows(draft.text, commandCatalog)
+    }
+    // Decided from the raw text, so it is true the moment `@tara ` is typed —
+    // before there is anything to parse. A private thing that looks like a
+    // message is how somebody sends one by accident.
+    val asideDraft = remember(draft.text) { ChatCommands.isAsideDraft(draft.text) }
+    var commandNote by remember { mutableStateOf<String?>(null) }
     var emojiOpen by remember { mutableStateOf(false) }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -738,9 +757,233 @@ fun ConversationScreen(
     // arriving; an empty composer makes this a no-op.
     DisposableEffect(peer) { onDispose { ComradeCore.abandonDraft(peer) } }
 
+    /**
+     * Act on an in-chat command, or return false to let [send] deliver the text.
+     *
+     * The grammar is Rust ([ComradeCore.parseChatCommand]) and the decision is
+     * [ChatCommands.planFor]; this only carries it out. Everything that touches
+     * a relay runs on IO, and the composer is cleared only once the call has
+     * actually succeeded — a command that failed must leave the text where the
+     * user can try again.
+     */
+    fun runCommand(text: String): Boolean {
+        val command = runCatching { ComradeCore.parseChatCommand(text) }.getOrNull()
+        if (command == null) {
+            // **Fail closed.** Returning false here would hand the text to
+            // [send], and for `@tara i can't stand my brother` that means
+            // sending somebody their own private thought. So anything that
+            // *looks* like a command is refused rather than delivered when the
+            // grammar is unreachable — `isAsideDraft` is pure Kotlin and cannot
+            // itself fail, which is why it can be trusted at this point.
+            if (ChatCommands.isAsideDraft(text) || text.startsWith("/")) {
+                commandNote = "Couldn't read that command — nothing was sent."
+                return true
+            }
+            return false
+        }
+        if (command is uniffi.comrade_core.ChatCommand.Plain ||
+            command is uniffi.comrade_core.ChatCommand.Pay
+        ) {
+            return false
+        }
+        val mentions = runCatching { ComradeCore.resolveMentions(text) }.getOrDefault(emptyList())
+        val plan = ChatCommands.planFor(command, mentions)
+
+        // Empties the composer. Deliberately does **not** touch [commandNote]:
+        // it used to, and every `/task` confirmation was erased on the line
+        // after it was set, so the command appeared to do nothing at all.
+        fun clearDraft() {
+            editDraft(TextFieldValue())
+        }
+
+        when (plan) {
+            is ComposerPlan.Send -> return false
+
+            // Say why and keep the text: a command the user has to retype is a
+            // command they stop using.
+            is ComposerPlan.Explain -> commandNote = plan.message
+
+            is ComposerPlan.Help -> commandNote = commandCatalog.joinToString("\n") {
+                "/${it.name} ${it.argument} — ${it.help}"
+            }
+
+            is ComposerPlan.Aside -> {
+                sending = true
+                scope.launch {
+                    runCatching { withContext(Dispatchers.IO) { ComradeCore.taraAsideTyped(plan.text) } }
+                        .onSuccess { reply ->
+                            // Shown in the composer's own note, not as a chat
+                            // bubble: this never went anywhere, and putting it in
+                            // the thread would make it look as though it had.
+                            commandNote = reply.text
+                            editDraft(TextFieldValue())
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Tara could not answer."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.Task -> {
+                sending = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            ComradeCore.assignTaskTyped(plan.peer, plan.text)
+                        }
+                    }
+                        .onSuccess {
+                            // Names where the list is: this screen owns no nav
+                            // state, so it cannot open Tasks itself, and a
+                            // confirmation about a list you cannot find is the
+                            // gap this screen used to have.
+                            commandNote = if (plan.peer != null) {
+                                "Asked them — it's under Tasks in the menu."
+                            } else {
+                                "Added to your list — it's under Tasks in the menu."
+                            }
+                            clearDraft()
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Could not add that."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.Offer -> {
+                sending = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            ComradeCore.offerActionTyped(plan.action, plan.peers)
+                        }
+                    }
+                        .onSuccess { outcome ->
+                            // A deliberate command that silently did nothing
+                            // reads as a bug, so say which of the three reasons
+                            // applied rather than guessing at the friendliest.
+                            commandNote = when {
+                                outcome.sent.isNotEmpty() -> null
+                                outcome.notComrades.isNotEmpty() ->
+                                    "Mark them a comrade first — this only goes to comrades."
+                                outcome.onCooldown.isNotEmpty() ->
+                                    "They were told recently — leaving them be for now."
+                                else -> "Couldn't reach them just now."
+                            }
+                            if (outcome.sent.isNotEmpty()) clearDraft()
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Could not send that."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.Open -> {
+                // Navigating out of a conversation from its own composer needs a
+                // host that owns the nav state; until `ConversationScreen` takes
+                // one, say where it is rather than doing nothing.
+                commandNote = "${ChatCommands.labelFor(plan.action)} is on the ${
+                    if (plan.action == uniffi.comrade_core.AppAction.BREATHE ||
+                        plan.action == uniffi.comrade_core.AppAction.FOCUS ||
+                        plan.action == uniffi.comrade_core.AppAction.READ
+                    ) {
+                        "Focus"
+                    } else {
+                        plan.action.name.lowercase().replaceFirstChar { c -> c.uppercase() }
+                    }
+                } tab."
+            }
+
+            is ComposerPlan.Play -> {
+                sending = true
+                scope.launch {
+                    // Three steps, and only the middle one is this frontend's:
+                    // core says what the query names, `MediaStore` says whether
+                    // a copy is here, and core turns those two answers into a
+                    // route. Nothing about *when* a session may open is decided
+                    // in this file.
+                    val target = withContext(Dispatchers.IO) {
+                        runCatching { ComradeCore.playQuery(plan.query, plan.service) }.getOrNull()
+                    }
+                    if (target == null) {
+                        // Fail closed, like the grammar above: a query nobody
+                        // resolved must not fall through to a file picker.
+                        commandNote = "Couldn't work out what to play — nothing was sent."
+                        sending = false
+                        return@launch
+                    }
+                    // "Not allowed to look" and "looked, not there" are different
+                    // problems with different next steps, so they are told apart
+                    // before either sentence is chosen. Currently always false —
+                    // the manifest declares no media-read permission; see
+                    // `LibraryResolver.mayRead` and AUDIT.md.
+                    val mayLook = runCatching { LibraryResolver.mayRead(context) }
+                        .getOrDefault(false)
+                    val found = withContext(Dispatchers.IO) {
+                        target.recording?.takeIf { mayLook }?.let { want ->
+                            // Duration is unknown for words the user typed, and
+                            // `match_score` treats an unknown length as neutral
+                            // rather than as a mismatch — that is what lets
+                            // "Kun Faya Kun" match at all.
+                            runCatching { LibraryResolver.resolve(context, want, 0L) }.getOrNull()
+                        }
+                    }
+                    val route = withContext(Dispatchers.IO) {
+                        ComradeCore.playRoute(target.plan, found != null)
+                    }
+                    if (route == null) {
+                        commandNote = "Couldn't work out what to play — nothing was sent."
+                        sending = false
+                        return@launch
+                    }
+                    // Held locally rather than written straight to [commandNote]:
+                    // a note is only cleared when the user taps it, so a
+                    // conditional write would let the previous command's
+                    // sentence stand in for this one's.
+                    var failed: String? = null
+                    if (route == PlayRoute.START_TOGETHER && found != null) {
+                        // A label, not an npub: an invitation that says
+                        // "npub1…" wants to listen with you is unreadable.
+                        val label = withContext(Dispatchers.IO) {
+                            runCatching { ComradeCore.contacts() }.getOrNull()
+                                ?.firstOrNull { it.npub == peer }
+                                ?.let { peerTitle(it.npub, it.alias, it.name) }
+                                ?: shortNpub(peer)
+                        }
+                        runCatching {
+                            TogetherManager.start(context, peer, label, found.uri, found.recording)
+                        }
+                            .onSuccess { clearDraft() }
+                            .onFailure { failed = it.message ?: "Could not start that." }
+                    }
+                    // Said on every route, the successful one included: this
+                    // screen owns no nav state, so it can start the session but
+                    // cannot show it, and a session the user cannot find is the
+                    // same gap the task list had.
+                    commandNote = when {
+                        failed != null -> failed
+                        route == PlayRoute.ASK_FOR_FILE && !mayLook -> ChatCommands.LIBRARY_UNSEEN
+                        else -> ChatCommands.playNote(route, target.service, plan.query)
+                    }
+                    sending = false
+                }
+            }
+        }
+        return true
+    }
+
     fun send() {
         val text = draft.text.trim()
         if (text.isEmpty() || sending) return
+        // A command is intercepted before anything reaches the DM path — an
+        // aside in particular must never be able to reach `sendDmReplyTyped`.
+        if (runCommand(text)) return
         sending = true
         error = null
         val replyId = replyingTo?.eventId
@@ -1390,6 +1633,61 @@ fun ConversationScreen(
         // the pill read as one control instead of a row of loose buttons. Only
         // the round button (and its swap) live outside, because they are the
         // ones whose meaning changes.
+        // The `/` picker sits above the field so choosing a row does not shift
+        // the composer under the thumb mid-tap.
+        if (pickerRows.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .testTag("dm-command-picker"),
+            ) {
+                for (spec in pickerRows) {
+                    Text(
+                        text = "/${spec.name}  ${spec.argument}\n${spec.help}",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                editDraft(
+                                    TextFieldValue(ChatCommands.completionFor(spec)).let {
+                                        it.copy(selection = TextRange(it.text.length))
+                                    },
+                                )
+                            }
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                    )
+                }
+            }
+        }
+
+        // An aside must not look like a message. Said in words as well as in the
+        // field's own styling, because the words are what a first-time user
+        // needs and the styling is what a returning one reads at a glance.
+        if (asideDraft) {
+            Text(
+                text = stringResource(R.string.aside_only_you),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .testTag("dm-aside-note"),
+            )
+        }
+
+        commandNote?.let { note ->
+            Text(
+                text = note,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { commandNote = null }
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("dm-command-note"),
+            )
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1400,7 +1698,15 @@ fun ConversationScreen(
             OutlinedTextField(
                 value = draft,
                 onValueChange = { editDraft(it) },
-                placeholder = { Text("Message") },
+                placeholder = {
+                    Text(
+                        if (asideDraft) {
+                            stringResource(R.string.aside_placeholder)
+                        } else {
+                            "Message"
+                        },
+                    )
+                },
                 shape = RoundedCornerShape(26.dp),
                 modifier = Modifier
                     .weight(1f)

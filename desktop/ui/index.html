@@ -77,6 +77,10 @@
             <span class="tab-icon" aria-hidden="true">⏳</span>
             <span class="tab-text">Focus <span class="tab-sub">Sessions · Long read</span></span>
           </button>
+          <button class="tab" data-tab="tasks" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">🗒</span>
+            <span class="tab-text">Tasks <span class="tab-sub">Yours · asked of you</span></span>
+          </button>
         </nav>
 
         <div class="sidebar-section" aria-label="Modes">
@@ -199,6 +203,11 @@
                    it. Built in main.js from `handoff_transfer.mjs`'s plan, which
                    is where "may this even be accepted" is decided. -->
               <div id="handoff-card" class="handoff-card" hidden></div>
+              <div id="dm-command-picker" class="command-picker" hidden></div>
+              <p id="dm-aside-note" class="aside-note sm" hidden>
+                Only you will see this — it goes to Tara, not to them.
+              </p>
+              <p id="dm-command-hint" class="command-hint sm" hidden></p>
               <div id="dm-upi-preview" class="upi-preview" hidden></div>
               <div id="dm-reply-chip" class="reply-chip" hidden>
                 <div class="reply-chip-body">
@@ -220,7 +229,7 @@
                   id="dm-input"
                   class="input"
                   type="text"
-                  placeholder="Message… (try “/pay 250 to friend@upi”)"
+                  placeholder="Message… (type / for what you can do)"
                   disabled
                 />
                 <button id="dm-send" class="btn btn-primary" disabled>
@@ -229,10 +238,11 @@
                 </button>
               </div>
               <p class="hint sm">
-                Messages are end-to-end encrypted. Live UPI <code>/pay</code>
-                detection is active, and the 📎 attaches a file — up to 10 MB
-                encrypted and uploaded, anything larger handed straight to their
-                device while you are both online.
+                Messages are end-to-end encrypted. Type <code>/</code> for
+                in-chat actions and <code>@tara</code> for a private aside only
+                you can see. 📎 attaches a file — up to 10 MB encrypted and
+                uploaded, anything larger handed straight to their device while
+                you are both online.
               </p>
             </div>
           </div>
@@ -243,6 +253,13 @@
              no usage mirror here on purpose; it is fed by Android's usage
              stats and the store is per-device, so a desktop panel could only
              ever read zero. -->
+        <!-- Everything `/task` has produced. The rows and their buttons come
+             from `task_list.mjs`, which mirrors `karya::may_transition` so a
+             button core would refuse is never drawn. -->
+        <section id="view-tasks" class="view view-tasks" role="tabpanel" hidden>
+          <div id="task-list" class="task-list"></div>
+        </section>
+
         <section id="view-focus" class="view view-focus" role="tabpanel" hidden>
           <div class="focus-col">
             <div class="composer focus-card">
