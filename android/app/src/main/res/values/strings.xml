@@ -338,6 +338,13 @@
     <string name="breathe_in">Breathe in</string>
     <string name="breathe_hold">Hold</string>
     <string name="breathe_out">Breathe out</string>
+    <!--
+      The pause after the out-breath, which is deliberately shorter than the one
+      after the in-breath (BreathPhase explains why). It needs its own word: two
+      phases both saying "Hold" for different lengths gives the reader no way to
+      tell which one they are in.
+    -->
+    <string name="breathe_settle">Settle</string>
     <string name="breathe_done">Done</string>
     <string name="breathe_minutes">%1$d min</string>
     <!--
@@ -346,16 +353,21 @@
       they chose. The wording of the second matters — comrades learn only that
       you might need them, never that you were breathing.
 
-      The count enumerates all four sides. It said "four counts in, four held,
-      four out" while the code ran a three-phase cycle with no pause on empty —
-      copy describing a box over an animation drawing a triangle.
+      The count enumerates every phase, and the numbers are the real ones. It
+      said "four counts in, four held, four out" while the code ran a three-phase
+      cycle with no pause at all — copy describing a box over an animation
+      drawing a triangle — and then said "four empty" for one release while that
+      was true. The last phase is two counts now (see BreathPhase), so this says
+      two. If the pattern ever changes again, this string changes with it.
     -->
-    <string name="breathe_note">Four counts in, four held, four out, four empty — follow the buzz if you\'d rather close your eyes. No account of this is kept here, and your comrades are told only that you might need them.</string>
+    <string name="breathe_note">Four counts in, four held, four out, two to settle — follow the buzz if you\'d rather close your eyes. No account of this is kept here, and your comrades are told only that you might need them.</string>
     <!--
       Rotated every two full cycles by BreathingScreen, in this order. They sit
       where the screen used to repeat its own title, which said nothing the app
-      bar had not already said. Ten of them, so the longest offered sit (five
-      minutes) gets through the list without repeating one.
+      bar had not already said. Eleven of them, because two cycles is 28 seconds
+      and the longest offered sit is five minutes — ten would have repeated one
+      at the very end. `theLongestOfferedSitGetsThroughTheListWithoutRepeating`
+      is the test that says so, and it fails if a line is removed.
 
       Each names **one concrete physical thing** to notice or let go of. The
       first draft was abstract — "you don't have to be doing something", "this is
@@ -381,6 +393,7 @@
         <item>Feel your breath in your belly, not your chest.</item>
         <item>Whatever you were about to do can be done after.</item>
         <item>Notice the weight of the phone in your hand.</item>
+        <item>Soften the space between your eyebrows.</item>
     </string-array>
 
     <!-- Attention: the tab and its honesty gate -->
