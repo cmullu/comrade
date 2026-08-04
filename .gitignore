@@ -66,6 +66,7 @@ dist/
 !.claude/skills/
 !.claude/agents/
 !.claude/hooks/
+!.claude/user-settings.template.json
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

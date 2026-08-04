@@ -112,6 +112,66 @@ saathi: carry sealed DMs, so a message reaches someone on the same WiFi
 
 Not `fix(media): add fallback array`.
 
+## Claude Code setup
+
+Committed under `.claude/`, so every session — terminal or cloud — gets it:
+`settings.json` (permissions, hooks, plugins), `rules/` (per-language, loaded by
+path glob), `skills/verify`, `agents/comrade-reviewer`, `hooks/`.
+
+The `caveman` plugin is enabled repo-wide and pinned to a commit; it compresses
+prose while leaving code, commands, errors and paths byte-exact. Declaring a
+plugin is not installing it, so the SessionStart hook repairs a cold container's
+plugin cache. On a brand-new container that repair lands one session late — run
+`/reload-plugins`, or put `claude plugin marketplace update caveman` in the cloud
+environment's setup script, which runs before the session boots.
+
+### User-scope settings
+
+`statusLine` and `teammateMode` are honoured only at user scope, so they cannot
+live in `.claude/settings.json` — and the cloud container wipes `~/.claude` every
+session, so setting them by hand lasts one session.
+`.claude/user-settings.template.json` is tracked instead, and
+`hooks/seed-user-settings.sh` installs it to `~/.claude/settings.json` on
+SessionStart **when that file is absent**. It never overwrites, so anything you
+set by hand wins.
+
+The status line shows model · branch · `↓N` commits behind `origin/main` · `*` for
+a dirty tree, then delegates the caveman badge to the plugin's own hardened
+script. It renders on a keystroke cadence, so it never fetches and caches the
+drift count for 30s.
+
+### Agent teams
+
+Enabled via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.json`
+(experimental, off by default upstream). Run `/team` for the formation playbook —
+`feature`, `review`, or `hunt`.
+
+Teams fit this repo because the five file sets are near-disjoint, so each owner
+edits files nobody else touches: `comrade-core` (engines + runtime), `comrade-ffi`
+(`comrade_jni`), `comrade-android`, `comrade-flutter`, `comrade-desktop`. Those
+are ordinary subagent definitions in `.claude/agents/`, usable either as
+teammates or as plain subagents. **The lead owns `AUDIT.md` and `docs/`** — five
+teammates editing one ledger is the guaranteed conflict.
+
+There is no project-level team config file to write: teams are runtime state
+under `~/.claude/teams/<session>/`, generated per session and not to be
+pre-authored. Roles and spawn prompts are the reusable parts.
+
+**Five agents is the ceiling** — for teams and for dynamic workflows alike.
+`workflowSizeGuideline` is `small` (fewer than 5 agents), which also drops the
+large-run warning threshold from 25 to 5. Five is the natural cap because there
+are exactly five owned file sets; a sixth agent owns nothing and only adds
+conflict risk. Prefer three.
+
+A `TaskCompleted` hook blocks closing a task that adds a `BridgeEvent` variant
+without updating the Kotlin and Dart matches, since the Rust side compiles clean
+and neither lane is in `ci.yml`.
+
+The cloud sandbox is **not** a devcontainer; there is no `.devcontainer/` here.
+It is an Anthropic-managed VM configured per *cloud environment* (network policy,
+env vars, setup script) at claude.ai. Repo-committed settings and hooks are the
+parts that travel with the code.
+
 ## Working across sessions
 
 Each session starts fresh in a throwaway container, so **anything not committed
