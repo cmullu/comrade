@@ -506,7 +506,13 @@ object AttachmentHandoffManager {
                     live = null
                     break
                 }
-                _state.value = moving.copy(status = engine.status, fraction = engine.progress)
+                // Keep the last sentence when the engine has nothing to say yet:
+                // a receiver that has just accepted is waiting for the sender,
+                // and a panel with a bar and no words does not say that.
+                _state.value = moving.copy(
+                    status = engine.status ?: moving.status,
+                    fraction = engine.progress ?: moving.fraction,
+                )
                 delay(POLL_MS)
             }
         }
