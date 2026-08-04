@@ -734,6 +734,7 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
       rust.BridgeEvent_TogetherCommand() => null,
       rust.BridgeEvent_TogetherCorrection() => null,
       rust.BridgeEvent_TogetherEnded() => null,
+      rust.BridgeEvent_TogetherShare() => null,
     };
 
 /// Flatten the typed `CallSignal` union back into the flat shape the call UI

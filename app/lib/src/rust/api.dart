@@ -10,6 +10,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `pump_bridge_events`, `runtime`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ShareVerdictDto`
 
 /// The comrade_jni crate version (e.g. "0.1.0").
 String version() => RustLib.instance.api.crateApiVersion();
@@ -542,6 +543,9 @@ sealed class BridgeEvent with _$BridgeEvent {
     required String peer,
     required bool byPeer,
   }) = BridgeEvent_TogetherEnded;
+  const factory BridgeEvent.togetherShare(
+    TogetherShareDto field0,
+  ) = BridgeEvent_TogetherShare;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;
@@ -1314,6 +1318,54 @@ sealed class RelayPolicy with _$RelayPolicy {
   const factory RelayPolicy.always() = RelayPolicy_Always;
 }
 
+class ShareOffer {
+  final BigInt totalBytes;
+  final int chunkBytes;
+  final String sha256;
+  final BigInt durationMs;
+
+  const ShareOffer({
+    required this.totalBytes,
+    required this.chunkBytes,
+    required this.sha256,
+    required this.durationMs,
+  });
+
+  @override
+  int get hashCode =>
+      totalBytes.hashCode ^
+      chunkBytes.hashCode ^
+      sha256.hashCode ^
+      durationMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ShareOffer &&
+          runtimeType == other.runtimeType &&
+          totalBytes == other.totalBytes &&
+          chunkBytes == other.chunkBytes &&
+          sha256 == other.sha256 &&
+          durationMs == other.durationMs;
+}
+
+@freezed
+sealed class ShareSignal with _$ShareSignal {
+  const ShareSignal._();
+
+  const factory ShareSignal.ask() = ShareSignal_Ask;
+  const factory ShareSignal.offer({
+    required ShareOffer offer,
+  }) = ShareSignal_Offer;
+  const factory ShareSignal.accept() = ShareSignal_Accept;
+  const factory ShareSignal.refuse({
+    required RefusalReason reason,
+  }) = ShareSignal_Refuse;
+  const factory ShareSignal.transport({
+    required TransferSignal signal,
+  }) = ShareSignal_Transport;
+}
+
 enum StateChange {
   played,
   paused,
@@ -1535,6 +1587,47 @@ class TogetherSessionDto {
           joined == other.joined &&
           posMs == other.posMs &&
           playing == other.playing;
+}
+
+class TogetherShareDto {
+  final String sessionId;
+  final String peer;
+  final ShareSignal signal;
+
+  const TogetherShareDto({
+    required this.sessionId,
+    required this.peer,
+    required this.signal,
+  });
+
+  @override
+  int get hashCode => sessionId.hashCode ^ peer.hashCode ^ signal.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherShareDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          peer == other.peer &&
+          signal == other.signal;
+}
+
+@freezed
+sealed class TransferSignal with _$TransferSignal {
+  const TransferSignal._();
+
+  const factory TransferSignal.offer({
+    required String sdp,
+  }) = TransferSignal_Offer;
+  const factory TransferSignal.answer({
+    required String sdp,
+  }) = TransferSignal_Answer;
+  const factory TransferSignal.ice({
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  }) = TransferSignal_Ice;
 }
 
 @freezed

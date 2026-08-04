@@ -548,9 +548,70 @@ the relay rule enforceable, since the transfer connection has its own ICE server
 list: the *call* keeps its TURN fallback, because a relayed call is a few tens of
 kilobits and entirely reasonable, while a relayed film is not.
 
-**Still to wire:** the policy, the pump and the protocol are built and tested;
-what remains is attaching them to a real `RTCPeerConnection` in `main.js` and in
-Kotlin, and neither has been run against a live connection.
+### 9d. How the handover is negotiated
+
+The pump and the policy are attached to a real `RTCPeerConnection` on both
+frontends. What connects them is four signals, carried **inside the session
+envelope** rather than under a marker of their own:
+
+| Signal | Direction | Means |
+| --- | --- | --- |
+| `ask` | receiver → sender | "My copy of this is missing." |
+| `offer` | sender → receiver | Size, hash and duration — before a single byte. |
+| `accept` | receiver → sender | "Go ahead." Negotiation starts here. |
+| `transport` | either | One step of the WebRTC negotiation. |
+| `refuse` | either | Not happening, and why. |
+
+Riding inside `TogetherSignal::Share` is the whole safety argument. Every guard
+the session already has applies unchanged: the acceptance gate, the
+sixty-second age gate, the session-id scoping, and the fact that sessions do
+not survive a restart. A separate envelope would have needed its own copy of
+all four, and **a stranger able to open a peer-to-peer connection to you by
+sending one DM is a much worse bug than a stranger able to move your playhead.**
+`a_transfer_cannot_be_negotiated_without_a_session_to_negotiate_it_in`
+(`crates/comrade_ui/src/runtime.rs`) is that claim as a test.
+
+A share signal is deliberately **not** a command
+(`TogetherSignal::is_command`). A transfer trickles ICE candidates at its own
+pace; if each counted as a command, a burst of them would outrank the pause
+button and the person pressing it would watch it do nothing.
+
+**Four steps rather than two,** because the two obvious shortcuts are both
+wrong. Skipping `ask` means the side that *has* the file must guess whether the
+other needs it — guess wrong and it is either an unwanted upload prompt or a
+session that silently never starts. Skipping `offer` means the receiver learns
+the size after the transfer rather than before it, which is exactly backwards
+for the one decision they might want to make.
+
+**`refuse` carries a reason and `end` does not**, and that asymmetry is
+deliberate. The argument that keeps a reason off `end` is that why someone left
+is nobody's business. The reason a transfer did not happen is a fact about the
+network, not about the person, and it is the only thing that tells them whether
+trying again could work.
+
+**The runtime keeps no transfer state.** It relays signals and answers the
+policy question; the peer connection, the data channel and the bytes live in
+the frontend, because that is where WebRTC lives. Mirroring the negotiation in
+the runtime as well would create two state machines that have to agree about a
+connection only one of them can see — the shape of both call bugs this repo has
+already fixed.
+
+**Chunks carry their own index** (a four-byte big-endian header). A data
+channel is ordered but a *transfer* is not: a receiver that seeks re-asks from
+a new anchor while chunks from the old one are still in flight, so "the next
+message is the next chunk I asked for" is false exactly when it matters. The
+index and the payload length are both checked against the offer on arrival —
+the whole-file hash would catch the same corruption, but only after the whole
+file.
+
+**Verified, and not.** The framing, the tracker, the policy and the pump are
+tested on all three sides — `comrade_core::share` (Rust), `share_transfer.mjs`
+(desktop) and `ShareDecisions.kt` (JVM), with the Rust vectors ported verbatim
+into both ports so a divergence is a red test rather than a corrupted file.
+What has **not** happened is a run between two real devices: no transfer has
+crossed a live `RTCPeerConnection`, and the Kotlin path additionally cannot be
+compiled in the development sandbox at all. Treat the connection handling as
+reviewed rather than exercised.
 
 ## 10. Deliberately out of scope
 

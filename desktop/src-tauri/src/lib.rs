@@ -145,6 +145,11 @@ pub fn run() {
             commands::together_end,
             commands::together_report_position,
             commands::together_session,
+            commands::together_share,
+            commands::share_ice_servers,
+            commands::share_transfer_verdict,
+            commands::share_relay_policy,
+            commands::set_share_relay_policy,
             commands::log_call,
             commands::call_history,
             // Journal (strictly local)

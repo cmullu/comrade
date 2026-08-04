@@ -3007,6 +3007,9 @@ const _: fn() = || {
             let _: String = peer;
             let _: bool = by_peer;
         }
+        crate::api::BridgeEvent::TogetherShare(field0) => {
+            let _: crate::api::TogetherShareDto = field0;
+        }
         crate::api::BridgeEvent::MeshStatusChanged(field0) => {
             let _: crate::api::MeshStatusDto = field0;
         }
@@ -3226,6 +3229,26 @@ const _: fn() = || {
         crate::api::RelayPolicy::AskEachTime => {}
         crate::api::RelayPolicy::Always => {}
     }
+    {
+        let ShareOffer = None::<crate::api::ShareOffer>.unwrap();
+        let _: u64 = ShareOffer.total_bytes;
+        let _: u32 = ShareOffer.chunk_bytes;
+        let _: String = ShareOffer.sha256;
+        let _: u64 = ShareOffer.duration_ms;
+    }
+    match None::<crate::api::ShareSignal>.unwrap() {
+        crate::api::ShareSignal::Ask => {}
+        crate::api::ShareSignal::Offer { offer } => {
+            let _: crate::api::ShareOffer = offer;
+        }
+        crate::api::ShareSignal::Accept => {}
+        crate::api::ShareSignal::Refuse { reason } => {
+            let _: crate::api::RefusalReason = reason;
+        }
+        crate::api::ShareSignal::Transport { signal } => {
+            let _: crate::api::TransferSignal = signal;
+        }
+    }
     match None::<crate::api::SyncVerdict>.unwrap() {
         crate::api::SyncVerdict::Hold => {}
         crate::api::SyncVerdict::Adopt {
@@ -3297,6 +3320,29 @@ const _: fn() = || {
         let _: bool = TogetherSessionDto.joined;
         let _: u64 = TogetherSessionDto.pos_ms;
         let _: bool = TogetherSessionDto.playing;
+    }
+    {
+        let TogetherShareDto = None::<crate::api::TogetherShareDto>.unwrap();
+        let _: String = TogetherShareDto.session_id;
+        let _: String = TogetherShareDto.peer;
+        let _: crate::api::ShareSignal = TogetherShareDto.signal;
+    }
+    match None::<crate::api::TransferSignal>.unwrap() {
+        crate::api::TransferSignal::Offer { sdp } => {
+            let _: String = sdp;
+        }
+        crate::api::TransferSignal::Answer { sdp } => {
+            let _: String = sdp;
+        }
+        crate::api::TransferSignal::Ice {
+            candidate,
+            sdp_mid,
+            sdp_m_line_index,
+        } => {
+            let _: String = candidate;
+            let _: Option<String> = sdp_mid;
+            let _: Option<u16> = sdp_m_line_index;
+        }
     }
     match None::<crate::api::TransferVerdict>.unwrap() {
         crate::api::TransferVerdict::Allow => {}
@@ -3478,10 +3524,14 @@ impl SseDecode for crate::api::BridgeEvent {
                 };
             }
             14 => {
+                let mut var_field0 = <crate::api::TogetherShareDto>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::TogetherShare(var_field0);
+            }
+            15 => {
                 let mut var_field0 = <crate::api::MeshStatusDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::MeshStatusChanged(var_field0);
             }
-            15 => {
+            16 => {
                 let mut var_ledger = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::LedgerUpdated { ledger: var_ledger };
             }
@@ -4368,6 +4418,52 @@ impl SseDecode for crate::api::RelayPolicy {
     }
 }
 
+impl SseDecode for crate::api::ShareOffer {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_totalBytes = <u64>::sse_decode(deserializer);
+        let mut var_chunkBytes = <u32>::sse_decode(deserializer);
+        let mut var_sha256 = <String>::sse_decode(deserializer);
+        let mut var_durationMs = <u64>::sse_decode(deserializer);
+        return crate::api::ShareOffer {
+            total_bytes: var_totalBytes,
+            chunk_bytes: var_chunkBytes,
+            sha256: var_sha256,
+            duration_ms: var_durationMs,
+        };
+    }
+}
+
+impl SseDecode for crate::api::ShareSignal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::api::ShareSignal::Ask;
+            }
+            1 => {
+                let mut var_offer = <crate::api::ShareOffer>::sse_decode(deserializer);
+                return crate::api::ShareSignal::Offer { offer: var_offer };
+            }
+            2 => {
+                return crate::api::ShareSignal::Accept;
+            }
+            3 => {
+                let mut var_reason = <crate::api::RefusalReason>::sse_decode(deserializer);
+                return crate::api::ShareSignal::Refuse { reason: var_reason };
+            }
+            4 => {
+                let mut var_signal = <crate::api::TransferSignal>::sse_decode(deserializer);
+                return crate::api::ShareSignal::Transport { signal: var_signal };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseDecode for crate::api::StateChange {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4536,6 +4632,50 @@ impl SseDecode for crate::api::TogetherSessionDto {
     }
 }
 
+impl SseDecode for crate::api::TogetherShareDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <String>::sse_decode(deserializer);
+        let mut var_peer = <String>::sse_decode(deserializer);
+        let mut var_signal = <crate::api::ShareSignal>::sse_decode(deserializer);
+        return crate::api::TogetherShareDto {
+            session_id: var_sessionId,
+            peer: var_peer,
+            signal: var_signal,
+        };
+    }
+}
+
+impl SseDecode for crate::api::TransferSignal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_sdp = <String>::sse_decode(deserializer);
+                return crate::api::TransferSignal::Offer { sdp: var_sdp };
+            }
+            1 => {
+                let mut var_sdp = <String>::sse_decode(deserializer);
+                return crate::api::TransferSignal::Answer { sdp: var_sdp };
+            }
+            2 => {
+                let mut var_candidate = <String>::sse_decode(deserializer);
+                let mut var_sdpMid = <Option<String>>::sse_decode(deserializer);
+                let mut var_sdpMLineIndex = <Option<u16>>::sse_decode(deserializer);
+                return crate::api::TransferSignal::Ice {
+                    candidate: var_candidate,
+                    sdp_mid: var_sdpMid,
+                    sdp_m_line_index: var_sdpMLineIndex,
+                };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseDecode for crate::api::TransferVerdict {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4577,6 +4717,13 @@ impl SseDecode for u16 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_u16::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for u32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u32::<NativeEndian>().unwrap()
     }
 }
 
@@ -4877,11 +5024,14 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::BridgeEvent> {
                 by_peer.into_into_dart().into_dart(),
             ]
             .into_dart(),
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+            crate::api::BridgeEvent::TogetherShare(field0) => {
                 [14.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                [15.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                [15.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
+                [16.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -5652,6 +5802,61 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::RelayPolicy>>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::ShareOffer> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.total_bytes.into_into_dart().into_dart(),
+            self.0.chunk_bytes.into_into_dart().into_dart(),
+            self.0.sha256.into_into_dart().into_dart(),
+            self.0.duration_ms.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::ShareOffer>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::ShareOffer>>
+    for crate::api::ShareOffer
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::ShareOffer> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::ShareSignal> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::ShareSignal::Ask => [0.into_dart()].into_dart(),
+            crate::api::ShareSignal::Offer { offer } => {
+                [1.into_dart(), offer.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ShareSignal::Accept => [2.into_dart()].into_dart(),
+            crate::api::ShareSignal::Refuse { reason } => {
+                [3.into_dart(), reason.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::ShareSignal::Transport { signal } => {
+                [4.into_dart(), signal.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::ShareSignal>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::ShareSignal>>
+    for crate::api::ShareSignal
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::ShareSignal> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::StateChange> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self.0 {
@@ -5866,6 +6071,66 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherSessionDto
     for crate::api::TogetherSessionDto
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherSessionDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherShareDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.session_id.into_into_dart().into_dart(),
+            self.0.peer.into_into_dart().into_dart(),
+            self.0.signal.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TogetherShareDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TogetherShareDto>>
+    for crate::api::TogetherShareDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TogetherShareDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TransferSignal> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::TransferSignal::Offer { sdp } => {
+                [0.into_dart(), sdp.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::TransferSignal::Answer { sdp } => {
+                [1.into_dart(), sdp.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::TransferSignal::Ice {
+                candidate,
+                sdp_mid,
+                sdp_m_line_index,
+            } => [
+                2.into_dart(),
+                candidate.into_into_dart().into_dart(),
+                sdp_mid.into_into_dart().into_dart(),
+                sdp_m_line_index.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::TransferSignal>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::TransferSignal>>
+    for crate::api::TransferSignal
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::TransferSignal> {
         self.into()
     }
 }
@@ -6132,12 +6397,16 @@ impl SseEncode for crate::api::BridgeEvent {
                 <String>::sse_encode(peer, serializer);
                 <bool>::sse_encode(by_peer, serializer);
             }
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+            crate::api::BridgeEvent::TogetherShare(field0) => {
                 <i32>::sse_encode(14, serializer);
+                <crate::api::TogetherShareDto>::sse_encode(field0, serializer);
+            }
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                <i32>::sse_encode(15, serializer);
                 <crate::api::MeshStatusDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                <i32>::sse_encode(15, serializer);
+                <i32>::sse_encode(16, serializer);
                 <String>::sse_encode(ledger, serializer);
             }
             _ => {
@@ -6844,6 +7113,45 @@ impl SseEncode for crate::api::RelayPolicy {
     }
 }
 
+impl SseEncode for crate::api::ShareOffer {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.total_bytes, serializer);
+        <u32>::sse_encode(self.chunk_bytes, serializer);
+        <String>::sse_encode(self.sha256, serializer);
+        <u64>::sse_encode(self.duration_ms, serializer);
+    }
+}
+
+impl SseEncode for crate::api::ShareSignal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::ShareSignal::Ask => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::api::ShareSignal::Offer { offer } => {
+                <i32>::sse_encode(1, serializer);
+                <crate::api::ShareOffer>::sse_encode(offer, serializer);
+            }
+            crate::api::ShareSignal::Accept => {
+                <i32>::sse_encode(2, serializer);
+            }
+            crate::api::ShareSignal::Refuse { reason } => {
+                <i32>::sse_encode(3, serializer);
+                <crate::api::RefusalReason>::sse_encode(reason, serializer);
+            }
+            crate::api::ShareSignal::Transport { signal } => {
+                <i32>::sse_encode(4, serializer);
+                <crate::api::TransferSignal>::sse_encode(signal, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseEncode for crate::api::StateChange {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6975,6 +7283,44 @@ impl SseEncode for crate::api::TogetherSessionDto {
     }
 }
 
+impl SseEncode for crate::api::TogetherShareDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.session_id, serializer);
+        <String>::sse_encode(self.peer, serializer);
+        <crate::api::ShareSignal>::sse_encode(self.signal, serializer);
+    }
+}
+
+impl SseEncode for crate::api::TransferSignal {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::TransferSignal::Offer { sdp } => {
+                <i32>::sse_encode(0, serializer);
+                <String>::sse_encode(sdp, serializer);
+            }
+            crate::api::TransferSignal::Answer { sdp } => {
+                <i32>::sse_encode(1, serializer);
+                <String>::sse_encode(sdp, serializer);
+            }
+            crate::api::TransferSignal::Ice {
+                candidate,
+                sdp_mid,
+                sdp_m_line_index,
+            } => {
+                <i32>::sse_encode(2, serializer);
+                <String>::sse_encode(candidate, serializer);
+                <Option<String>>::sse_encode(sdp_mid, serializer);
+                <Option<u16>>::sse_encode(sdp_m_line_index, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseEncode for crate::api::TransferVerdict {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7009,6 +7355,13 @@ impl SseEncode for u16 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u16::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for u32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u32::<NativeEndian>(self).unwrap();
     }
 }
 

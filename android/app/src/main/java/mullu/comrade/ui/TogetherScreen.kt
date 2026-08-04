@@ -44,6 +44,7 @@ fun TogetherScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by TogetherManager.state.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     Column(
         modifier = modifier.fillMaxSize().padding(16.dp),
@@ -62,6 +63,12 @@ fun TogetherScreen(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = onPickFile) { Text(stringResource(R.string.together_join)) }
+                    // The case `together` otherwise assumes away: you do not
+                    // have it. Their copy comes straight from their device —
+                    // never through a server of ours.
+                    TextButton(onClick = { TogetherManager.askForTheirCopy(context) }) {
+                        Text(stringResource(R.string.together_ask_for_copy))
+                    }
                     TextButton(onClick = { TogetherManager.leave() }) {
                         Text(stringResource(R.string.together_not_now))
                     }

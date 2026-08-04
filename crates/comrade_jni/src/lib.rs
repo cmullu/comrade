@@ -70,6 +70,8 @@ use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
+use comrade_core::share::transport::RelayPolicy;
+use comrade_core::share::ShareSignal;
 use comrade_core::together::{MusicLink, Recording, TogetherContent};
 use comrade_state::AppWorkspace;
 use comrade_ui::{
@@ -77,7 +79,8 @@ use comrade_ui::{
     ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
     FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
     MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReadingDto,
-    TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    ShareVerdictDto, TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError,
+    UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1025,6 +1028,59 @@ impl Comrade {
     /// The live session, if there is one.
     pub fn together_session(&self) -> Option<TogetherSessionDto> {
         self.inner.blocking_read().together_session()
+    }
+
+    /// Send one step of handing the file over — for the case `together`
+    /// otherwise assumes away, where only one of you has what you are playing.
+    pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_share(signal).await
+    }
+
+    /// What this device does when the only path a transfer could take is
+    /// somebody else's relay.
+    pub fn share_relay_policy(&self) -> RelayPolicy {
+        self.inner.blocking_read().share_relay_policy()
+    }
+
+    /// Change it. Takes effect on the next transfer connection.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
+        self.inner.blocking_read().set_share_relay_policy(policy);
+    }
+
+    /// Whether a transfer connection may be given TURN servers at all. Under
+    /// the default policy it may not, so a relayed path is never gathered and
+    /// the rule holds structurally rather than by later inspection.
+    pub fn share_ice_servers_allowed(&self) -> bool {
+        self.inner.blocking_read().share_ice_servers_allowed()
+    }
+
+    /// Judge the path ICE actually chose. `local_candidate_type` and
+    /// `remote_candidate_type` come from the selected candidate pair in an
+    /// `RTCStatsReport`; anything unrecognised is refused, never assumed direct.
+    ///
+    /// Synchronous and vault-free on purpose — a frontend calls this from
+    /// inside a WebRTC callback, which is exactly the place a lock held across
+    /// an await froze calls on "Connecting…" once already.
+    pub fn share_transfer_verdict(
+        &self,
+        local_candidate_type: String,
+        remote_candidate_type: String,
+        total_bytes: u64,
+    ) -> ShareVerdictDto {
+        self.inner.blocking_read().share_transfer_verdict(
+            &local_candidate_type,
+            &remote_candidate_type,
+            total_bytes,
+        )
+    }
+
+    /// How many chunks may go into a data channel currently holding
+    /// `buffered_bytes`. Zero means wait for the drain event rather than poll.
+    pub fn share_chunks_to_send(&self, buffered_bytes: u64) -> u32 {
+        self.inner
+            .blocking_read()
+            .share_chunks_to_send(buffered_bytes)
     }
 
     /// `signal` crosses as the real [`CallSignal`] enum, not a JSON blob —

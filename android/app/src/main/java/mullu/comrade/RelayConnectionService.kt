@@ -515,6 +515,12 @@ object ChatEventRouter {
                 }
             }
 
+            // Handing the file over, when only one side has it. Straight to the
+            // manager for the same reason as every other together event: a
+            // transfer must not stop because a screen was disposed.
+            is BridgeEvent.TogetherShare ->
+                mullu.comrade.together.TogetherManager.onShareSignal(context, event.v1.signal)
+
             is BridgeEvent.TogetherEnded ->
                 mullu.comrade.together.TogetherManager.onEnded(byPeer = event.byPeer)
         }

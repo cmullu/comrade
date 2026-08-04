@@ -66,7 +66,7 @@ pub const SHARE_CHUNK_BYTES: u32 = 16 * 1024;
 pub const SHARE_PLAYABLE_RUNWAY_MS: u64 = 5_000;
 
 /// What one side has and is willing to send.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct ShareOffer {
     pub total_bytes: u64,
     pub chunk_bytes: u32,
@@ -243,6 +243,142 @@ impl ShareTracker {
     fn first_gap_at_or_after(&self, start: u32) -> Option<u32> {
         (start..self.offer.chunk_count()).find(|i| !self.has(*i))
     }
+}
+
+// ── The wire: getting from "I don't have it" to a live connection ────────────
+
+/// One step of negotiating the connection a transfer will run over.
+///
+/// Deliberately its own three variants rather than reusing
+/// [`crate::call::CallSignal`]: that type also carries `ringing`, `busy` and
+/// `hangup`, none of which mean anything here, and a frontend handed an enum
+/// with three impossible arms will eventually write a branch for one of them.
+/// The shapes match because WebRTC's negotiation is the same negotiation — the
+/// *connection* is not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TransferSignal {
+    /// Sender → receiver. The side holding the file offers, because it is the
+    /// side that opens the data channel.
+    Offer { sdp: String },
+    /// Receiver → sender.
+    Answer { sdp: String },
+    /// Either direction: a trickled ICE candidate.
+    Ice {
+        candidate: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sdp_mid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sdp_m_line_index: Option<u16>,
+    },
+}
+
+impl TransferSignal {
+    /// Stable discriminant string, for logging.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Offer { .. } => "offer",
+            Self::Answer { .. } => "answer",
+            Self::Ice { .. } => "ice",
+        }
+    }
+}
+
+/// One statement about handing the file over, carried inside the together
+/// envelope so it inherits the acceptance gate, the age gate and the session
+/// scoping rather than growing its own copies of all three.
+///
+/// The sequence, and why it has four steps rather than two:
+///
+/// 1. [`Ask`](ShareSignal::Ask) — "I don't have this." Sent by the side whose
+///    library came up empty. It is a separate signal from the offer because the
+///    side that *has* the file should not have to guess whether the other one
+///    needs it; guessing wrong means either an unwanted upload prompt or a
+///    session that silently never starts.
+/// 2. [`Offer`](ShareSignal::Offer) — "I have it, and here is its shape."
+///    Size and hash arrive before a single byte does, so the receiver can decide
+///    against a 4 GB transfer *before* it starts rather than after.
+/// 3. [`Accept`](ShareSignal::Accept) — "go ahead." The receiver's yes is what
+///    authorises the sender to build a peer connection at all.
+/// 4. [`Transport`](ShareSignal::Transport) — the negotiation itself.
+///
+/// [`Refuse`](ShareSignal::Refuse) may replace any of the replies, and unlike
+/// [`crate::together::TogetherSignal::End`] it *does* carry a reason. The
+/// argument that keeps a reason off `End` is that leaving is nobody's business;
+/// the reason a transfer did not happen is a fact about the network, not about
+/// the person, and it is the one thing that tells them whether trying again
+/// could work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(tag = "share", rename_all = "snake_case")]
+pub enum ShareSignal {
+    /// Receiver → sender: my copy of this is missing; can you send yours?
+    Ask,
+    /// Sender → receiver: yes, and this is what it is.
+    Offer { offer: ShareOffer },
+    /// Receiver → sender: send it. Negotiation starts on receipt.
+    Accept,
+    /// Either direction: this is not happening, and this is why.
+    Refuse { reason: transport::RefusalReason },
+    /// Either direction: one step of the WebRTC negotiation.
+    Transport { signal: TransferSignal },
+}
+
+impl ShareSignal {
+    /// Stable discriminant string, for logging.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Offer { .. } => "offer",
+            Self::Accept => "accept",
+            Self::Refuse { .. } => "refuse",
+            Self::Transport { .. } => "transport",
+        }
+    }
+}
+
+// ── Framing on the data channel ──────────────────────────────────────────────
+
+/// Bytes of header on a chunk message: a big-endian `u32` index.
+///
+/// The index is on the wire even though the receiver asked for the range,
+/// because a data channel is ordered but a *transfer* is not: a receiver that
+/// seeks re-asks from a new anchor while chunks from the old one are still in
+/// flight, so "the next message is the next chunk I asked for" is false exactly
+/// when it matters. Four bytes against a 16 KiB payload is 0.02% overhead for
+/// removing a whole class of silent corruption.
+pub const CHUNK_FRAME_HEADER_BYTES: usize = 4;
+
+/// Prefix `bytes` with its chunk index, ready to hand to a data channel.
+pub fn frame_chunk(index: u32, bytes: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(CHUNK_FRAME_HEADER_BYTES + bytes.len());
+    framed.extend_from_slice(&index.to_be_bytes());
+    framed.extend_from_slice(bytes);
+    framed
+}
+
+/// Split a received data-channel message back into `(index, payload)`.
+///
+/// Returns `None` for anything too short to carry a header — a peer can put any
+/// bytes at all on this channel, so "it is at least four bytes long" is checked
+/// rather than assumed.
+pub fn parse_chunk_frame(message: &[u8]) -> Option<(u32, &[u8])> {
+    if message.len() < CHUNK_FRAME_HEADER_BYTES {
+        return None;
+    }
+    let (head, rest) = message.split_at(CHUNK_FRAME_HEADER_BYTES);
+    let index = u32::from_be_bytes(head.try_into().ok()?);
+    Some((index, rest))
+}
+
+/// Whether a received chunk is one this offer could have produced.
+///
+/// The index must exist and the payload must be exactly the length the offer's
+/// own arithmetic says that chunk is. Both halves matter: a wrong index writes
+/// bytes into the wrong place in the file, and a wrong length silently shifts
+/// everything after it. The hash would catch both at the end — after the whole
+/// transfer — which is much too late to be useful.
+pub fn chunk_frame_fits(offer: &ShareOffer, index: u32, payload_len: usize) -> bool {
+    matches!(offer.range(index), Some((_, len)) if len as usize == payload_len)
 }
 
 /// Whether an assembled file is the one that was offered.
@@ -429,5 +565,99 @@ mod tests {
         assert!(verify_sha256(&a.to_uppercase(), &a));
         assert!(!verify_sha256(&a, &"abc124".repeat(10)));
         assert!(!verify_sha256(&a, "short"));
+    }
+
+    // ── The wire ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn every_share_signal_round_trips_through_json() {
+        let all = [
+            ShareSignal::Ask,
+            ShareSignal::Offer {
+                offer: offer(1024, 256, 4000),
+            },
+            ShareSignal::Accept,
+            ShareSignal::Refuse {
+                reason: transport::RefusalReason::RelayForbidden,
+            },
+            ShareSignal::Transport {
+                signal: TransferSignal::Offer {
+                    sdp: "v=0\r\n".into(),
+                },
+            },
+            ShareSignal::Transport {
+                signal: TransferSignal::Ice {
+                    candidate: "candidate:1 1 udp 2 10.0.0.1 5 typ host".into(),
+                    sdp_mid: Some("0".into()),
+                    sdp_m_line_index: Some(0),
+                },
+            },
+        ];
+        for signal in all {
+            let json = serde_json::to_string(&signal).expect("serialises");
+            let back: ShareSignal = serde_json::from_str(&json).expect("parses");
+            assert_eq!(back, signal, "{json}");
+            assert!(json.contains("\"share\":"), "the tag must be on the wire");
+        }
+    }
+
+    #[test]
+    fn a_share_signal_is_tagged_apart_from_the_transport_signal_inside_it() {
+        // Two internally-tagged enums nested one inside the other, and if they
+        // shared a tag name the inner one would silently overwrite the outer.
+        let json = serde_json::to_string(&ShareSignal::Transport {
+            signal: TransferSignal::Answer { sdp: "s".into() },
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["share"], "transport");
+        assert_eq!(value["signal"]["kind"], "answer");
+    }
+
+    #[test]
+    fn a_chunk_carries_its_own_index_rather_than_relying_on_arrival_order() {
+        let framed = frame_chunk(7, b"payload");
+        assert_eq!(framed.len(), CHUNK_FRAME_HEADER_BYTES + 7);
+        assert_eq!(parse_chunk_frame(&framed), Some((7, &b"payload"[..])));
+    }
+
+    #[test]
+    fn a_frame_too_short_to_hold_a_header_is_rejected_rather_than_indexed() {
+        // The peer can put any bytes at all on this channel.
+        assert_eq!(parse_chunk_frame(&[]), None);
+        assert_eq!(parse_chunk_frame(&[0, 0, 0]), None);
+        // Exactly a header and no payload parses — it is a zero-length chunk,
+        // which `chunk_frame_fits` is the one to reject, not the parser.
+        assert_eq!(parse_chunk_frame(&[0, 0, 0, 1]), Some((1, &[][..])));
+    }
+
+    #[test]
+    fn a_chunk_of_the_wrong_length_is_caught_now_and_not_by_the_hash_later() {
+        let o = offer(250, 100, 0);
+        assert!(chunk_frame_fits(&o, 0, 100));
+        assert!(chunk_frame_fits(&o, 2, 50), "the last chunk is short");
+        assert!(!chunk_frame_fits(&o, 2, 100), "and is not padded to full");
+        assert!(!chunk_frame_fits(&o, 0, 99));
+        assert!(!chunk_frame_fits(&o, 3, 100), "past the end of the file");
+    }
+
+    #[test]
+    fn a_signal_names_itself_for_the_log() {
+        assert_eq!(ShareSignal::Ask.kind_str(), "ask");
+        assert_eq!(
+            ShareSignal::Transport {
+                signal: TransferSignal::Ice {
+                    candidate: String::new(),
+                    sdp_mid: None,
+                    sdp_m_line_index: None,
+                }
+            }
+            .kind_str(),
+            "transport"
+        );
+        assert_eq!(
+            TransferSignal::Offer { sdp: String::new() }.kind_str(),
+            "offer"
+        );
     }
 }

@@ -127,6 +127,179 @@ export function selectedPairTypes(stats) {
   };
 }
 
+// ── Framing, ported from `comrade_core::share` ───────────────────────────────
+//
+// The Rust module is the source of truth and its test vectors are ported
+// verbatim below, the way `call_decisions.test.mjs` ports `CallManagerTest.kt`.
+// A port rather than an FFI call because the receiver touches this once per
+// 16 KiB chunk — a Tauri round trip per chunk would be tens of thousands of
+// them for one film — and because it has to run inside a synchronous
+// `onmessage` handler, where there is nothing to await on.
+
+/** Bytes of header on a chunk message. Mirrors `CHUNK_FRAME_HEADER_BYTES`. */
+export const CHUNK_HEADER_BYTES = 4;
+
+/** How much contiguous playback to have in hand before starting. */
+export const PLAYABLE_RUNWAY_MS = 5000;
+
+/** Prefix `bytes` with its big-endian chunk index. */
+export function frameChunk(index, bytes) {
+  const out = new Uint8Array(CHUNK_HEADER_BYTES + bytes.byteLength);
+  new DataView(out.buffer).setUint32(0, index, false);
+  out.set(bytes, CHUNK_HEADER_BYTES);
+  return out;
+}
+
+/**
+ * Split a received message into `{index, payload}`, or `null` if it is too
+ * short to carry a header. The peer can put any bytes at all on this channel,
+ * so the length is checked rather than assumed.
+ */
+export function parseChunkFrame(message) {
+  const bytes = message instanceof Uint8Array ? message : new Uint8Array(message);
+  if (bytes.byteLength < CHUNK_HEADER_BYTES) return null;
+  const index = new DataView(bytes.buffer, bytes.byteOffset, CHUNK_HEADER_BYTES).getUint32(0, false);
+  return { index, payload: bytes.subarray(CHUNK_HEADER_BYTES) };
+}
+
+/** How many chunks an offer divides into. */
+export function chunkCount(offer) {
+  if (!offer || !offer.total_bytes || !offer.chunk_bytes) return 0;
+  return Math.ceil(offer.total_bytes / offer.chunk_bytes);
+}
+
+/** The `[start, length]` of chunk `index`, or `null` past the end. */
+export function chunkRange(offer, index) {
+  if (index < 0 || index >= chunkCount(offer)) return null;
+  const start = index * offer.chunk_bytes;
+  return [start, Math.min(offer.total_bytes - start, offer.chunk_bytes)];
+}
+
+/**
+ * Whether a received chunk is one this offer could have produced.
+ *
+ * Both halves matter: a wrong index writes bytes into the wrong place, and a
+ * wrong length silently shifts everything after it. The hash catches both — at
+ * the end of the whole transfer, which is far too late to be useful.
+ */
+export function chunkFrameFits(offer, index, payloadLength) {
+  const range = chunkRange(offer, index);
+  return range !== null && range[1] === payloadLength;
+}
+
+/**
+ * Which chunks have arrived, and what that means for playback. The JS twin of
+ * `comrade_core::share::ShareTracker`.
+ *
+ * Requests are anchored at the **playhead**, not at the start of the file, so a
+ * seek into un-fetched territory costs one request rather than a re-download;
+ * once everything past the playhead is here it falls back to the earliest gap,
+ * so a session that seeked forward still ends with a whole file rather than one
+ * with a hole in the middle.
+ */
+export function createTracker(offer) {
+  const count = chunkCount(offer);
+  const have = new Array(count).fill(false);
+  let received = 0;
+
+  const chunkMs = count === 0 ? 0 : Math.floor((offer.duration_ms ?? 0) / count);
+  const firstGapAtOrAfter = (start) => {
+    for (let i = start; i < count; i += 1) if (!have[i]) return i;
+    return null;
+  };
+
+  const api = {
+    get chunkCount() {
+      return count;
+    },
+    get chunkMs() {
+      return chunkMs;
+    },
+    accept(index) {
+      if (index < 0 || index >= count || have[index]) return false;
+      have[index] = true;
+      received += 1;
+      return true;
+    },
+    has: (index) => have[index] === true,
+    isComplete: () => received === count,
+    fraction: () => (count === 0 ? 1 : received / count),
+    chunkAtMs(posMs) {
+      if (chunkMs === 0) return 0;
+      return Math.min(Math.floor(posMs / chunkMs), Math.max(count - 1, 0));
+    },
+    runwayMs(posMs) {
+      let contiguous = 0;
+      for (let i = api.chunkAtMs(posMs); i < count; i += 1) {
+        if (!have[i]) break;
+        contiguous += 1;
+      }
+      return contiguous * chunkMs;
+    },
+    /**
+     * Whether playback may start at `posMs` — either there is enough runway, or
+     * the rest of the file is here and the runway is simply all that remains.
+     */
+    playableAt(posMs) {
+      if (api.isComplete()) return true;
+      const start = api.chunkAtMs(posMs);
+      for (let i = start; i < count; i += 1) if (!have[i]) return api.runwayMs(posMs) >= PLAYABLE_RUNWAY_MS;
+      return true;
+    },
+    nextRequest(posMs, maxCount) {
+      if (api.isComplete() || maxCount <= 0) return null;
+      const from = firstGapAtOrAfter(api.chunkAtMs(posMs)) ?? firstGapAtOrAfter(0);
+      if (from === null) return null;
+      let span = 0;
+      for (let i = from; i < count; i += 1) {
+        if (have[i] || span === maxCount) break;
+        span += 1;
+      }
+      return { from, count: span };
+    },
+  };
+  return api;
+}
+
+/**
+ * Turn a `ShareVerdictDto` into what the person should be told.
+ *
+ * A refused transfer gets a specific sentence rather than "transfer failed",
+ * because each of these has a different thing the person could do about it:
+ * change the policy, use a smaller file, or simply wait a moment longer.
+ */
+export function describeVerdict(verdict) {
+  if (!verdict) return { proceed: false, message: "Couldn't work out how to send this." };
+  if (verdict.verdict === "allow") return { proceed: true, message: null };
+  if (verdict.verdict === "needs_consent") {
+    const mb = Math.round((verdict.relayed_bytes ?? 0) / (1024 * 1024));
+    return {
+      proceed: false,
+      needsConsent: true,
+      message: `There's no direct route to them, so ${mb} MB would go through a relay server. Send it anyway?`,
+    };
+  }
+  const reason = verdict.reason?.kind ?? verdict.reason;
+  switch (reason) {
+    case "relay_forbidden":
+      return {
+        proceed: false,
+        message: "No direct route to them — the file would have to go through a relay, which this device doesn't do.",
+      };
+    case "too_large_for_relay": {
+      const limit = Math.round((verdict.reason?.limit ?? 0) / (1024 * 1024));
+      return {
+        proceed: false,
+        message: `No direct route to them, and this is over the ${limit} MB relay limit.`,
+      };
+    }
+    case "path_unknown":
+      return { proceed: false, retryable: true, message: "Still working out a route to them…" };
+    default:
+      return { proceed: false, message: "Couldn't send this over the route we have." };
+  }
+}
+
 /**
  * Drive a transfer over `channel`, asking `nextChunks` what to send and pausing
  * on the channel's own backpressure.

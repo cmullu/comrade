@@ -72,6 +72,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayPolicy dco_decode_box_autoadd_relay_policy(dynamic raw);
 
   @protected
+  ShareOffer dco_decode_box_autoadd_share_offer(dynamic raw);
+
+  @protected
   TogetherCommandDto dco_decode_box_autoadd_together_command_dto(dynamic raw);
 
   @protected
@@ -83,6 +86,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TogetherInviteDto dco_decode_box_autoadd_together_invite_dto(dynamic raw);
+
+  @protected
+  TogetherShareDto dco_decode_box_autoadd_together_share_dto(dynamic raw);
+
+  @protected
+  TransferSignal dco_decode_box_autoadd_transfer_signal(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_u_16(dynamic raw);
@@ -274,6 +283,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayPolicy dco_decode_relay_policy(dynamic raw);
 
   @protected
+  ShareOffer dco_decode_share_offer(dynamic raw);
+
+  @protected
+  ShareSignal dco_decode_share_signal(dynamic raw);
+
+  @protected
   StateChange dco_decode_state_change(dynamic raw);
 
   @protected
@@ -298,6 +313,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TogetherSessionDto dco_decode_together_session_dto(dynamic raw);
 
   @protected
+  TogetherShareDto dco_decode_together_share_dto(dynamic raw);
+
+  @protected
+  TransferSignal dco_decode_transfer_signal(dynamic raw);
+
+  @protected
   TransferVerdict dco_decode_transfer_verdict(dynamic raw);
 
   @protected
@@ -305,6 +326,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int dco_decode_u_16(dynamic raw);
+
+  @protected
+  int dco_decode_u_32(dynamic raw);
 
   @protected
   BigInt dco_decode_u_64(dynamic raw);
@@ -386,6 +410,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayPolicy sse_decode_box_autoadd_relay_policy(SseDeserializer deserializer);
 
   @protected
+  ShareOffer sse_decode_box_autoadd_share_offer(SseDeserializer deserializer);
+
+  @protected
   TogetherCommandDto sse_decode_box_autoadd_together_command_dto(
       SseDeserializer deserializer);
 
@@ -399,6 +426,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TogetherInviteDto sse_decode_box_autoadd_together_invite_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  TogetherShareDto sse_decode_box_autoadd_together_share_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  TransferSignal sse_decode_box_autoadd_transfer_signal(
       SseDeserializer deserializer);
 
   @protected
@@ -608,6 +643,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayPolicy sse_decode_relay_policy(SseDeserializer deserializer);
 
   @protected
+  ShareOffer sse_decode_share_offer(SseDeserializer deserializer);
+
+  @protected
+  ShareSignal sse_decode_share_signal(SseDeserializer deserializer);
+
+  @protected
   StateChange sse_decode_state_change(SseDeserializer deserializer);
 
   @protected
@@ -636,6 +677,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  TogetherShareDto sse_decode_together_share_dto(SseDeserializer deserializer);
+
+  @protected
+  TransferSignal sse_decode_transfer_signal(SseDeserializer deserializer);
+
+  @protected
   TransferVerdict sse_decode_transfer_verdict(SseDeserializer deserializer);
 
   @protected
@@ -644,6 +691,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
   BigInt sse_decode_u_64(SseDeserializer deserializer);
@@ -734,6 +784,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       RelayPolicy self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_share_offer(
+      ShareOffer self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_together_command_dto(
       TogetherCommandDto self, SseSerializer serializer);
 
@@ -748,6 +802,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_together_invite_dto(
       TogetherInviteDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_together_share_dto(
+      TogetherShareDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_transfer_signal(
+      TransferSignal self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer);
@@ -969,6 +1031,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_relay_policy(RelayPolicy self, SseSerializer serializer);
 
   @protected
+  void sse_encode_share_offer(ShareOffer self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_share_signal(ShareSignal self, SseSerializer serializer);
+
+  @protected
   void sse_encode_state_change(StateChange self, SseSerializer serializer);
 
   @protected
@@ -999,6 +1067,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       TogetherSessionDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_together_share_dto(
+      TogetherShareDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_transfer_signal(
+      TransferSignal self, SseSerializer serializer);
+
+  @protected
   void sse_encode_transfer_verdict(
       TransferVerdict self, SseSerializer serializer);
 
@@ -1008,6 +1084,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_u_16(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_64(BigInt self, SseSerializer serializer);

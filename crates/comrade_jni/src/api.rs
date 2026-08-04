@@ -74,14 +74,15 @@ pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrateg
 pub use comrade_core::share::transport::{
     IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
+pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
 pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
     BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TogetherCommandDto,
-    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TurnServerStatusDto, UiError,
-    UpiIntentDto, WorkspaceDto,
+    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ShareVerdictDto, TaraMessageDto,
+    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
+    TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -492,6 +493,53 @@ pub struct _TogetherCorrectionDto {
     pub quality_ms: u64,
 }
 
+#[frb(mirror(ShareOffer))]
+pub struct _ShareOffer {
+    pub total_bytes: u64,
+    pub chunk_bytes: u32,
+    pub sha256: String,
+    pub duration_ms: u64,
+}
+
+#[frb(mirror(TransferSignal))]
+pub enum _TransferSignal {
+    Offer {
+        sdp: String,
+    },
+    Answer {
+        sdp: String,
+    },
+    Ice {
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_m_line_index: Option<u16>,
+    },
+}
+
+#[frb(mirror(ShareSignal))]
+pub enum _ShareSignal {
+    Ask,
+    Offer { offer: ShareOffer },
+    Accept,
+    Refuse { reason: RefusalReason },
+    Transport { signal: TransferSignal },
+}
+
+#[frb(mirror(TogetherShareDto))]
+pub struct _TogetherShareDto {
+    pub session_id: String,
+    pub peer: String,
+    pub signal: ShareSignal,
+}
+
+#[frb(mirror(ShareVerdictDto))]
+pub struct _ShareVerdictDto {
+    pub verdict: String,
+    pub path: String,
+    pub reason: Option<RefusalReason>,
+    pub relayed_bytes: Option<u64>,
+}
+
 #[frb(mirror(BridgeEvent))]
 pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
@@ -530,6 +578,7 @@ pub enum _BridgeEvent {
         peer: String,
         by_peer: bool,
     },
+    TogetherShare(TogetherShareDto),
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
         ledger: String,

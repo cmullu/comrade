@@ -66,6 +66,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_TogetherCommand value)? togetherCommand,
     TResult Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
     TResult Function(BridgeEvent_TogetherEnded value)? togetherEnded,
+    TResult Function(BridgeEvent_TogetherShare value)? togetherShare,
     TResult Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
     required TResult orElse(),
@@ -102,6 +103,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherCorrection(_that);
       case BridgeEvent_TogetherEnded() when togetherEnded != null:
         return togetherEnded(_that);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -149,6 +152,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(BridgeEvent_TogetherCorrection value)
         togetherCorrection,
     required TResult Function(BridgeEvent_TogetherEnded value) togetherEnded,
+    required TResult Function(BridgeEvent_TogetherShare value) togetherShare,
     required TResult Function(BridgeEvent_MeshStatusChanged value)
         meshStatusChanged,
     required TResult Function(BridgeEvent_LedgerUpdated value) ledgerUpdated,
@@ -183,6 +187,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherCorrection(_that);
       case BridgeEvent_TogetherEnded():
         return togetherEnded(_that);
+      case BridgeEvent_TogetherShare():
+        return togetherShare(_that);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated():
@@ -220,6 +226,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_TogetherCommand value)? togetherCommand,
     TResult? Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
     TResult? Function(BridgeEvent_TogetherEnded value)? togetherEnded,
+    TResult? Function(BridgeEvent_TogetherShare value)? togetherShare,
     TResult? Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult? Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
   }) {
@@ -255,6 +262,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherCorrection(_that);
       case BridgeEvent_TogetherEnded() when togetherEnded != null:
         return togetherEnded(_that);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -294,6 +303,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(TogetherCommandDto field0)? togetherCommand,
     TResult Function(TogetherCorrectionDto field0)? togetherCorrection,
     TResult Function(String sessionId, String peer, bool byPeer)? togetherEnded,
+    TResult Function(TogetherShareDto field0)? togetherShare,
     TResult Function(MeshStatusDto field0)? meshStatusChanged,
     TResult Function(String ledger)? ledgerUpdated,
     required TResult orElse(),
@@ -330,6 +340,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherCorrection(_that.field0);
       case BridgeEvent_TogetherEnded() when togetherEnded != null:
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -372,6 +384,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(TogetherCorrectionDto field0) togetherCorrection,
     required TResult Function(String sessionId, String peer, bool byPeer)
         togetherEnded,
+    required TResult Function(TogetherShareDto field0) togetherShare,
     required TResult Function(MeshStatusDto field0) meshStatusChanged,
     required TResult Function(String ledger) ledgerUpdated,
   }) {
@@ -405,6 +418,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherCorrection(_that.field0);
       case BridgeEvent_TogetherEnded():
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
+      case BridgeEvent_TogetherShare():
+        return togetherShare(_that.field0);
       case BridgeEvent_MeshStatusChanged():
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated():
@@ -443,6 +458,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(TogetherCorrectionDto field0)? togetherCorrection,
     TResult? Function(String sessionId, String peer, bool byPeer)?
         togetherEnded,
+    TResult? Function(TogetherShareDto field0)? togetherShare,
     TResult? Function(MeshStatusDto field0)? meshStatusChanged,
     TResult? Function(String ledger)? ledgerUpdated,
   }) {
@@ -478,6 +494,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherCorrection(_that.field0);
       case BridgeEvent_TogetherEnded() when togetherEnded != null:
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
+      case BridgeEvent_TogetherShare() when togetherShare != null:
+        return togetherShare(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
@@ -1497,6 +1515,71 @@ class _$BridgeEvent_TogetherEndedCopyWithImpl<$Res>
           ? _self.byPeer
           : byPeer // ignore: cast_nullable_to_non_nullable
               as bool,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherShare extends BridgeEvent {
+  const BridgeEvent_TogetherShare(this.field0) : super._();
+
+  final TogetherShareDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherShareCopyWith<BridgeEvent_TogetherShare> get copyWith =>
+      _$BridgeEvent_TogetherShareCopyWithImpl<BridgeEvent_TogetherShare>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherShare &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherShare(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherShareCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherShareCopyWith(BridgeEvent_TogetherShare value,
+          $Res Function(BridgeEvent_TogetherShare) _then) =
+      _$BridgeEvent_TogetherShareCopyWithImpl;
+  @useResult
+  $Res call({TogetherShareDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherShareCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherShareCopyWith<$Res> {
+  _$BridgeEvent_TogetherShareCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherShare _self;
+  final $Res Function(BridgeEvent_TogetherShare) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_TogetherShare(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as TogetherShareDto,
     ));
   }
 }
@@ -3304,6 +3387,510 @@ class RelayPolicy_Always extends RelayPolicy {
 }
 
 /// @nodoc
+mixin _$ShareSignal {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ShareSignal);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ShareSignal()';
+  }
+}
+
+/// @nodoc
+class $ShareSignalCopyWith<$Res> {
+  $ShareSignalCopyWith(ShareSignal _, $Res Function(ShareSignal) __);
+}
+
+/// Adds pattern-matching-related methods to [ShareSignal].
+extension ShareSignalPatterns on ShareSignal {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(ShareSignal_Ask value)? ask,
+    TResult Function(ShareSignal_Offer value)? offer,
+    TResult Function(ShareSignal_Accept value)? accept,
+    TResult Function(ShareSignal_Refuse value)? refuse,
+    TResult Function(ShareSignal_Transport value)? transport,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask(_that);
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that);
+      case ShareSignal_Accept() when accept != null:
+        return accept(_that);
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(ShareSignal_Ask value) ask,
+    required TResult Function(ShareSignal_Offer value) offer,
+    required TResult Function(ShareSignal_Accept value) accept,
+    required TResult Function(ShareSignal_Refuse value) refuse,
+    required TResult Function(ShareSignal_Transport value) transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask():
+        return ask(_that);
+      case ShareSignal_Offer():
+        return offer(_that);
+      case ShareSignal_Accept():
+        return accept(_that);
+      case ShareSignal_Refuse():
+        return refuse(_that);
+      case ShareSignal_Transport():
+        return transport(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(ShareSignal_Ask value)? ask,
+    TResult? Function(ShareSignal_Offer value)? offer,
+    TResult? Function(ShareSignal_Accept value)? accept,
+    TResult? Function(ShareSignal_Refuse value)? refuse,
+    TResult? Function(ShareSignal_Transport value)? transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask(_that);
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that);
+      case ShareSignal_Accept() when accept != null:
+        return accept(_that);
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function()? ask,
+    TResult Function(ShareOffer offer)? offer,
+    TResult Function()? accept,
+    TResult Function(RefusalReason reason)? refuse,
+    TResult Function(TransferSignal signal)? transport,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask();
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that.offer);
+      case ShareSignal_Accept() when accept != null:
+        return accept();
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that.signal);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function() ask,
+    required TResult Function(ShareOffer offer) offer,
+    required TResult Function() accept,
+    required TResult Function(RefusalReason reason) refuse,
+    required TResult Function(TransferSignal signal) transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask():
+        return ask();
+      case ShareSignal_Offer():
+        return offer(_that.offer);
+      case ShareSignal_Accept():
+        return accept();
+      case ShareSignal_Refuse():
+        return refuse(_that.reason);
+      case ShareSignal_Transport():
+        return transport(_that.signal);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function()? ask,
+    TResult? Function(ShareOffer offer)? offer,
+    TResult? Function()? accept,
+    TResult? Function(RefusalReason reason)? refuse,
+    TResult? Function(TransferSignal signal)? transport,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case ShareSignal_Ask() when ask != null:
+        return ask();
+      case ShareSignal_Offer() when offer != null:
+        return offer(_that.offer);
+      case ShareSignal_Accept() when accept != null:
+        return accept();
+      case ShareSignal_Refuse() when refuse != null:
+        return refuse(_that.reason);
+      case ShareSignal_Transport() when transport != null:
+        return transport(_that.signal);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Ask extends ShareSignal {
+  const ShareSignal_Ask() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ShareSignal_Ask);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ShareSignal.ask()';
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Offer extends ShareSignal {
+  const ShareSignal_Offer({required this.offer}) : super._();
+
+  final ShareOffer offer;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ShareSignal_OfferCopyWith<ShareSignal_Offer> get copyWith =>
+      _$ShareSignal_OfferCopyWithImpl<ShareSignal_Offer>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ShareSignal_Offer &&
+            (identical(other.offer, offer) || other.offer == offer));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, offer);
+
+  @override
+  String toString() {
+    return 'ShareSignal.offer(offer: $offer)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ShareSignal_OfferCopyWith<$Res>
+    implements $ShareSignalCopyWith<$Res> {
+  factory $ShareSignal_OfferCopyWith(
+          ShareSignal_Offer value, $Res Function(ShareSignal_Offer) _then) =
+      _$ShareSignal_OfferCopyWithImpl;
+  @useResult
+  $Res call({ShareOffer offer});
+}
+
+/// @nodoc
+class _$ShareSignal_OfferCopyWithImpl<$Res>
+    implements $ShareSignal_OfferCopyWith<$Res> {
+  _$ShareSignal_OfferCopyWithImpl(this._self, this._then);
+
+  final ShareSignal_Offer _self;
+  final $Res Function(ShareSignal_Offer) _then;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? offer = null,
+  }) {
+    return _then(ShareSignal_Offer(
+      offer: null == offer
+          ? _self.offer
+          : offer // ignore: cast_nullable_to_non_nullable
+              as ShareOffer,
+    ));
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Accept extends ShareSignal {
+  const ShareSignal_Accept() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is ShareSignal_Accept);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'ShareSignal.accept()';
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Refuse extends ShareSignal {
+  const ShareSignal_Refuse({required this.reason}) : super._();
+
+  final RefusalReason reason;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ShareSignal_RefuseCopyWith<ShareSignal_Refuse> get copyWith =>
+      _$ShareSignal_RefuseCopyWithImpl<ShareSignal_Refuse>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ShareSignal_Refuse &&
+            (identical(other.reason, reason) || other.reason == reason));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reason);
+
+  @override
+  String toString() {
+    return 'ShareSignal.refuse(reason: $reason)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ShareSignal_RefuseCopyWith<$Res>
+    implements $ShareSignalCopyWith<$Res> {
+  factory $ShareSignal_RefuseCopyWith(
+          ShareSignal_Refuse value, $Res Function(ShareSignal_Refuse) _then) =
+      _$ShareSignal_RefuseCopyWithImpl;
+  @useResult
+  $Res call({RefusalReason reason});
+
+  $RefusalReasonCopyWith<$Res> get reason;
+}
+
+/// @nodoc
+class _$ShareSignal_RefuseCopyWithImpl<$Res>
+    implements $ShareSignal_RefuseCopyWith<$Res> {
+  _$ShareSignal_RefuseCopyWithImpl(this._self, this._then);
+
+  final ShareSignal_Refuse _self;
+  final $Res Function(ShareSignal_Refuse) _then;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? reason = null,
+  }) {
+    return _then(ShareSignal_Refuse(
+      reason: null == reason
+          ? _self.reason
+          : reason // ignore: cast_nullable_to_non_nullable
+              as RefusalReason,
+    ));
+  }
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $RefusalReasonCopyWith<$Res> get reason {
+    return $RefusalReasonCopyWith<$Res>(_self.reason, (value) {
+      return _then(_self.copyWith(reason: value));
+    });
+  }
+}
+
+/// @nodoc
+
+class ShareSignal_Transport extends ShareSignal {
+  const ShareSignal_Transport({required this.signal}) : super._();
+
+  final TransferSignal signal;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $ShareSignal_TransportCopyWith<ShareSignal_Transport> get copyWith =>
+      _$ShareSignal_TransportCopyWithImpl<ShareSignal_Transport>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is ShareSignal_Transport &&
+            (identical(other.signal, signal) || other.signal == signal));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, signal);
+
+  @override
+  String toString() {
+    return 'ShareSignal.transport(signal: $signal)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $ShareSignal_TransportCopyWith<$Res>
+    implements $ShareSignalCopyWith<$Res> {
+  factory $ShareSignal_TransportCopyWith(ShareSignal_Transport value,
+          $Res Function(ShareSignal_Transport) _then) =
+      _$ShareSignal_TransportCopyWithImpl;
+  @useResult
+  $Res call({TransferSignal signal});
+
+  $TransferSignalCopyWith<$Res> get signal;
+}
+
+/// @nodoc
+class _$ShareSignal_TransportCopyWithImpl<$Res>
+    implements $ShareSignal_TransportCopyWith<$Res> {
+  _$ShareSignal_TransportCopyWithImpl(this._self, this._then);
+
+  final ShareSignal_Transport _self;
+  final $Res Function(ShareSignal_Transport) _then;
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? signal = null,
+  }) {
+    return _then(ShareSignal_Transport(
+      signal: null == signal
+          ? _self.signal
+          : signal // ignore: cast_nullable_to_non_nullable
+              as TransferSignal,
+    ));
+  }
+
+  /// Create a copy of ShareSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $TransferSignalCopyWith<$Res> get signal {
+    return $TransferSignalCopyWith<$Res>(_self.signal, (value) {
+      return _then(_self.copyWith(signal: value));
+    });
+  }
+}
+
+/// @nodoc
 mixin _$SyncVerdict {
   @override
   bool operator ==(Object other) {
@@ -4091,6 +4678,433 @@ class _$TogetherContent_YoutubeCopyWithImpl<$Res>
           ? _self.videoId
           : videoId // ignore: cast_nullable_to_non_nullable
               as String,
+    ));
+  }
+}
+
+/// @nodoc
+mixin _$TransferSignal {
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType && other is TransferSignal);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'TransferSignal()';
+  }
+}
+
+/// @nodoc
+class $TransferSignalCopyWith<$Res> {
+  $TransferSignalCopyWith(TransferSignal _, $Res Function(TransferSignal) __);
+}
+
+/// Adds pattern-matching-related methods to [TransferSignal].
+extension TransferSignalPatterns on TransferSignal {
+  /// A variant of `map` that fallback to returning `orElse`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(TransferSignal_Offer value)? offer,
+    TResult Function(TransferSignal_Answer value)? answer,
+    TResult Function(TransferSignal_Ice value)? ice,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// Callbacks receives the raw object, upcasted.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case final Subclass2 value:
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(TransferSignal_Offer value) offer,
+    required TResult Function(TransferSignal_Answer value) answer,
+    required TResult Function(TransferSignal_Ice value) ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer():
+        return offer(_that);
+      case TransferSignal_Answer():
+        return answer(_that);
+      case TransferSignal_Ice():
+        return ice(_that);
+    }
+  }
+
+  /// A variant of `map` that fallback to returning `null`.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case final Subclass value:
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(TransferSignal_Offer value)? offer,
+    TResult? Function(TransferSignal_Answer value)? answer,
+    TResult? Function(TransferSignal_Ice value)? ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that);
+      case _:
+        return null;
+    }
+  }
+
+  /// A variant of `when` that fallback to an `orElse` callback.
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return orElse();
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String sdp)? offer,
+    TResult Function(String sdp)? answer,
+    TResult Function(String candidate, String? sdpMid, int? sdpMLineIndex)? ice,
+    required TResult orElse(),
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that.sdp);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that.sdp);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that.candidate, _that.sdpMid, _that.sdpMLineIndex);
+      case _:
+        return orElse();
+    }
+  }
+
+  /// A `switch`-like method, using callbacks.
+  ///
+  /// As opposed to `map`, this offers destructuring.
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case Subclass2(:final field2):
+  ///     return ...;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String sdp) offer,
+    required TResult Function(String sdp) answer,
+    required TResult Function(
+            String candidate, String? sdpMid, int? sdpMLineIndex)
+        ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer():
+        return offer(_that.sdp);
+      case TransferSignal_Answer():
+        return answer(_that.sdp);
+      case TransferSignal_Ice():
+        return ice(_that.candidate, _that.sdpMid, _that.sdpMLineIndex);
+    }
+  }
+
+  /// A variant of `when` that fallback to returning `null`
+  ///
+  /// It is equivalent to doing:
+  /// ```dart
+  /// switch (sealedClass) {
+  ///   case Subclass(:final field):
+  ///     return ...;
+  ///   case _:
+  ///     return null;
+  /// }
+  /// ```
+
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String sdp)? offer,
+    TResult? Function(String sdp)? answer,
+    TResult? Function(String candidate, String? sdpMid, int? sdpMLineIndex)?
+        ice,
+  }) {
+    final _that = this;
+    switch (_that) {
+      case TransferSignal_Offer() when offer != null:
+        return offer(_that.sdp);
+      case TransferSignal_Answer() when answer != null:
+        return answer(_that.sdp);
+      case TransferSignal_Ice() when ice != null:
+        return ice(_that.candidate, _that.sdpMid, _that.sdpMLineIndex);
+      case _:
+        return null;
+    }
+  }
+}
+
+/// @nodoc
+
+class TransferSignal_Offer extends TransferSignal {
+  const TransferSignal_Offer({required this.sdp}) : super._();
+
+  final String sdp;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferSignal_OfferCopyWith<TransferSignal_Offer> get copyWith =>
+      _$TransferSignal_OfferCopyWithImpl<TransferSignal_Offer>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferSignal_Offer &&
+            (identical(other.sdp, sdp) || other.sdp == sdp));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sdp);
+
+  @override
+  String toString() {
+    return 'TransferSignal.offer(sdp: $sdp)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferSignal_OfferCopyWith<$Res>
+    implements $TransferSignalCopyWith<$Res> {
+  factory $TransferSignal_OfferCopyWith(TransferSignal_Offer value,
+          $Res Function(TransferSignal_Offer) _then) =
+      _$TransferSignal_OfferCopyWithImpl;
+  @useResult
+  $Res call({String sdp});
+}
+
+/// @nodoc
+class _$TransferSignal_OfferCopyWithImpl<$Res>
+    implements $TransferSignal_OfferCopyWith<$Res> {
+  _$TransferSignal_OfferCopyWithImpl(this._self, this._then);
+
+  final TransferSignal_Offer _self;
+  final $Res Function(TransferSignal_Offer) _then;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sdp = null,
+  }) {
+    return _then(TransferSignal_Offer(
+      sdp: null == sdp
+          ? _self.sdp
+          : sdp // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TransferSignal_Answer extends TransferSignal {
+  const TransferSignal_Answer({required this.sdp}) : super._();
+
+  final String sdp;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferSignal_AnswerCopyWith<TransferSignal_Answer> get copyWith =>
+      _$TransferSignal_AnswerCopyWithImpl<TransferSignal_Answer>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferSignal_Answer &&
+            (identical(other.sdp, sdp) || other.sdp == sdp));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sdp);
+
+  @override
+  String toString() {
+    return 'TransferSignal.answer(sdp: $sdp)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferSignal_AnswerCopyWith<$Res>
+    implements $TransferSignalCopyWith<$Res> {
+  factory $TransferSignal_AnswerCopyWith(TransferSignal_Answer value,
+          $Res Function(TransferSignal_Answer) _then) =
+      _$TransferSignal_AnswerCopyWithImpl;
+  @useResult
+  $Res call({String sdp});
+}
+
+/// @nodoc
+class _$TransferSignal_AnswerCopyWithImpl<$Res>
+    implements $TransferSignal_AnswerCopyWith<$Res> {
+  _$TransferSignal_AnswerCopyWithImpl(this._self, this._then);
+
+  final TransferSignal_Answer _self;
+  final $Res Function(TransferSignal_Answer) _then;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sdp = null,
+  }) {
+    return _then(TransferSignal_Answer(
+      sdp: null == sdp
+          ? _self.sdp
+          : sdp // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TransferSignal_Ice extends TransferSignal {
+  const TransferSignal_Ice(
+      {required this.candidate, this.sdpMid, this.sdpMLineIndex})
+      : super._();
+
+  final String candidate;
+  final String? sdpMid;
+  final int? sdpMLineIndex;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TransferSignal_IceCopyWith<TransferSignal_Ice> get copyWith =>
+      _$TransferSignal_IceCopyWithImpl<TransferSignal_Ice>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TransferSignal_Ice &&
+            (identical(other.candidate, candidate) ||
+                other.candidate == candidate) &&
+            (identical(other.sdpMid, sdpMid) || other.sdpMid == sdpMid) &&
+            (identical(other.sdpMLineIndex, sdpMLineIndex) ||
+                other.sdpMLineIndex == sdpMLineIndex));
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(runtimeType, candidate, sdpMid, sdpMLineIndex);
+
+  @override
+  String toString() {
+    return 'TransferSignal.ice(candidate: $candidate, sdpMid: $sdpMid, sdpMLineIndex: $sdpMLineIndex)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TransferSignal_IceCopyWith<$Res>
+    implements $TransferSignalCopyWith<$Res> {
+  factory $TransferSignal_IceCopyWith(
+          TransferSignal_Ice value, $Res Function(TransferSignal_Ice) _then) =
+      _$TransferSignal_IceCopyWithImpl;
+  @useResult
+  $Res call({String candidate, String? sdpMid, int? sdpMLineIndex});
+}
+
+/// @nodoc
+class _$TransferSignal_IceCopyWithImpl<$Res>
+    implements $TransferSignal_IceCopyWith<$Res> {
+  _$TransferSignal_IceCopyWithImpl(this._self, this._then);
+
+  final TransferSignal_Ice _self;
+  final $Res Function(TransferSignal_Ice) _then;
+
+  /// Create a copy of TransferSignal
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? candidate = null,
+    Object? sdpMid = freezed,
+    Object? sdpMLineIndex = freezed,
+  }) {
+    return _then(TransferSignal_Ice(
+      candidate: null == candidate
+          ? _self.candidate
+          : candidate // ignore: cast_nullable_to_non_nullable
+              as String,
+      sdpMid: freezed == sdpMid
+          ? _self.sdpMid
+          : sdpMid // ignore: cast_nullable_to_non_nullable
+              as String?,
+      sdpMLineIndex: freezed == sdpMLineIndex
+          ? _self.sdpMLineIndex
+          : sdpMLineIndex // ignore: cast_nullable_to_non_nullable
+              as int?,
     ));
   }
 }

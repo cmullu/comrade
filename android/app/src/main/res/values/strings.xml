@@ -415,6 +415,9 @@
     <string name="together_invited">%1$s wants to watch %2$s with you</string>
     <string name="together_join">Join</string>
     <string name="together_not_now">Not now</string>
+    <!-- The case together otherwise assumes away: only one of you has the file.
+         It comes straight from their device, never through a server of ours. -->
+    <string name="together_ask_for_copy">I don\'t have it</string>
     <string name="together_waiting_for_them">waiting for them to open it</string>
     <string name="together_open_your_copy">open your copy to start</string>
     <string name="together_together">together</string>

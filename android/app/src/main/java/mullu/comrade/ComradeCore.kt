@@ -916,6 +916,54 @@ object ComradeCore {
     fun togetherSessionTyped(): uniffi.comrade_ui.TogetherSessionDto? =
         runCatching { ffi.togetherSession() }.getOrNull()
 
+    // ── Handing the file over, when only one side has it ─────────────────────
+
+    /**
+     * Send one step of the handover. It rides the session envelope, so it only
+     * goes anywhere while a session is live — which is what stops this being a
+     * way to open a peer-to-peer connection to someone who never agreed to
+     * watch anything with you.
+     */
+    fun togetherShareTyped(signal: uniffi.comrade_core.ShareSignal) {
+        rethrowing("Send file") { runBlocking { ffi.togetherShare(signal) } }
+    }
+
+    /**
+     * Whether a *transfer* connection may be given TURN at all. Under the
+     * default policy it may not, so a relay candidate is never gathered and
+     * the rule holds structurally rather than by later inspection. A *call*
+     * keeps its TURN fallback: a relayed call is a few tens of kilobits, a
+     * relayed film is not.
+     */
+    fun shareIceServersAllowed(): Boolean =
+        runCatching { ffi.shareIceServersAllowed() }.getOrDefault(false)
+
+    /**
+     * Judge the path ICE actually chose. The candidate types come from the
+     * selected pair; anything unrecognised classifies as unknown and is
+     * refused, because "we could not tell" must never read as "it was fine".
+     */
+    fun shareTransferVerdict(
+        localCandidateType: String,
+        remoteCandidateType: String,
+        totalBytes: Long,
+    ): uniffi.comrade_ui.ShareVerdictDto =
+        ffi.shareTransferVerdict(localCandidateType, remoteCandidateType, totalBytes.toULong())
+
+    /** How many chunks may go into a data channel currently holding this much. */
+    fun shareChunksToSend(bufferedBytes: Long): Int =
+        runCatching { ffi.shareChunksToSend(bufferedBytes.toULong()).toInt() }.getOrDefault(0)
+
+    /** What this device does when the only path is a relay. */
+    fun shareRelayPolicy(): uniffi.comrade_core.RelayPolicy =
+        runCatching { ffi.shareRelayPolicy() }
+            .getOrDefault(uniffi.comrade_core.RelayPolicy.DirectOnly)
+
+    /** Change it. Takes effect on the next transfer connection. */
+    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy) {
+        runCatching { ffi.setShareRelayPolicy(policy) }
+    }
+
     data class CallRecordInfo(
         val id: String,
         val peer: String,

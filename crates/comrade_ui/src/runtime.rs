@@ -61,6 +61,10 @@ use comrade_core::sabha::{
 };
 use comrade_core::sakha::{LedgerEntry, SakhaEngine, SakhaSyncCallback};
 use comrade_core::seen::{content_key, SeenSet, CONTENT_KEY_PREFIX};
+use comrade_core::share::transport::{
+    self as share_transport, IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
+};
+use comrade_core::share::ShareSignal;
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
 use comrade_core::together::{
     command_apply, describe_state_change, heartbeat_interval_ms, parse_together_envelope,
@@ -396,6 +400,41 @@ pub struct TogetherCorrectionDto {
     pub drift_ms: i64,
     /// How wrong that drift figure could be — half the measured round trip.
     pub quality_ms: u64,
+}
+
+/// One step of handing the file over, on its way to the frontend.
+///
+/// The runtime deliberately keeps **no** state for this. Everything a transfer
+/// needs — the peer connection, the data channel, the bytes — lives in the
+/// frontend, because that is where WebRTC lives; the runtime's whole job is to
+/// carry signals across a gated, end-to-end channel and to answer the policy
+/// question. Mirroring the negotiation here as well would mean two state
+/// machines that have to agree, which is the shape of the two call bugs this
+/// repo already fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TogetherShareDto {
+    pub session_id: String,
+    pub peer: String,
+    pub signal: ShareSignal,
+}
+
+/// Whether a transfer may run over the path ICE actually chose.
+///
+/// The verdict and the reason are separate fields rather than a nested enum
+/// because this crosses two FFI boundaries and gets rendered by three UIs; the
+/// typed [`TransferVerdict`] stays the source of truth in core and this is its
+/// flattening, the same way `CallSignal` is flattened for the call UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ShareVerdictDto {
+    /// `allow` · `needs_consent` · `refuse`.
+    pub verdict: String,
+    /// How the path was classified: `host` · `srflx` · `relay` · `unknown`.
+    pub path: String,
+    /// Present when the verdict is a refusal.
+    pub reason: Option<RefusalReason>,
+    /// Present when the verdict is `needs_consent`: how many bytes would go
+    /// through someone else's relay, so the question can name the number.
+    pub relayed_bytes: Option<u64>,
 }
 
 /// The live session, as the runtime keeps it. Never persisted, never more than
@@ -1100,6 +1139,15 @@ pub enum BridgeEvent {
         peer: String,
         by_peer: bool,
     },
+    /// One step of handing the file over, because only one of you has it.
+    ///
+    /// One event for the whole exchange rather than five, so adding a step to
+    /// the transfer protocol is a change in `comrade_core::share` and nowhere
+    /// else. The alternative — a bridge event per step — would put a Kotlin
+    /// `when` arm, a Dart `switch` arm and a regenerated bridge behind every
+    /// protocol tweak, which is exactly the tax that keeps protocols from being
+    /// tweaked.
+    TogetherShare(TogetherShareDto),
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
     MeshStatusChanged(MeshStatusDto),
@@ -1202,6 +1250,17 @@ pub struct ComradeRuntime {
     together: Arc<Mutex<Option<TogetherSession>>>,
     /// Invitation ids already seen — see [`TOGETHER_START_DEDUP_CAPACITY`].
     together_starts_seen: Arc<SeenSet>,
+    /// What this device is willing to do when the only path a file transfer can
+    /// take is somebody else's relay.
+    ///
+    /// It lives here rather than in each frontend for the reason the whole
+    /// transport module exists: the policy has to be changeable without touching
+    /// the code that moves bytes, and three UIs each holding their own copy is
+    /// three chances to enforce a different one. Session-scoped in v1 —
+    /// [`RelayPolicy::DirectOnly`] on every start, and a device that has never
+    /// been told otherwise relays nothing, which is the safe direction to
+    /// default in.
+    share_policy: Arc<Mutex<RelayPolicy>>,
 }
 
 impl Default for ComradeRuntime {
@@ -1254,6 +1313,7 @@ impl ComradeRuntime {
             nudge_watch: Arc::new(NudgeWatch::new()),
             together: Arc::new(Mutex::new(None)),
             together_starts_seen: Arc::new(SeenSet::new(TOGETHER_START_DEDUP_CAPACITY)),
+            share_policy: Arc::new(Mutex::new(RelayPolicy::default())),
         }
     }
 
@@ -2413,6 +2473,97 @@ impl ComradeRuntime {
     /// The live session, if there is one.
     pub fn together_session(&self) -> Option<TogetherSessionDto> {
         self.together.lock().unwrap().as_ref().map(|s| s.dto())
+    }
+
+    /// Send one step of the file handover.
+    /// Delegates to [`RuntimeHandles::together_share`] — see [`Self::send_dm`].
+    pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
+        self.handles().together_share(signal).await
+    }
+
+    // ── Transfer policy ─────────────────────────────────────────────────────
+    //
+    // Pure and vault-free, like `call_sas`: no lock is taken beyond the policy
+    // cell itself and nothing here touches the network, so a frontend may ask
+    // these questions from inside a WebRTC callback without the deadlock that
+    // shape has already caused twice in this repo.
+
+    /// What this device currently does when the only path is a relay.
+    pub fn share_relay_policy(&self) -> RelayPolicy {
+        *self.share_policy.lock().unwrap()
+    }
+
+    /// Change it. The next transfer connection is built under the new policy;
+    /// one already running is not renegotiated, because tearing down a transfer
+    /// someone is watching from is a worse answer than letting it finish under
+    /// the rules it started with.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
+        *self.share_policy.lock().unwrap() = policy;
+    }
+
+    /// Whether a transfer connection may be handed TURN servers at all.
+    ///
+    /// The *structural* half of the enforcement, and the half that holds even if
+    /// every later check were deleted: under the default policy the transfer
+    /// connection is configured with STUN only, so a relay candidate is never
+    /// gathered and there is no relayed path to detect.
+    pub fn share_ice_servers_allowed(&self) -> bool {
+        share_transport::ice_servers_allowed(self.share_relay_policy())
+    }
+
+    /// Judge the path ICE actually chose, given the candidate types on the
+    /// selected pair, and say whether this transfer may run over it.
+    ///
+    /// The two strings come straight from an `RTCStatsReport` and are peer- and
+    /// browser-supplied, so classification is lenient about case and spacing and
+    /// anything it does not recognise becomes
+    /// [`IcePathKind::Unknown`] — which is *refused*, never waved through.
+    pub fn share_transfer_verdict(
+        &self,
+        local_candidate_type: &str,
+        remote_candidate_type: &str,
+        total_bytes: u64,
+    ) -> ShareVerdictDto {
+        let path = IcePathKind::classify(local_candidate_type, remote_candidate_type);
+        let verdict = share_transport::decide(path, total_bytes, self.share_relay_policy());
+        ShareVerdictDto {
+            verdict: match verdict {
+                TransferVerdict::Allow => "allow",
+                TransferVerdict::NeedsConsent { .. } => "needs_consent",
+                TransferVerdict::Refuse { .. } => "refuse",
+            }
+            .to_string(),
+            path: match path {
+                IcePathKind::Host => "host",
+                IcePathKind::ServerReflexive => "srflx",
+                IcePathKind::Relay => "relay",
+                IcePathKind::Unknown => "unknown",
+            }
+            .to_string(),
+            reason: match verdict {
+                TransferVerdict::Refuse { reason } => Some(reason),
+                _ => None,
+            },
+            relayed_bytes: match verdict {
+                TransferVerdict::NeedsConsent { relayed_bytes } => Some(relayed_bytes),
+                _ => None,
+            },
+        }
+    }
+
+    /// How many chunks may be pushed into a data channel currently holding
+    /// `buffered_bytes`. Zero means stop and wait for the drain event.
+    ///
+    /// Exposed so a frontend without a tested twin of the arithmetic can ask
+    /// rather than guess — the desktop has `share_transfer.mjs` because it needs
+    /// the answer inside a synchronous event handler, but nothing else should
+    /// have to re-derive it.
+    pub fn share_chunks_to_send(&self, buffered_bytes: u64) -> u32 {
+        share_transport::chunks_to_send(
+            buffered_bytes,
+            comrade_core::share::SHARE_CHUNK_BYTES,
+            share_transport::SHARE_BUFFER_HIGH_WATER,
+        )
     }
 
     /// Convenience: send a `Hangup` signal with `reason` (`normal`, `declined`,
@@ -4735,6 +4886,21 @@ impl RuntimeHandles {
         sent
     }
 
+    /// Send one step of the file handover to the other side.
+    ///
+    /// A thin pass-through on purpose. The negotiation state machine lives in
+    /// the frontend next to the peer connection it is negotiating; duplicating
+    /// it here would create two machines that have to agree about a connection
+    /// only one of them can see.
+    ///
+    /// It does hold one line, though: a share signal is only sendable inside a
+    /// live session, because [`Self::send_together`] refuses otherwise. That is
+    /// what stops this becoming a way to open a peer-to-peer connection to
+    /// someone who never agreed to watch anything with you.
+    pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
+        self.send_together(TogetherSignal::Share { signal }).await
+    }
+
     /// One pass of the session loop: expire a session we have stopped hearing
     /// from, or tell the other side where we are.
     async fn together_tick(&self) {
@@ -5854,6 +6020,20 @@ fn handle_together_envelope(
                 peer,
                 by_peer: true,
             });
+        }
+        TogetherSignal::Share { signal } => {
+            // Straight through to the frontend, which owns the peer connection
+            // this is negotiating. It has already passed the acceptance gate,
+            // the age gate and the session-id check above — which is the entire
+            // argument for putting it inside this envelope rather than giving
+            // it one of its own.
+            let (session_id, peer) = (session.id.clone(), session.peer.clone());
+            drop(guard);
+            let _ = tx.send(BridgeEvent::TogetherShare(TogetherShareDto {
+                session_id,
+                peer,
+                signal,
+            }));
         }
         TogetherSignal::State {
             pos_ms,
@@ -10035,6 +10215,274 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a steady session must not put a single event on the critical bus"
+        );
+    }
+
+    // ── Handing the file over ───────────────────────────────────────────────
+
+    fn a_transfer_offer() -> ShareSignal {
+        ShareSignal::Offer {
+            offer: comrade_core::share::ShareOffer {
+                total_bytes: 8_000_000,
+                chunk_bytes: comrade_core::share::SHARE_CHUNK_BYTES,
+                sha256: "b".repeat(64),
+                duration_ms: 240_000,
+            },
+        }
+    }
+
+    /// The claim that justifies putting the transfer negotiation inside the
+    /// session envelope instead of giving it a marker of its own: it inherits
+    /// the session scoping, so an SDP offer naming no session negotiates
+    /// nothing. Without this, one DM from anyone would be enough to make this
+    /// device start gathering ICE candidates for a stranger.
+    #[tokio::test]
+    async fn a_transfer_cannot_be_negotiated_without_a_session_to_negotiate_it_in() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        // Accepted contact, perfectly fresh, well-formed — and still inert,
+        // because there is no session it can name.
+        let body = together_json(
+            "s-nobody",
+            1,
+            TogetherSignal::Share {
+                signal: ShareSignal::Transport {
+                    signal: comrade_core::share::TransferSignal::Offer {
+                        sdp: "v=0\r\n".into(),
+                    },
+                },
+            },
+        );
+        let mut msg = incoming(&hex, "t1", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(
+            rx.try_recv().is_err(),
+            "an SDP offer for no session reached the frontend"
+        );
+    }
+
+    /// Inside a session it goes straight through, unchanged. The runtime keeps
+    /// no transfer state on purpose — see [`TogetherShareDto`].
+    #[tokio::test]
+    async fn a_share_signal_inside_a_session_reaches_the_frontend_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s-share",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        let mut msg = incoming(&hex, "s1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherInvited(_)
+        ));
+
+        for signal in [ShareSignal::Ask, a_transfer_offer(), ShareSignal::Accept] {
+            let body = together_json(
+                "s-share",
+                2,
+                TogetherSignal::Share {
+                    signal: signal.clone(),
+                },
+            );
+            let mut msg = incoming(&hex, &format!("t-{}", signal.kind_str()), &body);
+            msg.created_at = now_secs();
+            dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+            match rx.try_recv().expect("the frontend must hear it") {
+                BridgeEvent::TogetherShare(dto) => {
+                    assert_eq!(dto.session_id, "s-share");
+                    assert_eq!(dto.signal, signal, "the signal must arrive as it was sent");
+                }
+                other => panic!("expected a share signal, got {other:?}"),
+            }
+        }
+    }
+
+    /// A share signal must not be ranked against play and pause. A transfer
+    /// negotiation trickles ICE candidates at its own pace; if each one counted
+    /// as a command, a burst of them would outrank the pause button and the
+    /// person pressing it would watch it do nothing.
+    #[tokio::test]
+    async fn negotiating_a_transfer_never_outranks_the_pause_button() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s-rank",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: true,
+            },
+        );
+        let mut msg = incoming(&hex, "r1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        let _ = rx.try_recv();
+
+        // A high-seq share signal, then a pause at a *lower* seq. If the share
+        // had been stamped as a command, the pause would lose.
+        let noisy = together_json(
+            "s-rank",
+            99,
+            TogetherSignal::Share {
+                signal: ShareSignal::Ask,
+            },
+        );
+        let mut msg = incoming(&hex, "r2", &noisy);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherShare(_)
+        ));
+
+        let pause = together_json(
+            "s-rank",
+            2,
+            TogetherSignal::State {
+                pos_ms: 30_000,
+                playing: false,
+                effective_at_ms: None,
+            },
+        );
+        let mut msg = incoming(&hex, "r3", &pause);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        match rx.try_recv().expect("the pause must still land") {
+            BridgeEvent::TogetherCommand(dto) => assert!(!dto.playing),
+            other => panic!("expected the pause, got {other:?}"),
+        }
+    }
+
+    // ── Transfer policy ─────────────────────────────────────────────────────
+
+    /// The default, and the one that matters: nothing bulk goes through a
+    /// relay, and the connection is not even offered TURN so the case cannot
+    /// arise by accident.
+    #[test]
+    fn by_default_a_film_does_not_go_through_someone_elses_relay() {
+        let rt = ComradeRuntime::new();
+        assert_eq!(rt.share_relay_policy(), RelayPolicy::DirectOnly);
+        assert!(
+            !rt.share_ice_servers_allowed(),
+            "a direct-only transfer connection must not be handed TURN"
+        );
+        let v = rt.share_transfer_verdict("relay", "host", 8_000_000_000);
+        assert_eq!(v.verdict, "refuse");
+        assert_eq!(v.path, "relay");
+        assert_eq!(v.reason, Some(RefusalReason::RelayForbidden));
+    }
+
+    /// "We could not tell" must never read as "it was fine".
+    #[test]
+    fn a_path_ice_has_not_settled_on_is_refused_rather_than_assumed_direct() {
+        let rt = ComradeRuntime::new();
+        let v = rt.share_transfer_verdict("", "", 1);
+        assert_eq!(v.path, "unknown");
+        assert_eq!(v.reason, Some(RefusalReason::PathUnknown));
+    }
+
+    /// The policy is about relays. Two devices talking straight to each other
+    /// are nobody else's cost, so the strictest policy still allows it.
+    #[test]
+    fn a_direct_path_carries_anything_under_any_policy() {
+        let rt = ComradeRuntime::new();
+        for (local, remote) in [("host", "host"), ("srflx", "host"), ("srflx", "srflx")] {
+            assert_eq!(
+                rt.share_transfer_verdict(local, remote, u64::MAX).verdict,
+                "allow",
+                "{local}/{remote}"
+            );
+        }
+    }
+
+    #[test]
+    fn changing_the_policy_changes_the_answer_and_the_ice_list_together() {
+        let rt = ComradeRuntime::new();
+        rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10_000_000 });
+        assert!(
+            rt.share_ice_servers_allowed(),
+            "a policy that can use a relay must be allowed to gather one"
+        );
+        assert_eq!(
+            rt.share_transfer_verdict("relay", "host", 9_000_000)
+                .verdict,
+            "allow"
+        );
+        let big = rt.share_transfer_verdict("relay", "host", 11_000_000);
+        assert_eq!(big.verdict, "refuse");
+        assert_eq!(
+            big.reason,
+            Some(RefusalReason::TooLargeForRelay { limit: 10_000_000 })
+        );
+
+        rt.set_share_relay_policy(RelayPolicy::AskEachTime);
+        let ask = rt.share_transfer_verdict("relay", "relay", 500);
+        assert_eq!(ask.verdict, "needs_consent");
+        assert_eq!(
+            ask.relayed_bytes,
+            Some(500),
+            "the question has to be able to name the size"
+        );
+    }
+
+    /// The pump's budget, from the runtime rather than a frontend's own copy.
+    #[test]
+    fn the_send_budget_empties_as_the_channel_fills() {
+        let rt = ComradeRuntime::new();
+        assert!(rt.share_chunks_to_send(0) > 0);
+        assert_eq!(
+            rt.share_chunks_to_send(share_transport::SHARE_BUFFER_HIGH_WATER),
+            0,
+            "a full channel must be told to wait, not to send one more"
         );
     }
 

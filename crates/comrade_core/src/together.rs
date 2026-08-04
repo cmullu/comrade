@@ -715,6 +715,20 @@ pub enum TogetherSignal {
     /// "I'm leaving." Also the decline: a `Start` answered with `End` is a no,
     /// and the initiator deliberately cannot tell the two apart.
     End,
+    /// Handing the file over, for the case this module otherwise assumes away:
+    /// only one of you has it.
+    ///
+    /// It rides *inside* the session envelope rather than getting a marker of
+    /// its own, and that is the whole reason it is safe. Every guard the session
+    /// already has — the acceptance gate, the sixty-second age gate, the
+    /// session-id scoping, and the fact that sessions do not survive a restart —
+    /// applies unchanged to a transfer negotiation. A separate envelope would
+    /// have needed its own copy of all four, and a stranger able to open a
+    /// peer-to-peer connection to you by sending one DM is a much worse bug than
+    /// a stranger able to move your playhead.
+    ///
+    /// It is deliberately **not** a command: see [`Self::is_command`].
+    Share { signal: crate::share::ShareSignal },
 }
 
 impl TogetherSignal {
@@ -726,12 +740,19 @@ impl TogetherSignal {
             Self::State { .. } => "state",
             Self::Heartbeat { .. } => "heartbeat",
             Self::End => "end",
+            Self::Share { .. } => "share",
         }
     }
 
     /// Whether this signal is a command — something a person did, which the
     /// arbitration in [`CommandStamp`] has to order. Heartbeats and joins are
     /// not: applying one twice changes nothing.
+    ///
+    /// Nor is a share signal, and that one is worth stating rather than reading
+    /// off the pattern. A transfer negotiation is a conversation in its own
+    /// right, running alongside playback and at its own pace: an ICE candidate
+    /// carries no opinion about where the playhead is, so ranking it against a
+    /// pause would let a burst of candidates outrank the pause button.
     pub fn is_command(&self) -> bool {
         matches!(self, Self::Start { .. } | Self::State { .. })
     }

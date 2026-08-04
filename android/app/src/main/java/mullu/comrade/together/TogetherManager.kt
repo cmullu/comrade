@@ -79,6 +79,15 @@ object TogetherManager {
     private var focusRequest: AudioFocusRequest? = null
 
     /**
+     * The file this device actually has open, if it is one we can read back —
+     * which is what makes us able to *send* it. A content:// URI we were handed
+     * by a picker is not, so this stays null for those and the handover simply
+     * does not offer, rather than failing halfway through.
+     */
+    private var openedPath: String? = null
+    private var openedDurationMs: Long = 0
+
+    /**
      * Set by tests that must not touch the foreground-service contract, exactly
      * as `CallManager.disableCallServiceForTest` does. Keep it: a test that
      * genuinely exercises promotion should be its own test rather than flipping
@@ -170,8 +179,75 @@ object TogetherManager {
     }
 
     fun onEnded(byPeer: Boolean) {
+        ShareTransfer.end()
         stopPlayback()
         _state.value = UiState.Idle
+    }
+
+    // ── Handing the file over ───────────────────────────────────────────────
+
+    /**
+     * Where our own player is, for the receiver's next request. Requests are
+     * anchored at the playhead, so a seek costs one request rather than a
+     * re-download — which only works if the transfer can ask.
+     */
+    fun currentPositionMs(): Long = player?.positionMs ?: 0
+
+    /**
+     * "I don't have this — send me yours."
+     *
+     * Joining first is deliberate and not just ordering: the handover rides the
+     * session envelope, so there has to *be* a session before a byte can be
+     * negotiated. That is what stops this from being a way to open a
+     * peer-to-peer connection to someone who never agreed to watch anything.
+     */
+    fun askForTheirCopy(context: Context) {
+        appContext = context.applicationContext
+        val invited = _state.value as? UiState.Invited ?: return
+        runCatching { ComradeCore.togetherJoinTyped() }
+            .onFailure { Log.w("TogetherManager", "join before asking failed", it) }
+        _state.value = UiState.Live(
+            peer = invited.peer,
+            peerLabel = invited.peerLabel,
+            title = invited.title,
+            weLead = false,
+            joined = true,
+            // Not ready: we have nothing to play yet. The status line says so
+            // rather than showing a player that cannot start.
+            ready = false,
+            playing = false,
+            positionMs = 0,
+            durationMs = 0,
+            status = Status.OpenYourCopy,
+        )
+        ShareTransfer.ask()
+    }
+
+    /** What the handover is doing, for the screen. Null when nothing is. */
+    fun shareStatus(): String? = ShareTransfer.status
+
+    /** One step of the handover arrived on the session channel. */
+    fun onShareSignal(context: Context, signal: uniffi.comrade_core.ShareSignal) {
+        appContext = context.applicationContext
+        ShareTransfer.onSignal(context, signal, localPath = openedPath, durationMs = openedDurationMs)
+    }
+
+    /**
+     * The file finished arriving and its hash checked out. Open it and carry on
+     * from where the session already is — the point of the handover is that the
+     * session does not restart, it simply stops being one-sided.
+     */
+    fun onSharedFileReady(path: String) {
+        if (appContext == null) return
+        val live = _state.value as? UiState.Live
+        openPlayer(Uri.fromFile(java.io.File(path))) { durationMs ->
+            openedPath = path
+            openedDurationMs = durationMs
+            if (live != null) _state.value = live.copy(ready = true, durationMs = durationMs)
+        }
+        // Whatever they are doing now is what we should be doing. No command is
+        // sent: the next heartbeat's drift verdict closes the gap, and a
+        // command from the side that just arrived would move *them*.
     }
 
     /** Apply a plan, arming its expectations first so nothing echoes back out. */
@@ -296,10 +372,15 @@ object TogetherManager {
 
     private fun openPlayer(uri: Uri, onReady: (Long) -> Unit) {
         val ctx = appContext ?: return
+        // Remember the readable path, if there is one: it is the difference
+        // between being able to hand this file over and only being able to
+        // receive one.
+        openedPath = if (uri.scheme == null || uri.scheme == "file") uri.path else null
         val p = player ?: TogetherPlayer(ctx).also { player = it }
         p.setListener(object : TogetherPlayer.Listener {
             override fun onPrepared(durationMs: Long) {
                 requestAudioFocus()
+                openedDurationMs = durationMs
                 onReady(durationMs)
                 startPolling()
             }
