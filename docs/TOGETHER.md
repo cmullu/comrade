@@ -384,6 +384,8 @@ Android specifics worth knowing:
 
 **Not built**, and stated here rather than discovered:
 
+- **The transports for sharing the file** — see below.
+
 - **The desktop player surface.** The commands and the decision module are in
   place; the `<video>` element, the file picker and the DOM wiring are not, so
   there is still no way to *start* a session from the desktop UI.
@@ -428,6 +430,60 @@ report or act on it). And perception (comb filtering becomes audible around
 5–30 ms; lip-sync tolerance is ±22 ms). What this design does reach — roughly a
 millisecond on a shared network — is below every one of those thresholds, which
 is the point at which there is nothing left to win.
+
+## 9a. When only one of you has it
+
+The feature's original shape assumed both people already had the file, which is
+often false. Two answers, and they cover different situations:
+
+**Play it from somewhere you do have.** The invitation names a *recording*
+(§2), so a device with no local copy can offer the same recording from a source
+it can reach. Through the YouTube embed we control the playhead, so the sync is
+exactly as tight as it would have been; a deep link into someone's own streaming
+subscription degrades to "we started together", because no app lets us drive
+another app's playhead. Nothing is transferred, it works between cities rather
+than only on one network, and it costs no bandwidth. **This should never happen
+silently** — a different master, an ad break, or a different mix is not what the
+other person is hearing, and switching source without saying so would be the app
+claiming a thing it cannot see.
+
+**Or send it.** `comrade_core::share` is the protocol: chunked, receiver-driven,
+resumable, and playable before it has finished arriving.
+
+Receiver-driven is the load-bearing choice. Because the receiver asks for ranges
+rather than the sender pushing them, **resume** costs nothing (ask again for
+what is missing), **seek** costs nothing (ask for the chunks under the new
+playhead first), and the sender holds no per-receiver state, so a dropped
+connection leaves nothing to clean up. Requests anchor at the playhead and only
+fall back to the earliest gap once the tail is complete — so seeking forward
+costs one request, and the session still ends up with a whole file rather than
+one with a hole in the middle.
+
+Playable-early is the other half: playback waits for a few seconds of
+*contiguous* runway rather than the first chunk (which would stutter a moment
+later) or the whole file (which would be minutes for a film). A gap ends the
+runway however much lies beyond it, because audio after a hole is not runway —
+it is a stutter waiting to happen. The exception is the tail: the last two
+seconds of a track are playable even though two seconds is under the threshold,
+because nothing more is coming.
+
+**No server, and that is the difference from beatsync.** beatsync has every
+client upload to a room on its own backend, which then serves everyone. Comrade
+has no backend and should not grow one for this: a server holding and
+redistributing copies is both an architectural reversal and the most exposed
+possible version of the copyright question. §8.2 rules out *proxying* media
+between users; one person handing something to one other person, both already in
+an end-to-end conversation, is the existing encrypted-attachment path in a
+different shape.
+
+**The transports are the remaining work.** None of the three already in the app
+can carry bulk: relay DMs are gift-wrapped control traffic, the media pipeline
+caps at 10 MiB *and* uploads to a third-party host (exactly the intermediary this
+must avoid), and Saathi is gossipsub — a 16 KiB frame broadcast to every peer on
+the network, which is both too small and far too public. The protocol above is
+transport-free so that a libp2p **direct stream** can carry it on a shared
+network, and the WebRTC **data channel** from §8.1 for peers that are not. Both
+are unbuilt.
 
 ## 10. Deliberately out of scope
 
