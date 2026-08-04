@@ -47,6 +47,7 @@ import {
   normalizeCaption,
   peerToPeerAttachmentRejection,
 } from "./attachment_caption.mjs";
+import { UNSAFE_TEXT } from "./display_text.mjs";
 import { describeVerdict } from "./share_transfer.mjs";
 
 /**
@@ -203,12 +204,10 @@ export function signalIsForTransfer(session, transferId) {
 
 // ── Peer-chosen text, on its way to a screen ────────────────────────────────
 
-// C0/C1 controls, and the bidirectional overrides. The controls because a
-// newline in a "filename" turns one card into two lines of forged UI; the
-// overrides because U+202E makes `holiday<RLO>gnp.exe` read as `holiday.png` in
-// every renderer that honours it. Neither is an XSS — everything here goes
-// through `textContent` — and both are lies on a screen, which is enough.
-const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+// The character class this file used to own now lives in `display_text.mjs`,
+// because a profile page draws a peer's name and bio at heading size and needed
+// the same rule. Two maintained copies of a security-relevant character class
+// eventually differ, and the difference would be invisible until someone used it.
 
 /**
  * A peer's filename, made safe to *draw*. Never safe to use as a path, and
