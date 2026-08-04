@@ -364,8 +364,14 @@ private fun ScreenshotSection() {
 
 // ── Sending files through a relay ────────────────────────────────────────────
 
-/** The 50 MB in the "small files only" option, as bytes. */
-private const val SHARE_SMALL_LIMIT_BYTES: ULong = 50uL * 1024uL * 1024uL
+/**
+ * The 50 MB in the "small files only" option, as bytes.
+ *
+ * A plain `val`: Kotlin will not accept unsigned arithmetic in a `const val`,
+ * and spelling the product out as a literal to satisfy that would trade a
+ * readable number for one nobody can check at a glance.
+ */
+private val SHARE_SMALL_LIMIT_BYTES: ULong = 50uL * 1024uL * 1024uL
 
 /**
  * What this device does when the only route to a peer is somebody else's relay.
