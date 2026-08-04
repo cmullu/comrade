@@ -76,6 +76,10 @@ const CALLS_TREE: &str = "call_log";
 const PRESENCE_TREE: &str = "peer_presence";
 /// Transfer preferences: the relay policy for peer-to-peer file handover.
 const SHARE_META_TREE: &str = "share_meta";
+/// Emoji reactions on cached messages, keyed `<target event id>:<reactor npub>`
+/// — one row per person per message, so reacting again replaces rather than
+/// stacks. See [`MessageReaction`].
+const REACTIONS_TREE: &str = "message_reactions";
 
 const IDENTITY_KEY: &str = "self";
 const LEDGER_SNAPSHOT_KEY: &str = "hisab_kitab";
@@ -188,6 +192,36 @@ pub struct StoredMessage {
     /// Event id (hex) this message replies to (NIP-10 `e` tag), if any.
     #[serde(default)]
     pub reply_to: Option<String>,
+}
+
+/// One person's emoji reaction to one cached message.
+///
+/// Keyed on `(target_id, reactor_npub)` by [`EncryptedStore::set_reaction`], so
+/// a person reacting a second time to the same message replaces their first —
+/// there is exactly one reaction per person per message, which is what makes
+/// "tap the emoji you already sent to take it back" expressible at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReaction {
+    /// Nostr event id (hex) of the message reacted to.
+    pub target_id: String,
+    /// The conversation this belongs to, so a thread's reactions can be read
+    /// without walking every message. Denormalised on purpose: the target may be
+    /// an event we have not cached (a reaction can outrun a backfill), and a
+    /// reaction with nowhere to live would be lost.
+    pub peer_npub: String,
+    /// Who reacted, as an npub.
+    pub reactor_npub: String,
+    /// The emoji, or empty for a **tombstone**: a reaction its sender withdrew.
+    /// Tombstones are kept rather than deleted so their timestamp survives to
+    /// refuse a replay — see [`EncryptedStore::set_reaction`]. Readers
+    /// ([`EncryptedStore::reactions_with`], [`EncryptedStore::reaction_by`])
+    /// filter them out, so nothing above this layer sees one.
+    pub emoji: String,
+    /// When the reaction was sent (unix seconds). Used to reject replays.
+    pub created_at: u64,
+    /// Whether *this device* sent it — drives the "your reaction" highlight, and
+    /// stored rather than derived because the store does not know the identity.
+    pub outgoing: bool,
 }
 
 /// A private journal entry — the wellbeing pillar's core record. Strictly
@@ -544,6 +578,76 @@ impl EncryptedStore {
     /// holding both rows. Returns whether a row existed.
     pub fn remove_message(&self, id: &str) -> Result<bool, StorageError> {
         self.delete(MESSAGES_TREE, id)
+    }
+
+    // Emoji reactions ---------------------------------------------------------
+
+    /// Store key for one person's reaction to one message.
+    fn reaction_key(target_id: &str, reactor_npub: &str) -> String {
+        format!("{target_id}:{reactor_npub}")
+    }
+
+    /// Record (or replace, or withdraw) a reaction. Returns whether the *visible*
+    /// state changed, so a caller only pushes a UI event when there is news.
+    ///
+    /// **Older reactions are refused.** A relay redelivers, and this app re-scans
+    /// a two-day gift-wrap window on every launch, so a reaction that has already
+    /// been superseded is not merely possible but expected on a normal cold
+    /// start. Without the timestamp check, replaying an old 👍 after a newer 🔥
+    /// would resurrect the 👍. Equal timestamps are refused too: within one second
+    /// the store cannot order two reactions, and keeping what is already there is
+    /// at least stable.
+    ///
+    /// **A withdrawal is stored, not deleted.** An empty `emoji` writes a
+    /// tombstone row. Deleting looks tidier and is wrong: the timestamp goes with
+    /// the row, so the very next replay of the withdrawn reaction would find an
+    /// empty slot, pass the check vacuously, and bring back an emoji its sender
+    /// had taken away. Keeping the row keeps the clock. Tombstones are bounded by
+    /// "reactions ever withdrawn in this conversation" and carry one emoji-shaped
+    /// hole each, so there is nothing to prune.
+    pub fn set_reaction(&self, reaction: &MessageReaction) -> Result<bool, StorageError> {
+        let key = Self::reaction_key(&reaction.target_id, &reaction.reactor_npub);
+        let existing: Option<MessageReaction> = self.get(REACTIONS_TREE, &key)?;
+        if let Some(prev) = &existing {
+            if prev.created_at >= reaction.created_at {
+                return Ok(false);
+            }
+        }
+        let was = existing.map(|p| p.emoji).unwrap_or_default();
+        self.put(REACTIONS_TREE, &key, reaction)?;
+        // Advancing the timestamp is always worth writing; only a different
+        // emoji (including to or from "none") is worth redrawing.
+        Ok(was != reaction.emoji)
+    }
+
+    /// Every reaction in one conversation, oldest first. Withdrawn ones are
+    /// tombstones (see [`Self::set_reaction`]) and are not returned.
+    pub fn reactions_with(&self, peer_npub: &str) -> Result<Vec<MessageReaction>, StorageError> {
+        let mut rows: Vec<MessageReaction> = self
+            .values::<MessageReaction>(REACTIONS_TREE)?
+            .into_iter()
+            .filter(|r| r.peer_npub == peer_npub && !r.emoji.is_empty())
+            .collect();
+        rows.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.target_id.cmp(&b.target_id))
+                .then_with(|| a.reactor_npub.cmp(&b.reactor_npub))
+        });
+        Ok(rows)
+    }
+
+    /// One person's current reaction to one message, if any. What "tapping the
+    /// emoji you already sent takes it back" is decided against — so a tombstone
+    /// reads as no reaction, which is exactly what it means.
+    pub fn reaction_by(
+        &self,
+        target_id: &str,
+        reactor_npub: &str,
+    ) -> Result<Option<MessageReaction>, StorageError> {
+        let row: Option<MessageReaction> =
+            self.get(REACTIONS_TREE, &Self::reaction_key(target_id, reactor_npub))?;
+        Ok(row.filter(|r| !r.emoji.is_empty()))
     }
 
     // Conversation gate (message requests) ------------------------------------
@@ -918,6 +1022,163 @@ mod tests {
         let alice = s.get_peer_presence("npub1alice").unwrap().unwrap();
         assert!(!alice.online);
         assert_eq!(alice.last_seen_at, 900);
+    }
+
+    fn reaction(target: &str, reactor: &str, emoji: &str, at: u64) -> MessageReaction {
+        MessageReaction {
+            target_id: target.into(),
+            peer_npub: "npub1alice".into(),
+            reactor_npub: reactor.into(),
+            emoji: emoji.into(),
+            created_at: at,
+            outgoing: reactor == "npub1me",
+        }
+    }
+
+    #[test]
+    fn a_second_reaction_from_one_person_replaces_the_first() {
+        let (_d, s) = store();
+        assert!(s
+            .set_reaction(&reaction("e1", "npub1alice", "👍", 100))
+            .unwrap());
+        assert!(s
+            .set_reaction(&reaction("e1", "npub1alice", "🔥", 200))
+            .unwrap());
+        let rows = s.reactions_with("npub1alice").unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one reaction per person per message: {rows:?}"
+        );
+        assert_eq!(rows[0].emoji, "🔥");
+    }
+
+    #[test]
+    fn different_people_reacting_to_one_message_all_count() {
+        let (_d, s) = store();
+        s.set_reaction(&reaction("e1", "npub1alice", "👍", 100))
+            .unwrap();
+        s.set_reaction(&reaction("e1", "npub1me", "🔥", 110))
+            .unwrap();
+        let rows = s.reactions_with("npub1alice").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            s.reaction_by("e1", "npub1me").unwrap().unwrap().emoji,
+            "🔥",
+            "our own reaction is what the toggle is decided against"
+        );
+        assert!(s.reaction_by("e1", "npub1me").unwrap().unwrap().outgoing);
+    }
+
+    #[test]
+    fn a_replayed_older_reaction_cannot_overwrite_a_newer_one() {
+        // Not hypothetical: the inbox re-scans a two-day gift-wrap window on
+        // every launch, so a superseded reaction is redelivered on a normal cold
+        // start.
+        let (_d, s) = store();
+        s.set_reaction(&reaction("e1", "npub1alice", "🔥", 200))
+            .unwrap();
+        assert!(
+            !s.set_reaction(&reaction("e1", "npub1alice", "👍", 100))
+                .unwrap(),
+            "an older reaction is not news"
+        );
+        assert_eq!(
+            s.reaction_by("e1", "npub1alice").unwrap().unwrap().emoji,
+            "🔥"
+        );
+        // Same second, different emoji: unorderable, so what is already there wins.
+        assert!(!s
+            .set_reaction(&reaction("e1", "npub1alice", "😀", 200))
+            .unwrap());
+        assert_eq!(
+            s.reaction_by("e1", "npub1alice").unwrap().unwrap().emoji,
+            "🔥"
+        );
+    }
+
+    #[test]
+    fn withdrawing_a_reaction_hides_it_and_a_replay_cannot_bring_it_back() {
+        let (_d, s) = store();
+        s.set_reaction(&reaction("e1", "npub1alice", "🔥", 100))
+            .unwrap();
+        assert!(
+            s.set_reaction(&reaction("e1", "npub1alice", "", 200))
+                .unwrap(),
+            "a withdrawal changes what is drawn"
+        );
+        assert!(s.reactions_with("npub1alice").unwrap().is_empty());
+        assert!(s.reaction_by("e1", "npub1alice").unwrap().is_none());
+
+        // The reason the withdrawal is a tombstone rather than a delete. Had the
+        // row been removed, this replay would find an empty slot, pass the
+        // timestamp check vacuously, and resurrect an emoji its sender took away.
+        assert!(!s
+            .set_reaction(&reaction("e1", "npub1alice", "🔥", 100))
+            .unwrap());
+        assert!(
+            s.reactions_with("npub1alice").unwrap().is_empty(),
+            "a withdrawn reaction must stay withdrawn"
+        );
+
+        // …and a genuinely newer reaction still lands, so withdrawing is not
+        // permanent for the person who did it.
+        assert!(s
+            .set_reaction(&reaction("e1", "npub1alice", "👍", 300))
+            .unwrap());
+        assert_eq!(
+            s.reaction_by("e1", "npub1alice").unwrap().unwrap().emoji,
+            "👍"
+        );
+    }
+
+    #[test]
+    fn re_sending_the_same_emoji_is_not_news() {
+        let (_d, s) = store();
+        s.set_reaction(&reaction("e1", "npub1alice", "🔥", 100))
+            .unwrap();
+        assert!(
+            !s.set_reaction(&reaction("e1", "npub1alice", "🔥", 200))
+                .unwrap(),
+            "nothing to redraw, so no UI event"
+        );
+        // The timestamp still advanced, which is what stops the 100 replay below.
+        assert!(!s
+            .set_reaction(&reaction("e1", "npub1alice", "😀", 150))
+            .unwrap());
+        assert_eq!(
+            s.reaction_by("e1", "npub1alice").unwrap().unwrap().emoji,
+            "🔥"
+        );
+    }
+
+    #[test]
+    fn reactions_are_scoped_to_their_conversation() {
+        let (_d, s) = store();
+        s.set_reaction(&reaction("e1", "npub1alice", "🔥", 100))
+            .unwrap();
+        let mut other = reaction("e9", "npub1bob", "👍", 110);
+        other.peer_npub = "npub1bob".into();
+        s.set_reaction(&other).unwrap();
+        assert_eq!(s.reactions_with("npub1alice").unwrap().len(), 1);
+        assert_eq!(s.reactions_with("npub1bob").unwrap().len(), 1);
+        assert!(s.reactions_with("npub1nobody").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_reaction_survives_arriving_before_the_message_it_is_about() {
+        // The target event id is not a foreign key: a reaction can outrun the
+        // backfill of the message it names, and dropping it then would lose it
+        // for good.
+        let (_d, s) = store();
+        assert!(s.get_message("e-unseen").unwrap().is_none());
+        assert!(s
+            .set_reaction(&reaction("e-unseen", "npub1alice", "🔥", 100))
+            .unwrap());
+        assert_eq!(
+            s.reactions_with("npub1alice").unwrap()[0].target_id,
+            "e-unseen"
+        );
     }
 
     #[test]

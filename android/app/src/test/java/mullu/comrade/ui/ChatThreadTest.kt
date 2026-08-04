@@ -148,4 +148,38 @@ class ChatThreadTest {
         // Nothing unread → no divider anywhere.
         assertFalse(startsUnread(index = 0, firstUnread = null))
     }
+
+    // ── Tapping a quote to reach the original ─────────────────────────────────
+
+    @Test
+    fun aQuoteTapFindsTheMessageItPointsAt() {
+        val ids = listOf("a", "b", "c")
+        assertEquals(0, indexOfEventId(ids, "a"))
+        assertEquals(2, indexOfEventId(ids, "c"))
+    }
+
+    /**
+     * The case that decides the feature's behaviour: a reply to something older
+     * than the loaded window quotes fine but has nowhere to scroll to. The caller
+     * must leave the thread where it is rather than land somewhere arbitrary.
+     */
+    @Test
+    fun anOriginalOutsideTheLoadedThreadHasNoDestination() {
+        assertNull(indexOfEventId(listOf("a", "b"), "older"))
+        assertNull(indexOfEventId(emptyList(), "a"))
+    }
+
+    @Test
+    fun aMessageThatIsNotAReplyHasNothingToGoTo() {
+        assertNull(indexOfEventId(listOf("a", "b"), null))
+        // A blank id is the bridge's "absent", and must not match a blank entry.
+        assertNull(indexOfEventId(listOf("a", ""), ""))
+    }
+
+    @Test
+    fun theFirstMatchWins() {
+        // Duplicate ids should not happen — the thread is deduped upstream — but
+        // if one ever slips through, the earlier item is the one quoted.
+        assertEquals(1, indexOfEventId(listOf("a", "dup", "dup"), "dup"))
+    }
 }

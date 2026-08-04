@@ -80,9 +80,9 @@ pub use comrade_ui::{
     BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ShareVerdictDto, TaraMessageDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
-    TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto, ShareVerdictDto,
+    TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -304,6 +304,16 @@ pub struct _MediaMessageDto {
     pub sender: String,
     pub created_at: u64,
     pub size: u64,
+    pub outgoing: bool,
+}
+
+#[frb(mirror(ReactionDto))]
+pub struct _ReactionDto {
+    pub target_id: String,
+    pub peer: String,
+    pub reactor: String,
+    pub emoji: String,
+    pub created_at: u64,
     pub outgoing: bool,
 }
 
@@ -545,6 +555,7 @@ pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
     IncomingDirectMessage(DirectMessageDto),
     IncomingMedia(MediaMessageDto),
+    IncomingReaction(ReactionDto),
     IncomingCallSignal(CallSignalDto),
     IncomingMessageRequest(MessageRequestDto),
     MessageStatus {
@@ -774,6 +785,30 @@ pub async fn send_dm_reply(
     handles
         .send_dm_reply(&target, &content, reply_to.as_deref())
         .await
+}
+
+/// React to a message in `peer`'s thread — or take an existing reaction back by
+/// passing the same emoji again. Returns the reaction now standing, or `None` if
+/// the tap withdrew one.
+///
+/// The toggle is decided on the Rust side (see `ComradeRuntime::toggle_reaction`)
+/// so this frontend and Android cannot disagree about what tapping an
+/// already-sent emoji means.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn toggle_reaction(
+    peer: String,
+    target_id: String,
+    emoji: String,
+) -> Result<Option<ReactionDto>, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.toggle_reaction(&peer, &target_id, &emoji).await
+}
+
+/// Every reaction in `peer`'s conversation, oldest first, read from the encrypted
+/// store — so a thread opens with its reactions already drawn.
+pub async fn reactions(peer: String) -> Result<Vec<ReactionDto>, UiError> {
+    runtime().read().await.reactions(&peer)
 }
 
 /// Retry every DM sitting in the sender outbox because no relay would take it.

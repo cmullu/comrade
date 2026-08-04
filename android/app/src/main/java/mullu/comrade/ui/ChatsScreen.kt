@@ -4,6 +4,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -19,9 +20,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,20 +35,24 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,16 +65,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
@@ -78,6 +90,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.R
@@ -515,6 +528,16 @@ fun ConversationScreen(
     // care which kind of event it names, so "reply to that photo" needs nothing
     // from the core that "reply to that message" did not already have.
     var replyingTo by remember { mutableStateOf<ChatItem?>(null) }
+    // Reactions on this thread, and which message a long press is acting on.
+    // Reloaded by the same effect as the messages, and re-read after every
+    // toggle so a chip reflects what the store actually holds rather than what
+    // the UI hoped for.
+    var reactions by remember(peer) { mutableStateOf<List<ComradeCore.ReactionInfo>>(emptyList()) }
+    var actingOn by remember { mutableStateOf<ChatItem?>(null) }
+    // The full picker, opened from the reaction row's "+" for anything outside
+    // the quick six. Held separately from `actingOn` because the action sheet
+    // closes when it opens, and the target has to outlive that.
+    var pickingFor by remember { mutableStateOf<ChatItem?>(null) }
     var attaching by remember { mutableStateOf(false) }
     // Voice notes: tap the action icon to record, tap again to send.
     var recording by remember { mutableStateOf(false) }
@@ -528,9 +551,13 @@ fun ConversationScreen(
     // the watermark advances — Telegram leaves the line where you found it for
     // the rest of the visit, which is what makes it useful to read down to.
     var unreadBoundaryKey by remember(peer) { mutableStateOf<String?>(null) }
+    // The item flashing because its quote was tapped to reach it. Keyed on the
+    // item key, not the index, for the same reason as the unread boundary above.
+    var highlightKey by remember(peer) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val recorder = remember { VoiceRecorder(context) }
     // What this device can actually capture, probed once. Capability-gated so a
     // tablet with no camera gets a mic and nothing to swap to, rather than a
@@ -561,6 +588,78 @@ fun ConversationScreen(
     // Keyed over the merged thread, not just the messages: a reply to an
     // attachment resolves to that attachment, and quoting it says what it was.
     val byId = remember(chatItems) { chatItems.associateBy { it.eventId } }
+    // Chips per message, grouped once per reaction change rather than per bubble
+    // per recomposition. `outgoing` is the "yours" marker rather than the local
+    // npub, which this screen has no reason to hold: the core already decided
+    // which rows this device sent.
+    val chipsByTarget = remember(reactions) {
+        reactions
+            .groupBy { it.targetId }
+            .mapValues { (_, rows) ->
+                summariseReactions(
+                    rows.map {
+                        ReactionRow(
+                            targetId = it.targetId,
+                            // Every outgoing row is collapsed to one synthetic
+                            // reactor id so `mine` is exactly "this device sent
+                            // one", with no npub lookup.
+                            reactor = if (it.outgoing) MINE_REACTOR else it.reactor,
+                            emoji = it.emoji,
+                        )
+                    },
+                    mineReactor = MINE_REACTOR,
+                )
+            }
+    }
+    // The emoji this device has on a given message, for the sheet's highlight.
+    val myReactionByTarget = remember(reactions) {
+        reactions.filter { it.outgoing }.associate { it.targetId to it.emoji }
+    }
+
+    /**
+     * Toggle a reaction and re-read the thread's reactions from the store.
+     *
+     * Re-reading rather than patching the list in place: the core owns whether a
+     * tap added, replaced or withdrew (see `ComradeRuntime::toggle_reaction`), and
+     * a local guess at which of the three happened is a second implementation of
+     * the rule that exists precisely so there is only one.
+     */
+    fun toggleReaction(item: ChatItem, emoji: String) {
+        scope.launch {
+            val (failure, fresh) = withContext(Dispatchers.IO) {
+                val failure = runCatching {
+                    ComradeCore.toggleReactionTyped(peer, item.eventId, emoji)
+                }.exceptionOrNull()
+                failure to runCatching { ComradeCore.reactions(peer) }.getOrNull()
+            }
+            if (failure != null) error = failure.message ?: "Could not react."
+            fresh?.let { reactions = it }
+        }
+    }
+
+    /**
+     * Go to the message a reply is quoting, and flash it on arrival.
+     *
+     * The flash is not decoration. The scroll lands the target somewhere in a
+     * screenful of other messages and says nothing about which one it was; without
+     * the highlight the jump reads as the thread having lost your place. The
+     * jump-to-latest button appears on the way, which is the way back.
+     *
+     * Does nothing when the original is not in the loaded thread — see
+     * [indexOfEventId]. Staying put is the honest outcome there.
+     */
+    fun goToQuoted(targetId: String?) {
+        val index = indexOfEventId(chatItems.map { it.eventId }, targetId) ?: return
+        val key = chatItems[index].key
+        highlightKey = key
+        scope.launch {
+            listState.animateScrollToItem(index)
+            delay(QUOTE_HIGHLIGHT_MS)
+            // Only the newest tap gets to end the flash, so tapping through a
+            // chain of replies keeps highlighting where you actually are.
+            if (highlightKey == key) highlightKey = null
+        }
+    }
 
     // `chatTick` is a GLOBAL event tick — it fires for activity in any
     // conversation, and repeatedly while this one is open. So a reload must
@@ -568,11 +667,19 @@ fun ConversationScreen(
     // auto-scroll only on first load or when they were already near it,
     // otherwise light up the jump-to-latest button instead.
     LaunchedEffect(peer, chatTick) {
-        val (msgs, media) = withContext(Dispatchers.IO) {
-            val msgs = runCatching { ComradeCore.messages(peer) }.getOrDefault(emptyList())
-            val media = runCatching { ComradeCore.media(peer) }.getOrDefault(emptyList())
-            msgs to media
+        val loaded = withContext(Dispatchers.IO) {
+            Triple(
+                runCatching { ComradeCore.messages(peer) }.getOrDefault(emptyList()),
+                runCatching { ComradeCore.media(peer) }.getOrDefault(emptyList()),
+                // Reactions ride the same tick: an IncomingReaction bumps
+                // chatTick, and reading them here rather than in their own
+                // effect keeps a bubble and its chips from being drawn a frame
+                // apart.
+                runCatching { ComradeCore.reactions(peer) }.getOrDefault(emptyList()),
+            )
         }
+        val (msgs, media) = loaded.first to loaded.second
+        reactions = loaded.third
         val grew = msgs.size + media.size > messages.size + mediaItems.size
         val wasNearBottom = isNearBottom(
             lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1,
@@ -955,6 +1062,18 @@ fun ConversationScreen(
                     // own list items), so item indices keep matching `chatItems`
                     // and the scroll arithmetic above stays honest.
                     val prevAt = chatItems.getOrNull(index - 1)?.createdAt
+                    // Tinted while this item is the target of a quote tap, and
+                    // animated so the flash fades rather than blinking. Around the
+                    // bubble only, not the separators above it: a target that
+                    // happens to open a new day must not tint that day's header.
+                    val highlight by animateColorAsState(
+                        targetValue = if (item.key == highlightKey) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                        } else {
+                            Color.Transparent
+                        },
+                        label = "quote-target-highlight",
+                    )
                     Column(Modifier.fillMaxWidth()) {
                         if (startsNewDay(prevAt, item.createdAt)) {
                             DaySeparator(dayLabel(item.createdAt, nowSecs))
@@ -962,72 +1081,121 @@ fun ConversationScreen(
                         if (item.key == unreadBoundaryKey) {
                             UnreadSeparator(stringResource(R.string.unread_messages))
                         }
-                        when (item) {
-                            is ChatItem.MediaItem -> Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = if (item.info.outgoing) Arrangement.End else Arrangement.Start,
-                            ) {
-                                MediaAttachmentBubble(
-                                    item.info,
-                                    onReply = { replyingTo = item },
+                        // Reply is a *swipe* now and react is the long press —
+                        // Telegram's split. Long-press used to be reply, which
+                        // left reactions with no gesture to live on and made the
+                        // one discoverable interaction on a message the less
+                        // common of the two.
+                        //
+                        // The accessibility action is not a nicety here: a drag
+                        // and a long press are both invisible to a screen reader,
+                        // so without it reply and react would be gesture-only.
+                        val replyLabel = stringResource(R.string.message_action_reply)
+                        val reactLabel = stringResource(R.string.message_action_react)
+                        val gestureModifier = Modifier
+                            .fillMaxWidth()
+                            .semantics {
+                                customActions = listOf(
+                                    CustomAccessibilityAction(replyLabel) {
+                                        replyingTo = item
+                                        true
+                                    },
+                                    CustomAccessibilityAction(reactLabel) {
+                                        actingOn = item
+                                        true
+                                    },
                                 )
                             }
-                            is ChatItem.TextItem -> {
-                                val msg = item.msg
-                                val quoted = msg.replyTo?.let { byId[it] }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .combinedClickable(
-                                            onClick = {},
-                                            onLongClick = { replyingTo = item },
-                                        ),
-                                    horizontalArrangement = if (msg.outgoing) Arrangement.End else Arrangement.Start,
+                            .combinedClickable(
+                                onClick = {},
+                                onLongClick = { actingOn = item },
+                            )
+                        val chips = chipsByTarget[item.eventId].orEmpty()
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(highlight, RoundedCornerShape(18.dp)),
+                        ) {
+                            when (item) {
+                                is ChatItem.MediaItem -> SwipeToReply(
+                                    onReply = { replyingTo = item },
+                                    modifier = gestureModifier,
                                 ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(
-                                            topStart = 18.dp,
-                                            topEnd = 18.dp,
-                                            bottomStart = if (msg.outgoing) 18.dp else 6.dp,
-                                            bottomEnd = if (msg.outgoing) 6.dp else 18.dp,
-                                        ),
-                                        color = if (msg.outgoing) {
-                                            MaterialTheme.colorScheme.primaryContainer
+                                    Column(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalAlignment = if (item.info.outgoing) {
+                                            Alignment.End
                                         } else {
-                                            MaterialTheme.colorScheme.surfaceVariant
+                                            Alignment.Start
                                         },
-                                        tonalElevation = 1.dp,
-                                        modifier = Modifier.widthIn(max = 300.dp),
                                     ) {
-                                        Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
-                                            if (quoted != null) {
-                                                QuotedPreview(quoted.preview)
-                                            }
-                                            Text(msg.content, style = MaterialTheme.typography.bodyLarge)
-                                            Row(
-                                                modifier = Modifier
-                                                    .align(Alignment.End)
-                                                    .padding(top = 2.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        MediaAttachmentBubble(
+                                            item.info,
+                                            onReply = { replyingTo = item },
+                                        )
+                                        ReactionChips(chips) { toggleReaction(item, it) }
+                                    }
+                                }
+                                is ChatItem.TextItem -> {
+                                    val msg = item.msg
+                                    val quoted = msg.replyTo?.let { byId[it] }
+                                    SwipeToReply(
+                                        onReply = { replyingTo = item },
+                                        modifier = gestureModifier,
+                                    ) {
+                                        Column(
+                                            Modifier.fillMaxWidth(),
+                                            horizontalAlignment = if (msg.outgoing) Alignment.End else Alignment.Start,
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(
+                                                    topStart = 18.dp,
+                                                    topEnd = 18.dp,
+                                                    bottomStart = if (msg.outgoing) 18.dp else 6.dp,
+                                                    bottomEnd = if (msg.outgoing) 6.dp else 18.dp,
+                                                ),
+                                                color = if (msg.outgoing) {
+                                                    MaterialTheme.colorScheme.primaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.surfaceVariant
+                                                },
+                                                tonalElevation = 1.dp,
+                                                modifier = Modifier.widthIn(max = 300.dp),
                                             ) {
-                                                Text(
-                                                    clockTime(msg.createdAt),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.outline,
-                                                )
-                                                if (msg.outgoing) {
-                                                    Text(
-                                                        statusGlyph(msg.status),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = if (msg.status == "read") {
-                                                            MaterialTheme.colorScheme.primary
-                                                        } else {
-                                                            MaterialTheme.colorScheme.outline
-                                                        },
-                                                    )
+                                                Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                                                    if (quoted != null) {
+                                                        QuotedPreview(quoted.preview) {
+                                                            goToQuoted(msg.replyTo)
+                                                        }
+                                                    }
+                                                    Text(msg.content, style = MaterialTheme.typography.bodyLarge)
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .align(Alignment.End)
+                                                            .padding(top = 2.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                    ) {
+                                                        Text(
+                                                            clockTime(msg.createdAt),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.outline,
+                                                        )
+                                                        if (msg.outgoing) {
+                                                            Text(
+                                                                statusGlyph(msg.status),
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = if (msg.status == "read") {
+                                                                    MaterialTheme.colorScheme.primary
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.outline
+                                                                },
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             }
+                                            ReactionChips(chips) { toggleReaction(item, it) }
                                         }
                                     }
                                 }
@@ -1227,6 +1395,46 @@ fun ConversationScreen(
             onSend = { caption -> sendAttachment(pending, caption) },
         )
     }
+
+    // Long press on a message: react, or reach the actions.
+    actingOn?.let { item ->
+        MessageActionSheet(
+            myReaction = myReactionByTarget[item.eventId],
+            onReact = {
+                toggleReaction(item, it)
+                actingOn = null
+            },
+            onMoreEmoji = {
+                // Hand the target over before closing, or the picker opens with
+                // nothing to react to.
+                pickingFor = item
+                actingOn = null
+            },
+            onReply = {
+                replyingTo = item
+                actingOn = null
+            },
+            onCopy = {
+                clipboard.setText(AnnotatedString(item.preview))
+                actingOn = null
+            },
+            onDismiss = { actingOn = null },
+        )
+    }
+
+    // "+" from the reaction row: the same picker the composer uses, pointed at a
+    // message instead of the draft. Closes on a pick — unlike the composer's,
+    // where choosing several in a row is the common case; one message takes one
+    // reaction, so staying open would only invite a second toggle that undoes it.
+    pickingFor?.let { item ->
+        EmojiPickerSheet(
+            onPick = {
+                toggleReaction(item, it)
+                pickingFor = null
+            },
+            onDismiss = { pickingFor = null },
+        )
+    }
 }
 
 /** The glyph for a capture mode. */
@@ -1408,24 +1616,267 @@ private fun UnreadSeparator(label: String) {
     }
 }
 
-/** A small quoted line rendered above a reply's own text. */
+/**
+ * A small quoted line rendered above a reply's own text.
+ *
+ * Tapping it goes to the message being quoted. [onTap] is null when there is
+ * nowhere to go — the original is outside the loaded history — and then the quote
+ * renders with no tap target and no accent bar, so a tap that could not work is
+ * never offered. Mirrors `message_bubble.dart`'s `QuotedPreview`.
+ */
 @Composable
-private fun QuotedPreview(text: String) {
+private fun QuotedPreview(text: String, onTap: (() -> Unit)? = null) {
+    val label = stringResource(R.string.message_goto_quoted)
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = 4.dp),
+            .padding(bottom = 4.dp)
+            .then(
+                if (onTap == null) {
+                    Modifier
+                } else {
+                    Modifier.clickable(onClickLabel = label, onClick = onTap)
+                },
+            ),
     ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // The accent bar is the affordance: it says "this points at something
+            // else", which is what makes the tap discoverable at all.
+            if (onTap != null) {
+                Box(
+                    Modifier
+                        .width(3.dp)
+                        .height(28.dp)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+// ── Reactions and the gestures that reach them ────────────────────────────────
+
+/**
+ * The reaction chips under one bubble. Tapping a chip toggles *your* reaction in
+ * it — adding yours if you were not in it, taking yours back if you were — which
+ * is why [ReactionChip.mine] has to be drawn: without the highlight, tapping is
+ * a coin flip between the two.
+ *
+ * Renders nothing at all for an empty list, so a message with no reactions costs
+ * no vertical space.
+ */
+@Composable
+private fun ReactionChips(chips: List<ReactionChip>, onToggle: (String) -> Unit) {
+    if (chips.isEmpty()) return
+    Row(
+        modifier = Modifier.padding(top = 3.dp).testTag("dm-reactions"),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        for (chip in chips) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (chip.mine) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                modifier = Modifier.clickable { onToggle(chip.emoji) },
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(chip.emoji, style = MaterialTheme.typography.labelLarge)
+                    // The count is only informative once more than one person is
+                    // in it; "🔥 1" is noise next to "🔥".
+                    if (chip.count > 1) {
+                        Text(
+                            chip.count.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (chip.mine) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * What a long press on a message opens: the quick reaction row, then the actions.
+ *
+ * A bottom sheet rather than the floating row Telegram anchors over the bubble.
+ * The reachability argument decides it: an anchored popup has to be positioned
+ * against a bubble that may be at the very top or bottom of the list, and the
+ * failure mode is a row half off screen. A sheet is always in the same place and
+ * always within a thumb's reach.
+ *
+ * [myReaction] is the emoji this device has already sent on this message, if any
+ * — highlighted, so it is visible that tapping it again removes it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageActionSheet(
+    myReaction: String?,
+    onReact: (String) -> Unit,
+    onMoreEmoji: () -> Unit,
+    onReply: () -> Unit,
+    onCopy: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        modifier = Modifier.testTag("message-actions"),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                for (emoji in QUICK_REACTIONS) {
+                    val mine = emoji == myReaction
+                    Surface(
+                        shape = CircleShape,
+                        color = if (mine) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                        } else {
+                            Color.Transparent
+                        },
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable { onReact(emoji) }
+                            .testTag("react-$emoji"),
+                    ) {
+                        Text(
+                            emoji,
+                            style = MaterialTheme.typography.headlineSmall,
+                            modifier = Modifier.padding(8.dp),
+                        )
+                    }
+                }
+                // Anything outside the six. Same sheet the composer's emoji
+                // button opens, so there is one picker in the app.
+                IconButton(onClick = onMoreEmoji, modifier = Modifier.testTag("react-more")) {
+                    Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.react_more))
+                }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            SheetAction(
+                icon = ReplyIcon,
+                label = stringResource(R.string.message_action_reply),
+                onClick = onReply,
+                testTag = "action-reply",
+            )
+            SheetAction(
+                icon = CopyIcon,
+                label = stringResource(R.string.message_action_copy),
+                onClick = onCopy,
+                testTag = "action-copy",
+            )
+        }
+    }
+}
+
+/** One full-width row of [MessageActionSheet]. */
+@Composable
+private fun SheetAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+/**
+ * Wraps a bubble so dragging it rightward and letting go replies to it.
+ *
+ * The arrow fades in behind the bubble as the drag approaches the trigger, so the
+ * gesture teaches itself — there is no other way to discover it. On release the
+ * offset returns to zero whether or not it fired, because the bubble is not a
+ * pane that stays open; the reply chip above the composer is the result.
+ *
+ * `onReply` is *also* exposed as a [CustomAccessibilityAction] by the caller: a
+ * drag is invisible to a screen reader, and reply must not be a gesture-only
+ * feature. The numbers live in [replySwipeOffsetDp] / [replySwipeTriggered] so a
+ * JVM test can pin them and the Flutter side can match them.
+ */
+@Composable
+private fun SwipeToReply(
+    onReply: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    var drag by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val offsetDp = replySwipeOffsetDp(drag)
+    val armed = replySwipeTriggered(drag)
+    Box(modifier) {
+        if (offsetDp > 1f) {
+            Icon(
+                ReplyIcon,
+                contentDescription = null,
+                tint = if (armed) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.outline
+                },
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 4.dp)
+                    .size(20.dp)
+                    .alpha((offsetDp / REPLY_SWIPE_TRIGGER_DP).coerceIn(0f, 1f)),
+            )
+        }
+        Box(
+            Modifier
+                .offset(x = offsetDp.dp)
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        // Accumulated in dp, not pixels, so the threshold means
+                        // the same distance on every screen density.
+                        drag += with(density) { delta.toDp().value }
+                    },
+                    onDragStopped = {
+                        if (replySwipeTriggered(drag)) onReply()
+                        drag = 0f
+                    },
+                ),
+        ) {
+            content()
+        }
     }
 }
 

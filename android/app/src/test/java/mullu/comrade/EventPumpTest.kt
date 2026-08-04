@@ -1,5 +1,6 @@
 package mullu.comrade
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -73,5 +74,50 @@ class EventPumpTest {
         holders.acquire(PumpHolder.FOREGROUND)
         holders.release(PumpHolder.FOREGROUND)
         assertTrue("coming back to the app must start it again", holders.acquire(PumpHolder.FOREGROUND))
+    }
+
+    // ── The loop must be restartable independently of the holder set ──────────
+
+    @Test
+    fun `a dead loop is restarted even though its holder is not new`() {
+        // The regression. `acquire` used to return early whenever the holder set
+        // did not change, which is exactly the state a returning Activity is in
+        // when the loop died under it — so delivery stayed dead for the life of
+        // the process.
+        val holders = PumpHolders()
+        holders.acquire(PumpHolder.FOREGROUND)
+        assertTrue(
+            "a holder that is already registered must still revive a dead loop",
+            shouldStartLoop(held = holders.isHeld(), loopAlive = false),
+        )
+    }
+
+    @Test
+    fun `a live loop is never started twice and an unheld one is never started at all`() {
+        assertFalse("one queue, one consumer", shouldStartLoop(held = true, loopAlive = true))
+        assertFalse("nobody needs it", shouldStartLoop(held = false, loopAlive = false))
+        assertFalse(shouldStartLoop(held = false, loopAlive = true))
+    }
+
+    // ── Failure backoff ──────────────────────────────────────────────────────
+
+    @Test
+    fun `a healthy queue drains with no added delay`() {
+        assertEquals(0L, failureBackoffMs(0))
+        assertEquals("a negative streak is nonsense, not a delay", 0L, failureBackoffMs(-1))
+    }
+
+    @Test
+    fun `repeated failures back off, bounded`() {
+        assertEquals(100L, failureBackoffMs(1))
+        assertEquals(200L, failureBackoffMs(2))
+        assertEquals(400L, failureBackoffMs(3))
+        // A systemic failure must not spin a core, and must not overflow into a
+        // negative delay however long the streak runs.
+        assertEquals(MAX_FAILURE_BACKOFF_MS, failureBackoffMs(30))
+        assertEquals(MAX_FAILURE_BACKOFF_MS, failureBackoffMs(Int.MAX_VALUE))
+        for (n in 1..64) {
+            assertTrue("backoff must stay a sane delay at n=$n", failureBackoffMs(n) in 0..MAX_FAILURE_BACKOFF_MS)
+        }
     }
 }

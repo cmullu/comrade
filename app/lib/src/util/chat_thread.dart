@@ -82,6 +82,32 @@ int? firstUnreadIndex({
 bool startsUnread(int index, int? firstUnread) =>
     firstUnread != null && index == firstUnread;
 
+/// Where the message with event id [targetId] sits in the rendered thread, or
+/// `null` if it is not in it.
+///
+/// This is what tapping a reply's quote scrolls to. `null` is the common case,
+/// not an edge case: a quote renders from whatever history is cached, and
+/// replying to something older than the loaded window leaves a perfectly good
+/// quote pointing at an item that is not on screen to scroll to. The caller must
+/// treat that as "no destination" and leave the thread where it is — scrolling
+/// somewhere arbitrary would be worse than not moving.
+///
+/// [eventIds] must be the same time-ordered merge the thread renders, so the
+/// returned index addresses the list the caller is about to scroll.
+int? indexOfEventId(List<String> eventIds, String? targetId) {
+  if (targetId == null || targetId.isEmpty) return null;
+  final int index = eventIds.indexOf(targetId);
+  return index >= 0 ? index : null;
+}
+
+/// How long the jumped-to message stays highlighted.
+///
+/// A scroll on its own does not say *which* message it landed on, and a reply
+/// usually quotes something surrounded by other messages — so the flash is what
+/// makes the jump legible rather than disorienting. Long enough to catch the eye
+/// after the scroll animation settles, short enough not to read as selection.
+const Duration quoteHighlightDuration = Duration(milliseconds: 1400);
+
 /// Pixel-space equivalent of [isNearBottom] for Flutter's scrollable, which
 /// reports offsets rather than item indices.
 ///

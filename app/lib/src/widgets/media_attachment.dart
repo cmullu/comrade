@@ -33,6 +33,7 @@ import '../state/providers.dart';
 import '../theme/comrade_theme.dart';
 import '../util/display_name.dart';
 import 'media_viewer.dart';
+import '../util/message_reactions.dart';
 import 'message_bubble.dart';
 
 /// Platform hooks the pure-Dart UI cannot provide by itself.
@@ -149,6 +150,9 @@ class MediaAttachmentBubble extends ConsumerWidget {
   const MediaAttachmentBubble(
     this.info, {
     this.onReply,
+    this.onLongPress,
+    this.chips = const <ReactionChip>[],
+    this.onToggleReaction,
     this.maxWidth = 280,
     super.key,
   });
@@ -158,6 +162,14 @@ class MediaAttachmentBubble extends ConsumerWidget {
   /// Start a reply aimed at this attachment. Null where the caller offers no
   /// reply (the couple panel, a preview) — see [ReplyAffordance].
   final VoidCallback? onReply;
+
+  /// Opens the reaction/action sheet — long press. Null where reacting is not
+  /// offered (the couple panel, a preview), same as [onReply].
+  final VoidCallback? onLongPress;
+
+  /// The reaction chips to draw beneath this attachment, already grouped.
+  final List<ReactionChip> chips;
+  final void Function(String emoji)? onToggleReaction;
 
   final double maxWidth;
 
@@ -205,7 +217,21 @@ class MediaAttachmentBubble extends ConsumerWidget {
         ],
       ),
     );
-    return ReplyAffordance(onReply: onReply, outgoing: out, child: bubble);
+    final void Function(String)? toggle = onToggleReaction;
+    return Column(
+      crossAxisAlignment:
+          out ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      children: <Widget>[
+        ReplyAffordance(
+          onReply: onReply,
+          onLongPress: onLongPress,
+          outgoing: out,
+          child: bubble,
+        ),
+        if (toggle != null)
+          ReactionChipRow(chips: chips, onToggle: toggle, outgoing: out),
+      ],
+    );
   }
 
   Widget _body(BuildContext context, WidgetRef ref) {

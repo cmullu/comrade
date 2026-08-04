@@ -748,6 +748,50 @@ object ComradeCore {
     fun media(peer: String): List<MediaMessageInfo> =
         rethrowing("Media history") { ffi.mediaWith(peer).map { it.toInfo() } }
 
+    /** One person's emoji reaction to one message — see [reactions]. */
+    data class ReactionInfo(
+        /** Event id of the message reacted to. A text message or an attachment. */
+        val targetId: String,
+        val peer: String,
+        val reactor: String,
+        val emoji: String,
+        val createdAt: Long,
+        /** Whether *this device* sent it — mirrors [MessageInfo.outgoing]. */
+        val outgoing: Boolean,
+    )
+
+    private fun uniffi.comrade_ui.ReactionDto.toInfo() = ReactionInfo(
+        targetId = targetId,
+        peer = peer,
+        reactor = reactor,
+        emoji = emoji,
+        createdAt = createdAt.toLong(),
+        outgoing = outgoing,
+    )
+
+    /**
+     * Every reaction in [peer]'s conversation, oldest first, from the encrypted
+     * store — so a thread opens with its reactions already drawn rather than
+     * waiting for a live event.
+     */
+    fun reactions(peer: String): List<ReactionInfo> =
+        rethrowing("Reactions") { ffi.reactions(peer).map { it.toInfo() } }
+
+    /**
+     * React to a message, or take an existing reaction back by passing the same
+     * emoji again. Returns the reaction now standing, or `null` if the tap
+     * withdrew one.
+     *
+     * The toggle is decided in Rust, not here — see
+     * `ComradeRuntime::toggle_reaction`. That is deliberate: "tapping what you
+     * already sent removes it" needs the current reaction to decide, and a copy
+     * of that rule in each frontend is a copy that can disagree.
+     */
+    fun toggleReactionTyped(peer: String, targetId: String, emoji: String): ReactionInfo? =
+        rethrowing("React") {
+            runBlocking { ffi.toggleReaction(peer, targetId, emoji) }?.toInfo()
+        }
+
     /** Encrypt + send raw media bytes (no base64 round-trip — uniffi carries `ByteArray` natively). */
     fun sendMediaBytesTyped(
         target: String,

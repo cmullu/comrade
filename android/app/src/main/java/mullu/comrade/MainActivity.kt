@@ -230,6 +230,10 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         EventPump.acquire(this, PumpHolder.FOREGROUND)
+        // "The conversation is on screen" is only a reason to skip a
+        // notification while there *is* a screen — see
+        // NotificationPolicy.messageDecision.
+        ChatEventRouter.setAppVisible(true)
         // At most one request a day, and none at all with the preference off
         // (see UpdateChecker) — a sideloaded app otherwise has no way to tell
         // anyone that a fix shipped.
@@ -270,6 +274,9 @@ class MainActivity : ComponentActivity() {
         // Nothing visible any more: the service keeps the drain loop alive if
         // the user wants background delivery, and the pump stops it if not.
         EventPump.release(PumpHolder.FOREGROUND)
+        // Nothing is on screen, so nothing counts as already-read: a message
+        // from the thread that was open must notify again from here.
+        ChatEventRouter.setAppVisible(false)
         // …and the comrades are told, because "online" means the app is open.
         // Delivery continues (that is the service's job); what stops is the
         // claim that anyone is at the phone. A PiP video call does not reach

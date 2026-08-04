@@ -10,6 +10,7 @@ import 'dart:typed_data';
 import 'package:comrade/src/data/comrade_repository.dart';
 import 'package:comrade/src/data/fake_comrade_repository.dart';
 import 'package:comrade/src/data/models.dart';
+import 'package:comrade/src/util/message_reactions.dart';
 import 'package:comrade/src/widgets/media_attachment.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -248,8 +249,11 @@ void main() {
   });
 
   group('replying to an attachment', () {
-    testWidgets('a long press aims the composer at it',
+    testWidgets('a rightward swipe aims the composer at it',
         (WidgetTester tester) async {
+      // Reply is the swipe now, not the long press — the long press belongs to
+      // reactions. "Reply to that photo" still behaves exactly like "reply to
+      // that message", which is the property this test is really about.
       var replies = 0;
       await pumpDecoded(
         tester,
@@ -257,16 +261,43 @@ void main() {
         repo: _ImageRepo(),
       );
 
-      await tester.longPress(find.byKey(const Key('media-open-fullscreen')));
+      // `kDragSlopDefault` on top of the threshold: `tester.drag` spends the
+      // first slop-worth of movement getting the recognizer to claim the gesture,
+      // and only the remainder is reported as drag deltas.
+      await tester.drag(
+        find.byKey(const Key('media-open-fullscreen')),
+        const Offset(replySwipeTriggerDp + kDragSlopDefault + 8, 0),
+      );
       await tester.pumpAndSettle();
 
       expect(replies, 1);
     });
 
-    testWidgets('a bubble with no reply handler has no long-press to miss',
+    testWidgets('a long press on an attachment opens the reaction sheet',
         (WidgetTester tester) async {
-      // The "no fake affordances" rule: a caller that offers no reply must not
-      // leave a gesture that swallows the press and does nothing.
+      var replies = 0;
+      var pressed = 0;
+      await pumpDecoded(
+        tester,
+        MediaAttachmentBubble(
+          _media('image/png'),
+          onReply: () => replies++,
+          onLongPress: () => pressed++,
+        ),
+        repo: _ImageRepo(),
+      );
+
+      await tester.longPress(find.byKey(const Key('media-open-fullscreen')));
+      await tester.pumpAndSettle();
+
+      expect(pressed, 1);
+      expect(replies, 0, reason: 'the two gestures must not overlap');
+    });
+
+    testWidgets('a bubble with no handlers has no gesture to miss',
+        (WidgetTester tester) async {
+      // The "no fake affordances" rule: a caller that offers neither reply nor
+      // react must not leave gestures that swallow the input and do nothing.
       await pumpDecoded(
         tester,
         MediaAttachmentBubble(_media('image/png')),
@@ -280,6 +311,10 @@ void main() {
       ));
       expect(
         detectors.where((GestureDetector g) => g.onLongPress != null),
+        isEmpty,
+      );
+      expect(
+        detectors.where((GestureDetector g) => g.onHorizontalDragEnd != null),
         isEmpty,
       );
     });

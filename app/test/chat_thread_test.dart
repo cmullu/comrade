@@ -199,4 +199,34 @@ void main() {
       expect(startsUnread(0, null), isFalse);
     });
   });
+
+  // Mirrors `ChatThreadTest.kt`'s "tapping a quote" block, case for case.
+  group('tapping a quote to reach the original', () {
+    test('finds the message it points at', () {
+      const List<String> ids = <String>['a', 'b', 'c'];
+      expect(indexOfEventId(ids, 'a'), 0);
+      expect(indexOfEventId(ids, 'c'), 2);
+    });
+
+    // The case that decides the feature's behaviour: a reply to something older
+    // than the loaded window quotes fine but has nowhere to scroll to. The
+    // caller must leave the thread where it is rather than land somewhere
+    // arbitrary.
+    test('an original outside the loaded thread has no destination', () {
+      expect(indexOfEventId(<String>['a', 'b'], 'older'), isNull);
+      expect(indexOfEventId(<String>[], 'a'), isNull);
+    });
+
+    test('a message that is not a reply has nothing to go to', () {
+      expect(indexOfEventId(<String>['a', 'b'], null), isNull);
+      // A blank id is the bridge's "absent", and must not match a blank entry.
+      expect(indexOfEventId(<String>['a', ''], ''), isNull);
+    });
+
+    test('the first match wins', () {
+      // Duplicate ids should not happen — the thread is deduped upstream — but
+      // if one ever slips through, the earlier item is the one quoted.
+      expect(indexOfEventId(<String>['a', 'dup', 'dup'], 'dup'), 1);
+    });
+  });
 }

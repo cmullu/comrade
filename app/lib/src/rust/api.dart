@@ -126,6 +126,27 @@ Future<MessageDto> sendDmReply(
     RustLib.instance.api.crateApiSendDmReply(
         target: target, content: content, replyTo: replyTo);
 
+/// React to a message in `peer`'s thread — or take an existing reaction back by
+/// passing the same emoji again. Returns the reaction now standing, or `None` if
+/// the tap withdrew one.
+///
+/// The toggle is decided on the Rust side (see `ComradeRuntime::toggle_reaction`)
+/// so this frontend and Android cannot disagree about what tapping an
+/// already-sent emoji means.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<ReactionDto?> toggleReaction(
+        {required String peer,
+        required String targetId,
+        required String emoji}) =>
+    RustLib.instance.api
+        .crateApiToggleReaction(peer: peer, targetId: targetId, emoji: emoji);
+
+/// Every reaction in `peer`'s conversation, oldest first, read from the encrypted
+/// store — so a thread opens with its reactions already drawn.
+Future<List<ReactionDto>> reactions({required String peer}) =>
+    RustLib.instance.api.crateApiReactions(peer: peer);
+
 /// Retry every DM sitting in the sender outbox because no relay would take it.
 /// Returns how many a relay accepted this pass.
 ///
@@ -508,6 +529,9 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.incomingMedia(
     MediaMessageDto field0,
   ) = BridgeEvent_IncomingMedia;
+  const factory BridgeEvent.incomingReaction(
+    ReactionDto field0,
+  ) = BridgeEvent_IncomingReaction;
   const factory BridgeEvent.incomingCallSignal(
     CallSignalDto field0,
   ) = BridgeEvent_IncomingCallSignal;
@@ -1273,6 +1297,45 @@ class ProfileDto {
           runtimeType == other.runtimeType &&
           npub == other.npub &&
           username == other.username;
+}
+
+class ReactionDto {
+  final String targetId;
+  final String peer;
+  final String reactor;
+  final String emoji;
+  final BigInt createdAt;
+  final bool outgoing;
+
+  const ReactionDto({
+    required this.targetId,
+    required this.peer,
+    required this.reactor,
+    required this.emoji,
+    required this.createdAt,
+    required this.outgoing,
+  });
+
+  @override
+  int get hashCode =>
+      targetId.hashCode ^
+      peer.hashCode ^
+      reactor.hashCode ^
+      emoji.hashCode ^
+      createdAt.hashCode ^
+      outgoing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReactionDto &&
+          runtimeType == other.runtimeType &&
+          targetId == other.targetId &&
+          peer == other.peer &&
+          reactor == other.reactor &&
+          emoji == other.emoji &&
+          createdAt == other.createdAt &&
+          outgoing == other.outgoing;
 }
 
 class Recording {

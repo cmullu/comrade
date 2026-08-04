@@ -879,6 +879,40 @@ code {
   text-overflow: ellipsis;
 }
 
+/* A quote whose original is in the thread: tapping it goes there. Rendered as a
+   <button>, so the inherited control styling has to be undone back to the plain
+   quote above — everything here is a reset except the cursor and the hover. */
+.bubble-quote-link {
+  display: block;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border: none;
+  border-left: 2px solid currentColor;
+}
+
+.bubble-quote-link:hover,
+.bubble-quote-link:focus-visible {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+/* The flash on arriving at a jumped-to message. Transitions on the way out so it
+   fades rather than snapping off; `prefers-reduced-motion` drops the fade but
+   keeps the highlight, because the highlight is the information. */
+.bubble.bubble-jumped {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  transition: background 220ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble.bubble-jumped {
+    transition: none;
+  }
+}
+
 /* Hover-revealed "reply" affordance hugging the outer edge of a bubble. */
 .bubble-reply {
   position: absolute;

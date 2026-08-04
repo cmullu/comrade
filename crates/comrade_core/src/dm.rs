@@ -11,9 +11,12 @@
  *    you let them in.
  *  • [`Receipt`] — a **delivered / read** acknowledgement referencing the ids of
  *    the messages it covers, so the sender's UI can show ticks.
+ *  • [`ReactionEnvelope`] — an **emoji reaction** to one earlier message. Sent
+ *    this way rather than as a public NIP-25 Kind-7 event, which would announce
+ *    to every relay that two keys are talking; see its own doc comment.
  *
  * Each envelope carries a distinct required marker field (`comrade_profile`,
- * `comrade_receipt`), so its `parse_*` function accepts only its own shape and
+ * `comrade_receipt`, `comrade_reaction`), so its `parse_*` function accepts only its own shape and
  * returns `None` for chat text, media/call/presence envelopes, or any other
  * JSON. That lets the runtime try each handler in turn and fall through to a
  * plain DM. The same pattern is used by [`crate::call::CallEnvelope`]
@@ -114,6 +117,88 @@ pub fn parse_receipt(content: &str) -> Option<Receipt> {
     (env.comrade_receipt == CONTROL_ENVELOPE_MARKER).then_some(env)
 }
 
+// ── Emoji reactions ───────────────────────────────────────────────────────────
+
+/// Longest reaction body accepted, in bytes.
+///
+/// A reaction is one grapheme in intent, but a legitimate one is not one byte:
+/// a family emoji with skin-tone modifiers and zero-width joiners runs past 30.
+/// 64 leaves generous room for that while keeping the field from being a place
+/// to put a paragraph — this string is attacker-controlled, arrives from anyone
+/// with an accepted conversation, and gets rendered in a chip under a message
+/// bubble. Over-long bodies are rejected at the parser rather than truncated:
+/// truncating a ZWJ sequence yields a *different* emoji, and silently showing
+/// someone a reaction they did not send is worse than showing none.
+pub const MAX_REACTION_BYTES: usize = 64;
+
+/// A reaction to one earlier message, riding the same sealed DM channel as the
+/// message itself.
+///
+/// Deliberately **not** a public NIP-25 Kind-7 event. A kind-7 reaction is
+/// published in the clear and tags both the event reacted to and its author, so
+/// reacting to a gift-wrapped DM would announce to every relay that these two
+/// keys are talking — exactly the metadata NIP-17 sealing exists to withhold.
+/// Sent as a control envelope inside an ordinary sealed DM, a reaction inherits
+/// the whole existing path: NIP-44 encryption, gift-wrap, mesh transport when
+/// there is no relay, and the outbox retry.
+///
+/// One reaction per person per message, replacing rather than accumulating —
+/// Telegram's model, and the one that makes the store key `(target, reactor)`.
+/// An empty [`Self::emoji`] is the retraction: "I take mine back".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionEnvelope {
+    /// Format marker; must equal [`CONTROL_ENVELOPE_MARKER`].
+    pub comrade_reaction: u8,
+    /// Nostr event id (hex) of the message being reacted to. Any event id will
+    /// do — a text message or an attachment — for the same reason a reply tag
+    /// does not care which: both are ordinary events.
+    pub target_id: String,
+    /// The emoji, or empty to withdraw a previous reaction.
+    pub emoji: String,
+}
+
+impl ReactionEnvelope {
+    pub fn new(target_id: impl Into<String>, emoji: impl Into<String>) -> Self {
+        Self {
+            comrade_reaction: CONTROL_ENVELOPE_MARKER,
+            target_id: target_id.into(),
+            emoji: emoji.into(),
+        }
+    }
+
+    /// The retraction form: same target, no emoji.
+    pub fn clearing(target_id: impl Into<String>) -> Self {
+        Self::new(target_id, "")
+    }
+
+    /// Whether this withdraws a reaction rather than adding one.
+    pub fn is_clearing(&self) -> bool {
+        self.emoji.is_empty()
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+/// Detect and parse a reaction envelope out of a decrypted DM body.
+///
+/// Rejects an empty `target_id` (a reaction to nothing is not renderable) and an
+/// over-long `emoji` (see [`MAX_REACTION_BYTES`]). Both are returned as `None`
+/// rather than an error, because the caller's next move either way is to fall
+/// through to the other envelope parsers — a malformed reaction must never
+/// surface as a chat bubble full of JSON.
+pub fn parse_reaction(content: &str) -> Option<ReactionEnvelope> {
+    let env: ReactionEnvelope = serde_json::from_str(content).ok()?;
+    if env.comrade_reaction != CONTROL_ENVELOPE_MARKER {
+        return None;
+    }
+    if env.target_id.is_empty() || env.emoji.len() > MAX_REACTION_BYTES {
+        return None;
+    }
+    Some(env)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -145,21 +230,80 @@ mod tests {
     }
 
     #[test]
+    fn reaction_round_trips_and_clears() {
+        let env = ReactionEnvelope::new("abc123", "🔥");
+        let json = env.to_json().unwrap();
+        let back = parse_reaction(&json).unwrap();
+        assert_eq!(back, env);
+        assert_eq!(back.emoji, "🔥");
+        assert!(!back.is_clearing());
+
+        // The retraction is the same envelope with nothing in it, so a peer
+        // needs no second message type to take a reaction back.
+        let cleared = ReactionEnvelope::clearing("abc123");
+        let back = parse_reaction(&cleared.to_json().unwrap()).unwrap();
+        assert!(back.is_clearing());
+        assert_eq!(back.target_id, "abc123");
+    }
+
+    #[test]
+    fn reaction_survives_a_multi_codepoint_emoji() {
+        // A skin-toned, zero-width-joined family is one reaction to a human and
+        // 25 bytes to a parser. The byte cap must not be so tight that ordinary
+        // emoji fail to arrive.
+        let family = "👨‍👩‍👧‍👦";
+        let thumb = "👍🏽";
+        for e in [family, thumb] {
+            let back = parse_reaction(&ReactionEnvelope::new("t", e).to_json().unwrap()).unwrap();
+            assert_eq!(back.emoji, e, "{e} must round-trip intact");
+            assert!(!back.is_clearing());
+        }
+    }
+
+    #[test]
+    fn an_oversized_or_targetless_reaction_is_refused() {
+        // The emoji field is attacker-controlled and ends up rendered in a chip
+        // under a bubble. Rejected, not truncated: cutting a ZWJ sequence short
+        // produces a *different* emoji, and showing someone a reaction they did
+        // not send is worse than showing none.
+        let huge = ReactionEnvelope::new("t", "🔥".repeat(MAX_REACTION_BYTES))
+            .to_json()
+            .unwrap();
+        assert!(parse_reaction(&huge).is_none());
+        // A reaction to nothing cannot be drawn anywhere.
+        let orphan = ReactionEnvelope::new("", "🔥").to_json().unwrap();
+        assert!(parse_reaction(&orphan).is_none());
+        // The boundary itself is allowed.
+        let exact = ReactionEnvelope::new("t", "a".repeat(MAX_REACTION_BYTES))
+            .to_json()
+            .unwrap();
+        assert!(parse_reaction(&exact).is_some());
+    }
+
+    #[test]
     fn envelopes_are_mutually_exclusive_and_ignore_chat_text() {
         let profile = ProfileShare::new(Some("neo".into())).to_json().unwrap();
         let receipt = Receipt::new(ReceiptKind::Read, vec!["m1".into()])
             .to_json()
             .unwrap();
+        let reaction = ReactionEnvelope::new("m1", "🔥").to_json().unwrap();
 
         // Each parser accepts only its own shape.
         assert!(parse_profile_share(&profile).is_some());
         assert!(parse_receipt(&profile).is_none());
         assert!(parse_receipt(&receipt).is_some());
         assert!(parse_profile_share(&receipt).is_none());
+        assert!(parse_reaction(&reaction).is_some());
+        assert!(parse_reaction(&receipt).is_none());
+        assert!(parse_reaction(&profile).is_none());
+        assert!(parse_receipt(&reaction).is_none());
+        assert!(parse_profile_share(&reaction).is_none());
 
         // Neither is fooled by chat text, a call envelope, or a media envelope.
         assert!(parse_profile_share("just saying hi").is_none());
         assert!(parse_receipt("just saying hi").is_none());
+        assert!(parse_reaction("just saying hi").is_none());
+        assert!(parse_reaction("🔥").is_none());
         let call =
             r#"{"comrade_call":1,"call_id":"c","media":"audio","signal":{"kind":"ringing"}}"#;
         assert!(parse_profile_share(call).is_none());
@@ -179,5 +323,6 @@ mod tests {
         assert!(
             parse_receipt(r#"{"comrade_receipt":0,"status":"read","message_ids":[]}"#).is_none()
         );
+        assert!(parse_reaction(r#"{"comrade_reaction":2,"target_id":"t","emoji":"🔥"}"#).is_none());
     }
 }
