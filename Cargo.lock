@@ -732,6 +732,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "libp2p",
+ "nostr",
  "nostr-sdk",
  "rand 0.8.6",
  "regex",

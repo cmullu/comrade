@@ -495,7 +495,12 @@ pub fn extract_fingerprint(sdp: &str) -> Option<String> {
 /// platform (as some ZWJ/skin-tone emoji do) would defeat the whole point.
 /// `emoji_alphabet_entries_are_single_codepoint_and_unique` (below) checks
 /// this assumption rather than just asserting it.
-const EMOJI_ALPHABET: &[&str] = &[
+/// Shared with [`crate::link::pairing_fingerprint`] on purpose: a user who has
+/// learned to compare four animals on a call should not have to learn a second
+/// alphabet to link a browser. `pub(crate)` rather than `pub` because the
+/// alphabet is an implementation detail of both fingerprints — callers get the
+/// emoji, not the table.
+pub(crate) const EMOJI_ALPHABET: &[&str] = &[
     "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🐔",
     "🐧", "🐦", "🐤", "🦆", "🦉", "🐴", "🐗", "🐺", "🐢", "🐍", "🐙", "🦋", "🐝", "🐞", "🐬", "🐳",
 ];
