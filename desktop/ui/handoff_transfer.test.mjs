@@ -327,6 +327,25 @@ test("sending is capped by the same ceiling as receiving, and says why", () => {
   assert.equal(attachmentSendPlan({ bytes: MAX_HANDOFF_BYTES, route: "peer_to_peer" }).road, "peer_to_peer");
 });
 
+test("a surface with nowhere to show a transfer does not offer one", () => {
+  // The couple panel has no card and no progress line. Refusing there and saying
+  // where it *can* be done is the same rule as hiding Accept on an offer this
+  // window cannot take: no button that reports to nothing.
+  const plan = attachmentSendPlan({
+    bytes: 40 * 1024 * 1024,
+    route: "peer_to_peer",
+    surfaceSupportsHandoff: false,
+  });
+  assert.equal(plan.road, null);
+  assert.match(plan.refusal, /open the conversation/);
+  // The hosted road works everywhere, so it is untouched by this.
+  assert.equal(
+    attachmentSendPlan({ bytes: 4 * 1024 * 1024, route: "hosted", surfaceSupportsHandoff: false })
+      .road,
+    "hosted",
+  );
+});
+
 test("the preview names the road, and what each road costs", () => {
   const hosted = previewRouteLine("hosted", 3 * 1024 * 1024);
   assert.match(hosted, /^3 MB · /);

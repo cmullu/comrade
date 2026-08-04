@@ -322,11 +322,29 @@ export function offerCardPlan(attachment, { ceiling = MAX_HANDOFF_BYTES } = {}) 
  * this window has no disk (see MAX_HANDOFF_BYTES) and which must therefore never
  * migrate into the mirrored rule, where it would wrongly cap Android too.
  */
-export function attachmentSendPlan({ bytes, route, name = "", ceiling = MAX_HANDOFF_BYTES }) {
+export function attachmentSendPlan({
+  bytes,
+  route,
+  name = "",
+  ceiling = MAX_HANDOFF_BYTES,
+  surfaceSupportsHandoff = true,
+}) {
   const n = Number(bytes) || 0;
   if (route === "peer_to_peer") {
     const shared = peerToPeerAttachmentRejection(name, n);
     if (shared) return { road: null, refusal: shared };
+    // The partner panel has no transfer card and no progress, so offering the
+    // road there would be a button with nowhere to report to — the same "no fake
+    // affordances" rule that hides Accept on an offer this window cannot take.
+    if (!surfaceSupportsHandoff) {
+      return {
+        road: null,
+        refusal:
+          `${formatAttachmentSize(n)} is too big to host, so it has to go straight to ` +
+          `their device — open the conversation to send it, where the transfer can ` +
+          `show you how it is going.`,
+      };
+    }
     if (n > ceiling) {
       return {
         road: null,

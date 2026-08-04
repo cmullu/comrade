@@ -2950,7 +2950,14 @@
   // `composer` is the input whose text seeds that caption — the DM box in the
   // conversation, and nothing at all in the couple panel, which has no composer
   // of its own and must not reach across screens for the DM one's draft.
-  async function handleAttach(file, targetPubkey, { composer = null } = {}) {
+  // `surfaceSupportsHandoff` is false for the couple panel: it has no transfer
+  // card and no progress line, so a large send there would be a button with
+  // nowhere to report to.
+  async function handleAttach(
+    file,
+    targetPubkey,
+    { composer = null, surfaceSupportsHandoff = false } = {},
+  ) {
     if (!file) return;
     if (!targetPubkey) {
       showToast("No recipient selected", "warn");
@@ -2976,7 +2983,12 @@
     // Each road's refusal comes from the mirrored rule for that road — the shared
     // 10 MB cap still governs the hosted one and only it, since over the cap the
     // question stops being "may this be sent" and becomes "which way".
-    const plan = attachmentSendPlan({ bytes: file.size, route, name: file.name });
+    const plan = attachmentSendPlan({
+      bytes: file.size,
+      route,
+      name: file.name,
+      surfaceSupportsHandoff,
+    });
     if (plan.refusal) {
       showToast(plan.refusal, "warn");
       return;
@@ -4981,7 +4993,10 @@
     $("#dm-attach").addEventListener("click", () => $("#dm-file").click());
     $("#dm-file").addEventListener("change", (e) => {
       const file = e.target.files && e.target.files[0];
-      handleAttach(file, state.activeContact, { composer: $("#dm-input") });
+      handleAttach(file, state.activeContact, {
+        composer: $("#dm-input"),
+        surfaceSupportsHandoff: true,
+      });
       e.target.value = "";
     });
     $("#couple-attach").addEventListener("click", () => $("#couple-file").click());
