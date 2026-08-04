@@ -262,11 +262,14 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
 
 **Not built**, and stated here rather than discovered:
 
-- **A dedicated task list.** Tasks appear as chat lines in the thread they were
-  named in, and `ComradeCore.tasks()` / the `tasks` Tauri command are live, but
-  neither frontend has a list screen. A **note to self therefore has no surface
-  at all** — it is stored and reachable over FFI and nothing renders it. This is
-  the largest gap and the next thing to build.
+- ~~**A dedicated task list.**~~ **Built 2026-08-04.** Android reaches it from
+  the drawer (`ChatNav.Tasks` → `TaskListScreen`), desktop has a fourth tab. The
+  decisions are `android/…/ui/TaskList.kt` and `desktop/ui/task_list.mjs`, tested
+  on both sides against the same vectors, and the rule they exist to hold is that
+  **the buttons a row offers mirror `karya::may_transition`** — a control core
+  would refuse with "that is not yours to change" is never drawn. A note to self
+  now has a surface, so the composer's "Added to your list." is no longer a claim
+  about a list nobody could open.
 - **`/play` does not open a session yet.** The command parses, `play_query`
   resolves links and free text, and Android's `TogetherManager` /
   `LibraryResolver` already exist — the two are not joined up, so the composer
@@ -299,3 +302,5 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
 | `comrade_jni` (uniffi), `desktop/src-tauri` | The same calls. **No `api.rs` change**, so no bridge regeneration. |
 | `desktop/ui/chat_commands.mjs` | What the composer does with a parsed command, the `/` picker, and the honest "not here yet" sentences. 28 `node --test` cases. |
 | `android/…/ui/ChatCommands.kt` | The same decisions, mirroring the desktop vectors case for case. 22 JVM cases; Compose-free. **Never compiled here** — no Android SDK in the container that wrote it. |
+| `desktop/ui/task_list.mjs` · `android/…/ui/TaskList.kt` | Grouping, which buttons a row offers, the subtitle, the empty copy. Mirrored vectors — 15 `node --test` cases, 11 JVM. Note the field names differ on purpose: Tauri sends serde snake_case, uniffi generates camelCase properties — and so is the state a button sends: `wireState()` is lowercase because `TaskState` is `rename_all = "snake_case"`, while Android passes the uniffi enum and has no string to get wrong. |
+| `desktop/ui/main.js` (Tasks tab) · `android/…/ui/TaskListScreen.kt` | The rendering, and nothing else — every decision above it. |

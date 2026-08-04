@@ -77,6 +77,10 @@
             <span class="tab-icon" aria-hidden="true">⏳</span>
             <span class="tab-text">Focus <span class="tab-sub">Sessions · Long read</span></span>
           </button>
+          <button class="tab" data-tab="tasks" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">🗒</span>
+            <span class="tab-text">Tasks <span class="tab-sub">Yours · asked of you</span></span>
+          </button>
         </nav>
 
         <div class="sidebar-section" aria-label="Modes">
@@ -249,6 +253,13 @@
              no usage mirror here on purpose; it is fed by Android's usage
              stats and the store is per-device, so a desktop panel could only
              ever read zero. -->
+        <!-- Everything `/task` has produced. The rows and their buttons come
+             from `task_list.mjs`, which mirrors `karya::may_transition` so a
+             button core would refuse is never drawn. -->
+        <section id="view-tasks" class="view view-tasks" role="tabpanel" hidden>
+          <div id="task-list" class="task-list"></div>
+        </section>
+
         <section id="view-focus" class="view view-focus" role="tabpanel" hidden>
           <div class="focus-col">
             <div class="composer focus-card">

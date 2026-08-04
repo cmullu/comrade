@@ -832,8 +832,15 @@ fun ConversationScreen(
                         }
                     }
                         .onSuccess {
-                            commandNote =
-                                if (plan.peer != null) "Asked them." else "Added to your list."
+                            // Names where the list is: this screen owns no nav
+                            // state, so it cannot open Tasks itself, and a
+                            // confirmation about a list you cannot find is the
+                            // gap this screen used to have.
+                            commandNote = if (plan.peer != null) {
+                                "Asked them — it's under Tasks in the menu."
+                            } else {
+                                "Added to your list — it's under Tasks in the menu."
+                            }
                             clearDraft()
                             sending = false
                         }

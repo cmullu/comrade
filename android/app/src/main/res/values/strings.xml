@@ -359,6 +359,11 @@
     <string name="reader_clear">Close this read</string>
     <string name="reader_title_label">Title (optional)</string>
 
+    <!-- Tasks: what `/task` produces. The empty-state and row copy lives in
+         `ui/TaskList.kt` beside the decisions it belongs to and is covered by
+         `TaskListTest`; only the screen's own title is here. -->
+    <string name="tasks_title">Tasks</string>
+
     <!-- Attention: breathing (phase 2) -->
     <!-- In-chat commands (grammar in `comrade_core::command`). The *offer* copy a
          comrade receives is rendered in Rust (`AppAction::offer_line`), not here:

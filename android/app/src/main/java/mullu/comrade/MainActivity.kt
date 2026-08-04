@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
@@ -447,6 +448,7 @@ private sealed interface ChatNav {
     data object Requests : ChatNav
     data object CallHistory : ChatNav
     data object Comrades : ChatNav
+    data object Tasks : ChatNav
     data class Open(
         val peer: String,
         /** User-chosen alias for the peer, when one exists. */
@@ -724,6 +726,11 @@ private fun MainShell(
                             tab = MainTab.Chats
                             chatNav = ChatNav.Comrades
                         },
+                        onOpenTasks = {
+                            scope.launch { drawerState.close() }
+                            tab = MainTab.Chats
+                            chatNav = ChatNav.Tasks
+                        },
                     )
                 },
             ) {
@@ -935,6 +942,14 @@ private fun MainShell(
                                 },
                                 title = { Text(stringResource(R.string.comrades_title)) },
                             )
+                            tab == MainTab.Chats && chatNav == ChatNav.Tasks -> TopAppBar(
+                                navigationIcon = {
+                                    IconButton(onClick = { chatNav = ChatNav.List }) {
+                                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                                    }
+                                },
+                                title = { Text(stringResource(R.string.tasks_title)) },
+                            )
                             tab == MainTab.Chats && chatNav == ChatNav.List -> CenterAlignedTopAppBar(
                                 navigationIcon = {
                                     IconButton(
@@ -1047,6 +1062,7 @@ private fun MainShell(
                                 },
                                 modifier = content,
                             )
+                            ChatNav.Tasks -> TaskListScreen(modifier = content)
                             ChatNav.CallHistory -> CallHistoryScreen(
                                 onCallBack = { peer, peerLabel, video ->
                                     withCallPermissions(video) {
@@ -1331,6 +1347,7 @@ private fun ComradeDrawerSheet(
     onOpenSettings: () -> Unit,
     onOpenCallHistory: () -> Unit,
     onOpenComrades: () -> Unit,
+    onOpenTasks: () -> Unit,
 ) {
     ModalDrawerSheet {
         Row(
@@ -1363,6 +1380,13 @@ private fun ComradeDrawerSheet(
             selected = false,
             onClick = onOpenComrades,
             modifier = Modifier.testTag("drawer-comrades"),
+        )
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.tasks_title)) },
+            icon = { Icon(Icons.Filled.CheckCircle, contentDescription = null) },
+            selected = false,
+            onClick = onOpenTasks,
+            modifier = Modifier.testTag("drawer-tasks"),
         )
         NavigationDrawerItem(
             label = { Text(stringResource(R.string.call_history_title)) },

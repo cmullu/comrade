@@ -139,6 +139,16 @@
   /** Command specs from core, fetched once after unlock for the `/` picker. */
   let commandCatalog = [];
 
+  // ── Task list decisions (desktop/ui/task_list.mjs) ─────────────────────────
+  // Grouping, which buttons a row offers (mirroring `karya::may_transition`),
+  // the subtitle and the empty-state copy. Loaded like the modules above.
+  let taskList = null;
+  import("./task_list.mjs")
+    .then((m) => {
+      taskList = m;
+    })
+    .catch(() => {});
+
   // ── Tiny DOM helpers ──────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
 
@@ -831,6 +841,74 @@
   }
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
+  /**
+   * Draw the task list.
+   *
+   * Which buttons a row gets is `task_list.mjs`'s call, not this function's —
+   * it mirrors `karya::may_transition`, so a control core would refuse with
+   * "that is not yours to change" is never rendered.
+   */
+  async function loadTasks() {
+    const host = $("#task-list");
+    if (!host || !taskList) return;
+    const tasks = await safeInvoke("tasks", {}, { silent: true });
+    host.innerHTML = "";
+    if (!tasks) return;
+    if (!tasks.length) {
+      host.append(el("p", { class: "muted task-empty", text: taskList.emptyCopy() }));
+      return;
+    }
+    // Names, not keys — `displayName` is the same published-handle-then-short-key
+    // helper the chat list and every other surface here already uses.
+    const nameFor = displayName;
+    const { open, resolved } = taskList.groupTasks(tasks);
+    const section = (rows, heading) => {
+      if (!rows.length) return;
+      if (heading) host.append(el("h4", { class: "task-heading", text: heading }));
+      for (const t of rows) host.append(taskRow(t, nameFor));
+    };
+    section(open, null);
+    section(resolved, "Finished");
+  }
+
+  /** One task row: what it is, whose it is, and only the buttons core accepts. */
+  function taskRow(task, nameFor) {
+    const row = el("div", { class: task.state === "open" ? "task-row" : "task-row is-done" });
+    row.append(el("div", { class: "task-text", text: task.text }));
+    const badge = taskList.stateLabel(task.state);
+    row.append(
+      el("div", {
+        class: "task-sub muted",
+        text: taskList.subtitleFor(task, nameFor) + (badge ? ` · ${badge}` : ""),
+      }),
+    );
+    const actions = taskList.actionsFor(task);
+    if (actions.length) {
+      const bar = el("div", { class: "task-actions" });
+      for (const action of actions) {
+        bar.append(
+          el("button", {
+            class: "btn btn-small",
+            type: "button",
+            text: { done: "Done", decline: "Decline", withdraw: "Withdraw" }[action],
+            onclick: async () => {
+              // `wireState` and not a literal: the casing is a serde contract
+              // (`TaskState` is snake_case, so "Done" is rejected outright) and
+              // it belongs somewhere a test can hold it. Not named `state`
+              // either — that is the module-wide app state, and shadowing it
+              // here would be a trap for the next reader.
+              const next = taskList.wireState(action);
+              const moved = await safeInvoke("set_task_state", { id: task.id, taskState: next });
+              if (moved) loadTasks();
+            },
+          }),
+        );
+      }
+      row.append(bar);
+    }
+    return row;
+  }
+
   function switchTab(name) {
     for (const t of document.querySelectorAll(".tab")) {
       const on = t.dataset.tab === name;
@@ -840,6 +918,8 @@
     $("#view-sabha").hidden = name !== "sabha";
     $("#view-vault").hidden = name !== "vault";
     $("#view-focus").hidden = name !== "focus";
+    $("#view-tasks").hidden = name !== "tasks";
+    if (name === "tasks") loadTasks();
     // The countdown only has to tick while it is being looked at; a session
     // left running behind another tab is still authoritative in the engine,
     // which is where the remaining time comes from on the next paint.
@@ -5340,6 +5420,32 @@
     let ws = wsOf("Base");
     const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     const re = /\/pay\s+(\d+(?:\.\d{1,2})?)\s+to\s+([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)/gi;
+    // Two rows so the Tasks panel is previewable without a backend: one asked of
+    // you (Done/Decline) and one note to self (all three).
+    const mockTasks = [
+      {
+        id: "mock-1",
+        text: "get some work done (mock)",
+        assigner: "npub1stranger00000000000000000000000000000000000000000",
+        assignee: "npub1mockdev0identity00000000000000000000000000000000",
+        created_at: Math.floor(Date.now() / 1000) - 600,
+        updated_at: Math.floor(Date.now() / 1000) - 600,
+        state: "open",
+        assigned_by_me: false,
+        mine_to_do: true,
+      },
+      {
+        id: "mock-2",
+        text: "water the plants (mock)",
+        assigner: "npub1mockdev0identity00000000000000000000000000000000",
+        assignee: null,
+        created_at: Math.floor(Date.now() / 1000) - 1200,
+        updated_at: Math.floor(Date.now() / 1000) - 1200,
+        state: "open",
+        assigned_by_me: true,
+        mine_to_do: true,
+      },
+    ];
     const ICE_DEMO = [
       { urls: ["stun:stun.l.google.com:19302"], username: null, credential: null },
     ];
@@ -5457,7 +5563,21 @@
             candidates: [],
           }));
         case "tasks":
-          return [];
+          return mockTasks;
+        case "set_task_state": {
+          const t = mockTasks.find((x) => x.id === args.id);
+          // Deliberately not lowercased: `TaskState` is snake_case on the wire,
+          // so the real backend rejects "Done". A forgiving mock here would
+          // have let exactly that bug through to a build nobody can run.
+          // `STATES` is task_list.mjs's own list, so the mock cannot drift from
+          // the contract the panel is written against. Reachable only from that
+          // panel, which does not render until the module has loaded.
+          if (!taskList.STATES.includes(args.taskState)) {
+            throw new Error(`set_task_state: unknown state ${args.taskState}`);
+          }
+          if (t) t.state = args.taskState;
+          return t || null;
+        }
         case "assign_task":
           return {
             id: "mock-task",

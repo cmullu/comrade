@@ -49,6 +49,14 @@ So Dart and Android changes cannot be compiled or tested here — CI is the firs
 place they build. When you touch `app/` or `android/`, say so plainly rather
 than implying you verified it. Reason from the code and keep diffs tight.
 
+**`desktop/src-tauri` is a fourth blocked lane, and it fails in a way that looks
+like your bug.** `cargo clippy` there exits **101** before compiling a single
+crate, because the shell needs GTK/webview development headers and `gdk-3.0.pc`
+is absent (`pkg-config --exists gdk-3.0` fails). The error names `glib-sys` or
+`gdk-sys`, not your code. CI's `Desktop — Tauri shell clippy` job is the only
+place this lane has ever run, so treat `desktop/src-tauri` exactly like
+`android/` and `app/`: reason from the code, and never report it as checked.
+
 ## Lint bar
 
 Every lane gates at maximum strictness, deliberately and consistently:
