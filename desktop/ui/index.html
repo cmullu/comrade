@@ -185,6 +185,7 @@
               </div>
               <video id="together-player" class="together-player" controls playsinline hidden></video>
               <p id="together-share-status" class="hint sm"></p>
+              <div id="share-consent" class="share-consent" hidden></div>
               <p class="hint sm">
                 Positions travel over the relay, so you'll be within about a
                 second of each other — not frame-perfect. If you don't have the
@@ -508,6 +509,21 @@
           <span class="btn-label">Save</span>
           <span class="spinner" hidden></span>
         </button>
+
+        <hr class="modal-rule" />
+        <label class="field-label" for="share-policy">Sending files through a relay</label>
+        <p class="muted sm">
+          A call through a relay is a few tens of kilobits. A film is not — and
+          it's someone else's bandwidth and someone else's machine in the middle.
+          This is separate from the setting above: your calls keep their relay
+          either way.
+        </p>
+        <select id="share-policy" class="input">
+          <option value="direct_only">Never — only send files over a direct connection</option>
+          <option value="under_bytes">Small files only (up to 50 MB)</option>
+          <option value="ask_each_time">Ask me each time</option>
+          <option value="always">Always, without asking</option>
+        </select>
       </div>
     </div>
 

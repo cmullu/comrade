@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -155,6 +156,7 @@ fun SettingsScreen(
         QuietHoursSection()
         UpdatesSection()
         TurnRelaySection()
+        ShareRelaySection()
         VaultLockSection(onLock = onLock)
 
         VoiceSection()
@@ -356,6 +358,71 @@ private fun ScreenshotSection() {
                 },
                 modifier = Modifier.padding(start = 12.dp),
             )
+        }
+    }
+}
+
+// ── Sending files through a relay ────────────────────────────────────────────
+
+/** The 50 MB in the "small files only" option, as bytes. */
+private const val SHARE_SMALL_LIMIT_BYTES: ULong = 50uL * 1024uL * 1024uL
+
+/**
+ * What this device does when the only route to a peer is somebody else's relay.
+ *
+ * Separate from [TurnRelaySection] and deliberately so: a relayed *call* is a
+ * few tens of kilobits and entirely reasonable, while a relayed film is
+ * gigabytes through a machine that volunteered for neither. Turning this on
+ * never affects calls, and the copy says so.
+ *
+ * The list is read back from core after every write rather than kept here, so
+ * this screen cannot show a policy different from the one being enforced — and
+ * a write that failed (a locked vault) is visible instead of silent.
+ */
+@Composable
+private fun ShareRelaySection() {
+    var policy by remember { mutableStateOf(ComradeCore.shareRelayPolicy()) }
+    val options = listOf(
+        uniffi.comrade_core.RelayPolicy.DirectOnly to R.string.settings_share_relay_never,
+        uniffi.comrade_core.RelayPolicy.UnderBytes(SHARE_SMALL_LIMIT_BYTES) to
+            R.string.settings_share_relay_small,
+        uniffi.comrade_core.RelayPolicy.AskEachTime to R.string.settings_share_relay_ask,
+        uniffi.comrade_core.RelayPolicy.Always to R.string.settings_share_relay_always,
+    )
+
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                stringResource(R.string.settings_share_relay_title),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                stringResource(R.string.settings_share_relay_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+            )
+            options.forEach { (option, label) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(
+                        selected = policy == option,
+                        onClick = {
+                            ComradeCore.setShareRelayPolicy(option)
+                            // Read back rather than assume: what core reports is
+                            // what core enforces.
+                            policy = ComradeCore.shareRelayPolicy()
+                        },
+                    )
+                    Text(
+                        stringResource(label),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(start = 4.dp),
+                    )
+                }
+            }
         }
     }
 }

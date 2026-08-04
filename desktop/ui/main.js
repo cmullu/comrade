@@ -1375,7 +1375,43 @@
   // ── TURN relay (call settings) ─────────────────────────────────────────────
   function openTurnModal() {
     $("#modal-turn").hidden = false;
+    loadSharePolicy();
     $("#turn-url").focus();
+  }
+
+  /** The 50 MB in the "small files only" option, as bytes. */
+  const SHARE_SMALL_LIMIT = 50 * 1024 * 1024;
+
+  /**
+   * Show the stored policy. Read from core rather than remembered here, so the
+   * control cannot drift from the rule actually being enforced.
+   */
+  async function loadSharePolicy() {
+    const select = $("#share-policy");
+    if (!select) return;
+    let kind = "direct_only";
+    try {
+      const raw = await safeInvoke("share_relay_policy", {}, { silent: true });
+      kind = JSON.parse(raw)?.kind ?? "direct_only";
+    } catch {
+      /* unreadable or unreachable shows as the safe one, which is also what
+         core falls back to enforcing */
+    }
+    select.value = kind;
+  }
+
+  async function handleSharePolicyChange() {
+    const kind = $("#share-policy").value;
+    const policy =
+      kind === "under_bytes" ? { kind, limit: SHARE_SMALL_LIMIT } : { kind };
+    try {
+      await safeInvoke("set_share_relay_policy", { policyJson: JSON.stringify(policy) });
+    } catch {
+      // The toast has already said why. Re-read instead of trusting the click:
+      // a save that failed must leave the control showing what is actually
+      // enforced, not what someone selected.
+      await loadSharePolicy();
+    }
   }
   function closeTurnModal() {
     $("#modal-turn").hidden = true;
@@ -3699,6 +3735,10 @@
       /* already torn down */
     }
     if (s.objectUrl) URL.revokeObjectURL(s.objectUrl);
+    // A question about a transfer that no longer exists must not stay on
+    // screen — answering it would act on a session that is already gone.
+    s.awaitingConsent = false;
+    renderShareConsent(s, "");
     if (toast) showToast(toast, "warn");
   }
 
@@ -3755,20 +3795,41 @@
       /* treated as unknown below */
     }
     if (state.share !== s) return;
-    const verdict = await safeInvoke(
-      "share_transfer_verdict",
-      {
-        localCandidateType: types?.local || "",
-        remoteCandidateType: types?.remote || "",
-        totalBytes: s.offer.total_bytes,
-      },
-      { silent: true },
-    );
+    // Caught rather than propagated: this runs from a connectionstatechange
+    // handler, where a rejection is an unhandled one and the retry below never
+    // happens — the transfer would sit at zero with nothing said. An absent
+    // verdict describes as "cannot work out how to send this", which refuses.
+    let verdict = null;
+    try {
+      verdict = await safeInvoke(
+        "share_transfer_verdict",
+        {
+          localCandidateType: types?.local || "",
+          remoteCandidateType: types?.remote || "",
+          totalBytes: s.offer.total_bytes,
+          // Only ever true after the person has answered the question below.
+          // Core treats this as an answer, not an override: it can turn
+          // needs_consent into allow and can do nothing else.
+          consentGranted: s.consentGranted === true,
+        },
+        { silent: true },
+      );
+    } catch {
+      /* handled by describeVerdict(null) below */
+    }
+    if (state.share !== s) return;
     const plan = describeVerdict(verdict);
     if (plan.retryable) {
       // ICE has not settled. Look again shortly rather than failing a transfer
       // that was about to be fine.
       setTimeout(() => judgeSharePath(), 1000);
+      return;
+    }
+    if (plan.needsConsent) {
+      // The policy wants a person to agree to this specific transfer. Ask, and
+      // do nothing at all until they answer — no bytes move, and no refusal is
+      // sent, because neither has been decided yet.
+      askShareConsent(s, plan.message);
       return;
     }
     if (!plan.proceed) {
@@ -3781,6 +3842,62 @@
     s.judged = true;
     setShareStatus(`Sending over a ${verdict.path === "host" ? "local" : "direct"} connection…`);
     if (s.role === "sender") startShareSending();
+  }
+
+  /**
+   * Put the relay question on screen and wait. Nothing moves until it is
+   * answered — declining is a real outcome, not a timeout.
+   *
+   * The prompt is rendered rather than `confirm()`ed because a modal
+   * `confirm` blocks the event loop, and this connection is live: the data
+   * channel, the ICE trickle and the session's own heartbeat all stop while a
+   * native dialog is up.
+   */
+  function askShareConsent(s, message) {
+    s.awaitingConsent = true;
+    setShareStatus(message);
+    renderShareConsent(s, message);
+  }
+
+  function renderShareConsent(s, message) {
+    const host = document.getElementById("share-consent");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!s?.awaitingConsent) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const text = document.createElement("p");
+    text.className = "share-consent-text";
+    text.textContent = message;
+    const yes = document.createElement("button");
+    yes.className = "btn-primary";
+    yes.textContent = "Send it anyway";
+    yes.onclick = () => {
+      if (state.share !== s) return;
+      s.consentGranted = true;
+      s.awaitingConsent = false;
+      renderShareConsent(s, "");
+      // Re-ask rather than assume: the path may have changed while the
+      // question was on screen, and the answer we want is the one for the
+      // route we actually have now.
+      judgeSharePath();
+    };
+    const no = document.createElement("button");
+    no.className = "btn-ghost";
+    no.textContent = "Don't send";
+    no.onclick = () => {
+      if (state.share !== s) return;
+      s.awaitingConsent = false;
+      renderShareConsent(s, "");
+      sendShareSignal({ share: "refuse", reason: { kind: "relay_forbidden" } });
+      endShare({ toast: "Didn't send it." });
+    };
+    const row = document.createElement("div");
+    row.className = "share-consent-actions";
+    row.append(yes, no);
+    host.append(text, row);
   }
 
   /** Sender: read the requested ranges off disk and push them, with backpressure. */
@@ -4228,6 +4345,7 @@
     $("#call-settings-btn").addEventListener("click", openTurnModal);
     $("#turn-cancel").addEventListener("click", closeTurnModal);
     $("#turn-save").addEventListener("click", handleSaveTurn);
+    $("#share-policy").addEventListener("change", handleSharePolicyChange);
 
     // Call overlays (ringing + in-call controls)
     $("#ring-accept").addEventListener("click", acceptIncoming);

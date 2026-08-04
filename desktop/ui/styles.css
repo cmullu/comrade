@@ -2333,3 +2333,21 @@ code {
   border-radius: 8px;
   background: #000;
 }
+
+/* The relay-consent question. Bordered rather than inline text because it is
+   the one thing in this panel that stops until it is answered. */
+.share-consent {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.share-consent-text {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.share-consent-actions {
+  display: flex;
+  gap: 0.5rem;
+}

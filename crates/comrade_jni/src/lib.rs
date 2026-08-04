@@ -1043,9 +1043,11 @@ impl Comrade {
         self.inner.blocking_read().share_relay_policy()
     }
 
-    /// Change it. Takes effect on the next transfer connection.
-    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
-        self.inner.blocking_read().set_share_relay_policy(policy);
+    /// Change it, and remember it. Takes effect on the next transfer
+    /// connection. Errors if the vault is locked — the choice still holds for
+    /// this process, but it could not be written down.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) -> Result<(), UiError> {
+        self.inner.blocking_read().set_share_relay_policy(policy)
     }
 
     /// Whether a transfer connection may be given TURN servers at all. Under
@@ -1067,11 +1069,13 @@ impl Comrade {
         local_candidate_type: String,
         remote_candidate_type: String,
         total_bytes: u64,
+        consent_granted: bool,
     ) -> ShareVerdictDto {
         self.inner.blocking_read().share_transfer_verdict(
             &local_candidate_type,
             &remote_candidate_type,
             total_bytes,
+            consent_granted,
         )
     }
 

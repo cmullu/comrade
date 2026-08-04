@@ -245,7 +245,8 @@ abstract class RustLibApi extends BaseApi {
   Future<TransferVerdict> crateApiShareTransferVerdict(
       {required IcePathKind path,
       required BigInt totalBytes,
-      required RelayPolicy policy});
+      required RelayPolicy policy,
+      required bool consentGranted});
 
   Future<String> crateApiSyncLedger();
 
@@ -1900,13 +1901,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<TransferVerdict> crateApiShareTransferVerdict(
       {required IcePathKind path,
       required BigInt totalBytes,
-      required RelayPolicy policy}) {
+      required RelayPolicy policy,
+      required bool consentGranted}) {
     return handler.executeNormal(NormalTask(
       callFfi: (port_) {
         final serializer = SseSerializer(generalizedFrbRustBinding);
         sse_encode_ice_path_kind(path, serializer);
         sse_encode_u_64(totalBytes, serializer);
         sse_encode_box_autoadd_relay_policy(policy, serializer);
+        sse_encode_bool(consentGranted, serializer);
         pdeCallFfi(generalizedFrbRustBinding, serializer,
             funcId: 65, port: port_);
       },
@@ -1915,7 +1918,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         decodeErrorData: null,
       ),
       constMeta: kCrateApiShareTransferVerdictConstMeta,
-      argValues: [path, totalBytes, policy],
+      argValues: [path, totalBytes, policy, consentGranted],
       apiImpl: this,
     ));
   }
@@ -1923,7 +1926,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiShareTransferVerdictConstMeta =>
       const TaskConstMeta(
         debugName: 'share_transfer_verdict',
-        argNames: ['path', 'totalBytes', 'policy'],
+        argNames: ['path', 'totalBytes', 'policy', 'consentGranted'],
       );
 
   @override

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -22,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import mullu.comrade.R
+import mullu.comrade.together.ShareTransfer
 import mullu.comrade.together.TogetherManager
 
 /**
@@ -77,7 +79,40 @@ fun TogetherScreen(
 
             is TogetherManager.UiState.Live -> LiveSession(s)
         }
+
+        // Outside the `when` on purpose: the relay question can arrive while a
+        // handover is running in any of these states, and it must not be
+        // possible to leave it unanswered by whatever the session does next.
+        ShareRelayConsent()
     }
+}
+
+/**
+ * The one question this feature asks before spending someone else's bandwidth.
+ *
+ * Modal because it is genuinely blocking — the transfer sits still until it is
+ * answered — and dismissible only into "no", since there is no third outcome
+ * and a silently dropped question would be the stall this was built to fix.
+ */
+@Composable
+private fun ShareRelayConsent() {
+    val question by ShareTransfer.consentQuestion.collectAsState()
+    val text = question ?: return
+    AlertDialog(
+        onDismissRequest = { ShareTransfer.refuseShareConsent() },
+        title = { Text(stringResource(R.string.together_relay_title)) },
+        text = { Text(text) },
+        confirmButton = {
+            TextButton(onClick = { ShareTransfer.grantShareConsent() }) {
+                Text(stringResource(R.string.together_relay_yes))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { ShareTransfer.refuseShareConsent() }) {
+                Text(stringResource(R.string.together_relay_no))
+            }
+        },
+    )
 }
 
 @Composable

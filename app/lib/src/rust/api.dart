@@ -364,12 +364,20 @@ Future<IcePathKind> shareClassifyPath(
         localType: localType, remoteType: remoteType);
 
 /// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+///
+/// `consent_granted` answers a question a previous call asked by returning
+/// `NeedsConsent`. It can only turn that into `Allow`; a refusal stays refused
+/// however insistently a frontend claims consent.
 Future<TransferVerdict> shareTransferVerdict(
         {required IcePathKind path,
         required BigInt totalBytes,
-        required RelayPolicy policy}) =>
+        required RelayPolicy policy,
+        required bool consentGranted}) =>
     RustLib.instance.api.crateApiShareTransferVerdict(
-        path: path, totalBytes: totalBytes, policy: policy);
+        path: path,
+        totalBytes: totalBytes,
+        policy: policy,
+        consentGranted: consentGranted);
 
 /// Whether a transfer connection built under `policy` may be offered TURN.
 Future<bool> shareIceServersAllowed({required RelayPolicy policy}) =>

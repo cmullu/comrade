@@ -661,12 +661,20 @@ is small; the content problem is the real constraint:
 >   exactly `frame-src`, never `script-src`, which would put third-party
 >   JavaScript in the origin where `withGlobalTauri` exposes every registered
 >   command.
-> - **Nothing asks for consent, and nothing sets the policy.**
->   `TransferVerdict::NeedsConsent` is computed and carried to both frontends,
->   and neither presents the question — so `RelayPolicy::AskEachTime` currently
->   behaves as a refusal. `set_share_relay_policy` likewise has no UI and is not
->   persisted, so every launch is `DirectOnly`. Safe default; not yet the
->   configurable policy the design claims.
+> - ~~**Nothing asks for consent, and nothing sets the policy.**~~ **Resolved
+>   2026-08-04.** Both frontends now ask
+>   (`desktop/ui/main.js:askShareConsent`, `ui/TogetherScreen.kt`'s
+>   `ShareRelayConsent`) and both let the policy be chosen and remember it
+>   (`SettingsScreen.kt`'s `ShareRelaySection`, the desktop call-settings
+>   modal). The answer travels as a `consent_granted` argument to
+>   `share_transfer_verdict` rather than as a frontend decision, and
+>   `share::transport::decide_with_consent` can only use it to turn
+>   `NeedsConsent` into `Allow` — a frontend passing `true` unconditionally
+>   cannot move a refusal, which
+>   `a_frontend_claiming_consent_cannot_talk_past_a_refusal` pins. The policy is
+>   stored inside the vault as `comrade_storage::SharePrefs` and seeded into the
+>   in-memory cell on unlock; an unrecognised stored value reads as
+>   `DirectOnly`, never as permission.
 > - **Playable-early is computed and unused.** `ShareTracker::playable_at` and
 >   `runway_ms` are tested on all three sides, but desktop plays only once the
 >   file is whole (a `blob:` URL cannot grow; progressive playback needs MSE and

@@ -541,11 +541,13 @@ pub async fn share_transfer_verdict(
     local_candidate_type: String,
     remote_candidate_type: String,
     total_bytes: u64,
+    consent_granted: bool,
 ) -> Result<comrade_ui::ShareVerdictDto, String> {
     Ok(state.read().await.share_transfer_verdict(
         &local_candidate_type,
         &remote_candidate_type,
         total_bytes,
+        consent_granted,
     ))
 }
 
@@ -566,8 +568,11 @@ pub async fn set_share_relay_policy(
 ) -> Result<(), String> {
     let policy: comrade_ui::RelayPolicy =
         serde_json::from_str(&policy_json).map_err(|e| format!("invalid relay policy: {e}"))?;
-    state.read().await.set_share_relay_policy(policy);
-    Ok(())
+    state
+        .read()
+        .await
+        .set_share_relay_policy(policy)
+        .map_err(|e| e.to_string())
 }
 
 /// Send a `Hangup` with `reason` to end/reject a call.

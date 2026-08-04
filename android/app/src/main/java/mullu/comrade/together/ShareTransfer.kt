@@ -9,6 +9,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import mullu.comrade.ComradeCore
 import mullu.comrade.call.CallManager
@@ -20,6 +23,7 @@ import org.webrtc.PeerConnection
 import org.webrtc.RtpReceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import uniffi.comrade_core.RefusalReason
 import uniffi.comrade_core.ShareOffer
 import uniffi.comrade_core.ShareSignal
 import uniffi.comrade_core.TransferSignal
@@ -89,6 +93,13 @@ object ShareTransfer {
         var remoteSet = false
         var judged = false
         var stopped = false
+        /**
+         * Set only by [grantShareConsent], and only ever passed to core as the
+         * answer to a question core asked. Core treats it as an answer, not an
+         * override: it can turn `needs_consent` into `allow` and nothing else.
+         */
+        var consentGranted = false
+        var stoppedForConsent = false
         /** Sender: the half-open range the receiver last asked for. */
         var cursorNext = 0
         var cursorEnd = 0
@@ -132,6 +143,40 @@ object ShareTransfer {
         }
     }
 
+    /**
+     * The relay question the screen is showing, or null when there is none.
+     *
+     * A flow rather than a `@Volatile` like [status], because this one has to
+     * *arrive* — a question nobody is told about is a transfer that stalls in
+     * silence, which is the failure this whole change exists to remove.
+     */
+    private val _consentQuestion = MutableStateFlow<String?>(null)
+    val consentQuestion: StateFlow<String?> = _consentQuestion.asStateFlow()
+
+    /** They said yes to this transfer. Re-judge; nothing is assumed from here. */
+    fun grantShareConsent() {
+        val s = session ?: return
+        if (!s.stoppedForConsent) return
+        s.consentGranted = true
+        s.stoppedForConsent = false
+        _consentQuestion.value = null
+        // Re-ask rather than proceed: the path may have changed while the
+        // question was on screen, and the answer that matters is the one for
+        // the route we actually have now.
+        io.launch { judgePath(s) }
+    }
+
+    /** They said no. That is a real outcome, and the far side is told. */
+    fun refuseShareConsent() {
+        val s = session ?: return
+        if (!s.stoppedForConsent) return
+        s.stoppedForConsent = false
+        _consentQuestion.value = null
+        send(ShareSignal.Refuse(RefusalReason.RelayForbidden))
+        status = "Didn't send it."
+        end()
+    }
+
     /** Tear everything down. Safe to call twice, and from any thread. */
     fun end() {
         val s = session ?: return
@@ -140,6 +185,9 @@ object ShareTransfer {
         runCatching { s.channel?.close() }
         runCatching { s.pc?.close() }
         progress = null
+        // Answering a question about a transfer that no longer exists would act
+        // on a session that is already gone.
+        _consentQuestion.value = null
     }
 
     // ── Sender ──────────────────────────────────────────────────────────────
@@ -264,9 +312,37 @@ object ShareTransfer {
 
     // ── Receiver ────────────────────────────────────────────────────────────
 
+    /**
+     * Where an incoming file lands.
+     *
+     * Named after the offer's content hash, in a directory of its own, for two
+     * reasons. A single fixed name meant a second handover silently overwrote
+     * whatever the first left behind — including a file the player still had
+     * open. And decrypted media on disk is exactly what S-4 is about, so having
+     * one directory to purge is what makes purging possible at all.
+     */
+    private fun incomingFile(context: Context, offer: ShareOffer): java.io.File {
+        val dir = java.io.File(context.cacheDir, "together-share")
+        dir.mkdirs()
+        // The name is [ShareDecisions.incomingFileName] rather than inline here
+        // because the hash is peer-supplied and this is a path — see its tests.
+        return java.io.File(dir, ShareDecisions.incomingFileName(offer.sha256))
+    }
+
+    /** Drop every incoming file except `keep`, which is the live one. */
+    private fun purgeIncoming(context: Context, keep: java.io.File?) {
+        val dir = java.io.File(context.cacheDir, "together-share")
+        dir.listFiles()?.forEach { f ->
+            if (f.absolutePath != keep?.absolutePath) runCatching { f.delete() }
+        }
+    }
+
     private fun acceptTheirCopy(context: Context, offer: ShareOffer) {
-        val target = java.io.File(context.cacheDir, "together-incoming.bin")
+        val target = incomingFile(context, offer)
         runCatching { target.delete() }
+        // Anything left by an earlier handover goes now rather than lingering
+        // until the next one needs the space.
+        purgeIncoming(context, target)
         val s = Session(Role.RECEIVER, offer, target.absolutePath)
         s.tracker = ShareDecisions.Tracker(
             offer.totalBytes.toLong(),
@@ -503,6 +579,7 @@ object ShareTransfer {
                     types?.first.orEmpty(),
                     types?.second.orEmpty(),
                     s.offer.totalBytes.toLong(),
+                    s.consentGranted,
                 )
             }.getOrNull()
             val plan = ShareDecisions.describeVerdict(verdict)
@@ -510,6 +587,16 @@ object ShareTransfer {
                 s.judged = true
                 status = "Sending over a direct connection…"
                 if (s.role == Role.SENDER) pump(s)
+                return
+            }
+            if (plan.needsConsent) {
+                // The policy wants a person to agree to this specific transfer.
+                // Stop here and wait: no bytes move, and no refusal is sent,
+                // because neither has been decided yet. [grantShareConsent] or
+                // [refuseShareConsent] restarts or ends this.
+                s.stoppedForConsent = true
+                _consentQuestion.value = plan.message
+                status = plan.message
                 return
             }
             if (!plan.retryable) {

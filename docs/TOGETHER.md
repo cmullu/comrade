@@ -604,11 +604,33 @@ index and the payload length are both checked against the offer on arrival —
 the whole-file hash would catch the same corruption, but only after the whole
 file.
 
+**The relay question, and who is allowed to answer it.** Under
+`AskEachTime` the transfer stops and asks, naming the size; nothing moves and no
+refusal is sent until someone answers, because neither has been decided. The
+answer goes back to core as an argument rather than being acted on locally, and
+core can only ever use it to turn `needs_consent` into `allow`. That asymmetry
+is the whole design: `consent_granted` arrives from the least trustworthy caller
+the policy has, and a frontend that passed `true` unconditionally — a bug, or a
+dismiss wired to the wrong branch — must not be able to defeat `DirectOnly`. The
+worst it can do is skip a question.
+
+Consent is per-transfer and is never remembered. A yes that outlived its session
+would be a yes to a file nobody was asked about.
+
+**The policy is a stored preference**, inside the vault, seeded into the
+in-memory cell on unlock — the cell exists because the WebRTC callbacks read it
+and must not touch storage. A stored value this build does not recognise reads
+as `DirectOnly`: the only safe reading of "I do not know what this device agreed
+to" is the one that carries nobody's bytes.
+
 **Verified, and not.** The framing, the tracker, the policy and the pump are
 tested on all three sides — `comrade_core::share` (Rust), `share_transfer.mjs`
 (desktop) and `ShareDecisions.kt` (JVM), with the Rust vectors ported verbatim
 into both ports so a divergence is a red test rather than a corrupted file.
-What has **not** happened is a run between two real devices: no transfer has
+The consent path adds four Rust cases, including the one that matters — a
+frontend claiming consent cannot move a refusal — and the round trip that proves
+a chosen policy survives a restart. What has **not** happened is a run between
+two real devices: no transfer has
 crossed a live `RTCPeerConnection`, and the Kotlin path additionally cannot be
 compiled in the development sandbox at all. Treat the connection handling as
 reviewed rather than exercised.

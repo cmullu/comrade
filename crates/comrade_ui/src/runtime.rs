@@ -65,6 +65,37 @@ use comrade_core::share::transport::{
     self as share_transport, IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
 use comrade_core::share::ShareSignal;
+
+/// Read a stored [`SharePrefs`] back into a policy.
+///
+/// **An unrecognised string is [`RelayPolicy::DirectOnly`]**, not a panic and
+/// not `Always`. The value can only be wrong if an older or newer build wrote
+/// it, and the safe reading of "I do not know what this device agreed to" is
+/// the one that carries nobody's bytes but our own.
+fn relay_policy_from_prefs(prefs: &comrade_storage::SharePrefs) -> RelayPolicy {
+    match prefs.relay_policy.as_str() {
+        "under_bytes" => RelayPolicy::UnderBytes {
+            limit: prefs.relay_limit_bytes,
+        },
+        "ask_each_time" => RelayPolicy::AskEachTime,
+        "always" => RelayPolicy::Always,
+        _ => RelayPolicy::DirectOnly,
+    }
+}
+
+/// The inverse. Round-trips through [`relay_policy_from_prefs`] by test.
+fn relay_policy_to_prefs(policy: RelayPolicy) -> comrade_storage::SharePrefs {
+    let (name, limit) = match policy {
+        RelayPolicy::DirectOnly => ("direct_only", 0),
+        RelayPolicy::UnderBytes { limit } => ("under_bytes", limit),
+        RelayPolicy::AskEachTime => ("ask_each_time", 0),
+        RelayPolicy::Always => ("always", 0),
+    };
+    comrade_storage::SharePrefs {
+        relay_policy: name.to_string(),
+        relay_limit_bytes: limit,
+    }
+}
 use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
 use comrade_core::together::{
     command_apply, describe_state_change, heartbeat_interval_ms, parse_together_envelope,
@@ -1408,6 +1439,16 @@ impl ComradeRuntime {
             }
         }
 
+        // The relay policy is a stored preference, so seed the in-memory cell
+        // the WebRTC callbacks read. It is deliberately *only* seeded here: a
+        // locked vault has no preference to read, and the cell's default is the
+        // refusing one, so a failure to load can only ever be conservative.
+        if let Some(store) = self.ui.store_ref() {
+            if let Ok(prefs) = store.load_share_prefs() {
+                *self.share_policy.lock().unwrap() = relay_policy_from_prefs(&prefs);
+            }
+        }
+
         // Unlocking is someone standing at the app with a passphrase typed, so
         // presence starts active again — a previous `lock_vault` left it off
         // (see `spawn_farewell_beacons`), and this runtime outlives the lock.
@@ -2493,12 +2534,26 @@ impl ComradeRuntime {
         *self.share_policy.lock().unwrap()
     }
 
-    /// Change it. The next transfer connection is built under the new policy;
-    /// one already running is not renegotiated, because tearing down a transfer
-    /// someone is watching from is a worse answer than letting it finish under
-    /// the rules it started with.
-    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
+    /// Change it, and remember it. The next transfer connection is built under
+    /// the new policy; one already running is not renegotiated, because tearing
+    /// down a transfer someone is watching from is a worse answer than letting
+    /// it finish under the rules it started with.
+    ///
+    /// The cell is updated even when the vault is locked, so a frontend can set
+    /// a policy for this session without one; it just will not survive the
+    /// process. Persistence failures are reported rather than swallowed —
+    /// silently forgetting a choice about someone else's bandwidth is the kind
+    /// of quiet default this codebase does not do.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) -> Result<(), UiError> {
         *self.share_policy.lock().unwrap() = policy;
+        let Some(store) = self.ui.store_ref() else {
+            return Err(UiError::VaultLocked);
+        };
+        let prefs = relay_policy_to_prefs(policy);
+        store
+            .save_share_prefs(&prefs)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))
     }
 
     /// Whether a transfer connection may be handed TURN servers at all.
@@ -2518,14 +2573,25 @@ impl ComradeRuntime {
     /// browser-supplied, so classification is lenient about case and spacing and
     /// anything it does not recognise becomes
     /// [`IcePathKind::Unknown`] — which is *refused*, never waved through.
+    ///
+    /// `consent_granted` is the answer to a question a *previous* call asked by
+    /// returning `needs_consent`; it can only ever turn that into `allow`, never
+    /// move a refusal — see [`share_transport::decide_with_consent`] for why
+    /// that asymmetry is load-bearing.
     pub fn share_transfer_verdict(
         &self,
         local_candidate_type: &str,
         remote_candidate_type: &str,
         total_bytes: u64,
+        consent_granted: bool,
     ) -> ShareVerdictDto {
         let path = IcePathKind::classify(local_candidate_type, remote_candidate_type);
-        let verdict = share_transport::decide(path, total_bytes, self.share_relay_policy());
+        let verdict = share_transport::decide_with_consent(
+            path,
+            total_bytes,
+            self.share_relay_policy(),
+            consent_granted,
+        );
         ShareVerdictDto {
             verdict: match verdict {
                 TransferVerdict::Allow => "allow",
@@ -10415,7 +10481,7 @@ mod tests {
             !rt.share_ice_servers_allowed(),
             "a direct-only transfer connection must not be handed TURN"
         );
-        let v = rt.share_transfer_verdict("relay", "host", 8_000_000_000);
+        let v = rt.share_transfer_verdict("relay", "host", 8_000_000_000, false);
         assert_eq!(v.verdict, "refuse");
         assert_eq!(v.path, "relay");
         assert_eq!(v.reason, Some(RefusalReason::RelayForbidden));
@@ -10425,7 +10491,7 @@ mod tests {
     #[test]
     fn a_path_ice_has_not_settled_on_is_refused_rather_than_assumed_direct() {
         let rt = ComradeRuntime::new();
-        let v = rt.share_transfer_verdict("", "", 1);
+        let v = rt.share_transfer_verdict("", "", 1, false);
         assert_eq!(v.path, "unknown");
         assert_eq!(v.reason, Some(RefusalReason::PathUnknown));
     }
@@ -10437,7 +10503,8 @@ mod tests {
         let rt = ComradeRuntime::new();
         for (local, remote) in [("host", "host"), ("srflx", "host"), ("srflx", "srflx")] {
             assert_eq!(
-                rt.share_transfer_verdict(local, remote, u64::MAX).verdict,
+                rt.share_transfer_verdict(local, remote, u64::MAX, false)
+                    .verdict,
                 "allow",
                 "{local}/{remote}"
             );
@@ -10447,31 +10514,134 @@ mod tests {
     #[test]
     fn changing_the_policy_changes_the_answer_and_the_ice_list_together() {
         let rt = ComradeRuntime::new();
-        rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10_000_000 });
+        // No store attached, so the choice holds for this process and says so
+        // rather than reporting a save that did not happen.
+        assert!(matches!(
+            rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10_000_000 }),
+            Err(UiError::VaultLocked)
+        ));
+        assert_eq!(
+            rt.share_relay_policy(),
+            RelayPolicy::UnderBytes { limit: 10_000_000 },
+            "the cell still took the change"
+        );
         assert!(
             rt.share_ice_servers_allowed(),
             "a policy that can use a relay must be allowed to gather one"
         );
         assert_eq!(
-            rt.share_transfer_verdict("relay", "host", 9_000_000)
+            rt.share_transfer_verdict("relay", "host", 9_000_000, false)
                 .verdict,
             "allow"
         );
-        let big = rt.share_transfer_verdict("relay", "host", 11_000_000);
+        let big = rt.share_transfer_verdict("relay", "host", 11_000_000, false);
         assert_eq!(big.verdict, "refuse");
         assert_eq!(
             big.reason,
             Some(RefusalReason::TooLargeForRelay { limit: 10_000_000 })
         );
 
-        rt.set_share_relay_policy(RelayPolicy::AskEachTime);
-        let ask = rt.share_transfer_verdict("relay", "relay", 500);
+        let _ = rt.set_share_relay_policy(RelayPolicy::AskEachTime);
+        let ask = rt.share_transfer_verdict("relay", "relay", 500, false);
         assert_eq!(ask.verdict, "needs_consent");
         assert_eq!(
             ask.relayed_bytes,
             Some(500),
             "the question has to be able to name the size"
         );
+    }
+
+    /// The consent loop end to end: the runtime asks, the frontend answers,
+    /// and the same call that asked now allows.
+    #[test]
+    fn a_yes_is_carried_back_into_the_call_that_asked_for_it() {
+        let rt = ComradeRuntime::new();
+        let _ = rt.set_share_relay_policy(RelayPolicy::AskEachTime);
+        let asked = rt.share_transfer_verdict("relay", "relay", 500, false);
+        assert_eq!(asked.verdict, "needs_consent");
+        assert_eq!(
+            rt.share_transfer_verdict("relay", "relay", 500, true)
+                .verdict,
+            "allow"
+        );
+    }
+
+    /// The frontend is the least trustworthy caller this policy has, so the one
+    /// thing it must not be able to do is talk its way past a refusal.
+    #[test]
+    fn a_frontend_claiming_consent_cannot_talk_past_a_refusal() {
+        let rt = ComradeRuntime::new();
+        // Default policy: relayed bulk is refused outright, consent or not.
+        let v = rt.share_transfer_verdict("relay", "host", 1_000, true);
+        assert_eq!(v.verdict, "refuse");
+        assert_eq!(v.reason, Some(RefusalReason::RelayForbidden));
+
+        // Over the allowance: the refusal names a limit, and a yes does not
+        // raise it — changing the limit is a policy change, not a dialog.
+        let _ = rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10 });
+        let over = rt.share_transfer_verdict("relay", "host", 11, true);
+        assert_eq!(over.verdict, "refuse");
+        assert_eq!(
+            over.reason,
+            Some(RefusalReason::TooLargeForRelay { limit: 10 })
+        );
+
+        // And an unsettled path stays unsettled.
+        assert_eq!(
+            rt.share_transfer_verdict("", "", 1, true).reason,
+            Some(RefusalReason::PathUnknown)
+        );
+    }
+
+    /// Every policy survives a write and a read, so a choice made once is the
+    /// choice the next launch enforces.
+    #[tokio::test]
+    async fn a_relay_policy_outlives_the_process_that_chose_it() {
+        let dir = TempDir::new().unwrap();
+        for policy in [
+            RelayPolicy::UnderBytes { limit: 42 },
+            RelayPolicy::AskEachTime,
+            RelayPolicy::Always,
+            RelayPolicy::DirectOnly,
+        ] {
+            let mut rt = ComradeRuntime::new();
+            rt.unlock_vault(dir.path(), "pin").await.unwrap();
+            rt.set_share_relay_policy(policy).unwrap();
+            // redb holds the file exclusively, so the "next launch" cannot open
+            // it until this one is gone — which is also the situation being
+            // modelled.
+            drop(rt);
+
+            let mut next = ComradeRuntime::new();
+            assert_eq!(
+                next.share_relay_policy(),
+                RelayPolicy::DirectOnly,
+                "a locked vault has no preference to read yet"
+            );
+            next.unlock_vault(dir.path(), "pin").await.unwrap();
+            assert_eq!(
+                next.share_relay_policy(),
+                policy,
+                "{policy:?} did not survive"
+            );
+            drop(next);
+        }
+    }
+
+    /// A stored value this build does not recognise — an older or newer write —
+    /// must read as the policy that carries nobody's bytes, never as permission.
+    #[test]
+    fn an_unreadable_stored_policy_falls_back_to_refusing() {
+        for stored in ["", "relay_everything", "ALWAYS", "always "] {
+            assert_eq!(
+                relay_policy_from_prefs(&comrade_storage::SharePrefs {
+                    relay_policy: stored.to_string(),
+                    relay_limit_bytes: 999,
+                }),
+                RelayPolicy::DirectOnly,
+                "{stored:?} was read as something other than direct-only"
+            );
+        }
     }
 
     /// The pump's budget, from the runtime rather than a frontend's own copy.
