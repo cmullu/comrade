@@ -98,6 +98,39 @@ class UpdateDownloadsTest {
         assertEquals(installing, UpdateDownloads.state.value)
     }
 
+    // ── The two phases of Installing ─────────────────────────────────────────
+
+    @Test
+    fun aStagingCopyIsTellableFromACommittedHandOff() {
+        // The card shows a progress bar for one and "waiting for Android" plus a
+        // way out for the other, so conflating them either hides real progress or
+        // offers a retry mid-copy.
+        val staging = UpdateDownloadState.Installing("0.0.9", APK, bytesStaged = 2_000L, totalBytes = 8_000L)
+        val committed = UpdateDownloadState.Installing("0.0.9", APK)
+        assertTrue(staging.totalBytes > 0)
+        assertEquals(0L, committed.totalBytes)
+        assertEquals(0L, committed.bytesStaged)
+    }
+
+    @Test
+    fun aStagingCopySurvivesReconciliation() {
+        // Resuming the settings card mid-copy must not rewrite the progress
+        // behind it, and must not promote the cached Ready over a live hand-off.
+        val staging = UpdateDownloadState.Installing("0.0.9", APK, bytesStaged = 2_000L, totalBytes = 8_000L)
+        UpdateDownloads.update(staging)
+        UpdateDownloads.reconcile(exists = { true }, cached = UpdateDownloadState.Ready("0.0.9", APK))
+        assertEquals(staging, UpdateDownloads.state.value)
+    }
+
+    @Test
+    fun aStagingCopyWhoseApkVanishedStopsClaimingToBeInstalling() {
+        UpdateDownloads.update(
+            UpdateDownloadState.Installing("0.0.9", APK, bytesStaged = 2_000L, totalBytes = 8_000L),
+        )
+        UpdateDownloads.reconcile(exists = { false }, cached = null)
+        assertEquals(UpdateDownloadState.Idle, UpdateDownloads.state.value)
+    }
+
     // ── The way out of a hand-off that never came back ───────────────────────
 
     @Test

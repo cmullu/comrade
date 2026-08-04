@@ -29,8 +29,10 @@ import mullu.comrade.update.UpdateStatus
  * `download` returns as soon as the foreground service has been started: the
  * transfer outlives the engine, shows progress in the notification shade, and
  * reports through the state channel. `install` is the same shape — it opens
- * `UpdateInstallActivity`, which does the copy on a worker thread; nothing
- * blocks the platform thread, and the outcome arrives on the state channel.
+ * `UpdateInstallActivity`, which hands the copy to `UpdateInstallService` and
+ * finishes; nothing blocks the platform thread, the hand-off reports its own
+ * progress on the state channel (see `DownloadInstalling`), and the outcome
+ * arrives there too.
  *
  * With one exception worth stating: a **successful** install often produces no
  * event at all, because from API 31 the session asks to skip the confirmation
@@ -88,7 +90,14 @@ internal class UpdateChannel(
         is UpdateDownloadState.Ready -> mapOf("state" to "ready", "version" to version)
         // `path` is deliberately not exposed: Dart never names a file to the
         // installer, it only ever says "install what is ready".
-        is UpdateDownloadState.Installing -> mapOf("state" to "installing", "version" to version)
+        is UpdateDownloadState.Installing -> mapOf(
+            "state" to "installing",
+            "version" to version,
+            // Zero while the platform has it — see UpdateDownloadState.Installing
+            // for why that is the distinction rather than a separate state.
+            "bytesStaged" to bytesStaged,
+            "totalBytes" to totalBytes,
+        )
         is UpdateDownloadState.Failed -> mapOf("state" to "failed", "message" to message)
     }
 

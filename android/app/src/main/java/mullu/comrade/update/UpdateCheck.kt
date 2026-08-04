@@ -38,6 +38,24 @@ object UpdateCheck {
     const val CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
 
     /**
+     * How much of [CHECK_INTERVAL_MS] the scheduler may fire early in, so it can
+     * batch the check with whatever else the device is already awake for. An
+     * hour of slack on a daily check costs nothing and saves a wakeup.
+     */
+    const val CHECK_JOB_FLEX_MS = 60L * 60 * 1000
+
+    /**
+     * How stale the last check must be before a *scheduled* run bothers.
+     *
+     * Not [CHECK_INTERVAL_MS], and the difference is load-bearing: the scheduler
+     * is allowed to fire anywhere in the last [CHECK_JOB_FLEX_MS] of the period,
+     * so a run can arrive slightly *before* a full interval has passed. Gating it
+     * on the full interval would make that run a no-op and push the next one a
+     * whole day out — the periodic job would then check roughly never.
+     */
+    const val SCHEDULED_CHECK_MIN_AGE_MS = CHECK_INTERVAL_MS - CHECK_JOB_FLEX_MS
+
+    /**
      * Refuse to read an unreasonable response body. A release payload with a
      * long changelog is a few tens of KiB; anything past this is either not
      * GitHub or not worth streaming into memory on a phone.
@@ -228,4 +246,44 @@ object UpdateCheck {
         parseVersion(alreadyNotifiedVersion)?.let { notified -> if (release.version <= notified) return false }
         return true
     }
+
+    // ── The periodic job that looks while the app is closed ───────────────────
+
+    /**
+     * Whether the periodic check job needs (re)queueing.
+     *
+     * @param autoCheckEnabled the user's setting. Off means *no* job: the
+     *   privacy promise in [UpdateChecker]'s doc is that switching it off stops
+     *   the requests, and a queued job that outlived the setting would keep
+     *   making them for up to a day.
+     * @param pendingIntervalMs the period of the job already in the queue, or
+     *   null when there is none.
+     *
+     * The `pendingIntervalMs == wantedIntervalMs` case answering **false** is the
+     * point of this function. `JobScheduler.schedule()` on an id that is already
+     * queued replaces the job and restarts its period from zero, so scheduling
+     * unconditionally at every process start means an app opened once a day never
+     * reaches the end of a one-day period — the check would fire only for users
+     * who leave the app closed for longer than the interval, which is precisely
+     * backwards.
+     */
+    fun shouldScheduleCheckJob(
+        autoCheckEnabled: Boolean,
+        pendingIntervalMs: Long?,
+        wantedIntervalMs: Long = CHECK_INTERVAL_MS,
+    ): Boolean {
+        if (!autoCheckEnabled) return false
+        return pendingIntervalMs != wantedIntervalMs
+    }
+
+    /**
+     * Whether a scheduled run that ended in [outcome] should be retried before
+     * its next slot.
+     *
+     * Only a failed *check* earns one — the phone was in a tunnel, or GitHub
+     * rate-limited us — and the scheduler's own backoff decides when. "Up to
+     * date" and "here is a release" are both complete answers, and retrying
+     * either would just be a second request for the same fact.
+     */
+    fun shouldRetryScheduledCheck(outcome: UpdateStatus): Boolean = outcome is UpdateStatus.Failed
 }

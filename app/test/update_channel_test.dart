@@ -116,6 +116,28 @@ void main() {
         }),
         isA<DownloadInstalling>(),
       );
+      // Two phases of the same state: the hand-off, which has real progress, and
+      // the wait on the platform, which has none. The card shows a bar for the
+      // first and a way out for the second, so a missing field must read as
+      // "committed" rather than as 0% of nothing.
+      expect(
+        parse(const <Object?, Object?>{
+          'state': 'installing',
+          'version': '0.0.9',
+          'bytesStaged': 2000,
+          'totalBytes': 8000,
+        }),
+        isA<DownloadInstalling>()
+            .having((DownloadInstalling d) => d.percent, 'percent', 25),
+      );
+      expect(
+        parse(const <Object?, Object?>{
+          'state': 'installing',
+          'version': '0.0.9'
+        }),
+        isA<DownloadInstalling>()
+            .having((DownloadInstalling d) => d.percent, 'percent', isNull),
+      );
       expect(
         parse(const <Object?, Object?>{'state': 'failed', 'message': 'nope'}),
         isA<DownloadFailed>()

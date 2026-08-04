@@ -221,7 +221,7 @@
     <string name="settings_updates_title">App updates</string>
     <string name="settings_updates_current">You\'re running %1$s</string>
     <string name="settings_updates_auto_title">Check for updates automatically</string>
-    <string name="settings_updates_auto_summary">Asks github.com once a day whether a newer Comrade has been published. That tells GitHub your IP address and nothing else — no account, no identifier, no message data. With this off, nothing is checked until you tap “Check now”.</string>
+    <string name="settings_updates_auto_summary">Asks github.com once a day whether a newer Comrade has been published, and notifies you if there is — including while Comrade is closed. That tells GitHub your IP address and nothing else — no account, no identifier, no message data. With this off, nothing is checked until you tap “Check now”.</string>
     <string name="settings_updates_check_now">Check now</string>
     <string name="settings_updates_checking">Checking…</string>
     <string name="settings_updates_up_to_date">Up to date, as of %1$s</string>
@@ -240,6 +240,7 @@
     <string name="settings_updates_downloading">Downloading %1$s of %2$s…</string>
     <string name="settings_updates_verifying">Checking the download…</string>
     <string name="settings_updates_install">Install %1$s</string>
+    <string name="settings_updates_staging">Handing %1$s of %2$s to Android…</string>
     <string name="settings_updates_installing">Waiting for Android to install it…</string>
     <string name="settings_updates_install_retry">Nothing happened? Try again</string>
     <string name="settings_updates_cancel_download">Cancel download</string>
@@ -251,6 +252,10 @@
     <string name="update_downloading_title_generic">Downloading an update</string>
     <string name="update_downloading_text">%1$s of %2$s</string>
     <string name="update_verifying_text">Checking the download…</string>
+    <string name="update_installing_title">Installing Comrade %1$s</string>
+    <string name="update_installing_title_generic">Installing the update</string>
+    <string name="update_installing_text">Handing it to Android…</string>
+    <string name="update_installing_progress">%1$s of %2$s</string>
     <string name="update_ready_title">Comrade %1$s is ready to install</string>
     <string name="update_ready_text">Tap to install it now</string>
     <string name="update_download_failed_title">Update download failed</string>

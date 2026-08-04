@@ -216,4 +216,76 @@ class UpdateCheckTest {
     fun aNewerFindingIsAnnouncedEvenAfterAnEarlierOneWas() {
         assertTrue(UpdateCheck.shouldNotify(release("v0.1.0"), skippedVersion = null, alreadyNotifiedVersion = "0.0.9"))
     }
+
+    // ── The scheduled check ──────────────────────────────────────────────────
+
+    @Test
+    fun aJobThatFiredInsideItsFlexWindowStillChecks() {
+        // The reason SCHEDULED_CHECK_MIN_AGE_MS exists. The scheduler may fire up
+        // to CHECK_JOB_FLEX_MS early, so gating a scheduled run on the full
+        // interval would make it a no-op and push the next one a whole day out —
+        // the daily check would then run roughly never.
+        val lastChecked = 1_000L
+        val firedEarly = lastChecked + UpdateCheck.CHECK_INTERVAL_MS - UpdateCheck.CHECK_JOB_FLEX_MS
+        assertFalse(UpdateCheck.shouldCheck(lastChecked, firedEarly))
+        assertTrue(UpdateCheck.shouldCheck(lastChecked, firedEarly, UpdateCheck.SCHEDULED_CHECK_MIN_AGE_MS))
+    }
+
+    @Test
+    fun aCheckThatJustRanIsNotRepeatedByTheScheduler() {
+        // Opening the app half an hour ago already asked. The job firing now
+        // should not ask again.
+        val lastChecked = 1_000L
+        val halfAnHourLater = lastChecked + 30L * 60 * 1000
+        assertFalse(UpdateCheck.shouldCheck(lastChecked, halfAnHourLater, UpdateCheck.SCHEDULED_CHECK_MIN_AGE_MS))
+    }
+
+    @Test
+    fun anAlreadyQueuedJobIsLeftAlone() {
+        // The trap: JobScheduler.schedule() on a queued id restarts its period,
+        // so re-scheduling at every process start means an app opened daily never
+        // reaches the end of a one-day period.
+        assertFalse(
+            UpdateCheck.shouldScheduleCheckJob(
+                autoCheckEnabled = true,
+                pendingIntervalMs = UpdateCheck.CHECK_INTERVAL_MS,
+            ),
+        )
+    }
+
+    @Test
+    fun aMissingOrOutOfDateJobIsQueued() {
+        assertTrue(UpdateCheck.shouldScheduleCheckJob(autoCheckEnabled = true, pendingIntervalMs = null))
+        // A build that changed the interval must replace what is queued, or the
+        // old period outlives the decision to change it.
+        assertTrue(
+            UpdateCheck.shouldScheduleCheckJob(
+                autoCheckEnabled = true,
+                pendingIntervalMs = UpdateCheck.CHECK_INTERVAL_MS / 2,
+            ),
+        )
+    }
+
+    @Test
+    fun autoCheckOffMeansNoJobAtAll() {
+        // The privacy promise: off has to stop the requests, not just stop
+        // reading the answers.
+        assertFalse(UpdateCheck.shouldScheduleCheckJob(autoCheckEnabled = false, pendingIntervalMs = null))
+        assertFalse(
+            UpdateCheck.shouldScheduleCheckJob(
+                autoCheckEnabled = false,
+                pendingIntervalMs = UpdateCheck.CHECK_INTERVAL_MS,
+            ),
+        )
+    }
+
+    @Test
+    fun onlyAFailedCheckIsWorthRetrying() {
+        assertTrue(UpdateCheck.shouldRetryScheduledCheck(UpdateStatus.Failed("offline", 1L)))
+        // Both of these are complete answers; retrying either is a second
+        // request for a fact we already have.
+        assertFalse(UpdateCheck.shouldRetryScheduledCheck(UpdateStatus.UpToDate(1L)))
+        assertFalse(UpdateCheck.shouldRetryScheduledCheck(UpdateStatus.Available(release("v0.0.9"), 1L)))
+        assertFalse(UpdateCheck.shouldRetryScheduledCheck(UpdateStatus.Unknown))
+    }
 }

@@ -801,19 +801,44 @@ private fun UpdateDownloadControls(
         }
 
         is UpdateDownloadState.Installing -> {
-            Text(
-                stringResource(R.string.settings_updates_installing),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            // The app cannot tell a confirmation dialog that is up from one the
-            // platform declined to show — a dropped activity start reports
-            // nothing at all. Rather than leave someone stuck on a line that
-            // says "waiting" forever, this hands the install back to them.
-            OutlinedButton(
-                onClick = { UpdateChecker.retryInstall(context) },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text(stringResource(R.string.settings_updates_install_retry)) }
+            // Two phases, and only the second is a wait with nothing to show:
+            // while the APK is still being handed over there is real progress to
+            // report, and reporting it is the difference between "installing" and
+            // the several silent seconds this used to be.
+            if (download.totalBytes > 0) {
+                Text(
+                    stringResource(
+                        R.string.settings_updates_staging,
+                        Formatter.formatShortFileSize(context, download.bytesStaged),
+                        Formatter.formatShortFileSize(
+                            context,
+                            download.totalBytes.coerceAtLeast(download.bytesStaged),
+                        ),
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                LinearProgressIndicator(
+                    progress = { downloadPercent(download.bytesStaged, download.totalBytes) / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                Text(
+                    stringResource(R.string.settings_updates_installing),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // The app cannot tell a confirmation dialog that is up from one
+                // the platform declined to show — a dropped activity start
+                // reports nothing at all. Rather than leave someone stuck on a
+                // line that says "waiting" forever, this hands it back to them.
+                // Deliberately not offered during the copy above, where "nothing
+                // is happening" is visibly false.
+                OutlinedButton(
+                    onClick = { UpdateChecker.retryInstall(context) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(stringResource(R.string.settings_updates_install_retry)) }
+            }
         }
 
         is UpdateDownloadState.Failed -> {

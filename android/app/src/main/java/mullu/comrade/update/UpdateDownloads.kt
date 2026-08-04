@@ -19,11 +19,27 @@ sealed class UpdateDownloadState {
     data class Ready(val version: String, val path: String) : UpdateDownloadState()
 
     /**
-     * Handed to the system installer — the OS is asking the user to confirm.
+     * On its way into the system installer. Two phases, told apart by
+     * [totalBytes] the same way [Downloading] tells "size unknown" apart:
+     *
+     * - **`totalBytes > 0`** — [UpdateInstallService] is streaming the APK into
+     *   the session, [bytesStaged] of [totalBytes] done. This is the part that
+     *   used to happen invisibly: tens of megabytes copied with nothing on
+     *   screen, so tapping Install looked like tapping nothing until the system
+     *   dialog eventually appeared.
+     * - **`totalBytes == 0`** — committed. The platform owns it now, and what
+     *   comes next is its confirmation dialog or, on a device that skips it, the
+     *   process being replaced. Neither is ours to report progress on.
+     *
      * Carries [path] as well as [version] so this can be walked back to [Ready]
      * if the hand-off never comes back (see [UpdateDownloads.dismissInstalling]).
      */
-    data class Installing(val version: String, val path: String) : UpdateDownloadState()
+    data class Installing(
+        val version: String,
+        val path: String,
+        val bytesStaged: Long = 0L,
+        val totalBytes: Long = 0L,
+    ) : UpdateDownloadState()
 
     data class Failed(val message: String) : UpdateDownloadState()
 }
