@@ -279,6 +279,22 @@ class RustComradeRepository implements ComradeRepository {
       (await _guard(() => rust.mediaWith(peer: peer))).map(_media).toList();
 
   @override
+  Future<List<ReactionInfo>> reactions(String peer) async =>
+      (await _guard(() => rust.reactions(peer: peer))).map(_reaction).toList();
+
+  @override
+  Future<ReactionInfo?> toggleReaction({
+    required String peer,
+    required String targetId,
+    required String emoji,
+  }) async {
+    final rust.ReactionDto? dto = await _guard(
+      () => rust.toggleReaction(peer: peer, targetId: targetId, emoji: emoji),
+    );
+    return dto == null ? null : _reaction(dto);
+  }
+
+  @override
   Future<MediaMessageInfo> sendMedia({
     required String peer,
     required String mimeType,
@@ -686,6 +702,8 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
         )),
       rust.BridgeEvent_IncomingMedia(:final rust.MediaMessageDto field0) =>
         IncomingMedia(_media(field0)),
+      rust.BridgeEvent_IncomingReaction(:final rust.ReactionDto field0) =>
+        IncomingReaction(_reaction(field0)),
       rust.BridgeEvent_IncomingCallSignal(:final rust.CallSignalDto field0) =>
         _incomingCallSignal(field0),
       rust.BridgeEvent_IncomingMessageRequest(
@@ -830,6 +848,15 @@ MediaMessageInfo _media(rust.MediaMessageDto dto) => MediaMessageInfo(
       sender: dto.sender,
       createdAt: dto.createdAt.toInt(),
       size: dto.size.toInt(),
+      outgoing: dto.outgoing,
+    );
+
+ReactionInfo _reaction(rust.ReactionDto dto) => ReactionInfo(
+      targetId: dto.targetId,
+      peer: dto.peer,
+      reactor: dto.reactor,
+      emoji: dto.emoji,
+      createdAt: dto.createdAt.toInt(),
       outgoing: dto.outgoing,
     );
 

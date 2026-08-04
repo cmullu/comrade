@@ -49,11 +49,23 @@ class FakeComradeRepository implements ComradeRepository {
       <String, List<MessageInfo>>{};
   final Map<String, List<MediaMessageInfo>> _media =
       <String, List<MediaMessageInfo>>{};
+
+  /// Reactions keyed `<peer>` → `<targetId>:<reactor>` → row, mirroring the
+  /// store's own `(target, reactor)` key so the fake enforces the same "one
+  /// reaction per person per message" rule the real one does. A fake that let
+  /// them stack would let a widget test pass on behaviour the app cannot produce.
+  final Map<String, Map<String, ReactionInfo>> _reactions =
+      <String, Map<String, ReactionInfo>>{};
   final List<MessageRequestInfo> _requests = <MessageRequestInfo>[];
   final List<ChitthiInfo> _feed = <ChitthiInfo>[];
   final List<JournalEntryInfo> _journal = <JournalEntryInfo>[];
   final List<TaraMessageInfo> _tara = <TaraMessageInfo>[];
   final List<CallRecordInfo> _calls = <CallRecordInfo>[];
+
+  /// This device's own npub in the fake. Named rather than repeated inline so
+  /// "did *I* react to this" and "who am I" cannot drift apart.
+  static const String _selfNpub =
+      'npub1youridentity0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2q7m4te';
 
   static const String _alicePub =
       'npub1alice7q0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2l3jd2qtqy3gq';
@@ -238,10 +250,7 @@ class FakeComradeRepository implements ComradeRepository {
               'Vault unlock failed: wrong passphrase.');
         }
         _unlocked = true;
-        _profile ??= const Profile(
-          npub: 'npub1youridentity0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2q7m4te',
-          username: 'you',
-        );
+        _profile ??= const Profile(npub: _selfNpub, username: 'you');
         return _profile!;
       });
 
@@ -266,11 +275,7 @@ class FakeComradeRepository implements ComradeRepository {
           throw const ComradeException(
               'Only letters, numbers and _ are allowed.');
         }
-        _profile = (_profile ??
-                const Profile(
-                  npub:
-                      'npub1youridentity0av9y8gm7vk2xspwjnvyxydr0hjfpnr4x9dvw2q7m4te',
-                ))
+        _profile = (_profile ?? const Profile(npub: _selfNpub))
             .copyWith(username: handle);
         return _profile!;
       });
@@ -576,6 +581,45 @@ class FakeComradeRepository implements ComradeRepository {
         return List<MediaMessageInfo>.unmodifiable(
           _media[peer] ?? const <MediaMessageInfo>[],
         );
+      });
+
+  @override
+  Future<List<ReactionInfo>> reactions(String peer) => _io(() {
+        _requireUnlocked();
+        return List<ReactionInfo>.unmodifiable(
+          (_reactions[peer] ?? const <String, ReactionInfo>{})
+              .values
+              .where((ReactionInfo r) => r.emoji.isNotEmpty)
+              .toList()
+            ..sort((ReactionInfo a, ReactionInfo b) =>
+                a.createdAt.compareTo(b.createdAt)),
+        );
+      });
+
+  @override
+  Future<ReactionInfo?> toggleReaction({
+    required String peer,
+    required String targetId,
+    required String emoji,
+  }) =>
+      _io(() {
+        _requireUnlocked();
+        final Map<String, ReactionInfo> rows =
+            _reactions[peer] ??= <String, ReactionInfo>{};
+        final String key = '$targetId:$_selfNpub';
+        // The toggle rule the real implementation applies in Rust: tapping what
+        // you already sent withdraws it, anything else replaces.
+        final bool clearing = rows[key]?.emoji == emoji;
+        final ReactionInfo row = ReactionInfo(
+          targetId: targetId,
+          peer: peer,
+          reactor: _selfNpub,
+          emoji: clearing ? '' : emoji,
+          createdAt: _clock,
+          outgoing: true,
+        );
+        rows[key] = row;
+        return clearing ? null : row;
       });
 
   @override

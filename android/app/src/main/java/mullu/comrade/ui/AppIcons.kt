@@ -720,3 +720,26 @@ val MoreVertIcon: ImageVector = materialIcon(name = "Filled.MoreVert") {
         close()
     }
 }
+
+/**
+ * Material "reply" (filled) — the swipe-to-reply hint that fades in behind a
+ * dragged bubble, and the Reply row in the long-press sheet.
+ *
+ * Drawn here rather than pulled from `Icons.AutoMirrored.Filled.Reply`, which
+ * lives in material-icons-extended: the whole reason this file exists is to keep
+ * that multi-megabyte artifact out of the APK. It points left, which is correct
+ * for an LTR layout and the direction the gesture drags *from*; an RTL mirror
+ * would need `automirrored`'s machinery and this app has no RTL locale yet.
+ */
+val ReplyIcon: ImageVector = materialIcon(name = "Filled.Reply") {
+    materialPath {
+        moveTo(10.0f, 9.0f)
+        verticalLineTo(5.0f)
+        lineToRelative(-7.0f, 7.0f)
+        lineToRelative(7.0f, 7.0f)
+        verticalLineToRelative(-4.1f)
+        curveToRelative(5.0f, 0.0f, 8.5f, 1.6f, 11.0f, 5.1f)
+        curveToRelative(-1.0f, -5.0f, -4.0f, -10.0f, -11.0f, -11.0f)
+        close()
+    }
+}

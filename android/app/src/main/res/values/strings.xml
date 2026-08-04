@@ -196,6 +196,12 @@
     <string name="composer_swap_capture">Switch to: %1$s</string>
     <string name="composer_stop_recording">Stop and send</string>
     <string name="composer_recording">Recording… tap to send</string>
+    <!-- Long-press-a-message sheet, and the accessibility actions that reach the
+         same two things without a gesture. -->
+    <string name="message_action_reply">Reply</string>
+    <string name="message_action_react">React</string>
+    <string name="message_action_copy">Copy text</string>
+    <string name="react_more">More emoji</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->

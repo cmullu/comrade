@@ -3,6 +3,7 @@
 library;
 
 import 'package:comrade/src/data/models.dart';
+import 'package:comrade/src/util/message_reactions.dart';
 import 'package:comrade/src/widgets/message_bubble.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -151,7 +152,43 @@ void main() {
       expect(find.text('Safe travels.'), findsOneWidget);
     });
 
-    testWidgets('long-pressing a bubble starts a reply',
+    testWidgets('swiping a bubble rightward starts a reply',
+        (WidgetTester tester) async {
+      // Reply moved off the long press and onto the swipe (Telegram's split), so
+      // that the long press is free to open reactions. This is the test that used
+      // to assert the old binding — kept pointed at the same outcome through the
+      // new gesture rather than deleted, since "a swipe replies" is the contract.
+      final repo = await unlockedFake();
+      var replied = false;
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm1',
+              peer: 'npub1x',
+              content: 'Boarded',
+              createdAt: 1752321600,
+              outgoing: false,
+            ),
+            onReply: () => replied = true,
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      // `kDragSlopDefault` on top of the threshold: `tester.drag` spends the
+      // first slop-worth of movement getting the recognizer to claim the gesture,
+      // and only the remainder is reported as drag deltas.
+      await tester.drag(
+        find.text('Boarded'),
+        const Offset(replySwipeTriggerDp + kDragSlopDefault + 8, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(replied, isTrue);
+    });
+
+    testWidgets('a short drag is a scroll wobble, not a reply',
         (WidgetTester tester) async {
       final repo = await unlockedFake();
       var replied = false;
@@ -172,8 +209,105 @@ void main() {
       );
       await tester.pump();
 
+      await tester.drag(find.text('Boarded'), const Offset(12, 0));
+      await tester.pumpAndSettle();
+      expect(replied, isFalse);
+      // …and neither does a leftward one, however far it goes.
+      await tester.drag(find.text('Boarded'), const Offset(-200, 0));
+      await tester.pumpAndSettle();
+      expect(replied, isFalse);
+    });
+
+    testWidgets('a long press opens the reaction sheet, not a reply',
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      var replied = false;
+      var pressed = 0;
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm1',
+              peer: 'npub1x',
+              content: 'Boarded',
+              createdAt: 1752321600,
+              outgoing: false,
+            ),
+            onReply: () => replied = true,
+            onLongPress: () => pressed++,
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
       await tester.longPress(find.text('Boarded'));
-      expect(replied, isTrue);
+      await tester.pumpAndSettle();
+      expect(pressed, 1);
+      expect(replied, isFalse, reason: 'the two gestures must not overlap');
+    });
+
+    testWidgets('reaction chips render, count only when shared',
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      final List<String> toggled = <String>[];
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm1',
+              peer: 'npub1x',
+              content: 'Boarded',
+              createdAt: 1752321600,
+              outgoing: false,
+            ),
+            onReply: () {},
+            chips: const <ReactionChip>[
+              ReactionChip(emoji: '🔥', count: 2, mine: true),
+              ReactionChip(emoji: '👍', count: 1, mine: false),
+            ],
+            onToggleReaction: toggled.add,
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('dm-reactions')), findsOneWidget);
+      expect(find.text('🔥'), findsOneWidget);
+      expect(find.text('2'), findsOneWidget);
+      // "👍 1" is noise next to "👍" — one person is what a bare chip means.
+      expect(find.text('1'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('reaction-👍')));
+      expect(toggled, <String>['👍']);
+    });
+
+    testWidgets('a bubble with no reaction handler draws no chip row',
+        (WidgetTester tester) async {
+      // The "no fake affordances" rule: chips that cannot be tapped are a lie
+      // about what the screen offers.
+      final repo = await unlockedFake();
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm1',
+              peer: 'npub1x',
+              content: 'Boarded',
+              createdAt: 1752321600,
+              outgoing: false,
+            ),
+            onReply: () {},
+            chips: const <ReactionChip>[
+              ReactionChip(emoji: '🔥', count: 1, mine: false),
+            ],
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('dm-reactions')), findsNothing);
     });
   });
 

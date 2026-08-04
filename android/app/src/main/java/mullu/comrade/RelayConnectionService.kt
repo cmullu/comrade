@@ -417,6 +417,14 @@ object ChatEventRouter {
             is BridgeEvent.MessageStatus -> {
                 _chatTick.update { it + 1 }
             }
+            is BridgeEvent.IncomingReaction -> {
+                // The open thread re-reads its reactions off this tick. No
+                // notification: someone reacting to a message you already have is
+                // not new information arriving, and buzzing for a 👍 is how an app
+                // trains you to ignore it. Telegram draws the same line by
+                // default.
+                _chatTick.update { it + 1 }
+            }
             is BridgeEvent.PeerProfileUpdated -> {
                 _chatTick.update { it + 1 }
                 // A DM from an unknown key may now be nameable.
