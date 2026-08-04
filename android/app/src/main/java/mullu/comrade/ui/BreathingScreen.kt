@@ -37,6 +37,7 @@ import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -94,6 +95,9 @@ private const val MAX_SCALE = 1f
  * shortest useful pause is the one a person will actually take. The longer
  * options exist because someone who came here deliberately should not have to
  * keep re-opening it.
+ *
+ * These are what the chips *say*; [breathingRunSeconds] is what actually runs,
+ * because a minute is not a whole number of breaths.
  */
 private val DURATION_MINUTES = listOf(1, 2, 3, 5)
 private const val DEFAULT_MINUTES = 1
@@ -160,14 +164,22 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
     var elapsed by remember { mutableIntStateOf(0) }
     var minutes by remember { mutableIntStateOf(DEFAULT_MINUTES) }
     val context = LocalContext.current
-    val totalSeconds = minutes * 60
+    val totalSeconds = breathingRunSeconds(minutes)
     val complete = elapsed >= totalSeconds
 
-    // Keeps counting past the chosen length rather than stopping: the sit being
-    // "done" is a thing the button says, not a thing that freezes the circle
-    // mid-breath. Someone who keeps going after the minute is up is doing
-    // exactly what this screen is for.
-    LaunchedEffect(Unit) {
+    // Stops when the chosen length is up. It used to count on for ever — the sit
+    // being "done" changed the button's word and nothing else — which read on a
+    // handset as the screen ignoring the one minute it had just been asked for
+    // ("it doesn't seem to be stopping after 1 min"). A duration the screen
+    // offers is a promise to stop, and asking someone mid-panic to decide when
+    // to leave is precisely the decision they came here to be relieved of.
+    //
+    // Keyed on `complete` rather than `Unit` so it is the *state* that owns the
+    // ticker: reaching the end cancels this effect, and choosing a longer chip
+    // afterwards restarts it from wherever `elapsed` got to, which is what makes
+    // "give me two more minutes" work on a finished sit without a restart.
+    LaunchedEffect(complete) {
+        if (complete) return@LaunchedEffect
         while (true) {
             delay(1_000)
             elapsed += 1
@@ -184,7 +196,13 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
     }
 
     val phase = breathingPhase(elapsed)
-    val label = when (phase) {
+    // A finished sit stops on a cycle boundary, which is the start of an inhale —
+    // so without this the circle would go still under the word "Breathe in" and
+    // hold there, telling someone to draw a breath it had no intention of
+    // finishing. Rest is a state this screen never used to be able to reach.
+    val label = if (complete) {
+        R.string.breathe_rest
+    } else when (phase) {
         BreathPhase.IN -> R.string.breathe_in
         BreathPhase.OUT -> R.string.breathe_out
         // The full hold says "Hold" and the empty one says "Settle". They were
@@ -206,7 +224,16 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
     // Both holds are silent. A buzz through a hold makes a pause feel like
     // something to do, and the two are already told apart by what follows:
     // the out-breath opens at full amplitude, the in-breath at a whisper.
-    LaunchedEffect(phase) {
+    //
+    // A finished sit cancels rather than falling silent on its own: the last
+    // buzz was handed a four-second ramp, so leaving it to expire would keep the
+    // phone going in someone's hand for up to four seconds after the screen said
+    // the pause was over.
+    LaunchedEffect(phase, complete) {
+        if (complete) {
+            BreathHaptics.cancel(context)
+            return@LaunchedEffect
+        }
         BreathHaptics.play(
             context,
             when (phase) {
@@ -230,7 +257,15 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
     // animated was the shrink. There is no "from" to give it — the starting
     // value has to be state the screen owns.
     val scale = remember { Animatable(MIN_SCALE) }
-    LaunchedEffect(phase) {
+    LaunchedEffect(phase, complete) {
+        if (complete) {
+            // Already at MIN_SCALE — the sit ends on a cycle boundary, so the
+            // out-breath and the settle have both finished. Held explicitly
+            // anyway, so that a future change to where a sit can end cannot
+            // leave the circle stopped half-inflated.
+            scale.snapTo(MIN_SCALE)
+            return@LaunchedEffect
+        }
         when (phase) {
             BreathPhase.IN -> scale.animateTo(MAX_SCALE, breathTween(phase))
             BreathPhase.OUT -> scale.animateTo(MIN_SCALE, breathTween(phase))
@@ -256,10 +291,13 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
     val inLines = stringArrayResource(R.array.breathe_lines_in)
     val outLines = stringArrayResource(R.array.breathe_lines_out)
     val pair = breathingPairIndex(elapsed, minOf(inLines.size, outLines.size))
-    val line = if (showsInhaleLine(phase)) {
-        inLines.getOrNull(pair).orEmpty()
-    } else {
-        outLines.getOrNull(pair).orEmpty()
+    val line = when {
+        // Neither half of a pair fits a sit that is over: both are written to be
+        // read *during* a breath, and the inhale line — which is what a boundary
+        // stop would otherwise land on — asks for one.
+        complete -> stringResource(R.string.breathe_complete_line)
+        showsInhaleLine(phase) -> inLines.getOrNull(pair).orEmpty()
+        else -> outLines.getOrNull(pair).orEmpty()
     }
 
     Column(
@@ -325,7 +363,10 @@ fun BreathingScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
                     // Changing the length mid-sit keeps `elapsed`, so this
                     // extends or ends the sit in progress rather than
                     // restarting it — nobody asking for more time meant "start
-                    // that minute again".
+                    // that minute again". On a sit that has already stopped, a
+                    // longer chip is how you carry on: it puts the total back
+                    // above `elapsed`, which restarts the ticker where it left
+                    // off. A shorter one ends the sit now.
                     onClick = { minutes = option },
                     label = { Text(stringResource(R.string.breathe_minutes, option)) },
                 )
@@ -410,12 +451,37 @@ internal fun breathingPairIndex(elapsedSeconds: Int, pairCount: Int): Int {
 }
 
 /**
+ * How long a sit of [minutes] actually runs, in seconds: the nearest whole
+ * number of cycles, and never fewer than one.
+ *
+ * A minute is not a whole number of breaths — the cycle is [CYCLE_SECONDS], so
+ * sixty seconds is four and a bit. Now that the screen genuinely stops, it has
+ * to stop *somewhere*, and stopping on the raw count would cut a breath in half:
+ * a one-minute sit would go still four seconds into its fifth inhale, with the
+ * circle part-grown and the haptic mid-ramp. Ending on a boundary means the last
+ * thing that happens is an out-breath and a settle, which is the right note to
+ * leave someone on and also the reason the completed state can assume the circle
+ * is already at [MIN_SCALE].
+ *
+ * Rounds to nearest rather than up, so the chips stay honest in both directions
+ * — 1 min runs 56s and 2 min runs 126s, never more than half a cycle from the
+ * word on the chip. Up would have made every chip a lie in the same direction,
+ * and for the person who picked one minute *because* they only had one minute,
+ * overshooting is the worse half of the trade.
+ */
+internal fun breathingRunSeconds(minutes: Int): Int {
+    if (minutes <= 0 || CYCLE_SECONDS <= 0) return CYCLE_SECONDS.coerceAtLeast(1)
+    val cycles = ((minutes * 60.0) / CYCLE_SECONDS).roundToInt().coerceAtLeast(1)
+    return cycles * CYCLE_SECONDS
+}
+
+/**
  * How far through the chosen length, as 0..1.
  *
- * Clamped at both ends because [elapsedSeconds] deliberately keeps counting
- * after the sit completes, and because shortening the duration mid-sit can put
- * elapsed past the new total — a progress bar reporting 3.4 would be a crash on
- * some Compose versions and a wrong drawing on the rest.
+ * Still clamped at both ends. The counter stops at the total now, so it no
+ * longer walks past 1 on its own — but shortening the duration mid-sit puts
+ * elapsed above the new total in one step, and a progress bar handed 3.4 is a
+ * crash on some Compose versions and a wrong drawing on the rest.
  */
 internal fun breathingProgress(elapsedSeconds: Int, totalSeconds: Int): Float {
     if (totalSeconds <= 0) return 1f

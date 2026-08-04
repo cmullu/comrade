@@ -351,6 +351,20 @@
     -->
     <string name="breathe_settle">Settle</string>
     <string name="breathe_done">Done</string>
+    <!--
+      The two words for a sit that has ended. The screen used to count on for
+      ever, so it had no way to say this at all — the chosen length changed the
+      button and nothing else, and on a handset that read as the minute being
+      ignored.
+
+      Neither of these asks for another breath, which is the whole point: the
+      circle has gone still at its smallest and the pace is over. "Stay as long
+      as you like" rather than "come back tomorrow" because the person is still
+      sitting there, and being told the session is closed is not what they need
+      from a screen they reached for mid-panic.
+    -->
+    <string name="breathe_rest">Rest</string>
+    <string name="breathe_complete_line">That is the time you asked for. Stay as long as you like.</string>
     <string name="breathe_minutes">%1$d min</string>
     <!--
       Two disclosures the screen has to make itself, because both are things a

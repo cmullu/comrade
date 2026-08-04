@@ -259,15 +259,37 @@ Attention is trained by doing attention, not by minigames:
     true either way: that they are here, that they reached for something, that
     nothing more is being asked of them this minute. Still no claim about what
     breathing achieves, and still nothing the reader can get wrong.
-  - **You choose how long.** Duration chips (1 / 2 / 3 / 5 min, defaulting to
-    one) and a progress line with no digits on it. One minute is the default
-    because the screen is reached for mid-something and the shortest useful
-    pause is the one a person actually takes; the chips exist because someone
-    who came here deliberately should not have to keep re-opening it. Changing
-    the length mid-sit extends or ends the sit in progress rather than
-    restarting it. The bar carries no number, for the same reason nothing else
-    on this screen does — but a five-minute sit with no feedback at all is one
-    you cannot tell you are two minutes into.
+  - **You choose how long, and it stops when you said.** Duration chips
+    (1 / 2 / 3 / 5 min, defaulting to one) and a progress line with no digits on
+    it. One minute is the default because the screen is reached for
+    mid-something and the shortest useful pause is the one a person actually
+    takes; the chips exist because someone who came here deliberately should not
+    have to keep re-opening it. Changing the length mid-sit extends or ends the
+    sit in progress rather than restarting it. The bar carries no number, for
+    the same reason nothing else on this screen does — but a five-minute sit
+    with no feedback at all is one you cannot tell you are two minutes into.
+
+    For its first releases the clock **kept counting past the chosen length** on
+    the stated reasoning that being done was "a thing the button says, not a
+    thing that freezes the circle mid-breath". From a handset that read as the
+    screen ignoring the minute it had just been given: *"it doesn't seem to be
+    stopping after 1 min."* A duration the screen offers is a promise to stop,
+    and leaving someone mid-panic to decide when to get out is the decision they
+    came here to be relieved of. So the sit ends: the ticker stops, the haptic
+    is **cancelled** rather than left to expire (its last ramp had up to four
+    seconds still to run), the circle goes still at its smallest, and the screen
+    says *Rest* over a line that asks for nothing further. Nothing
+    auto-navigates — ending the pace is not the same as closing the screen, and
+    a longer chip picks the pace back up from where it stopped.
+
+    A minute is not a whole number of breaths, so a run is rounded to the
+    **nearest whole cycle** (`breathingRunSeconds`): 1 min is 56s, 2 min is
+    126s. Stopping on the raw count would freeze the circle part-grown four
+    seconds into a fifth inhale with the buzz mid-ramp; ending on a boundary
+    means the last thing that happens is an out-breath and a settle. Nearest
+    rather than up, so the chips are never off by more than half a cycle and
+    never in only one direction — for the person who picked one minute *because*
+    they had one minute, overshooting is the worse half of that trade.
   - **It nudges your comrades.** Reaching for a pause raises one *"your
     comrade might need you"* on the phones of the people the user chose —
     the *same* one-bit envelope an abandoned draft sends
@@ -438,7 +460,7 @@ with `VaultLocked`. Three decisions worth naming:
 | **Calm-feed contract** | Documented on `FeedScreen` and now load-bearing: chronological only, no ranking, no autoplay, no counters. Plus the gentle stop — one inline card after 10 unbroken minutes, dismissible for the sitting, quoting **no duration and no count** (a number invites a score). Rule in `attention/ScrollSitting.kt`, 8 tests |
 | **Quiet hours** | `attention/QuietHours.kt` + `NotificationPolicy`: silences messages, requests, presence and update notices in a nightly window — **never a ringing call.** 6 tests on the window arithmetic, where the overnight wrap is the normal case and an empty window (`start == end`) silences nothing rather than the whole day |
 | **Usage mirror** | Opt-in `PACKAGE_USAGE_STATS` behind an explainer that states what is read and that it cannot leave the device. `attention/UsageMirror.kt` reduces the event stream to three integers **in memory** and drops it (8 tests, including that overlapping stretches count once, so a day can never exceed itself, and that Comrade excludes its own screen time). Card lives on the Journal tab, self-relative, no red |
-| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen — paced breathing at 4-4-4-2, 1–5 minutes, haptic-paced, and it tells your comrades you might need them |
+| **Focus tab** | New 4th nav slot: sessions with a named intention, optional DND (priority filter, so calls still ring), countdown, and a close-out that offers to keep the reflection as a journal line. Plus the chunked reader and the *"Take a deep breath"* screen — paced breathing at 4-4-4-2, 1–5 minutes (rounded to whole breaths, and it stops when the time is up), haptic-paced, and it tells your comrades you might need them |
 | **Voice** | "start a focus session [for N minutes]" — digits only, because a half-parsed "forty five" would start a session nobody asked for; the bare phrase uses the engine's own suggestion. 5 new grammar/dispatch tests |
 
 ### Desktop
