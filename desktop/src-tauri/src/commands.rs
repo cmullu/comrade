@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use comrade_ui::{
-    AttentionDayDto, AttentionSummaryDto, CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto,
-    ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
-    FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
-    MessageDto, MessageRequestDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto,
-    TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto, CallSessionDto,
+    ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto,
+    FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto,
+    MediaMessageDto, MessageDto, MessageRequestDto, PresenceDto, ProfileDto, ReadingDto,
+    SakhaStatusDto, TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -504,6 +504,47 @@ pub async fn together_share(
     let handles = state.read().await.handles();
     handles
         .together_share(signal)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Which road an attachment of `total_bytes` takes: `"hosted"` or `"peer_to_peer"`.
+///
+/// A command rather than a constant in the webview. The threshold *is* the hosted
+/// ceiling (`comrade_core::media::MAX_MEDIA_BYTES`), so a frontend keeping its own
+/// copy of 10 MB is a frontend that disagrees with the core the day that number
+/// moves — and the two roads have different failure modes a person must be told
+/// about, which makes this a question worth asking rather than assuming.
+#[tauri::command]
+pub async fn attachment_route_for_bytes(total_bytes: u64) -> Result<AttachmentRoute, String> {
+    Ok(comrade_ui::route_for_bytes(total_bytes))
+}
+
+/// Send one step of handing a large attachment to `peer`, scoped to `transfer_id`.
+///
+/// `signal_json` is a `comrade_core::handoff::HandoffSignal`. It crosses as JSON
+/// for the same reason [`together_share`]'s does: the protocol is the sort of
+/// thing that grows a step, and this layer's job is to relay one, not to have an
+/// opinion about how many there are.
+///
+/// Unlike [`together_share`] there is no session to be inside — nobody starts a
+/// watch-together session to send a video file — so the gate is the one the
+/// runtime applies on *receipt* (an accepted conversation, the same bar a call
+/// signal clears). See `comrade_ui::ComradeRuntime::attachment_handoff_send`.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn attachment_handoff_send(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    transfer_id: String,
+    signal_json: String,
+) -> Result<(), String> {
+    let signal: comrade_ui::HandoffSignal =
+        serde_json::from_str(&signal_json).map_err(|e| format!("invalid handoff signal: {e}"))?;
+    let handles = state.read().await.handles();
+    handles
+        .attachment_handoff_send(&peer, &transfer_id, signal)
         .await
         .map_err(|e| e.to_string())
 }

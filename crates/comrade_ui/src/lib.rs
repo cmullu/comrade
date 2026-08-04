@@ -39,6 +39,14 @@ pub mod runtime;
 pub use comrade_core::share::transport::{RefusalReason, RelayPolicy};
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
 pub use comrade_core::together::{StateChange, SyncVerdict, TogetherContent};
+// The handoff wire types and the road decision, for the same reason: the desktop
+// shell takes a `HandoffSignal` as JSON and asks which road a size takes, and it
+// must get that answer from the core rather than keeping its own copy of the
+// threshold — a frontend with its own 10 MB constant is a frontend that
+// disagrees with the core the day the cap moves.
+pub use comrade_core::handoff::{
+    route_for_bytes, AttachmentHandoff, AttachmentRoute, HandoffSignal,
+};
 pub use runtime::{
     AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto,
     CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,

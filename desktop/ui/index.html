@@ -194,6 +194,11 @@
             </section>
 
             <div class="chat-composer">
+              <!-- A large attachment on its way in or out: what it is, how far
+                   it has got, and the only buttons that can do anything about
+                   it. Built in main.js from `handoff_transfer.mjs`'s plan, which
+                   is where "may this even be accepted" is decided. -->
+              <div id="handoff-card" class="handoff-card" hidden></div>
               <div id="dm-upi-preview" class="upi-preview" hidden></div>
               <div id="dm-reply-chip" class="reply-chip" hidden>
                 <div class="reply-chip-body">
@@ -203,8 +208,14 @@
                 <button id="dm-reply-cancel" class="icon-btn" title="Cancel reply" aria-label="Cancel reply">✕</button>
               </div>
               <div class="field-row">
-                <button id="dm-attach" class="icon-btn" title="Attach encrypted media (max 10 MB)" disabled>📎</button>
-                <input id="dm-file" type="file" accept="image/*,audio/*" hidden />
+                <button id="dm-attach" class="icon-btn" title="Attach a file" disabled>📎</button>
+                <!-- No `accept` filter and no "max 10 MB" in the tooltip any
+                     more: over the hosted cap a file takes the peer-to-peer
+                     road instead of being refused, and a picker that hides
+                     videos is a picker that hides the case that road exists
+                     for. Which road a pick takes is the core's answer, shown in
+                     the preview sheet before anything is sent. -->
+                <input id="dm-file" type="file" hidden />
                 <input
                   id="dm-input"
                   class="input"
@@ -219,8 +230,9 @@
               </div>
               <p class="hint sm">
                 Messages are end-to-end encrypted. Live UPI <code>/pay</code>
-                detection is active, and the 📎 attaches an encrypted photo/audio
-                (max 10 MB).
+                detection is active, and the 📎 attaches a file — up to 10 MB
+                encrypted and uploaded, anything larger handed straight to their
+                device while you are both online.
               </p>
             </div>
           </div>
