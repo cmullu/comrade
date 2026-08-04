@@ -226,15 +226,44 @@ Attention is trained by doing attention, not by minigames:
   - **The circle grows into the in-breath.** It opens small and fills, because
     that is what an inhale is; it shipped opening *full* for a fortnight,
     because `animateFloatAsState` starts at its first target and the opening
-    phase targets full. Now an `Animatable` the screen seeds itself, linear so
-    it keeps pace with the haptic, and both holds snap rather than easing so the
-    still phases are still.
+    phase targets full. Now an `Animatable` the screen seeds itself, and both
+    holds snap rather than easing so the still phases are still.
+
+    **One curve, two renderings.** The motion was `LinearEasing` for several
+    releases so that it kept pace with a haptic that ramped linearly. The premise
+    — circle and buzz must not drift — was right; making them both straight was
+    the wrong way to honour it. A constant rate meant the circle reached empty
+    still travelling at full speed and then stopped dead for the settle, reported
+    from a handset as the change from out-breath to settle *"not being natural"*.
+    A breath has no sharp edge where it turns around. Both now read the same
+    `BreathHaptics.curve` — sinusoidal ease-in-out, zero velocity at each end,
+    fastest in the middle, which is very nearly the airflow profile of a real
+    breath — so they cannot diverge without that one function returning something
+    different to both. It also makes the boundaries forgiving: the circle is
+    barely moving as it arrives, so the holds' snap has almost nothing left to
+    absorb. Tests pin the curve's endpoints, its symmetry, its monotonicity, and
+    that the eased amplitude ramp is still strictly increasing — the flattened
+    ends leave increments of exactly 1, and a swell that repeated a value would
+    read as a stall.
   - **Paired lines that ride the breath.** Eight pairs: an inhale line to draw
     on, an exhale line to put down. The inhale half appears at the top of the
     breath and holds through the pause after it; the exhale half takes over as
     the out-breath starts and holds through the settle. So the text turns over
     **twice a cycle**, on the two phases that actually ask something of the
     reader, and never mid-pause.
+
+    **The rough edge was layout, not the fade.** A change of line read as a
+    stutter, and the crossfade was not the cause: the lines are not all the same
+    length, so some wrap to two rows and some to one, and in a centred column a
+    shorter line pulled the circle, the progress bar and the chips up by a row and
+    dropped them back on the next change. The 200dp circle was hopping, not the
+    text. The line now reserves two rows (`minLines`), which costs a row of blank
+    space under the short lines and makes the layout hold still. Both fades are
+    also deliberately slow for a UI — 900ms for the line, 450ms for the phase word
+    — and the phase word is crossfaded at all, where it used to hard-cut: it
+    changes four times a cycle in the dead centre of the thing being watched, so
+    it was the most abrupt edge on the screen, and it landed at exactly the moment
+    the circle is meant to be gliding to a stop.
 
     This replaced one line every two cycles. That earlier rule — "a sentence
     changing every few seconds is one more thing to keep up with" — was written
