@@ -35,9 +35,9 @@ use comrade_core::attention::{
     self, FocusOutcome, UsageSignal, FOCUS_MAX_MINUTES, FOCUS_MIN_MINUTES,
 };
 use comrade_core::call::{
-    call_signal_retry_delay_ms, derive_sas, ice_servers_for, new_call_id, parse_call_envelope,
-    validate_turn_url, CallEnvelope, CallMediaKind, CallSignal, HangupReason, IceServer,
-    IceStrategy,
+    call_signal_is_stale, call_signal_retry_delay_ms, derive_sas, ice_servers_for, new_call_id,
+    parse_call_envelope, validate_turn_url, CallEnvelope, CallMediaKind, CallSignal, HangupReason,
+    IceServer, IceStrategy,
 };
 use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
@@ -233,13 +233,11 @@ const CROSS_TRANSPORT_DEDUP_CAPACITY: usize = 512;
 const TRANSPORT_RELAY: &str = "relay";
 const TRANSPORT_MESH: &str = "mesh";
 
-/// A call signal older than this is meaningless — the ring timeout has long
-/// since passed on the sender's side (an `Offer`), and every other signal
-/// kind (`Answer`/`Ice`/`Hangup`/…) is equally transient. Relays redeliver
-/// at-least-once and the Vault inbox subscription backfills up to 2 days on
-/// every launch, so without this a days-old `Offer` re-rings on every app
-/// start.
-const CALL_SIGNAL_MAX_AGE_SECS: u64 = 90;
+// The call-signal staleness rule now lives in `comrade_core::call`
+// (`call_signal_is_stale`, with its max age and clock-skew tolerance) so it is
+// a tested decision rather than an inline comparison. It used to be `age > 90`
+// against the *sender's* clock with no tolerance, which silently killed every
+// call between two devices whose clocks disagreed by more than that.
 /// Encrypted-store tree holding the Sakha/Sakhi pairing record (there is only
 /// ever one partner per device, but a tree keeps the storage shape uniform
 /// with the rest of the repository layer).
@@ -6800,9 +6798,19 @@ fn dispatch_incoming_dm(
     //    launch) must not re-ring or re-apply a signal already handled.
     if let Some(env) = parse_call_envelope(&msg.content) {
         if matches!(gate, IncomingGate::Accepted) {
-            let age = now_secs().saturating_sub(msg.created_at);
-            if age > CALL_SIGNAL_MAX_AGE_SECS {
-                tracing::debug!(event_id = %msg.event_id, age, "dropping stale call signal");
+            let now = now_secs();
+            if call_signal_is_stale(msg.created_at, now) {
+                // Warn, not debug: this is the one drop that looks to a user
+                // exactly like "calls are broken" while chat keeps working, so
+                // it has to be visible in a log someone actually captures.
+                tracing::warn!(
+                    event_id = %msg.event_id,
+                    kind = env.signal.kind_str(),
+                    created_at = msg.created_at,
+                    now,
+                    "dropping a call signal as stale — if this is a live call, \
+                     the two devices' clocks disagree by more than the tolerance",
+                );
             } else if dedup.already_seen(&msg.event_id) {
                 tracing::debug!(event_id = %msg.event_id, "dropping duplicate call signal");
             } else {
@@ -11374,6 +11382,30 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "the same wrapper event id must only ever dispatch one IncomingCallSignal"
+        );
+
+        // The regression: this check compared `now` against the *sender's*
+        // clock with no tolerance, so a peer whose clock ran a few minutes slow
+        // had every call signal dropped as "stale" while their chat — which has
+        // no age check — kept arriving. Calls dead, messages fine, from nothing
+        // but clock drift.
+        let mut skewed = incoming(&hex, "e3", &envelope);
+        skewed.created_at = now_secs().saturating_sub(5 * 60);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, skewed);
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeEvent::IncomingCallSignal(_))),
+            "a live call signal from a peer whose clock is five minutes slow must still ring",
+        );
+
+        // …and the same signal from a peer whose clock is *ahead* of ours, which
+        // the old `saturating_sub` happened to allow by accident rather than by
+        // decision.
+        let mut ahead = incoming(&hex, "e4", &envelope);
+        ahead.created_at = now_secs() + 5 * 60;
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, ahead);
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeEvent::IncomingCallSignal(_))),
+            "a call signal from a peer whose clock is ahead of ours must ring",
         );
     }
 
