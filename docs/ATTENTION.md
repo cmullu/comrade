@@ -229,18 +229,36 @@ Attention is trained by doing attention, not by minigames:
     phase targets full. Now an `Animatable` the screen seeds itself, linear so
     it keeps pace with the haptic, and both holds snap rather than easing so the
     still phases are still.
-  - **Ten calming lines, rotated every two cycles.** Where the screen used to
-    repeat its own app-bar title. Each names one *concrete physical* thing to
-    notice or let go of — a jaw, the floor under your feet, the air being cooler
-    going in than coming out. The first draft was abstract ("you don't have to be
-    doing something") and read as vague, which is the failure mode here: an
-    attention with nothing to rest on returns to whatever it was chewing on.
-    None of them claims anything about what breathing achieves, or sets up
-    something the reader can get wrong — a pause screen dispensing advice would
-    quietly walk back the "not a therapist" line the rest of the app holds.
-    Every two *cycles*, not every phase: a sentence changing every four seconds
-    is one more thing to keep up with, on the one screen with nothing to keep up
-    with. Ten of them covers the longest offered sit without a repeat.
+  - **Paired lines that ride the breath.** Eight pairs: an inhale line to draw
+    on, an exhale line to put down. The inhale half appears at the top of the
+    breath and holds through the pause after it; the exhale half takes over as
+    the out-breath starts and holds through the settle. So the text turns over
+    **twice a cycle**, on the two phases that actually ask something of the
+    reader, and never mid-pause.
+
+    This replaced one line every two cycles. That earlier rule — "a sentence
+    changing every few seconds is one more thing to keep up with" — was written
+    for the attention-practice framing; the owner's stated purpose is anxiety,
+    panic and stress *as well as* practice, and for that the line should ride
+    the breath rather than sit beside it. **Repetition became acceptable in the
+    same move**: five minutes is 21 cycles against eight pairs, so the set comes
+    round two and a half times, and for someone waiting out a bad few minutes a
+    line they have already read is nearer a mantra than a screen running out of
+    things to say. `theSetRepeatingOnALongSitIsAllowed` exists to stop a future
+    reader "fixing" that by reference to the rule it replaced.
+
+    The register is **reaffirming, and specifically takes the pressure off** —
+    *"you don't have to feel better yet"*, *"you don't have to do this well"* —
+    because panicking about not being calm yet is a documented way for panic to
+    feed itself, and a screen implying they were doing it wrong would be joining
+    in. What the lines may **not** do is reassure about anything the app cannot
+    know: no *"you are safe"*, no *"there is nothing wrong with you"*, no *"this
+    is just anxiety"*. Comrade has no idea whether these symptoms are a panic
+    attack or a cardiac event, and a calming screen that talked someone out of
+    getting help would be the worst thing in this repository. What is left is
+    true either way: that they are here, that they reached for something, that
+    nothing more is being asked of them this minute. Still no claim about what
+    breathing achieves, and still nothing the reader can get wrong.
   - **You choose how long.** Duration chips (1 / 2 / 3 / 5 min, defaulting to
     one) and a progress line with no digits on it. One minute is the default
     because the screen is reached for mid-something and the shortest useful

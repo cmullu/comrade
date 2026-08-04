@@ -362,38 +362,67 @@
     -->
     <string name="breathe_note">Four counts in, four held, four out, two to settle — follow the buzz if you\'d rather close your eyes. No account of this is kept here, and your comrades are told only that you might need them.</string>
     <!--
-      Rotated every two full cycles by BreathingScreen, in this order. They sit
-      where the screen used to repeat its own title, which said nothing the app
-      bar had not already said. Eleven of them, because two cycles is 28 seconds
-      and the longest offered sit is five minutes — ten would have repeated one
-      at the very end. `theLongestOfferedSitGetsThroughTheListWithoutRepeating`
-      is the test that says so, and it fails if a line is removed.
+      Paired lines, one shown while breathing in and its partner while breathing
+      out. `breathe_lines_in[i]` goes with `breathe_lines_out[i]`, so the two
+      arrays must stay the same length and in the same order — BreathingScreen
+      pairs them by index and takes the shorter count if a translation drops one.
 
-      Each names **one concrete physical thing** to notice or let go of. The
-      first draft was abstract — "you don't have to be doing something", "this is
-      enough" — and read as vague, which is the failure mode here: an attention
-      with nothing to rest on goes back to whatever it was chewing on. A jaw is
-      somewhere to put it.
+      ## Why they change twice a cycle now
 
-      What none of them do is claim anything about what breathing will achieve,
-      or set up something the reader can get wrong. This app is not a therapist
-      and says so elsewhere (docs/TARA.md); a pause screen dispensing advice
-      would be quietly walking that back. "Notice" and "let go", never "you
-      should" — and nothing that mentions a duration, because the reader chose
-      that and it may not be a minute.
+      They used to change once every two cycles, on the reasoning that a
+      sentence swapping every few seconds is "one more thing to keep up with".
+      That was written for the attention-practice framing. The stated purpose is
+      anxiety, panic and stress *as well as* practice, and for that the line
+      should ride the breath rather than sit beside it: something to draw on
+      going in, something to put down coming out. So the inhale line appears at
+      the top of the breath and holds through the pause after it; the exhale
+      line takes over as the out-breath starts and holds through the settle.
+
+      Repetition is therefore fine, and that also reverses an earlier call. A
+      five-minute sit is 21 cycles and there are eight pairs, so the set comes
+      round two and a half times. For attention practice that would read as the
+      screen running out of things to say; for someone waiting out a panic
+      attack, a line they have already heard is the *point* — it is closer to a
+      mantra than to content.
+
+      ## What they may and may not say
+
+      Reaffirming, and specifically taking the pressure *off*: "you don't have to
+      feel better yet", "you don't have to do this well". Someone panicking about
+      not being calm yet is a documented way for panic to feed itself, and a
+      screen that implied they were doing it wrong would be joining in.
+
+      They must NOT reassure about anything the app cannot know. No "you are
+      safe", no "there is nothing wrong with you", no "this is just anxiety" —
+      Comrade has no idea whether these symptoms are a panic attack or a cardiac
+      event, and a calming screen that talks someone out of getting help would be
+      the worst thing in this repository. Nor may they claim what breathing will
+      achieve. What is left is true either way: that they are here, that they
+      reached for something, that nothing more is being asked of them this minute.
+
+      Nothing instructs a depth or a pace the animation is not already showing —
+      an out-breath line telling someone to exhale longer than they inhale would
+      contradict the 4-and-4 on screen.
     -->
-    <string-array name="breathe_lines">
-        <item>Let your shoulders drop away from your ears.</item>
-        <item>Unclench your jaw. It was clenched.</item>
-        <item>Feel the floor holding your feet up.</item>
-        <item>Let your tongue come off the roof of your mouth.</item>
-        <item>The air is cooler going in than coming out.</item>
-        <item>Let your hands go heavy wherever they are.</item>
-        <item>Let your eyes go soft. Nothing here needs reading.</item>
-        <item>Feel your breath in your belly, not your chest.</item>
-        <item>Whatever you were about to do can be done after.</item>
-        <item>Notice the weight of the phone in your hand.</item>
-        <item>Soften the space between your eyebrows.</item>
+    <string-array name="breathe_lines_in">
+        <item>Breathe in. Your body knows how to do this.</item>
+        <item>Take in as much as is comfortable — no more.</item>
+        <item>You reached for this. That already counts.</item>
+        <item>Feel the floor still holding you up.</item>
+        <item>Just this breath. Not the rest of it.</item>
+        <item>You are here, and you are breathing.</item>
+        <item>Slowly. There is no hurry in this.</item>
+        <item>One breath, and then one more.</item>
+    </string-array>
+    <string-array name="breathe_lines_out">
+        <item>And out. You don\'t have to feel better yet.</item>
+        <item>Let it go, and let your shoulders down with it.</item>
+        <item>Nothing more is being asked of you right now.</item>
+        <item>Let your jaw and your hands go loose.</item>
+        <item>Whatever it is can wait until after.</item>
+        <item>Let it leave without pushing it.</item>
+        <item>Soften your face as it goes.</item>
+        <item>You don\'t have to do this well.</item>
     </string-array>
 
     <!-- Attention: the tab and its honesty gate -->
