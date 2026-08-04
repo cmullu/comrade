@@ -9,16 +9,25 @@
       * No CDN, no analytics, no font host, no service worker registration of
         anything remote. A privacy client that phones a third party to render its
         own login screen has already lost the argument. Everything here is served
-        from this origin or is inline.
+        from this origin or is inline — which is *not* the default: the build
+        would otherwise fetch CanvasKit from gstatic.com, so the CI lane passes
+        `--no-web-resources-cdn` and greps the artifact to keep it that way.
       * No `<base href="/">` rewriting beyond the token Flutter's tooling
         replaces, so the app can be hosted at a sub-path.
-      * `referrer` is `no-referrer` and the CSP forbids `connect-src` to anything
-        but this origin and wss:. Once Phase W2 lands, the only network this page
-        makes is a relay websocket — see docs/FLUTTER_WEB_MIGRATION.md.
+      * `referrer` is `no-referrer`.
+
+    On `connect-src`: it is `'self' wss: blob: data:`. The remote half of that is
+    this origin and `wss:` — once Phase W3 lands, the only network this page makes
+    is a relay websocket (see docs/FLUTTER_WEB_MIGRATION.md). `blob:` and `data:`
+    are in there too, and they are not a network: they address bytes this page
+    already holds, which is how decrypted attachments get to an <img> or an
+    <audio> without a plaintext file anywhere. Worth stating plainly rather than
+    rounding down to "origin and wss: only", which is what an earlier version of
+    this comment said and the directive above did not.
 
     The CSP allows 'wasm-unsafe-eval' because Flutter's CanvasKit renderer and
-    (from Phase W2) the wasm build of comrade_core's crypto subset both need to
-    compile a WebAssembly module. It is *not* 'unsafe-eval': that permits
+    (from Phase W2) the wasm build of comrade_core's link/crypto subset both need
+    to compile a WebAssembly module. It is *not* 'unsafe-eval': that permits
     WebAssembly only, not JavaScript string evaluation.
   -->
   <base href="$FLUTTER_BASE_HREF">

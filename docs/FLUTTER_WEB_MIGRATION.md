@@ -76,10 +76,20 @@ different amounts:
 
 `app/` also has one screen Android does not — `couple_screen.dart`, the Sakha
 sandbox — and it cannot work against the real core either: `sakha_status`,
-`pair_sakha`, `sakha_add_entry`, `sakha_read_ledger` and `test_turn_connectivity`
-are on `ComradeRuntime` and exposed by Tauri but by **neither** FFI ABI, so
-`rust_comrade_repository.dart:497-516` throws `_notBridged` for all of them. That
-is the pre-existing hole `FRONTEND_STRATEGY.md` §10 surfaced, still open.
+`pair_sakha`, `sakha_add_entry` and `sakha_read_ledger` are on `ComradeRuntime`
+and exposed by Tauri but by **neither** FFI ABI, so
+`rust_comrade_repository.dart:497-516` throws `_notBridged` for all four. That is
+the pre-existing hole `FRONTEND_STRATEGY.md` §10 surfaced, still open.
+
+`test_turn_connectivity` is a **different** kind of hole and does not belong in
+that list — an earlier draft of this document put it there, and
+`FRONTEND_STRATEGY.md` §10 is the more precise account. `grep -rn
+test_turn_connectivity crates/` returns nothing: there is no TURN probe on any
+runtime, on any bridge, or in `desktop/src-tauri/src/commands.rs`. The Kotlin app
+implements one itself inside `CallManager`. So `rust_comrade_repository.dart:475-479`
+throws a plain `ComradeException` saying exactly that, not `_notBridged`, and no
+codegen run can export a function nobody has written. Writing the probe is its own
+task.
 
 **Worth naming for what it is.** `FRONTEND_STRATEGY.md` §2 measured that the real
 problem was never UI duplication but *parity debt* — desktop stopped tracking
@@ -113,7 +123,7 @@ them are closed.
 **(a) Run the core in the browser.** Closed, measured. `comrade_core` does not
 compile for `wasm32-unknown-unknown`: `mio`, reached through tokio's net stack,
 fails with 48 errors. Even if it did, `comrade_storage` opens the vault with
-`redb::Database::create` (`crates/comrade_storage/src/lib.rs:115`), which wants a
+`redb::Database::create` (`crates/comrade_storage/src/lib.rs:116`), which wants a
 real file and an exclusive lock on it, and `saathi` wants libp2p TCP and mDNS. A
 browser tab has none of those.
 
@@ -190,6 +200,17 @@ workspace now declares `nostr` directly — `nostr-sdk` re-exports the same crat
 the same version, so `nostr::PublicKey` *is* `nostr_sdk::PublicKey` and this adds
 a dependency edge rather than a second copy of the type.
 
+**One caveat on that measurement, because it changes what Phase W1 has to move.**
+The probe also stubbed one item: `link.rs`'s only cross-module reference outside
+its test block is `crate::call::EMOJI_ALPHABET`, a `const` the probe supplied
+locally. So the subset is not the three modules named above — it is `link.rs` +
+`error.rs` + that `const`. `crypto.rs` and `pad.rs` are reached only from the
+*test* module, through `dak::courier`; they belong in the leaf crate because the
+browser will need sealing, not because `link.rs` imports them today. Phase W1 must
+carry the alphabet across too, or the leaf crate has a dangling edge into
+`call.rs`, which is not in the split and cannot be (it pulls the whole call
+engine).
+
 One real finding from the probe: `rand` 0.8 reaches the OS RNG through `getrandom`
 0.2, which on `wasm32-unknown-unknown` has no OS to reach. The wasm crate must
 enable `getrandom`'s `js` feature or the target does not build at all. Without it
@@ -225,7 +246,7 @@ never been run.
 ### Phase W0 — done, in this change
 
 `crates/comrade_core/src/link.rs`: the protocol, as policy and framing with no
-I/O, in the style of `dak`. 51 tests, `cargo test -p comrade_core link::`.
+I/O, in the style of `dak`. 61 tests, `cargo test -p comrade_core link::`.
 
 * `LinkOffer` — the QR payload, as a strict `comrade://link?…` URI codec. The
   wire shape is pinned by `offer_uri_shape_is_pinned`, so any second
@@ -256,6 +277,13 @@ existing `crate::crypto::…` path still resolves. §4 says the code is ready; t
 phase is the Cargo and module surgery, plus a CI lane that runs `cargo check
 --target wasm32-unknown-unknown` on the new crate so it cannot silently regain a
 tokio edge.
+
+**`EMOJI_ALPHABET` moves with them**, per §4's caveat — `link.rs` depends on it and
+`call.rs` cannot come along. Put it in the leaf crate and have `call.rs` import it
+back, which also makes the sharing explicit in the dependency graph rather than
+resting on a `pub(crate)`. `link.rs`'s `the_shared_alphabet_is_exactly_32_symbols`
+travels with it: the "4 emoji is 20 bits" claim holds only while the alphabet
+divides 256, and `call.rs`'s own test asserts merely `>= 32`.
 
 Do **not** feature-gate `comrade_core` into a wasm mode instead. It reaches the
 same place by making 20-odd modules conditional, and a `--no-default-features`
@@ -294,8 +322,23 @@ The half that makes a grant do something. In `comrade_ui`:
   nothing checks. That already bit once: the first draft said `download_media`,
   which is not an export (`download_and_decrypt_media` is), and the only symptom
   would have been a linked browser silently unable to open an attachment.
-  Fail-closed contained it; nothing caught it. `comrade_ui` is the first place
-  both sides are visible, so the check belongs there.
+  Fail-closed contained it, and nothing in the suite caught it — it was found by
+  diffing the table against `api.rs` by hand. There is now a regression test for
+  that one name (`media_download_is_named_after_the_real_export`), which is not
+  the same thing as checking all forty: a pinned name cannot notice the *next*
+  typo. `comrade_ui` is the first place both sides are visible, so the general
+  check belongs there.
+
+* **Close the fingerprint gap, or write down that it stays open.** Per
+  `link.rs`'s header, the pairing fingerprint gives after-the-fact detection, not
+  prevention: a `LinkOffer` carries nothing about the host, so the browser cannot
+  display a fingerprint until it has already been granted a session. Prevention
+  would need the offer to commit to a host key — meaning the tab knows which vault
+  it is asking for before it asks, e.g. by the user picking a saved host, or by
+  the phone's scanner writing a challenge back. That is a protocol change and a
+  `WIRE_VERSION` bump; it is not in W0. Whichever way it goes, the approval sheet
+  is what actually carries the weight today, so it has to name the scopes
+  (`LinkScope::describe`) and not just ask "allow?".
 * `BridgeEvent` forwarding as `LinkFrame::Event`, so a linked tab updates live.
 * Transport over relays, both directions, chunked and sealed. Bounded, because a
   relay round trip per call is the latency floor — batch the initial sync rather
@@ -322,8 +365,9 @@ The five missing screens from §1, plus voice notes, dictation, wake word and th
 UPI `/pay` preview. **Not uniform work**, per §1's table, and the ordering follows
 from that:
 
-1. **`api.rs` first**, in one codegen run: the 11 Attention exports and the 5
-   Sakha/TURN ones. Everything else in this phase is blocked behind or
+1. **`api.rs` first**, in one codegen run: the 11 Attention exports and the 4
+   Sakha ones. (Not five — `test_turn_connectivity` has no implementation to
+   export; see §1.) Everything else in this phase is blocked behind or
    independent of it, and batching means one `flutter_rust_bridge_codegen` pass
    rather than three.
 2. `ComradesScreen` — view only, unblocked today.
@@ -360,10 +404,20 @@ to treat them differently:
 
 ## 6. What this change contains
 
-Rust, verified here (`cargo fmt`, `clippy --workspace --all-targets -D warnings`,
-`cargo test --workspace`, all on `rustc 1.97.1` after `rustup update stable`):
+Rust, verified here (`cargo fmt`, `clippy --workspace --all-targets --locked --
+-D warnings`, `cargo test --workspace`, all on `rustc 1.97.1` after `rustup update
+stable` — the image ships 1.94 and this repo has been burned by that gap before).
 
-* `crates/comrade_core/src/link.rs` — Phase W0 above, 51 tests.
+> **How this section was wrong once, since the method matters more than the
+> claim.** The first version of it asserted the same clippy pass, and clippy was
+> in fact failing: `LinkScopes::from_iter` tripped `clippy::should_implement_trait`
+> (now an actual `impl FromIterator`). The check had been run — but through
+> `| grep -E "^(error|warning)"`, and clippy colourises its output, so `error`
+> never begins a line and the grep matched nothing. **The exit code was never
+> examined.** Grepping a compiler's stdout is not a substitute for its status; the
+> commands above are quoted so they can be re-run whole.
+
+* `crates/comrade_core/src/link.rs` — Phase W0 above, 61 tests.
 * `LinkError` in `crates/comrade_core/src/error.rs` — fine-grained on the
   refusals, because each one is read by somebody holding a phone wondering why
   the scan did nothing.

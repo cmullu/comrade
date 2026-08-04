@@ -244,9 +244,30 @@ jobs:
       # compile error, not a runtime one, so a regressed conditional import
       # cannot get past here — there is nothing to grep the output for
       # afterwards, because there would be no output.
+      #
+      # `--no-web-resources-cdn` is not optional here. By default the build bakes
+      # FLUTTER_WEB_CANVASKIT_URL=https://www.gstatic.com/flutter-canvaskit/<rev>/
+      # into the bundle, so the page fetches its renderer from a Google CDN — which
+      # contradicts index.html's "everything is served from this origin", and which
+      # that page's own CSP (`script-src 'self'`) then blocks, leaving the boot
+      # placeholder on screen forever. The flag copies CanvasKit into the bundle so
+      # the comment and the CSP are true at the same time.
       - name: flutter build web --release
         working-directory: app
-        run: flutter build web --release
+        run: flutter build web --release --no-web-resources-cdn
+
+      # The CSP promise, checked against the artifact rather than asserted in a
+      # comment: nothing in the bundle may point at an off-origin host. Greps the
+      # emitted loader/config JS, where the CanvasKit base URL lands as a literal
+      # — unlike `dart:ffi`, this one survives compilation as a string.
+      - name: No off-origin resource URLs in the bundle
+        working-directory: app
+        run: |
+          if grep -rIn "gstatic.com\|googleapis.com" build/web/ ; then
+            echo "::error::the web bundle points at an off-origin CDN; the page's CSP blocks it"
+            exit 1
+          fi
+          echo "no off-origin resource URLs"
 
       - uses: actions/upload-artifact@v4
         with:

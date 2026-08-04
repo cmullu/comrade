@@ -40,18 +40,36 @@
  *
  * The offer travels optically, so nothing can sit in the middle of it. The
  * attack that remains is an **evil twin**: someone shows you *their* browser's
- * QR and you scan it, granting them a session on your vault. The defence is
- * that the host displays [`pairing_fingerprint`] before granting and the browser
- * displays the same four emoji — derived from the session pubkey, the host
- * pubkey and the offer nonce together. If you scanned the attacker's code, the
- * phone shows one set and the tab in front of you shows another.
+ * QR and you scan it, granting them a session on your vault.
  *
- * 4 emoji from a 32-symbol alphabet is 20 bits. That is thin for an offline
- * digest and ample here, because there is nothing to grind: a collision would
- * have to match the fingerprint of *your* browser's session key, which is fresh,
- * random, and unknown to the attacker at the moment they show you their code.
- * The alphabet is shared with the call SAS deliberately — one comparison ritual
- * for the user to learn, not two.
+ * **The fingerprint does not prevent that, and an earlier version of this
+ * comment claimed it did.** [`pairing_fingerprint`] needs the host pubkey, and a
+ * [`LinkOffer`] deliberately carries nothing about the host — the browser learns
+ * which npub adopted it *from the grant*. So the honest sequence is:
+ *
+ * 1. Attacker shows their tab's QR. You scan it. Your phone can compute a
+ *    fingerprint (it knows both keys); **your** tab cannot, because it has
+ *    received no grant.
+ * 2. If you approve, the attacker's tab gets the grant and displays a
+ *    fingerprint that matches your phone's exactly. There was never a
+ *    disagreement to notice.
+ *
+ * What the fingerprint actually gives is **detection after the fact**: your own
+ * tab, once paired, shows four emoji, and a row in the host's linked-devices list
+ * whose emoji you cannot match against a tab in front of you is a session to
+ * revoke. Prevention rests on the approval sheet naming what is being granted,
+ * on [`MAX_PAIRING_ATTEMPTS`], and on the grant being short-lived and revocable —
+ * not on the emoji. Closing the gap properly needs the offer to commit to a host
+ * key, which would mean the browser knowing which vault it is asking for before
+ * it asks; that is a protocol change, and it is recorded as one in
+ * `docs/FLUTTER_WEB_MIGRATION.md` rather than papered over here.
+ *
+ * 4 emoji from a 32-symbol alphabet is 20 bits, which is right for a
+ * user-compared code and is *not* load-bearing against a determined attacker for
+ * the reason above. The alphabet is shared with the call SAS deliberately — one
+ * comparison ritual for the user to learn, not two — and
+ * `the_shared_alphabet_is_exactly_32_symbols` pins the property the bit count
+ * depends on, which `call.rs`'s own test does not.
  *
  * ## No forward secrecy, and no I/O
  *
@@ -65,11 +83,19 @@
  * argument, which is what makes expiry and rate limiting testable. Transport
  * lives above, in `comrade_ui`.
  *
- * Written against `nostr` rather than `nostr_sdk` on purpose: together with
- * [`crate::crypto`] and [`crate::pad`], the modules this one depends on are the
- * subset that *does* compile for `wasm32-unknown-unknown`, so the browser can
- * one day run this exact code instead of a second implementation of it. See
- * `docs/FLUTTER_WEB_MIGRATION.md` §4.
+ * Written against `nostr` rather than `nostr_sdk` on purpose. `nostr_sdk` pulls
+ * tokio's net stack, which does not compile for `wasm32-unknown-unknown`, and the
+ * point of keeping this file's imports narrow is that a browser can one day run
+ * this exact code rather than a second implementation of it.
+ *
+ * Its non-test dependencies are precisely `nostr`, `serde`, `serde_json`, `sha2`,
+ * `hex`, `base64`, and — inside the crate — [`crate::error`] and
+ * [`crate::call::EMOJI_ALPHABET`]. Note what is *not* in that list:
+ * [`crate::crypto`] and [`crate::pad`] are used only by the test module, through
+ * [`crate::dak::courier`]. So the wasm-reachable subset is this file plus
+ * `error.rs` plus that one `const` — and the alphabet has to travel with it,
+ * which is why `docs/FLUTTER_WEB_MIGRATION.md` Phase W1 moves it rather than
+ * leaving `call.rs` behind as an edge the leaf crate cannot satisfy.
  */
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,6 +140,16 @@ pub const CLOCK_SKEW_SECS: u64 = 60;
 /// it is attacker-controlled text and is length- and content-checked.
 pub const MAX_LABEL_CHARS: usize = 48;
 
+/// Longest method name a request may name.
+///
+/// The bound exists because the name travels back out in
+/// [`LinkError::NotPermitted`], whose message is documented as text shown to
+/// somebody holding a phone. Without it, the only limit is
+/// [`MAX_FRAME_BYTES`] — so a refused request could put a 1 MiB string full of
+/// newlines into a log line or a toast. Every real method name is well under 40
+/// characters; the longest in the table is `broadcast_anonymous_chitthi` at 27.
+pub const MAX_METHOD_CHARS: usize = 64;
+
 /// Grant lifetimes. A linked tab is a convenience, not a second home: it
 /// expires on its own even if the user never revokes it.
 pub const DEFAULT_GRANT_TTL_SECS: u64 = 14 * 24 * 60 * 60;
@@ -128,7 +164,12 @@ pub const MAX_ACTIVE_SESSIONS: usize = 5;
 /// were approved or refused. Bounds how many times an evil twin gets to roll the
 /// 1-in-a-million fingerprint collision, and keeps a nagging prompt loop from
 /// wearing the user down into tapping approve.
-pub const MAX_PAIRING_ATTEMPTS: usize = 5;
+///
+/// Deliberately **above** [`MAX_ACTIVE_SESSIONS`], and the gap is the point: at
+/// five each, someone legitimately filling all five session slots in one sitting
+/// would spend their whole prompt budget doing it, and the session cap could
+/// never be the thing that spoke. Room for the five plus a few mis-scans.
+pub const MAX_PAIRING_ATTEMPTS: usize = 8;
 pub const PAIRING_WINDOW_SECS: u64 = 5 * 60;
 
 /// Payload bytes per chunk. Under [`crate::dak::courier::MAX_CIPHERTEXT_BYTES`]
@@ -141,7 +182,8 @@ pub const MAX_CHUNKS: u16 = 128;
 /// fits; a photo does not, and should not — media has its own pipeline and the
 /// browser should fetch a blob by reference rather than through the RPC channel.
 pub const MAX_FRAME_BYTES: usize = MAX_CHUNK_BYTES * MAX_CHUNKS as usize;
-/// Partially-received frames held at once, per peer.
+/// Partially-received frames held at once, per session — see [`Reassembler`],
+/// which is bound to one session so this cap cannot be shared across peers.
 pub const MAX_PENDING_FRAMES: usize = 8;
 /// How long an incomplete frame waits for its missing chunks.
 pub const REASSEMBLY_TTL_SECS: u64 = 60;
@@ -192,10 +234,19 @@ impl LinkScope {
     /// One sentence, in the second person, for the approval sheet. The host must
     /// show these rather than the variant names: "SendMessages" is a symbol,
     /// "Send messages as you" is a decision.
+    ///
+    /// Each sentence has to cover everything its `scope_for` arm actually
+    /// permits, which is a real constraint and not a stylistic one.
+    /// `SendMessages` reads the way it does because its arm is not only
+    /// `send_dm`: it also grants `set_username`, `add_contact`,
+    /// `set_contact_alias` and `remove_contact`. A sheet that said only "send
+    /// messages" while the tab could rename the user's published handle and
+    /// delete their contacts would be a permission prompt that misinforms, which
+    /// is worse than no prompt at all.
     pub fn describe(self) -> &'static str {
         match self {
             Self::ReadThreads => "Read your conversations, contacts and profile",
-            Self::SendMessages => "Send messages as you",
+            Self::SendMessages => "Send messages as you, and edit your display name and contacts",
             Self::Media => "Open and send photos and files",
             Self::Feed => "Read the public feed and post as you",
             Self::Calls => "See your call history and place calls",
@@ -212,13 +263,15 @@ impl LinkScope {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkScopes(BTreeSet<LinkScope>);
 
+impl FromIterator<LinkScope> for LinkScopes {
+    fn from_iter<I: IntoIterator<Item = LinkScope>>(scopes: I) -> Self {
+        Self(scopes.into_iter().collect())
+    }
+}
+
 impl LinkScopes {
     pub fn empty() -> Self {
         Self(BTreeSet::new())
-    }
-
-    pub fn from_iter<I: IntoIterator<Item = LinkScope>>(scopes: I) -> Self {
-        Self(scopes.into_iter().collect())
     }
 
     /// What a browser tab is offered by default: everything except nothing.
@@ -307,6 +360,17 @@ fn is_never_grantable(method: &str) -> bool {
             | "init_app"
             | "init_runtime"
             | "init_runtime_with_relays"
+            // Radio control, and it is not a label. `toggle_workspace` was in
+            // `SendMessages`' arm until a review pointed out what it does:
+            // `comrade_ui`'s runtime notes that entering `OffGridTravel` "really
+            // starts mDNS discovery, it doesn't just flip a label". A browser tab
+            // that could turn on the host phone's local-network broadcast is
+            // deciding what that phone radiates to the room it is sitting in,
+            // which no approval sentence about sending messages describes and
+            // which a web client has no reason to need. Reading the workspace
+            // (`current_workspace`, `workspaces`) stays permitted.
+            | "toggle_workspace"
+            | "back"
             // The link surface itself. Deny-listed before it exists (Phase W2 of
             // docs/FLUTTER_WEB_MIGRATION.md adds these exports), because the
             // order matters: a session that could mint or revoke grants could
@@ -340,8 +404,7 @@ fn scope_for(method: &str) -> Option<LinkScope> {
         | "set_contact_alias"
         | "remove_contact"
         | "note_draft"
-        | "abandon_draft"
-        | "toggle_workspace" => LinkScope::SendMessages,
+        | "abandon_draft" => LinkScope::SendMessages,
 
         // `download_and_decrypt_media`, not `download_media`: these are
         // `comrade_jni::api` export names, and an approximation of one fails
@@ -541,13 +604,24 @@ fn parse_nonce(value: &str) -> Result<[u8; NONCE_LEN], LinkError> {
         .map_err(|_| LinkError::Malformed(format!("nonce must be {NONCE_LEN} bytes")))
 }
 
-/// `wss://` only, and no credentials in the URL.
+/// `wss://` only, no credentials, and nothing that can lie in a list.
 ///
 /// `ws://` is refused rather than upgraded: a browser served over HTTPS cannot
 /// open a plaintext socket anyway, so accepting it here would mean storing a
 /// hint that can only ever fail. Userinfo is refused because a relay hint gets
 /// persisted in a grant and shown in a session list, and neither is a place for
 /// a password.
+///
+/// And because it *is* shown in that list, a relay URL is untrusted display text
+/// exactly like a device label — so it gets the same treatment
+/// ([`sanitise_label`]), which an earlier version of this function did not do.
+/// Rejecting only `char::is_whitespace` let `wss://a\u{0}b` and
+/// `wss://a\u{202E}evil.example` through: NUL is not `White_Space`, and U+202E
+/// RIGHT-TO-LEFT OVERRIDE is not either — it silently reverses the rendering of
+/// everything after it, which is how a hostile hint renders as a familiar one.
+/// Refused rather than stripped, because unlike a label there is no legitimate
+/// URL that needs cleaning up, and a silently-rewritten URL is a hint that
+/// connects somewhere other than what was checked.
 fn validate_relay(url: &str) -> Result<(), LinkError> {
     if url.chars().count() > MAX_RELAY_URL_CHARS {
         return Err(LinkError::Malformed(format!(
@@ -566,13 +640,30 @@ fn validate_relay(url: &str) -> Result<(), LinkError> {
             "relay URL must not carry credentials".into(),
         ));
     }
-    if url.contains(char::is_whitespace) {
+    if url.chars().any(|c| {
+        c.is_whitespace() || c.is_control() || BIDI_OVERRIDES.contains(&c) || c == '\u{FEFF}'
+    }) {
         return Err(LinkError::Malformed(
-            "relay URL must not contain whitespace".into(),
+            "relay URL contains a control, whitespace or text-direction character".into(),
         ));
     }
     Ok(())
 }
+
+/// Unicode bidirectional formatting characters, which reorder the glyphs after
+/// them without being visible themselves.
+///
+/// Not covered by `char::is_control` — they are `Cf` (format), not `Cc`
+/// (control) — so a check that only asks about control characters lets every one
+/// of these through. They are refused wherever text this module persists gets
+/// shown back to a human: a linked-devices list is a security decision surface,
+/// and a row that renders differently from the bytes it holds is exactly the
+/// thing that makes such a list untrustworthy.
+const BIDI_OVERRIDES: &[char] = &[
+    '\u{200E}', '\u{200F}', // LRM, RLM
+    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', // embedding/override
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', // isolates
+];
 
 /// Minimal percent-encoding: keep the unreserved set, escape everything else.
 ///
@@ -694,6 +785,51 @@ impl LinkGrant {
     pub fn id_hex(&self) -> String {
         hex::encode(self.id)
     }
+
+    /// The browser's check on a grant it just unsealed. Call this before storing
+    /// one; a grant that does not pass is not a session.
+    ///
+    /// `sealed_by` is the **authenticated** sender from
+    /// [`crate::dak::courier::open`], not anything the frame claimed. Three
+    /// things have to line up, and each closes something specific:
+    ///
+    /// * `version` — this is the reader [`WIRE_VERSION`]'s "a browser and a phone
+    ///   on different versions must refuse each other rather than guess" needs in
+    ///   order to be true of grants at all. Without it the field was written at
+    ///   mint time and consulted by nothing, so the promise covered only the
+    ///   offer URI.
+    /// * `session` — a grant addressed to a *different* browser tab, replayed
+    ///   into this one. It could not be unsealed by us, but checking costs
+    ///   nothing and does not depend on that reasoning holding.
+    /// * `host` — the npub the grant claims must be the npub that sealed it.
+    ///   This is the whole reason no signature scheme was needed.
+    pub fn accept(
+        &self,
+        expected_session: &PublicKey,
+        sealed_by: &PublicKey,
+        now: u64,
+    ) -> Result<(), LinkError> {
+        if self.version != WIRE_VERSION {
+            return Err(LinkError::UnsupportedVersion(self.version));
+        }
+        if &self.session != expected_session {
+            return Err(LinkError::Malformed(
+                "grant was issued to a different session".into(),
+            ));
+        }
+        if &self.host != sealed_by {
+            return Err(LinkError::Malformed(
+                "grant names a different host than the one that sealed it".into(),
+            ));
+        }
+        if self.is_expired(now) {
+            return Err(LinkError::SessionExpired);
+        }
+        if self.scopes.is_empty() {
+            return Err(LinkError::NoScopes);
+        }
+        Ok(())
+    }
 }
 
 mod id_hex {
@@ -746,6 +882,17 @@ pub struct LinkSessionSnapshot {
     pub attempts: Vec<u64>,
 }
 
+/// Proof that the user was prompted about one specific link code.
+///
+/// Not constructible outside this module and not `Clone`, so it can be produced
+/// only by [`LinkSessionStore::note_pairing_attempt`] and spent only once, on the
+/// offer it was issued for. That is the entire point: it turns "remember to rate
+/// limit before prompting" from a comment into a compile error.
+#[derive(Debug)]
+pub struct PairingAttempt {
+    session: PublicKey,
+}
+
 /// Every browser tab this vault has adopted.
 ///
 /// Not interior-mutable, for the same reason [`crate::dak::courier::CourierStore`]
@@ -776,12 +923,24 @@ impl LinkSessionStore {
         }
     }
 
-    /// Record that the user was *asked* to approve a pairing.
+    /// Record that the user is *about to be asked* to approve a pairing, and
+    /// return the receipt [`Self::grant`] needs.
     ///
     /// Called before the prompt is shown, and counted whether they say yes or
     /// no — the thing being limited is how often a stranger can put that prompt
     /// in front of them, not how often they agree.
-    pub fn note_pairing_attempt(&mut self, now: u64) -> Result<(), LinkError> {
+    ///
+    /// It returns a [`PairingAttempt`] rather than `()` because this rate limit is
+    /// the *only* thing bounding how many times an evil twin gets to roll the
+    /// 20-bit fingerprint collision this module's header describes, and an
+    /// obligation stated in a doc comment is one a second caller can forget.
+    /// `grant` consumes the receipt, so the ordering is enforced by the type
+    /// rather than by whoever reads this paragraph.
+    pub fn note_pairing_attempt(
+        &mut self,
+        offer: &LinkOffer,
+        now: u64,
+    ) -> Result<PairingAttempt, LinkError> {
         self.attempts
             .retain(|at| now.saturating_sub(*at) < PAIRING_WINDOW_SECS);
         if self.attempts.len() >= MAX_PAIRING_ATTEMPTS {
@@ -791,18 +950,23 @@ impl LinkSessionStore {
             });
         }
         self.attempts.push(now);
-        Ok(())
+        Ok(PairingAttempt {
+            session: offer.session,
+        })
     }
 
     /// Mint a grant for an approved offer.
     ///
     /// Everything checkable is checked here rather than at the call site, so a
-    /// second caller (the desktop host, later) cannot forget one: the offer must
-    /// be fresh, the label sane, the TTL bounded, and there must be room. Expired
-    /// sessions are swept first, so "full" means five *live* tabs, not five ever.
+    /// second caller (the desktop host, later) cannot forget one: the user was
+    /// prompted (`attempt`, which cannot be forged or reused for another offer),
+    /// the offer must be fresh, the label sane, the TTL bounded, and there must be
+    /// room. Expired sessions are swept first, so "full" means five *live* tabs,
+    /// not five ever.
     #[allow(clippy::too_many_arguments)]
     pub fn grant(
         &mut self,
+        attempt: PairingAttempt,
         offer: &LinkOffer,
         host: PublicKey,
         scopes: LinkScopes,
@@ -811,6 +975,14 @@ impl LinkSessionStore {
         ttl_secs: u64,
         now: u64,
     ) -> Result<LinkGrant, LinkError> {
+        // The receipt has to be for *this* offer. Otherwise one prompt could be
+        // spent granting a different session — which is the same hole as not
+        // prompting at all, reached by holding on to an old receipt.
+        if attempt.session != offer.session {
+            return Err(LinkError::Malformed(
+                "pairing receipt belongs to a different link code".into(),
+            ));
+        }
         if offer.version != WIRE_VERSION {
             return Err(LinkError::UnsupportedVersion(offer.version));
         }
@@ -879,7 +1051,7 @@ impl LinkSessionStore {
         }
         if !grant.scopes.permits(method) {
             return Err(LinkError::NotPermitted {
-                method: method.to_string(),
+                method: describable_method(method),
             });
         }
         Ok(grant)
@@ -939,10 +1111,36 @@ impl LinkSessionStore {
 /// is untrusted display text. Newlines and control bytes are stripped rather
 /// than escaped because there is no legitimate label containing them, and a
 /// label that can inject a line break can forge a second row in that list.
+///
+/// [`BIDI_OVERRIDES`] go too, and they are the reason this is not simply
+/// `is_control`: they are category `Cf`, so `char::is_control` answers `false`
+/// for every one of them, and a label of `"Firefox\u{202E}…"` reverses the
+/// rendering of the row it lands in. Stripped rather than rejected, unlike a
+/// relay URL — a label is only ever shown, so removing the character loses
+/// nothing, whereas rewriting a URL would change where it points.
+/// Make a rejected method name safe to put in a message a human reads.
+///
+/// [`LinkError::NotPermitted`] interpolates this, and the name came off the wire
+/// bounded only by [`MAX_FRAME_BYTES`]. Truncating rather than refusing, because
+/// the caller is already on the error path: the useful outcome is a legible
+/// "not permitted to call X", not a second, different error about the shape of
+/// the first one.
+fn describable_method(method: &str) -> String {
+    let cleaned: String = method
+        .chars()
+        .filter(|c| !c.is_control() && !BIDI_OVERRIDES.contains(c) && *c != '\u{FEFF}')
+        .take(MAX_METHOD_CHARS)
+        .collect();
+    if cleaned.is_empty() {
+        return "(unnamed)".to_string();
+    }
+    cleaned
+}
+
 fn sanitise_label(label: &str) -> Result<String, LinkError> {
     let cleaned: String = label
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !BIDI_OVERRIDES.contains(c) && *c != '\u{FEFF}')
         .collect::<String>()
         .trim()
         .to_string();
@@ -1072,15 +1270,28 @@ pub fn chunk(frame_id: u64, payload: &[u8]) -> Result<Vec<Chunk>, LinkError> {
         .collect())
 }
 
-/// Rebuilds frames from chunks that may arrive out of order, twice, or not at
-/// all.
+/// Rebuilds one session's frames from chunks that may arrive out of order,
+/// twice, or not at all.
 ///
 /// Bounded in every direction a remote peer controls: chunk count, frame size,
 /// how many frames may be part-assembled at once, and how long an incomplete one
 /// waits. A reassembly buffer with none of those is a memory-exhaustion primitive
-/// handed to whoever can reach the channel.
-#[derive(Debug, Default)]
+/// handed to whoever can reach the channel. Worst case per instance is
+/// [`MAX_PENDING_FRAMES`] × [`MAX_FRAME_BYTES`] = 8 MiB.
+///
+/// **One instance per session, and the type enforces it.** A `Chunk`'s `frame`
+/// id is an arbitrary `u64` chosen by whoever sent it, so a single `Reassembler`
+/// shared across linked sessions would let one session reach into another's
+/// half-built frames: send `frame: 1, seq: 1` and complete a frame session A
+/// started, and the caller would attribute B's bytes to A's grant. Cheaper
+/// still, contradict A's `seq: 0` and the frame is dropped, or fill all eight
+/// slots and starve A entirely. None of that is reachable if the buffer cannot
+/// be shared, so [`Reassembler::for_session`] takes the session key and
+/// [`Reassembler::session`] hands it back — there is no `Default` and no way to
+/// build one that is not already bound to a peer.
+#[derive(Debug)]
 pub struct Reassembler {
+    session: PublicKey,
     pending: BTreeMap<u64, Partial>,
 }
 
@@ -1093,8 +1304,19 @@ struct Partial {
 }
 
 impl Reassembler {
-    pub fn new() -> Self {
-        Self::default()
+    /// Bind a fresh buffer to one linked session. See the type's doc for why
+    /// this is the only constructor.
+    pub fn for_session(session: PublicKey) -> Self {
+        Self {
+            session,
+            pending: BTreeMap::new(),
+        }
+    }
+
+    /// Whose chunks this buffer accepts. Lets a caller holding a map of
+    /// reassemblers assert it is feeding the right one.
+    pub fn session(&self) -> &PublicKey {
+        &self.session
     }
 
     /// Feed one chunk. `Ok(Some(frame))` when it completed one.
@@ -1341,6 +1563,76 @@ mod tests {
     }
 
     #[test]
+    fn relays_cannot_carry_invisible_or_direction_reversing_characters() {
+        // Regression. `validate_relay` rejected only `char::is_whitespace`, and
+        // neither NUL nor U+202E RIGHT-TO-LEFT OVERRIDE is `White_Space` — so both
+        // reached `LinkGrant.relays` and the linked-devices list, where U+202E
+        // reverses the rendering of everything after it.
+        for hostile in [
+            "wss://a\u{0}b.example",
+            "wss://a\u{202E}elpmaxe.live",
+            "wss://a\u{200F}b.example",
+            "wss://a\u{2066}b.example",
+            "wss://a\u{FEFF}b.example",
+            "wss://a\u{1}b.example",
+        ] {
+            assert!(
+                validate_relay(hostile).is_err(),
+                "{hostile:?} must not reach a session list"
+            );
+        }
+        assert!(validate_relay("wss://relay.example/nostr").is_ok());
+    }
+
+    #[test]
+    fn a_label_cannot_reverse_the_row_it_lands_in() {
+        // Same class as above, opposite treatment: a label is only ever shown, so
+        // the character is stripped rather than the whole label refused.
+        assert_eq!(
+            sanitise_label("Firefox\u{202E}xunil no").expect("ok"),
+            "Firefoxxunil no"
+        );
+        assert!(sanitise_label("\u{202E}\u{200F}").is_err());
+    }
+
+    #[test]
+    fn a_refused_method_name_cannot_flood_the_message_shown_to_the_user() {
+        // `LinkError::NotPermitted` interpolates this, and the name arrives off
+        // the wire bounded only by MAX_FRAME_BYTES (1 MiB).
+        let flood = "x".repeat(4096);
+        let described = describable_method(&flood);
+        assert_eq!(described.chars().count(), MAX_METHOD_CHARS);
+
+        assert_eq!(describable_method("send\n\ndm"), "senddm");
+        assert_eq!(describable_method("\u{202E}dm"), "dm");
+        assert_eq!(describable_method("\u{0}"), "(unnamed)");
+        assert_eq!(describable_method(""), "(unnamed)");
+
+        let now = 1_000;
+        let mut store = LinkSessionStore::new();
+        let offer = offer(now);
+        grant_on(&mut store, &offer, now);
+        match store.authorize(&offer.session, &flood, now) {
+            Err(LinkError::NotPermitted { method }) => {
+                assert_eq!(method.chars().count(), MAX_METHOD_CHARS)
+            }
+            other => panic!("expected NotPermitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_linked_browser_cannot_turn_on_the_hosts_local_radio() {
+        // `toggle_workspace` was under SendMessages until a review pointed out
+        // that entering OffGridTravel really starts mDNS discovery rather than
+        // flipping a label. Reading the workspace stays fine.
+        let all = LinkScopes::web_default();
+        assert!(!all.permits("toggle_workspace"));
+        assert!(!all.permits("back"));
+        assert!(all.permits("current_workspace"));
+        assert!(all.permits("workspaces"));
+    }
+
+    #[test]
     fn relay_hints_are_capped_at_both_ends() {
         let six: Vec<String> = (0..6).map(|i| format!("wss://r{i}.example")).collect();
         assert!(matches!(
@@ -1460,7 +1752,7 @@ mod tests {
         // the short name came from `ComradeRepository.downloadMedia`. It failed
         // closed, so nothing was exposed; a linked browser just silently could
         // not open an attachment.
-        let media = LinkScopes::from_iter([LinkScope::Media]);
+        let media: LinkScopes = [LinkScope::Media].into_iter().collect();
         assert!(media.permits("download_and_decrypt_media"));
         assert!(!media.permits("download_media"));
     }
@@ -1478,7 +1770,7 @@ mod tests {
         // approval sheet, and gates nothing — which would be a lie told to the
         // user in a permission prompt.
         for scope in LinkScope::ALL {
-            let only = LinkScopes::from_iter([scope]);
+            let only: LinkScopes = [scope].into_iter().collect();
             assert!(
                 METHOD_SAMPLES.iter().any(|m| only.permits(m)),
                 "{scope:?} gates no method in the table"
@@ -1488,7 +1780,7 @@ mod tests {
 
     #[test]
     fn reading_does_not_imply_writing() {
-        let read_only = LinkScopes::from_iter([LinkScope::ReadThreads]);
+        let read_only: LinkScopes = [LinkScope::ReadThreads].into_iter().collect();
         assert!(read_only.permits("messages_with"));
         assert!(!read_only.permits("send_dm"));
         assert!(!read_only.permits("broadcast_chitthi"));
@@ -1530,6 +1822,52 @@ mod tests {
     }
 
     #[test]
+    fn a_reassembler_is_bound_to_one_session() {
+        // The invariant behind `MAX_PENDING_FRAMES` being "per session": a
+        // `Chunk`'s frame id is attacker-chosen, so a buffer shared between two
+        // linked sessions would let one complete, poison or starve the other's
+        // frames. There is no `Default` and no `new()` — the only constructor
+        // takes the session key, so the sharing bug is unwritable rather than
+        // merely undocumented.
+        let alice = key(11);
+        let bob = key(12);
+        let mut for_alice = Reassembler::for_session(alice);
+        let mut for_bob = Reassembler::for_session(bob);
+        assert_eq!(for_alice.session(), &alice);
+        assert_eq!(for_bob.session(), &bob);
+
+        // Same frame id from both peers. Alice's half-frame must be untouched by
+        // Bob's chunk, and neither must complete on the other's bytes.
+        let half = Chunk {
+            frame: 1,
+            seq: 0,
+            total: 2,
+            data: b"alice".to_vec(),
+        };
+        let rest = Chunk {
+            frame: 1,
+            seq: 1,
+            total: 2,
+            data: b"bob".to_vec(),
+        };
+        assert_eq!(for_alice.accept(half, 0).expect("accepts"), None);
+        assert_eq!(for_bob.accept(rest, 0).expect("accepts"), None);
+        assert_eq!(for_alice.pending_frames(), 1);
+        assert_eq!(for_bob.pending_frames(), 1);
+    }
+
+    #[test]
+    fn the_shared_alphabet_is_exactly_32_symbols() {
+        // `pairing_fingerprint` reduces one digest byte per emoji with `%`, so
+        // the "4 emoji is 20 bits" claim in this module's header is only true
+        // while the alphabet is a power of two that divides 256. `call.rs`'s own
+        // test asserts the alphabet is *at least* 32, which would let a 33rd
+        // entry silently bias this fingerprint and falsify that comment.
+        assert_eq!(EMOJI_ALPHABET.len(), 32);
+        assert_eq!(256 % EMOJI_ALPHABET.len(), 0);
+    }
+
+    #[test]
     fn fingerprint_is_deterministic() {
         assert_eq!(
             pairing_fingerprint(&key(1), &key(2), &[9; NONCE_LEN]),
@@ -1557,18 +1895,62 @@ mod tests {
 
     // ── Granting ─────────────────────────────────────────────────────────────
 
+    /// The prompt-then-grant pair every host performs, for the tests that are
+    /// about what happens after the user has said yes.
+    #[allow(clippy::too_many_arguments)]
+    fn issue(
+        store: &mut LinkSessionStore,
+        offer: &LinkOffer,
+        scopes: LinkScopes,
+        label: &str,
+        id: [u8; GRANT_ID_LEN],
+        ttl_secs: u64,
+        now: u64,
+    ) -> Result<LinkGrant, LinkError> {
+        let attempt = store.note_pairing_attempt(offer, now)?;
+        store.grant(attempt, offer, key(99), scopes, label, id, ttl_secs, now)
+    }
+
     fn grant_on(store: &mut LinkSessionStore, offer: &LinkOffer, now: u64) -> LinkGrant {
-        store
-            .grant(
-                offer,
+        issue(
+            store,
+            offer,
+            LinkScopes::web_default(),
+            "Firefox on Linux",
+            [1; GRANT_ID_LEN],
+            DEFAULT_GRANT_TTL_SECS,
+            now,
+        )
+        .expect("grant")
+    }
+
+    #[test]
+    fn a_grant_requires_a_receipt_for_that_exact_link_code() {
+        // The receipt is the enforcement point for the pairing rate limit, which
+        // is the only bound on the fingerprint grind. It must not be spendable on
+        // a different offer than the one the user was shown.
+        let now = 1_000;
+        let mut store = LinkSessionStore::new();
+        let shown = offer(now);
+        let other = LinkOffer::new(key(123), [1; NONCE_LEN], now, vec![]).expect("valid");
+
+        let receipt = store
+            .note_pairing_attempt(&shown, now)
+            .expect("first prompt");
+        assert!(matches!(
+            store.grant(
+                receipt,
+                &other,
                 key(99),
                 LinkScopes::web_default(),
-                "Firefox on Linux",
+                "tab",
                 [1; GRANT_ID_LEN],
                 DEFAULT_GRANT_TTL_SECS,
                 now,
-            )
-            .expect("grant")
+            ),
+            Err(LinkError::Malformed(_))
+        ));
+        assert!(store.is_empty());
     }
 
     #[test]
@@ -1598,9 +1980,9 @@ mod tests {
         let offer = offer(minted);
         let late = minted + OFFER_TTL_SECS + CLOCK_SKEW_SECS + 1;
         assert!(matches!(
-            store.grant(
+            issue(
+                &mut store,
                 &offer,
-                key(99),
                 LinkScopes::web_default(),
                 "Firefox",
                 [1; GRANT_ID_LEN],
@@ -1617,9 +1999,9 @@ mod tests {
         let mut store = LinkSessionStore::new();
         let offer = offer(now);
         assert!(matches!(
-            store.grant(
+            issue(
+                &mut store,
                 &offer,
-                key(99),
                 LinkScopes::empty(),
                 "Firefox",
                 [1; GRANT_ID_LEN],
@@ -1630,9 +2012,9 @@ mod tests {
         ));
         for ttl in [0, MAX_GRANT_TTL_SECS + 1] {
             assert!(matches!(
-                store.grant(
+                issue(
+                    &mut store,
                     &offer,
-                    key(99),
                     LinkScopes::web_default(),
                     "Firefox",
                     [1; GRANT_ID_LEN],
@@ -1665,17 +2047,16 @@ mod tests {
         let offer = offer(now);
         grant_on(&mut store, &offer, now);
 
-        let second = store
-            .grant(
-                &offer,
-                key(99),
-                LinkScopes::from_iter([LinkScope::ReadThreads]),
-                "Firefox on Linux",
-                [2; GRANT_ID_LEN],
-                DEFAULT_GRANT_TTL_SECS,
-                now + 1,
-            )
-            .expect("re-pair");
+        let second = issue(
+            &mut store,
+            &offer,
+            [LinkScope::ReadThreads].into_iter().collect(),
+            "Firefox on Linux",
+            [2; GRANT_ID_LEN],
+            DEFAULT_GRANT_TTL_SECS,
+            now + 1,
+        )
+        .expect("re-pair");
 
         assert_eq!(store.len(), 1);
         assert_eq!(store.active(now + 1), vec![&second]);
@@ -1691,24 +2072,23 @@ mod tests {
         for i in 0..MAX_ACTIVE_SESSIONS {
             let offer = LinkOffer::new(key(i as u8 + 10), [0; NONCE_LEN], now, vec![])
                 .expect("valid offer");
-            store
-                .grant(
-                    &offer,
-                    key(99),
-                    LinkScopes::web_default(),
-                    "tab",
-                    [i as u8; GRANT_ID_LEN],
-                    DEFAULT_GRANT_TTL_SECS,
-                    now,
-                )
-                .expect("within cap");
+            issue(
+                &mut store,
+                &offer,
+                LinkScopes::web_default(),
+                "tab",
+                [i as u8; GRANT_ID_LEN],
+                DEFAULT_GRANT_TTL_SECS,
+                now,
+            )
+            .expect("within cap");
         }
 
         let extra = LinkOffer::new(key(200), [0; NONCE_LEN], now, vec![]).expect("valid");
         assert!(matches!(
-            store.grant(
+            issue(
+                &mut store,
                 &extra,
-                key(99),
                 LinkScopes::web_default(),
                 "tab",
                 [77; GRANT_ID_LEN],
@@ -1722,17 +2102,16 @@ mod tests {
         // five live tabs, not five ever.
         let later = now + DEFAULT_GRANT_TTL_SECS;
         let fresh = LinkOffer::new(key(200), [0; NONCE_LEN], later, vec![]).expect("valid");
-        assert!(store
-            .grant(
-                &fresh,
-                key(99),
-                LinkScopes::web_default(),
-                "tab",
-                [77; GRANT_ID_LEN],
-                DEFAULT_GRANT_TTL_SECS,
-                later
-            )
-            .is_ok());
+        assert!(issue(
+            &mut store,
+            &fresh,
+            LinkScopes::web_default(),
+            "tab",
+            [77; GRANT_ID_LEN],
+            DEFAULT_GRANT_TTL_SECS,
+            later
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1740,15 +2119,17 @@ mod tests {
         let now = 1_000;
         let mut store = LinkSessionStore::new();
         for _ in 0..MAX_PAIRING_ATTEMPTS {
-            store.note_pairing_attempt(now).expect("within the window");
+            store
+                .note_pairing_attempt(&offer(now), now)
+                .expect("within the window");
         }
         assert!(matches!(
-            store.note_pairing_attempt(now),
+            store.note_pairing_attempt(&offer(now), now),
             Err(LinkError::TooManyAttempts { .. })
         ));
         // The window slides rather than resetting on a fixed boundary.
         assert!(store
-            .note_pairing_attempt(now + PAIRING_WINDOW_SECS)
+            .note_pairing_attempt(&offer(now), now + PAIRING_WINDOW_SECS)
             .is_ok());
     }
 
@@ -1757,12 +2138,14 @@ mod tests {
         let now = 1_000;
         let mut store = LinkSessionStore::new();
         for _ in 0..MAX_PAIRING_ATTEMPTS {
-            store.note_pairing_attempt(now).expect("within the window");
+            store
+                .note_pairing_attempt(&offer(now), now)
+                .expect("within the window");
         }
         let mut restarted = LinkSessionStore::from_snapshot(store.snapshot());
         assert!(
             matches!(
-                restarted.note_pairing_attempt(now),
+                restarted.note_pairing_attempt(&offer(now), now),
                 Err(LinkError::TooManyAttempts { .. })
             ),
             "force-quitting the app must not reset the pairing rate limit"
@@ -1785,17 +2168,16 @@ mod tests {
         let now = 1_000;
         let mut store = LinkSessionStore::new();
         let offer = offer(now);
-        store
-            .grant(
-                &offer,
-                key(99),
-                LinkScopes::from_iter([LinkScope::ReadThreads]),
-                "tab",
-                [1; GRANT_ID_LEN],
-                DEFAULT_GRANT_TTL_SECS,
-                now,
-            )
-            .expect("grant");
+        issue(
+            &mut store,
+            &offer,
+            [LinkScope::ReadThreads].into_iter().collect(),
+            "tab",
+            [1; GRANT_ID_LEN],
+            DEFAULT_GRANT_TTL_SECS,
+            now,
+        )
+        .expect("grant");
         match store.authorize(&offer.session, "send_dm", now) {
             Err(LinkError::NotPermitted { method }) => assert_eq!(method, "send_dm"),
             other => panic!("expected NotPermitted, got {other:?}"),
@@ -1823,17 +2205,16 @@ mod tests {
         let mut store = LinkSessionStore::new();
         for i in 0..3u8 {
             let offer = LinkOffer::new(key(i + 20), [0; NONCE_LEN], now, vec![]).expect("valid");
-            store
-                .grant(
-                    &offer,
-                    key(99),
-                    LinkScopes::web_default(),
-                    "tab",
-                    [i; GRANT_ID_LEN],
-                    DEFAULT_GRANT_TTL_SECS,
-                    now,
-                )
-                .expect("grant");
+            issue(
+                &mut store,
+                &offer,
+                LinkScopes::web_default(),
+                "tab",
+                [i; GRANT_ID_LEN],
+                DEFAULT_GRANT_TTL_SECS,
+                now,
+            )
+            .expect("grant");
         }
         assert_eq!(store.revoke_all(), 3);
         assert!(store.is_empty());
@@ -1866,17 +2247,16 @@ mod tests {
         for i in 0..3u8 {
             let offer =
                 LinkOffer::new(key(i + 30), [0; NONCE_LEN], now + i as u64, vec![]).expect("valid");
-            store
-                .grant(
-                    &offer,
-                    key(99),
-                    LinkScopes::web_default(),
-                    "tab",
-                    [i; GRANT_ID_LEN],
-                    DEFAULT_GRANT_TTL_SECS,
-                    now + i as u64,
-                )
-                .expect("grant");
+            issue(
+                &mut store,
+                &offer,
+                LinkScopes::web_default(),
+                "tab",
+                [i; GRANT_ID_LEN],
+                DEFAULT_GRANT_TTL_SECS,
+                now + i as u64,
+            )
+            .expect("grant");
         }
         let issued: Vec<u64> = store.active(now + 3).iter().map(|g| g.issued_at).collect();
         assert_eq!(issued, vec![now + 2, now + 1, now]);
@@ -1937,6 +2317,56 @@ mod tests {
         assert!(!grant.permits("tara_send", now));
     }
 
+    #[test]
+    fn the_browser_refuses_a_grant_that_does_not_check_out() {
+        // `LinkGrant::accept` is the reader that makes WIRE_VERSION's promise —
+        // "a browser and a phone on different versions must refuse each other
+        // rather than guess" — true of grants and not only of the offer URI. The
+        // version field was previously written at mint time and read by nothing.
+        let now = 1_000;
+        let mut store = LinkSessionStore::new();
+        let offer = offer(now);
+        let host = key(99);
+        let grant = grant_on(&mut store, &offer, now);
+
+        assert!(grant.accept(&offer.session, &host, now).is_ok());
+
+        // A grant from a future protocol version is refused, not guessed at.
+        let mut newer = grant.clone();
+        newer.version = WIRE_VERSION + 1;
+        assert!(matches!(
+            newer.accept(&offer.session, &host, now),
+            Err(LinkError::UnsupportedVersion(_))
+        ));
+
+        // Addressed to another tab.
+        assert!(matches!(
+            grant.accept(&key(77), &host, now),
+            Err(LinkError::Malformed(_))
+        ));
+
+        // Claims a host other than the key that actually sealed it — the check
+        // that stands in for a signature.
+        assert!(matches!(
+            grant.accept(&offer.session, &key(78), now),
+            Err(LinkError::Malformed(_))
+        ));
+
+        // Already expired on arrival.
+        assert!(matches!(
+            grant.accept(&offer.session, &host, grant.expires_at),
+            Err(LinkError::SessionExpired)
+        ));
+
+        // Scopeless: a session that can do nothing is not a session.
+        let mut empty = grant.clone();
+        empty.scopes = LinkScopes::empty();
+        assert!(matches!(
+            empty.accept(&offer.session, &host, now),
+            Err(LinkError::NoScopes)
+        ));
+    }
+
     // ── Frames and chunking ──────────────────────────────────────────────────
 
     #[test]
@@ -1981,7 +2411,7 @@ mod tests {
             let chunks = chunk(1, &payload).expect("chunks");
             assert!(!chunks.is_empty(), "{len} bytes produced no chunks");
 
-            let mut reassembler = Reassembler::new();
+            let mut reassembler = Reassembler::for_session(key(42));
             let mut done = None;
             for c in chunks {
                 assert!(c.data.len() <= MAX_CHUNK_BYTES);
@@ -2000,7 +2430,7 @@ mod tests {
         let mut chunks = chunk(7, &payload).expect("chunks");
         chunks.reverse();
 
-        let mut reassembler = Reassembler::new();
+        let mut reassembler = Reassembler::for_session(key(42));
         let mut done = None;
         for c in chunks {
             // Feed each one twice: a relay retry must not corrupt the frame, and
@@ -2025,7 +2455,7 @@ mod tests {
 
     #[test]
     fn a_chunk_that_contradicts_one_already_held_drops_the_frame() {
-        let mut reassembler = Reassembler::new();
+        let mut reassembler = Reassembler::for_session(key(42));
         let first = Chunk {
             frame: 1,
             seq: 0,
@@ -2049,7 +2479,7 @@ mod tests {
 
     #[test]
     fn malformed_chunk_headers_are_refused() {
-        let mut reassembler = Reassembler::new();
+        let mut reassembler = Reassembler::for_session(key(42));
         for bad in [
             Chunk {
                 frame: 1,
@@ -2085,7 +2515,7 @@ mod tests {
         // Every chunk is individually legal and the header claims a legal piece
         // count; only the running total is over. Without the byte accounting
         // this is a memory-exhaustion primitive.
-        let mut reassembler = Reassembler::new();
+        let mut reassembler = Reassembler::for_session(key(42));
         let mut result = Ok(None);
         for seq in 0..MAX_CHUNKS {
             result = reassembler.accept(
@@ -2105,7 +2535,7 @@ mod tests {
         assert!(matches!(result, Ok(Some(_))), "got {result:?}");
 
         // One byte more, and it is refused.
-        let mut reassembler = Reassembler::new();
+        let mut reassembler = Reassembler::for_session(key(42));
         for seq in 0..MAX_CHUNKS - 1 {
             reassembler
                 .accept(
@@ -2145,7 +2575,7 @@ mod tests {
 
     #[test]
     fn part_built_frames_are_capped_and_expire() {
-        let mut reassembler = Reassembler::new();
+        let mut reassembler = Reassembler::for_session(key(42));
         for frame in 0..MAX_PENDING_FRAMES as u64 {
             reassembler
                 .accept(
@@ -2241,8 +2671,10 @@ mod tests {
         let mut store = LinkSessionStore::new();
         let offer =
             LinkOffer::new(session.public_key(), [4; NONCE_LEN], now, vec![]).expect("valid offer");
+        let receipt = store.note_pairing_attempt(&offer, now).expect("prompted");
         let grant = store
             .grant(
+                receipt,
                 &offer,
                 host.public_key(),
                 LinkScopes::web_default(),
@@ -2269,6 +2701,14 @@ mod tests {
         // actually sealed it. A grant naming someone else's host is refused.
         match LinkFrame::decode(&opened.payload).expect("decodes") {
             LinkFrame::Granted { grant } => {
+                // The browser's real check, in one call, against the
+                // *authenticated* sender rather than anything the frame claimed.
+                grant
+                    .accept(&session.public_key(), &opened.sender, now)
+                    .expect("grant checks out");
+                assert!(grant
+                    .accept(&session.public_key(), &impostor.public_key(), now)
+                    .is_err());
                 assert_eq!(grant.host, opened.sender);
                 assert_ne!(grant.host, impostor.public_key());
                 assert_eq!(
