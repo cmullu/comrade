@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -538,6 +539,42 @@ private fun MainShell(
     // ── Calls ─────────────────────────────────────────────────────────────────
     // A call needs the mic (and, for video, the camera) granted before capture.
     // We gate the runtime permission here, then run the deferred action.
+    // Watch/listen together: pick a local file both sides already have, then
+    // either open a session or join the one we were invited to. The Rust core
+    // never learns the filename — only the length, and whatever label the user
+    // chose (docs/TOGETHER.md §2).
+    val togetherState by mullu.comrade.together.TogetherManager.state.collectAsState()
+    var togetherPeer by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val togetherPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
+        val invited = mullu.comrade.together.TogetherManager.state.value
+        if (invited is mullu.comrade.together.TogetherManager.UiState.Invited) {
+            mullu.comrade.together.TogetherManager.join(context, uri)
+        } else {
+            togetherPeer?.let { (peer, label) ->
+                // Name it from the file's own tags where it has them, so the
+                // other side can find their copy instead of hunting for it.
+                // Never from the filename — that is the one piece of local
+                // filesystem vocabulary the sender never chose to share.
+                mullu.comrade.together.TogetherManager.start(
+                    context = context,
+                    peer = peer,
+                    peerLabel = label,
+                    uri = uri,
+                    recording = mullu.comrade.together.LibraryResolver.describe(context, uri),
+                )
+            }
+        }
+    }
+
     val callState by CallManager.state.collectAsState()
     var pendingCall by remember { mutableStateOf<(() -> Unit)?>(null) }
     val callPermissions = rememberLauncherForActivityResult(
@@ -749,6 +786,15 @@ private fun MainShell(
                                         }
                                     }) {
                                         Icon(CallIcon, contentDescription = "Voice call")
+                                    }
+                                    IconButton(onClick = {
+                                        togetherPeer = openChat.peer to callLabel
+                                        togetherPicker.launch(arrayOf("video/*", "audio/*"))
+                                    }) {
+                                        Icon(
+                                            Icons.Filled.PlayArrow,
+                                            contentDescription = stringResource(R.string.together_invite_action),
+                                        )
                                     }
                                     IconButton(onClick = {
                                         withCallPermissions(video = true) {
@@ -1043,6 +1089,15 @@ private fun MainShell(
                 }
                 }
             }
+        }
+        // Watch-together overlay. Covers the app whenever a session exists —
+        // including one we were invited to but have not opened a file for yet,
+        // because "Ana wants to watch Solaris with you" is not something to
+        // leave buried behind a tab.
+        if (togetherState !is mullu.comrade.together.TogetherManager.UiState.Idle) {
+            mullu.comrade.ui.TogetherScreen(
+                onPickFile = { togetherPicker.launch(arrayOf("video/*", "audio/*")) },
+            )
         }
         // Call overlay — covers the app while a call is ringing/connected.
         CallScreen(

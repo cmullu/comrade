@@ -71,12 +71,18 @@ use crate::frb_generated::StreamSink;
 // no Rust downstream.)
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+pub use comrade_core::share::transport::{
+    IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
+};
+pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
+pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
     BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
     ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, TaraMessageDto, TurnServerStatusDto,
-    UiError, UpiIntentDto, WorkspaceDto,
+    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ShareVerdictDto, TaraMessageDto,
+    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
+    TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -361,6 +367,179 @@ pub enum _CallSignal {
     },
 }
 
+#[frb(mirror(IcePathKind))]
+pub enum _IcePathKind {
+    Host,
+    ServerReflexive,
+    Relay,
+    Unknown,
+}
+
+#[frb(mirror(RelayPolicy))]
+pub enum _RelayPolicy {
+    DirectOnly,
+    UnderBytes { limit: u64 },
+    AskEachTime,
+    Always,
+}
+
+#[frb(mirror(RefusalReason))]
+pub enum _RefusalReason {
+    RelayForbidden,
+    TooLargeForRelay { limit: u64 },
+    PathUnknown,
+}
+
+#[frb(mirror(TransferVerdict))]
+pub enum _TransferVerdict {
+    Allow,
+    NeedsConsent { relayed_bytes: u64 },
+    Refuse { reason: RefusalReason },
+}
+
+#[frb(mirror(Recording))]
+pub struct _Recording {
+    pub isrc: Option<String>,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+}
+
+#[frb(mirror(MusicLink))]
+pub enum _MusicLink {
+    Spotify {
+        track_id: String,
+    },
+    AppleMusic {
+        storefront: String,
+        track_id: String,
+    },
+    Youtube {
+        video_id: String,
+    },
+}
+
+#[frb(mirror(TogetherContent))]
+pub enum _TogetherContent {
+    LocalFile {
+        duration_ms: u64,
+        recording: Option<Recording>,
+    },
+    Youtube {
+        video_id: String,
+    },
+}
+
+#[frb(mirror(SyncVerdict))]
+pub enum _SyncVerdict {
+    Hold,
+    Adopt {
+        pos_ms: u64,
+        playing: bool,
+        seq: u64,
+    },
+    Nudge {
+        rate: f64,
+    },
+    Seek {
+        pos_ms: u64,
+    },
+}
+
+#[frb(mirror(StateChange))]
+pub enum _StateChange {
+    Played,
+    Paused,
+    Seeked,
+    PausedAndSeeked,
+    Unchanged,
+}
+
+#[frb(mirror(TogetherInviteDto))]
+pub struct _TogetherInviteDto {
+    pub session_id: String,
+    pub peer: String,
+    pub content: TogetherContent,
+    pub pos_ms: u64,
+    pub playing: bool,
+    pub created_at: u64,
+}
+
+#[frb(mirror(TogetherSessionDto))]
+pub struct _TogetherSessionDto {
+    pub session_id: String,
+    pub peer: String,
+    pub content: TogetherContent,
+    pub we_lead: bool,
+    pub joined: bool,
+    pub pos_ms: u64,
+    pub playing: bool,
+}
+
+#[frb(mirror(TogetherCommandDto))]
+pub struct _TogetherCommandDto {
+    pub session_id: String,
+    pub pos_ms: u64,
+    pub playing: bool,
+    pub change: StateChange,
+    pub apply_in_ms: u64,
+}
+
+#[frb(mirror(TogetherCorrectionDto))]
+pub struct _TogetherCorrectionDto {
+    pub session_id: String,
+    pub verdict: SyncVerdict,
+    pub drift_ms: i64,
+    pub quality_ms: u64,
+}
+
+#[frb(mirror(ShareOffer))]
+pub struct _ShareOffer {
+    pub total_bytes: u64,
+    pub chunk_bytes: u32,
+    pub sha256: String,
+    pub duration_ms: u64,
+}
+
+#[frb(mirror(TransferSignal))]
+pub enum _TransferSignal {
+    Offer {
+        sdp: String,
+    },
+    Answer {
+        sdp: String,
+    },
+    Ice {
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_m_line_index: Option<u16>,
+    },
+}
+
+#[frb(mirror(ShareSignal))]
+pub enum _ShareSignal {
+    Ask,
+    Offer { offer: ShareOffer },
+    Accept,
+    Refuse { reason: RefusalReason },
+    Transport { signal: TransferSignal },
+}
+
+#[frb(mirror(TogetherShareDto))]
+pub struct _TogetherShareDto {
+    pub session_id: String,
+    pub peer: String,
+    pub signal: ShareSignal,
+}
+
+#[frb(mirror(ShareVerdictDto))]
+pub struct _ShareVerdictDto {
+    pub verdict: String,
+    pub path: String,
+    pub reason: Option<RefusalReason>,
+    pub relayed_bytes: Option<u64>,
+}
+
 #[frb(mirror(BridgeEvent))]
 pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
@@ -387,6 +566,19 @@ pub enum _BridgeEvent {
         peer: String,
         name: Option<String>,
     },
+    TogetherInvited(TogetherInviteDto),
+    TogetherJoined {
+        session_id: String,
+        peer: String,
+    },
+    TogetherCommand(TogetherCommandDto),
+    TogetherCorrection(TogetherCorrectionDto),
+    TogetherEnded {
+        session_id: String,
+        peer: String,
+        by_peer: bool,
+    },
+    TogetherShare(TogetherShareDto),
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
         ledger: String,
@@ -887,6 +1079,76 @@ pub async fn send_call_signal(
     handles
         .send_call_signal(&peer, &call_id, media.as_str(), &signal_json)
         .await
+}
+
+/// Classify the ICE candidate pair a transfer connection selected.
+pub fn share_classify_path(local_type: String, remote_type: String) -> IcePathKind {
+    IcePathKind::classify(&local_type, &remote_type)
+}
+
+/// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+pub fn share_transfer_verdict(
+    path: IcePathKind,
+    total_bytes: u64,
+    policy: RelayPolicy,
+) -> TransferVerdict {
+    comrade_core::share::transport::decide(path, total_bytes, policy)
+}
+
+/// Whether a transfer connection built under `policy` may be offered TURN.
+pub fn share_ice_servers_allowed(policy: RelayPolicy) -> bool {
+    comrade_core::share::transport::ice_servers_allowed(policy)
+}
+
+/// Recognise a Spotify / Apple Music / YouTube link. Pure and offline.
+pub fn parse_music_link(input: String) -> Option<MusicLink> {
+    comrade_core::together::parse_music_link(&input)
+}
+
+/// Score a library candidate against what the peer named — see the uniffi twin.
+pub fn together_match_score(want: Recording, have: Recording, want_ms: u64, have_ms: u64) -> f64 {
+    comrade_core::together::match_score(&want, &have, want_ms, have_ms)
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_start(
+    peer: String,
+    content: TogetherContent,
+) -> Result<TogetherSessionDto, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.together_start(&peer, content).await
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_join() -> Result<(), UiError> {
+    let handles = runtime().read().await.handles();
+    handles.together_join().await
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_set_state(
+    pos_ms: u64,
+    playing: bool,
+    effective_in_ms: u64,
+) -> Result<(), UiError> {
+    let handles = runtime().read().await.handles();
+    handles
+        .together_set_state(pos_ms, playing, effective_in_ms)
+        .await
+}
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn together_end() -> Result<(), UiError> {
+    let handles = runtime().read().await.handles();
+    handles.together_end().await
+}
+
+/// Report where our own player is. Synchronous and skipped under contention —
+/// see [`Comrade::together_report_position`] in this crate's uniffi half.
+pub fn together_report_position(pos_ms: u64, playing: bool, output_latency_ms: u64) {
+    if let Ok(rt) = runtime().try_read() {
+        rt.together_report_position(pos_ms, playing, output_latency_ms);
+    }
 }
 
 /// See [`broadcast_chitthi`] for the lock discipline.

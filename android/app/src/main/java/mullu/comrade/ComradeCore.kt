@@ -831,6 +831,139 @@ object ComradeCore {
         rethrowing("Hangup") { runBlocking { ffi.hangupCall(peer, callId, media, reason) } }
     }
 
+    // ── Watch/listen together ───────────────────────────────────────────────
+    //
+    // The engine, the clock arithmetic and every timing rule live in
+    // `comrade_core::together`; these are the thinnest possible wrappers over
+    // it. See `docs/TOGETHER.md`.
+
+    /**
+     * Recognise a Spotify / Apple Music / YouTube link and reduce it to what it
+     * identifies.
+     *
+     * Offline and metadata-only: no audio is fetched and no account is touched.
+     * Spotify and Apple Music serve DRM-protected audio that no third-party
+     * client may decode, so what a link buys here is *which recording* the other
+     * person means — enough to find your own copy. Only a YouTube link is
+     * playable in place, through the embed player.
+     */
+    fun parseMusicLinkTyped(input: String): uniffi.comrade_core.MusicLink? =
+        runCatching { ffi.parseMusicLink(input) }.getOrNull()
+
+    /**
+     * How well a candidate in the listener's own library matches what the peer
+     * named. Decisive on an ISRC either way; a weighted title/artist/duration
+     * score otherwise. The arithmetic lives in `comrade_core::together` so this
+     * frontend and the desktop one cannot disagree about it.
+     */
+    fun togetherMatchScore(
+        want: uniffi.comrade_core.Recording,
+        have: uniffi.comrade_core.Recording,
+        wantMs: Long,
+        haveMs: Long,
+    ): Double = runCatching {
+        ffi.togetherMatchScore(want, have, wantMs.toULong(), haveMs.toULong())
+    }.getOrDefault(0.0)
+
+    /** The bar above which a library match may be opened without asking. */
+    fun togetherMatchConfident(): Double =
+        runCatching { ffi.togetherMatchConfident() }.getOrDefault(1.0)
+
+    /** Invite `peer` to watch or listen to `content` together. */
+    fun togetherStartTyped(peer: String, content: uniffi.comrade_core.TogetherContent) {
+        rethrowing("Watch together") { runBlocking { ffi.togetherStart(peer, content) } }
+    }
+
+    /** Accept the invitation we were sent. */
+    fun togetherJoinTyped() {
+        rethrowing("Join") { runBlocking { ffi.togetherJoin() } }
+    }
+
+    /**
+     * Play, pause or seek — one call, because all three are one statement.
+     *
+     * `effectiveInMs` is a promise that we will apply the same change on our own
+     * player at that instant. A native player can defer a few tens of
+     * milliseconds imperceptibly, and then both sides change state on the *same*
+     * tick instead of one chasing the other. Pass 0 to apply immediately and let
+     * the other side project instead.
+     */
+    fun togetherSetStateTyped(posMs: Long, playing: Boolean, effectiveInMs: Long) {
+        rethrowing("Together state") {
+            runBlocking {
+                ffi.togetherSetState(posMs.toULong(), playing, effectiveInMs.toULong())
+            }
+        }
+    }
+
+    /** Leave the session. */
+    fun togetherEndTyped() {
+        rethrowing("Leave") { runBlocking { ffi.togetherEnd() } }
+    }
+
+    /**
+     * Tell the core where our player is. Synchronous and cheap by design — it is
+     * called several times a second from the UI thread and sends nothing; see
+     * the Rust doc comment for why it is skipped under contention.
+     */
+    fun togetherReportPosition(posMs: Long, playing: Boolean, outputLatencyMs: Long) {
+        runCatching {
+            ffi.togetherReportPosition(posMs.toULong(), playing, outputLatencyMs.toULong())
+        }
+    }
+
+    /** The live session, if there is one. */
+    fun togetherSessionTyped(): uniffi.comrade_ui.TogetherSessionDto? =
+        runCatching { ffi.togetherSession() }.getOrNull()
+
+    // ── Handing the file over, when only one side has it ─────────────────────
+
+    /**
+     * Send one step of the handover. It rides the session envelope, so it only
+     * goes anywhere while a session is live — which is what stops this being a
+     * way to open a peer-to-peer connection to someone who never agreed to
+     * watch anything with you.
+     */
+    fun togetherShareTyped(signal: uniffi.comrade_core.ShareSignal) {
+        rethrowing("Send file") { runBlocking { ffi.togetherShare(signal) } }
+    }
+
+    /**
+     * Whether a *transfer* connection may be given TURN at all. Under the
+     * default policy it may not, so a relay candidate is never gathered and
+     * the rule holds structurally rather than by later inspection. A *call*
+     * keeps its TURN fallback: a relayed call is a few tens of kilobits, a
+     * relayed film is not.
+     */
+    fun shareIceServersAllowed(): Boolean =
+        runCatching { ffi.shareIceServersAllowed() }.getOrDefault(false)
+
+    /**
+     * Judge the path ICE actually chose. The candidate types come from the
+     * selected pair; anything unrecognised classifies as unknown and is
+     * refused, because "we could not tell" must never read as "it was fine".
+     */
+    fun shareTransferVerdict(
+        localCandidateType: String,
+        remoteCandidateType: String,
+        totalBytes: Long,
+    ): uniffi.comrade_ui.ShareVerdictDto =
+        ffi.shareTransferVerdict(localCandidateType, remoteCandidateType, totalBytes.toULong())
+
+    /** How many chunks may go into a data channel currently holding this much. */
+    fun shareChunksToSend(bufferedBytes: Long): Int =
+        runCatching { ffi.shareChunksToSend(bufferedBytes.toULong()).toInt() }.getOrDefault(0)
+
+    /** What this device does when the only path is a relay. */
+    fun shareRelayPolicy(): uniffi.comrade_core.RelayPolicy =
+        runCatching { ffi.shareRelayPolicy() }
+            .getOrDefault(uniffi.comrade_core.RelayPolicy.DirectOnly)
+
+    /** Change it. Takes effect on the next transfer connection. */
+    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy) {
+        runCatching { ffi.setShareRelayPolicy(policy) }
+    }
+
     data class CallRecordInfo(
         val id: String,
         val peer: String,

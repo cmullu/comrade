@@ -32,13 +32,21 @@ uniffi::setup_scaffolding!("comrade_ui");
 
 pub mod runtime;
 
+// The together wire types a bridge has to name: the desktop shell takes
+// `TogetherContent` as JSON and deserialises it, and both bridges hand the
+// verdict and the state change straight to a player. Re-exported here so a
+// bridge depends on `comrade_ui` alone, exactly as it does for every DTO.
+pub use comrade_core::share::transport::{RefusalReason, RelayPolicy};
+pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
+pub use comrade_core::together::{StateChange, SyncVerdict, TogetherContent};
 pub use runtime::{
     AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto, IceServerDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    MetricDto, PresenceDto, ProfileDto, ReadingDto, RuntimeHandles, SakhaStatusDto, TaraMessageDto,
-    TurnServerStatusDto,
+    MetricDto, PresenceDto, ProfileDto, ReadingDto, RuntimeHandles, SakhaStatusDto,
+    ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

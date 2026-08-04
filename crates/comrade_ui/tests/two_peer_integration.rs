@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason};
 use comrade_core::nudge::NUDGE_SETTLE_SECS;
+use comrade_core::together::{Recording, TogetherContent};
 use comrade_ui::{BridgeEvent, ComradeRuntime};
 use support::TestRelay;
 use tempfile::TempDir;
@@ -1009,4 +1010,130 @@ async fn presence_reaches_only_the_peer_who_was_chosen() {
     .is_none());
 
     relay.stop().await;
+}
+
+/// The call channel's stranger gate, restated for a playhead. A watch-together
+/// invitation is the one signal that can create session state from nothing, so
+/// an unaccepted peer must not be able to send one — and it must not leave a
+/// message request full of JSON behind either.
+#[tokio::test]
+async fn a_stranger_cannot_start_a_watch_party_with_an_unaccepted_target() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let mut alice_events = alice.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    // Bob has never been accepted by Alice.
+    bob.together_start(
+        &alice_npub,
+        TogetherContent::local_file(7_200_000, Some(Recording::titled("Solaris"))),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        wait_for(&mut alice_events, ABSENCE_TIMEOUT, |e| matches!(
+            e,
+            BridgeEvent::TogetherInvited(_)
+        ))
+        .await
+        .is_none(),
+        "a stranger must not be able to open a session on someone else's device"
+    );
+    assert!(
+        alice.together_session().is_none(),
+        "a stranger must not be able to move your playhead"
+    );
+}
+
+/// The happy path over a real relay: invite, join, pause, leave — with the
+/// pause arriving as a command the receiver can name.
+#[tokio::test]
+async fn accepted_peers_start_join_pause_and_end_a_session() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut alice_events = alice.subscribe_events();
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    // Mutual acceptance, exactly as the call test establishes it.
+    alice
+        .send_dm(&bob_npub, "want to watch something?")
+        .await
+        .unwrap();
+    wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::IncomingMessageRequest(_))
+    })
+    .await
+    .expect("bob sees alice's request");
+    bob.accept_request(&alice_npub).unwrap();
+
+    // ── Alice invites, and leads ───────────────────────────────────────────
+    let session = alice
+        .together_start(
+            &bob_npub,
+            TogetherContent::local_file(7_200_000, Some(Recording::titled("Solaris"))),
+        )
+        .await
+        .unwrap();
+    assert!(session.we_lead, "the inviter leads");
+
+    let invite = wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::TogetherInvited(_))
+    })
+    .await
+    .expect("bob is invited");
+    let BridgeEvent::TogetherInvited(invite) = invite else {
+        unreachable!()
+    };
+    assert_eq!(invite.session_id, session.session_id);
+    assert_eq!(invite.peer, alice_npub);
+    assert!(
+        !bob.together_session().unwrap().we_lead,
+        "the invited side follows, and is the one that drift-corrects"
+    );
+
+    // ── Bob joins ──────────────────────────────────────────────────────────
+    bob.together_join().await.unwrap();
+    wait_for(&mut alice_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::TogetherJoined { .. })
+    })
+    .await
+    .expect("alice hears bob join");
+
+    // ── Bob pauses; alice is told, and told what it was ────────────────────
+    bob.together_set_state(60_000, false, 0).await.unwrap();
+    let command = wait_for(&mut alice_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::TogetherCommand(_))
+    })
+    .await
+    .expect("alice sees bob's pause");
+    let BridgeEvent::TogetherCommand(command) = command else {
+        unreachable!()
+    };
+    assert!(!command.playing);
+    assert_eq!(command.pos_ms, 60_000);
+
+    // ── Alice leaves; bob is told it was them, not a timeout ───────────────
+    alice.together_end().await.unwrap();
+    let ended = wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::TogetherEnded { .. })
+    })
+    .await
+    .expect("bob hears alice leave");
+    let BridgeEvent::TogetherEnded { by_peer, .. } = ended else {
+        unreachable!()
+    };
+    assert!(by_peer, "alice sent an End; that is not a lapsed TTL");
+    assert!(bob.together_session().is_none());
+    assert!(alice.together_session().is_none());
 }

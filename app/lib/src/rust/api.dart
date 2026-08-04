@@ -10,6 +10,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `pump_bridge_events`, `runtime`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ShareVerdictDto`
 
 /// The comrade_jni crate version (e.g. "0.1.0").
 String version() => RustLib.instance.api.crateApiVersion();
@@ -356,6 +357,65 @@ Future<void> sendCallSignal(
     RustLib.instance.api.crateApiSendCallSignal(
         peer: peer, callId: callId, media: media, signal: signal);
 
+/// Classify the ICE candidate pair a transfer connection selected.
+Future<IcePathKind> shareClassifyPath(
+        {required String localType, required String remoteType}) =>
+    RustLib.instance.api.crateApiShareClassifyPath(
+        localType: localType, remoteType: remoteType);
+
+/// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+Future<TransferVerdict> shareTransferVerdict(
+        {required IcePathKind path,
+        required BigInt totalBytes,
+        required RelayPolicy policy}) =>
+    RustLib.instance.api.crateApiShareTransferVerdict(
+        path: path, totalBytes: totalBytes, policy: policy);
+
+/// Whether a transfer connection built under `policy` may be offered TURN.
+Future<bool> shareIceServersAllowed({required RelayPolicy policy}) =>
+    RustLib.instance.api.crateApiShareIceServersAllowed(policy: policy);
+
+/// Recognise a Spotify / Apple Music / YouTube link. Pure and offline.
+Future<MusicLink?> parseMusicLink({required String input}) =>
+    RustLib.instance.api.crateApiParseMusicLink(input: input);
+
+/// Score a library candidate against what the peer named — see the uniffi twin.
+Future<double> togetherMatchScore(
+        {required Recording want,
+        required Recording have,
+        required BigInt wantMs,
+        required BigInt haveMs}) =>
+    RustLib.instance.api.crateApiTogetherMatchScore(
+        want: want, have: have, wantMs: wantMs, haveMs: haveMs);
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<TogetherSessionDto> togetherStart(
+        {required String peer, required TogetherContent content}) =>
+    RustLib.instance.api.crateApiTogetherStart(peer: peer, content: content);
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<void> togetherJoin() => RustLib.instance.api.crateApiTogetherJoin();
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<void> togetherSetState(
+        {required BigInt posMs,
+        required bool playing,
+        required BigInt effectiveInMs}) =>
+    RustLib.instance.api.crateApiTogetherSetState(
+        posMs: posMs, playing: playing, effectiveInMs: effectiveInMs);
+
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<void> togetherEnd() => RustLib.instance.api.crateApiTogetherEnd();
+
+/// Report where our own player is. Synchronous and skipped under contention —
+/// see [`Comrade::together_report_position`] in this crate's uniffi half.
+Future<void> togetherReportPosition(
+        {required BigInt posMs,
+        required bool playing,
+        required BigInt outputLatencyMs}) =>
+    RustLib.instance.api.crateApiTogetherReportPosition(
+        posMs: posMs, playing: playing, outputLatencyMs: outputLatencyMs);
+
 /// See [`broadcast_chitthi`] for the lock discipline.
 Future<void> hangupCall(
         {required String peer,
@@ -465,6 +525,27 @@ sealed class BridgeEvent with _$BridgeEvent {
     required String peer,
     String? name,
   }) = BridgeEvent_ComradeNudge;
+  const factory BridgeEvent.togetherInvited(
+    TogetherInviteDto field0,
+  ) = BridgeEvent_TogetherInvited;
+  const factory BridgeEvent.togetherJoined({
+    required String sessionId,
+    required String peer,
+  }) = BridgeEvent_TogetherJoined;
+  const factory BridgeEvent.togetherCommand(
+    TogetherCommandDto field0,
+  ) = BridgeEvent_TogetherCommand;
+  const factory BridgeEvent.togetherCorrection(
+    TogetherCorrectionDto field0,
+  ) = BridgeEvent_TogetherCorrection;
+  const factory BridgeEvent.togetherEnded({
+    required String sessionId,
+    required String peer,
+    required bool byPeer,
+  }) = BridgeEvent_TogetherEnded;
+  const factory BridgeEvent.togetherShare(
+    TogetherShareDto field0,
+  ) = BridgeEvent_TogetherShare;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;
@@ -854,6 +935,14 @@ enum HangupReason {
   ;
 }
 
+enum IcePathKind {
+  host,
+  serverReflexive,
+  relay,
+  unknown,
+  ;
+}
+
 class IceServerDto {
   final List<String> urls;
   final String? username;
@@ -1110,6 +1199,22 @@ class MetricDto {
           value == other.value;
 }
 
+@freezed
+sealed class MusicLink with _$MusicLink {
+  const MusicLink._();
+
+  const factory MusicLink.spotify({
+    required String trackId,
+  }) = MusicLink_Spotify;
+  const factory MusicLink.appleMusic({
+    required String storefront,
+    required String trackId,
+  }) = MusicLink_AppleMusic;
+  const factory MusicLink.youtube({
+    required String videoId,
+  }) = MusicLink_Youtube;
+}
+
 class PresenceDto {
   final String peer;
   final bool online;
@@ -1162,6 +1267,132 @@ class ProfileDto {
           username == other.username;
 }
 
+class Recording {
+  final String? isrc;
+  final String title;
+  final String artist;
+  final String? album;
+
+  const Recording({
+    this.isrc,
+    required this.title,
+    required this.artist,
+    this.album,
+  });
+
+  @override
+  int get hashCode =>
+      isrc.hashCode ^ title.hashCode ^ artist.hashCode ^ album.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Recording &&
+          runtimeType == other.runtimeType &&
+          isrc == other.isrc &&
+          title == other.title &&
+          artist == other.artist &&
+          album == other.album;
+}
+
+@freezed
+sealed class RefusalReason with _$RefusalReason {
+  const RefusalReason._();
+
+  const factory RefusalReason.relayForbidden() = RefusalReason_RelayForbidden;
+  const factory RefusalReason.tooLargeForRelay({
+    required BigInt limit,
+  }) = RefusalReason_TooLargeForRelay;
+  const factory RefusalReason.pathUnknown() = RefusalReason_PathUnknown;
+}
+
+@freezed
+sealed class RelayPolicy with _$RelayPolicy {
+  const RelayPolicy._();
+
+  const factory RelayPolicy.directOnly() = RelayPolicy_DirectOnly;
+  const factory RelayPolicy.underBytes({
+    required BigInt limit,
+  }) = RelayPolicy_UnderBytes;
+  const factory RelayPolicy.askEachTime() = RelayPolicy_AskEachTime;
+  const factory RelayPolicy.always() = RelayPolicy_Always;
+}
+
+class ShareOffer {
+  final BigInt totalBytes;
+  final int chunkBytes;
+  final String sha256;
+  final BigInt durationMs;
+
+  const ShareOffer({
+    required this.totalBytes,
+    required this.chunkBytes,
+    required this.sha256,
+    required this.durationMs,
+  });
+
+  @override
+  int get hashCode =>
+      totalBytes.hashCode ^
+      chunkBytes.hashCode ^
+      sha256.hashCode ^
+      durationMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ShareOffer &&
+          runtimeType == other.runtimeType &&
+          totalBytes == other.totalBytes &&
+          chunkBytes == other.chunkBytes &&
+          sha256 == other.sha256 &&
+          durationMs == other.durationMs;
+}
+
+@freezed
+sealed class ShareSignal with _$ShareSignal {
+  const ShareSignal._();
+
+  const factory ShareSignal.ask() = ShareSignal_Ask;
+  const factory ShareSignal.offer({
+    required ShareOffer offer,
+  }) = ShareSignal_Offer;
+  const factory ShareSignal.accept() = ShareSignal_Accept;
+  const factory ShareSignal.refuse({
+    required RefusalReason reason,
+  }) = ShareSignal_Refuse;
+  const factory ShareSignal.transport({
+    required TransferSignal signal,
+  }) = ShareSignal_Transport;
+}
+
+enum StateChange {
+  played,
+  paused,
+  seeked,
+  pausedAndSeeked,
+  unchanged,
+  ;
+}
+
+@freezed
+sealed class SyncVerdict with _$SyncVerdict {
+  const SyncVerdict._();
+
+  const factory SyncVerdict.hold() = SyncVerdict_Hold;
+  const factory SyncVerdict.adopt({
+    required BigInt posMs,
+    required bool playing,
+    required BigInt seq,
+  }) = SyncVerdict_Adopt;
+  const factory SyncVerdict.nudge({
+    required double rate,
+  }) = SyncVerdict_Nudge;
+  const factory SyncVerdict.seek({
+    required BigInt posMs,
+  }) = SyncVerdict_Seek;
+}
+
 class TaraMessageDto {
   final String id;
   final String text;
@@ -1195,6 +1426,221 @@ class TaraMessageDto {
           fromTara == other.fromTara &&
           crisis == other.crisis &&
           createdAt == other.createdAt;
+}
+
+class TogetherCommandDto {
+  final String sessionId;
+  final BigInt posMs;
+  final bool playing;
+  final StateChange change;
+  final BigInt applyInMs;
+
+  const TogetherCommandDto({
+    required this.sessionId,
+    required this.posMs,
+    required this.playing,
+    required this.change,
+    required this.applyInMs,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      posMs.hashCode ^
+      playing.hashCode ^
+      change.hashCode ^
+      applyInMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherCommandDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          posMs == other.posMs &&
+          playing == other.playing &&
+          change == other.change &&
+          applyInMs == other.applyInMs;
+}
+
+@freezed
+sealed class TogetherContent with _$TogetherContent {
+  const TogetherContent._();
+
+  const factory TogetherContent.localFile({
+    required BigInt durationMs,
+    Recording? recording,
+  }) = TogetherContent_LocalFile;
+  const factory TogetherContent.youtube({
+    required String videoId,
+  }) = TogetherContent_Youtube;
+}
+
+class TogetherCorrectionDto {
+  final String sessionId;
+  final SyncVerdict verdict;
+  final PlatformInt64 driftMs;
+  final BigInt qualityMs;
+
+  const TogetherCorrectionDto({
+    required this.sessionId,
+    required this.verdict,
+    required this.driftMs,
+    required this.qualityMs,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      verdict.hashCode ^
+      driftMs.hashCode ^
+      qualityMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherCorrectionDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          verdict == other.verdict &&
+          driftMs == other.driftMs &&
+          qualityMs == other.qualityMs;
+}
+
+class TogetherInviteDto {
+  final String sessionId;
+  final String peer;
+  final TogetherContent content;
+  final BigInt posMs;
+  final bool playing;
+  final BigInt createdAt;
+
+  const TogetherInviteDto({
+    required this.sessionId,
+    required this.peer,
+    required this.content,
+    required this.posMs,
+    required this.playing,
+    required this.createdAt,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      peer.hashCode ^
+      content.hashCode ^
+      posMs.hashCode ^
+      playing.hashCode ^
+      createdAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherInviteDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          peer == other.peer &&
+          content == other.content &&
+          posMs == other.posMs &&
+          playing == other.playing &&
+          createdAt == other.createdAt;
+}
+
+class TogetherSessionDto {
+  final String sessionId;
+  final String peer;
+  final TogetherContent content;
+  final bool weLead;
+  final bool joined;
+  final BigInt posMs;
+  final bool playing;
+
+  const TogetherSessionDto({
+    required this.sessionId,
+    required this.peer,
+    required this.content,
+    required this.weLead,
+    required this.joined,
+    required this.posMs,
+    required this.playing,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      peer.hashCode ^
+      content.hashCode ^
+      weLead.hashCode ^
+      joined.hashCode ^
+      posMs.hashCode ^
+      playing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherSessionDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          peer == other.peer &&
+          content == other.content &&
+          weLead == other.weLead &&
+          joined == other.joined &&
+          posMs == other.posMs &&
+          playing == other.playing;
+}
+
+class TogetherShareDto {
+  final String sessionId;
+  final String peer;
+  final ShareSignal signal;
+
+  const TogetherShareDto({
+    required this.sessionId,
+    required this.peer,
+    required this.signal,
+  });
+
+  @override
+  int get hashCode => sessionId.hashCode ^ peer.hashCode ^ signal.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TogetherShareDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          peer == other.peer &&
+          signal == other.signal;
+}
+
+@freezed
+sealed class TransferSignal with _$TransferSignal {
+  const TransferSignal._();
+
+  const factory TransferSignal.offer({
+    required String sdp,
+  }) = TransferSignal_Offer;
+  const factory TransferSignal.answer({
+    required String sdp,
+  }) = TransferSignal_Answer;
+  const factory TransferSignal.ice({
+    required String candidate,
+    String? sdpMid,
+    int? sdpMLineIndex,
+  }) = TransferSignal_Ice;
+}
+
+@freezed
+sealed class TransferVerdict with _$TransferVerdict {
+  const TransferVerdict._();
+
+  const factory TransferVerdict.allow() = TransferVerdict_Allow;
+  const factory TransferVerdict.needsConsent({
+    required BigInt relayedBytes,
+  }) = TransferVerdict_NeedsConsent;
+  const factory TransferVerdict.refuse({
+    required RefusalReason reason,
+  }) = TransferVerdict_Refuse;
 }
 
 class TurnServerStatusDto {

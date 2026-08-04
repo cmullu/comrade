@@ -9,6 +9,8 @@
  *   call    — voice/video call signaling (WebRTC over the Vault DM channel)
  *   presence— comrade presence beacons (online/offline, to chosen peers only)
  *   nudge   — "they nearly wrote to you": one signal for an abandoned draft
+ *   together— sync-play control channel (watch/listen together; no media moves)
+ *   share   — chunked, resumable, playable-early P2P file transfer (no server)
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
  *   tara    — reflective-companion engine (deterministic, on-device, not therapy)
@@ -54,7 +56,9 @@ pub mod saathi;
 pub mod sabha;
 pub mod sakha;
 pub mod seen;
+pub mod share;
 pub mod tara;
+pub mod together;
 pub mod vault;
 
 pub use error::CoreError;

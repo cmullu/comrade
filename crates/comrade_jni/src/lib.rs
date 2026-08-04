@@ -70,13 +70,17 @@ use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
+use comrade_core::share::transport::RelayPolicy;
+use comrade_core::share::ShareSignal;
+use comrade_core::together::{MusicLink, Recording, TogetherContent};
 use comrade_state::AppWorkspace;
 use comrade_ui::{
     AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto,
     ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
     FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
     MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReadingDto,
-    TaraMessageDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    ShareVerdictDto, TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError,
+    UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -937,6 +941,146 @@ impl Comrade {
         media: CallMediaKind,
     ) -> Result<CallSessionDto, UiError> {
         self.inner.blocking_read().place_call(&peer, media.as_str())
+    }
+
+    /// Recognise a Spotify / Apple Music / YouTube link and reduce it to what
+    /// it identifies. Pure and offline — no audio is fetched and no account is
+    /// touched; turning the id into a title needs the service's public
+    /// catalogue API, which is the frontend's call to make.
+    pub fn parse_music_link(&self, input: String) -> Option<MusicLink> {
+        comrade_core::together::parse_music_link(&input)
+    }
+
+    /// How well a candidate in the listener's own library matches what the peer
+    /// named — 1.0 on an ISRC agreement, 0.0 on an ISRC disagreement, a weighted
+    /// title/artist/duration score otherwise. Above
+    /// [`Comrade::together_match_confident`] a frontend may open it unasked.
+    pub fn together_match_score(
+        &self,
+        want: Recording,
+        have: Recording,
+        want_ms: u64,
+        have_ms: u64,
+    ) -> f64 {
+        comrade_core::together::match_score(&want, &have, want_ms, have_ms)
+    }
+
+    /// The bar above which a library match may be opened without asking.
+    pub fn together_match_confident(&self) -> f64 {
+        comrade_core::together::MATCH_CONFIDENT
+    }
+
+    /// Invite `peer` to watch or listen to something together.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn together_start(
+        &self,
+        peer: String,
+        content: TogetherContent,
+    ) -> Result<TogetherSessionDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_start(&peer, content).await
+    }
+
+    /// Accept the invitation we were sent.
+    pub async fn together_join(&self) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_join().await
+    }
+
+    /// Play, pause or seek — one call, because all three are one statement.
+    ///
+    /// `effective_in_ms` is a promise by the caller that it will apply the same
+    /// change on its own player at that instant. A native player can defer a few
+    /// tens of milliseconds imperceptibly, and then both sides change state on
+    /// the *same* tick instead of one chasing the other. Pass 0 if you cannot.
+    pub async fn together_set_state(
+        &self,
+        pos_ms: u64,
+        playing: bool,
+        effective_in_ms: u64,
+    ) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .together_set_state(pos_ms, playing, effective_in_ms)
+            .await
+    }
+
+    /// Leave the session.
+    pub async fn together_end(&self) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_end().await
+    }
+
+    /// Report where our own player is, without sending anything.
+    ///
+    /// Synchronous and skipped under contention, exactly like
+    /// [`Comrade::note_draft`]: a player calls this several times a second from
+    /// its UI thread, and a position report is not worth waiting on a vault
+    /// unlock for. Missing one only means the next drift verdict compares
+    /// against a slightly older number.
+    pub fn together_report_position(&self, pos_ms: u64, playing: bool, output_latency_ms: u64) {
+        if let Ok(rt) = self.inner.try_read() {
+            rt.together_report_position(pos_ms, playing, output_latency_ms);
+        }
+    }
+
+    /// The live session, if there is one.
+    pub fn together_session(&self) -> Option<TogetherSessionDto> {
+        self.inner.blocking_read().together_session()
+    }
+
+    /// Send one step of handing the file over — for the case `together`
+    /// otherwise assumes away, where only one of you has what you are playing.
+    pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.together_share(signal).await
+    }
+
+    /// What this device does when the only path a transfer could take is
+    /// somebody else's relay.
+    pub fn share_relay_policy(&self) -> RelayPolicy {
+        self.inner.blocking_read().share_relay_policy()
+    }
+
+    /// Change it. Takes effect on the next transfer connection.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
+        self.inner.blocking_read().set_share_relay_policy(policy);
+    }
+
+    /// Whether a transfer connection may be given TURN servers at all. Under
+    /// the default policy it may not, so a relayed path is never gathered and
+    /// the rule holds structurally rather than by later inspection.
+    pub fn share_ice_servers_allowed(&self) -> bool {
+        self.inner.blocking_read().share_ice_servers_allowed()
+    }
+
+    /// Judge the path ICE actually chose. `local_candidate_type` and
+    /// `remote_candidate_type` come from the selected candidate pair in an
+    /// `RTCStatsReport`; anything unrecognised is refused, never assumed direct.
+    ///
+    /// Synchronous and vault-free on purpose — a frontend calls this from
+    /// inside a WebRTC callback, which is exactly the place a lock held across
+    /// an await froze calls on "Connecting…" once already.
+    pub fn share_transfer_verdict(
+        &self,
+        local_candidate_type: String,
+        remote_candidate_type: String,
+        total_bytes: u64,
+    ) -> ShareVerdictDto {
+        self.inner.blocking_read().share_transfer_verdict(
+            &local_candidate_type,
+            &remote_candidate_type,
+            total_bytes,
+        )
+    }
+
+    /// How many chunks may go into a data channel currently holding
+    /// `buffered_bytes`. Zero means wait for the drain event rather than poll.
+    pub fn share_chunks_to_send(&self, buffered_bytes: u64) -> u32 {
+        self.inner
+            .blocking_read()
+            .share_chunks_to_send(buffered_bytes)
     }
 
     /// `signal` crosses as the real [`CallSignal`] enum, not a JSON blob —

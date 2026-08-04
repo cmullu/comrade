@@ -180,7 +180,10 @@ pub async fn send_dm(
     content: String,
 ) -> Result<MessageDto, String> {
     let handles = state.read().await.handles();
-    handles.send_dm(&target, &content).await.map_err(|e| e.to_string())
+    handles
+        .send_dm(&target, &content)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The chat list (one entry per peer, newest first) from the offline history.
@@ -188,7 +191,11 @@ pub async fn send_dm(
 pub async fn conversations(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<ConversationDto>, String> {
-    state.read().await.conversations().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .conversations()
+        .map_err(|e| e.to_string())
 }
 
 /// Full offline message history with `peer`, oldest first.
@@ -197,7 +204,11 @@ pub async fn messages_with(
     state: tauri::State<'_, Runtime>,
     peer: String,
 ) -> Result<Vec<MessageDto>, String> {
-    state.read().await.messages_with(&peer).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .messages_with(&peer)
+        .map_err(|e| e.to_string())
 }
 
 /// Full encrypted-media history with `peer`, oldest first — the media
@@ -208,7 +219,11 @@ pub async fn media_with(
     state: tauri::State<'_, Runtime>,
     peer: String,
 ) -> Result<Vec<MediaMessageDto>, String> {
-    state.read().await.media_with(&peer).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .media_with(&peer)
+        .map_err(|e| e.to_string())
 }
 
 /// Send a DM as a reply to a prior message (`reply_to` = replied event id hex).
@@ -235,13 +250,21 @@ pub async fn send_dm_reply(
 pub async fn message_requests(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<MessageRequestDto>, String> {
-    state.read().await.message_requests().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .message_requests()
+        .map_err(|e| e.to_string())
 }
 
 /// Accept a message request (into the chat list; share handle; ack messages).
 #[tauri::command]
 pub async fn accept_request(state: tauri::State<'_, Runtime>, peer: String) -> Result<(), String> {
-    state.read().await.accept_request(&peer).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .accept_request(&peer)
+        .map_err(|e| e.to_string())
 }
 
 /// Block a peer (hide + drop future DMs).
@@ -250,7 +273,11 @@ pub async fn block_conversation(
     state: tauri::State<'_, Runtime>,
     peer: String,
 ) -> Result<(), String> {
-    state.read().await.block_conversation(&peer).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .block_conversation(&peer)
+        .map_err(|e| e.to_string())
 }
 
 /// Send a read receipt for a conversation (call when the thread is opened).
@@ -349,7 +376,11 @@ pub async fn place_call(
     peer: String,
     media: String,
 ) -> Result<CallSessionDto, String> {
-    state.read().await.place_call(&peer, &media).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .place_call(&peer, &media)
+        .map_err(|e| e.to_string())
 }
 
 /// Send one call-signaling payload (`signal_json` = a CallSignal) to `peer`.
@@ -368,6 +399,175 @@ pub async fn send_call_signal(
         .send_call_signal(&peer, &call_id, &media, &signal_json)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Invite `peer` to watch or listen to something together.
+///
+/// `content_json` is a `comrade_core::together::TogetherContent` — either
+/// `{"kind":"local_file","duration_ms":N}` or `{"kind":"youtube","video_id":"…"}`.
+/// The video id is validated in core, on send *and* receive, so no UI can put an
+/// unchecked peer-supplied string into an `<iframe src>`.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_start(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    content_json: String,
+) -> Result<comrade_ui::TogetherSessionDto, String> {
+    let content: comrade_ui::TogetherContent =
+        serde_json::from_str(&content_json).map_err(|e| format!("invalid content: {e}"))?;
+    let handles = state.read().await.handles();
+    handles
+        .together_start(&peer, content)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Accept the invitation we were sent.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_join(state: tauri::State<'_, Runtime>) -> Result<(), String> {
+    let handles = state.read().await.handles();
+    handles.together_join().await.map_err(|e| e.to_string())
+}
+
+/// Play, pause or seek — one command, because all three are one statement.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_set_state(
+    state: tauri::State<'_, Runtime>,
+    pos_ms: u64,
+    playing: bool,
+    effective_in_ms: u64,
+) -> Result<(), String> {
+    let handles = state.read().await.handles();
+    handles
+        .together_set_state(pos_ms, playing, effective_in_ms)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Leave the session.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_end(state: tauri::State<'_, Runtime>) -> Result<(), String> {
+    let handles = state.read().await.handles();
+    handles.together_end().await.map_err(|e| e.to_string())
+}
+
+/// Report where our own player is, without sending anything.
+///
+/// The player calls this on a timer while it plays, so it must not queue behind
+/// a vault unlock; it is skipped under contention like `note_draft`, which fails
+/// in the harmless direction (the next report is a second away).
+#[tauri::command]
+pub async fn together_report_position(
+    state: tauri::State<'_, Runtime>,
+    pos_ms: u64,
+    playing: bool,
+    output_latency_ms: u64,
+) -> Result<(), String> {
+    state
+        .read()
+        .await
+        .together_report_position(pos_ms, playing, output_latency_ms);
+    Ok(())
+}
+
+/// The live session, if there is one.
+#[tauri::command]
+pub async fn together_session(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Option<comrade_ui::TogetherSessionDto>, String> {
+    Ok(state.read().await.together_session())
+}
+
+/// Send one step of handing the file over, for when only one of you has it.
+///
+/// `signal_json` is a `comrade_core::share::ShareSignal`. It crosses as JSON
+/// rather than as separate commands per step because the transfer protocol is
+/// the sort of thing that grows a step, and the UI's job is to relay them, not
+/// to have an opinion about how many there are.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn together_share(
+    state: tauri::State<'_, Runtime>,
+    signal_json: String,
+) -> Result<(), String> {
+    let signal: comrade_ui::ShareSignal =
+        serde_json::from_str(&signal_json).map_err(|e| format!("invalid share signal: {e}"))?;
+    let handles = state.read().await.handles();
+    handles
+        .together_share(signal)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Which ICE servers a *transfer* connection may be built with.
+///
+/// Not the same list a call gets, and that is the point: a relayed call is a
+/// few tens of kilobits and entirely reasonable, while a relayed film is
+/// gigabytes through a machine that volunteered for neither. Under the default
+/// policy the TURN entries are dropped here, so the transfer connection cannot
+/// gather a relay candidate at all — the check further down is the second line,
+/// not the first.
+#[tauri::command]
+pub async fn share_ice_servers(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Vec<comrade_ui::IceServerDto>, String> {
+    let rt = state.read().await;
+    let strategy = if rt.share_ice_servers_allowed() {
+        "stun_and_turn"
+    } else {
+        "stun_only"
+    };
+    Ok(rt.call_ice_servers_for(strategy))
+}
+
+/// Judge the path ICE actually chose for a transfer connection.
+///
+/// The two candidate types come from the selected pair in the webview's own
+/// `RTCStatsReport`. Anything unrecognised — including "ICE has not settled
+/// yet" — classifies as unknown and is refused, because "we could not tell"
+/// must never be read as "it was fine".
+#[tauri::command]
+pub async fn share_transfer_verdict(
+    state: tauri::State<'_, Runtime>,
+    local_candidate_type: String,
+    remote_candidate_type: String,
+    total_bytes: u64,
+) -> Result<comrade_ui::ShareVerdictDto, String> {
+    Ok(state.read().await.share_transfer_verdict(
+        &local_candidate_type,
+        &remote_candidate_type,
+        total_bytes,
+    ))
+}
+
+/// What this device does when the only path is a relay, as a JSON
+/// `comrade_core::share::transport::RelayPolicy`.
+#[tauri::command]
+pub async fn share_relay_policy(state: tauri::State<'_, Runtime>) -> Result<String, String> {
+    serde_json::to_string(&state.read().await.share_relay_policy()).map_err(|e| e.to_string())
+}
+
+/// Change it. Takes effect on the next transfer connection; one already running
+/// keeps the rules it started under, because tearing down a transfer someone is
+/// watching from is a worse answer than letting it finish.
+#[tauri::command]
+pub async fn set_share_relay_policy(
+    state: tauri::State<'_, Runtime>,
+    policy_json: String,
+) -> Result<(), String> {
+    let policy: comrade_ui::RelayPolicy =
+        serde_json::from_str(&policy_json).map_err(|e| format!("invalid relay policy: {e}"))?;
+    state.read().await.set_share_relay_policy(policy);
+    Ok(())
 }
 
 /// Send a `Hangup` with `reason` to end/reject a call.
@@ -457,7 +657,11 @@ pub async fn add_contact(
     npub: String,
     alias: String,
 ) -> Result<ContactDto, String> {
-    state.read().await.add_contact(&npub, &alias).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .add_contact(&npub, &alias)
+        .map_err(|e| e.to_string())
 }
 
 /// Set (non-empty) or clear (empty) the user-chosen alias for a contact.
@@ -480,7 +684,11 @@ pub async fn remove_contact(
     state: tauri::State<'_, Runtime>,
     npub: String,
 ) -> Result<bool, String> {
-    state.read().await.remove_contact(&npub).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .remove_contact(&npub)
+        .map_err(|e| e.to_string())
 }
 
 /// Refresh cached peer profiles (bounded, TTL-gated). Returns how many
@@ -490,14 +698,24 @@ pub async fn refresh_peer_profiles(state: tauri::State<'_, Runtime>) -> Result<u
     // Detach the refresher under a briefly-held guard, then run guard-free:
     // holding the shared lock across relay round-trips would block every
     // other command (AUDIT P2: no guard held across network awaits).
-    let refresher = { state.read().await.profile_refresher().map_err(|e| e.to_string())? };
+    let refresher = {
+        state
+            .read()
+            .await
+            .profile_refresher()
+            .map_err(|e| e.to_string())?
+    };
     refresher.run().await.map_err(|e| e.to_string())
 }
 
 /// All saved contacts, alias-sorted.
 #[tauri::command]
 pub async fn list_contacts(state: tauri::State<'_, Runtime>) -> Result<Vec<ContactDto>, String> {
-    state.read().await.list_contacts().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .list_contacts()
+        .map_err(|e| e.to_string())
 }
 
 // ── Comrades (chosen-peer presence) ───────────────────────────────────────────
@@ -512,7 +730,11 @@ pub async fn set_comrade(
     npub: String,
     comrade: bool,
 ) -> Result<ContactDto, String> {
-    state.read().await.set_comrade(&npub, comrade).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .set_comrade(&npub, comrade)
+        .map_err(|e| e.to_string())
 }
 
 /// Every comrade with their live presence, online first.
@@ -527,7 +749,11 @@ pub async fn peer_presence(
     state: tauri::State<'_, Runtime>,
     npub: String,
 ) -> Result<Option<PresenceDto>, String> {
-    state.read().await.peer_presence(&npub).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .peer_presence(&npub)
+        .map_err(|e| e.to_string())
 }
 
 /// Announce this window's presence to every comrade (on focus/blur, or on the
@@ -597,7 +823,10 @@ pub async fn search_profiles(
     query: String,
 ) -> Result<Vec<FoundProfileDto>, String> {
     let handles = state.read().await.handles();
-    handles.search_profiles(&query).await.map_err(|e| e.to_string())
+    handles
+        .search_profiles(&query)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Journal (strictly local, never networked) ──────────────────────────────────
@@ -621,7 +850,11 @@ pub async fn add_journal_entry(
 pub async fn journal_entries(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<JournalEntryDto>, String> {
-    state.read().await.journal_entries().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .journal_entries()
+        .map_err(|e| e.to_string())
 }
 
 /// Delete a journal entry by id; returns whether one existed.
@@ -646,21 +879,27 @@ pub async fn tara_send(
     state: tauri::State<'_, Runtime>,
     text: String,
 ) -> Result<TaraMessageDto, String> {
-    state.read().await.tara_send(&text).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .tara_send(&text)
+        .map_err(|e| e.to_string())
 }
 
 /// The whole Tara thread, oldest-first (chat order).
 #[tauri::command]
-pub async fn tara_thread(
-    state: tauri::State<'_, Runtime>,
-) -> Result<Vec<TaraMessageDto>, String> {
+pub async fn tara_thread(state: tauri::State<'_, Runtime>) -> Result<Vec<TaraMessageDto>, String> {
     state.read().await.tara_thread().map_err(|e| e.to_string())
 }
 
 /// Delete the entire Tara thread; returns how many turns were removed.
 #[tauri::command]
 pub async fn clear_tara_thread(state: tauri::State<'_, Runtime>) -> Result<u64, String> {
-    state.read().await.clear_tara_thread().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .clear_tara_thread()
+        .map_err(|e| e.to_string())
 }
 
 /// The opener shown while the thread is empty — journal mood markers only.
@@ -708,7 +947,11 @@ pub async fn record_attention_day(
 pub async fn attention_days(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<AttentionDayDto>, String> {
-    state.read().await.attention_days().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .attention_days()
+        .map_err(|e| e.to_string())
 }
 
 /// Today's rollup against the user's own recent medians.
@@ -783,7 +1026,11 @@ pub async fn active_focus_session(
 pub async fn focus_sessions(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<FocusSessionDto>, String> {
-    state.read().await.focus_sessions().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .focus_sessions()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -851,7 +1098,11 @@ pub async fn set_reading_position(
 
 #[tauri::command]
 pub async fn clear_reading(state: tauri::State<'_, Runtime>) -> Result<bool, String> {
-    state.read().await.clear_reading().map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .clear_reading()
+        .map_err(|e| e.to_string())
 }
 
 // ── Milestone 3: progressive-disclosure workspace controller ──────────────────
@@ -905,7 +1156,11 @@ pub async fn back(state: tauri::State<'_, Runtime>) -> Result<WorkspaceDto, Stri
 
 #[tauri::command]
 pub async fn generate_identity(state: tauri::State<'_, Runtime>) -> Result<IdentityDto, String> {
-    state.write().await.generate_identity().map_err(|e| e.to_string())
+    state
+        .write()
+        .await
+        .generate_identity()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -920,7 +1175,11 @@ pub async fn extract_payments(
     state: tauri::State<'_, Runtime>,
     text: String,
 ) -> Result<Vec<UpiIntentDto>, String> {
-    state.read().await.extract_payments(&text).map_err(|e| e.to_string())
+    state
+        .read()
+        .await
+        .extract_payments(&text)
+        .map_err(|e| e.to_string())
 }
 
 // ── Encrypted media pipeline (NIP-94/96 · Blossom) ────────────────────────────

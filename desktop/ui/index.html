@@ -166,6 +166,32 @@
               <span class="muted">Select a conversation</span>
             </div>
             <div id="chat-log" class="chat-log" aria-live="polite"></div>
+
+            <!-- Watch/listen together (docs/TOGETHER.md). Both sides play their
+                 own copy and Comrade only keeps the clocks together; when only
+                 one side has the file, it is handed over peer-to-peer over its
+                 own WebRTC connection, never through a server of ours. -->
+            <section id="together-panel" class="together-panel" hidden>
+              <div class="together-head">
+                <span class="together-title">Together</span>
+                <span id="together-status" class="muted sm">Not in a session</span>
+              </div>
+              <div class="field-row">
+                <button id="together-pick" class="btn btn-ghost">Choose a file…</button>
+                <input id="together-file" type="file" accept="audio/*,video/*" hidden />
+                <button id="together-invite" class="btn btn-primary" disabled>Watch together</button>
+                <button id="together-join" class="btn btn-primary" hidden>I'm ready</button>
+                <button id="together-leave" class="btn btn-ghost" hidden>Leave</button>
+              </div>
+              <video id="together-player" class="together-player" controls playsinline hidden></video>
+              <p id="together-share-status" class="hint sm"></p>
+              <p class="hint sm">
+                Positions travel over the relay, so you'll be within about a
+                second of each other — not frame-perfect. If you don't have the
+                file, they can send it to you directly.
+              </p>
+            </section>
+
             <div class="chat-composer">
               <div id="dm-upi-preview" class="upi-preview" hidden></div>
               <div id="dm-reply-chip" class="reply-chip" hidden>
