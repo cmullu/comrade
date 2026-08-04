@@ -1,8 +1,9 @@
 package mullu.comrade.ui
 
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 import mullu.comrade.ComradeCore
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.comrade_core.AppAction
 import uniffi.comrade_core.ChatCommand
@@ -108,9 +109,9 @@ class ChatCommandsTest {
 
     @Test
     fun aPersonWhoseHandleStartsWithTaraIsNotAnAside() {
-        assertTrue(!ChatCommands.isAsideDraft("@taranjeet are you around"))
-        assertTrue(!ChatCommands.isAsideDraft("hello @tara"))
-        assertTrue(!ChatCommands.isAsideDraft(""))
+        assertFalse(ChatCommands.isAsideDraft("@taranjeet are you around"))
+        assertFalse(ChatCommands.isAsideDraft("hello @tara"))
+        assertFalse(ChatCommands.isAsideDraft(""))
     }
 
     // ── Tasks ────────────────────────────────────────────────────────────────
@@ -184,7 +185,7 @@ class ChatCommandsTest {
         // Android has all five, which is the deliberate divergence from the
         // desktop module's two.
         for (action in AppAction.entries) {
-            assertTrue(action in ChatCommands.AVAILABLE_SCREENS, "$action")
+            assertTrue("$action", action in ChatCommands.AVAILABLE_SCREENS)
             assertEquals(ComposerPlan.Open(action), ChatCommands.planFor(ChatCommand.Open(action)))
         }
     }
@@ -192,7 +193,7 @@ class ChatCommandsTest {
     @Test
     fun everyActionHasALabelForTheSentences() {
         for (action in AppAction.entries) {
-            assertTrue(ChatCommands.labelFor(action).isNotBlank(), "$action")
+            assertTrue("$action", ChatCommands.labelFor(action).isNotBlank())
         }
     }
 

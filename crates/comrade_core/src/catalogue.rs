@@ -81,6 +81,17 @@ const MAX_LOOKUP_BYTES: usize = 512 * 1024;
 /// a scroll, and every extra row is another chance to open the wrong thing.
 pub const MAX_CANDIDATES: usize = 8;
 
+/// The read cap can never reject a real answer: a metadata document for the most
+/// candidates we ask for is orders of magnitude under it.
+///
+/// A compile-time invariant rather than an assertion in a test, matching the five
+/// in [`crate::together`]. Both operands are constants, so a runtime `assert!`
+/// would be constant-folded — which is what `clippy::assertions_on_constants`
+/// objects to, and it is right: this belongs in the build, where raising
+/// `MAX_CANDIDATES` past the cap fails to compile instead of failing a test run.
+#[cfg(feature = "catalogue-http")]
+const _: () = assert!(MAX_CANDIDATES * 4096 < MAX_LOOKUP_BYTES);
+
 // ── Where audio can come from ────────────────────────────────────────────────
 
 /// The tiers [`choose_audio_plan`] tries, in order.
@@ -881,9 +892,8 @@ mod tests {
         assert!(!over(MAX_LOOKUP_BYTES - 1, 1));
         assert!(over(MAX_LOOKUP_BYTES, 1));
         assert!(over(0, MAX_LOOKUP_BYTES + 1));
-        // And a metadata document for the most candidates we ask for is orders
-        // of magnitude under it, so the cap can never reject a real answer.
-        assert!(MAX_CANDIDATES * 4096 < MAX_LOOKUP_BYTES);
+        // That the cap is comfortably above any real answer is checked at compile
+        // time instead — see the `const _` beside `MAX_CANDIDATES`.
     }
 
     #[cfg(feature = "catalogue-http")]
