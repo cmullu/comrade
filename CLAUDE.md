@@ -125,6 +125,27 @@ plugin cache. On a brand-new container that repair lands one session late — ru
 `/reload-plugins`, or put `claude plugin marketplace update caveman` in the cloud
 environment's setup script, which runs before the session boots.
 
+### Agent teams
+
+Enabled via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.json`
+(experimental, off by default upstream). Run `/team` for the formation playbook —
+`feature`, `review`, or `hunt`.
+
+Teams fit this repo because the five file sets are near-disjoint, so each owner
+edits files nobody else touches: `comrade-core` (engines + runtime), `comrade-ffi`
+(`comrade_jni`), `comrade-android`, `comrade-flutter`, `comrade-desktop`. Those
+are ordinary subagent definitions in `.claude/agents/`, usable either as
+teammates or as plain subagents. **The lead owns `AUDIT.md` and `docs/`** — five
+teammates editing one ledger is the guaranteed conflict.
+
+There is no project-level team config file to write: teams are runtime state
+under `~/.claude/teams/<session>/`, generated per session and not to be
+pre-authored. Roles and spawn prompts are the reusable parts.
+
+A `TaskCompleted` hook blocks closing a task that adds a `BridgeEvent` variant
+without updating the Kotlin and Dart matches, since the Rust side compiles clean
+and neither lane is in `ci.yml`.
+
 The cloud sandbox is **not** a devcontainer; there is no `.devcontainer/` here.
 It is an Anthropic-managed VM configured per *cloud environment* (network policy,
 env vars, setup script) at claude.ai. Repo-committed settings and hooks are the
