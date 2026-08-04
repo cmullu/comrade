@@ -2963,9 +2963,11 @@
     // disagrees the day that number moves.
     let route = null;
     try {
-      route = await safeInvoke("attachment_route_for_bytes", { totalBytes: file.size }, {
-        silent: true,
-      });
+      route = await safeInvoke(
+        "attachment_route_for_bytes",
+        { totalBytes: file.size },
+        { silent: true },
+      );
     } catch {
       /* no route is refused below, never guessed at */
     }
@@ -4009,12 +4011,11 @@
   async function judgeSharePath() {
     const s = state.share;
     if (!s || s.judged || !s.pc || !s.offer) return;
-    const { selectedPairTypes } = await shareTransferReady;
+    const { selectedPairTypes, describeVerdict } = await shareTransferReady;
     // A handoff's refusal carries one thing a together handover's cannot: the
     // hosted road is still there for a smaller file, and saying so is the
     // difference between "it failed" and "here is what would work".
     const { describeHandoffVerdict } = await handoffReady;
-    const { describeVerdict } = await shareTransferReady;
     const describe = s.kind === "handoff" ? describeHandoffVerdict : describeVerdict;
     if (state.share !== s) return;
     let types = null;
@@ -4573,7 +4574,11 @@
     if (step.step !== "offer") {
       // Except a withdrawal of the offer currently on screen, which has no
       // engine behind it yet.
-      if (step.step === "withdraw" && state.handoff?.transferId === p.transfer_id) {
+      if (
+        step.step === "withdraw" &&
+        state.handoff?.transferId === p.transfer_id &&
+        state.handoff.peer === p.peer
+      ) {
         clearHandoffCard();
         showToast("They took the offer back.", "info");
       }
