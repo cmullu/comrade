@@ -63,6 +63,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PresenceDto dco_decode_box_autoadd_presence_dto(dynamic raw);
 
   @protected
+  ReactionDto dco_decode_box_autoadd_reaction_dto(dynamic raw);
+
+  @protected
   Recording dco_decode_box_autoadd_recording(dynamic raw);
 
   @protected
@@ -214,6 +217,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<ReactionDto> dco_decode_list_reaction_dto(dynamic raw);
+
+  @protected
   List<TaraMessageDto> dco_decode_list_tara_message_dto(dynamic raw);
 
   @protected
@@ -259,6 +265,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PresenceDto? dco_decode_opt_box_autoadd_presence_dto(dynamic raw);
 
   @protected
+  ReactionDto? dco_decode_opt_box_autoadd_reaction_dto(dynamic raw);
+
+  @protected
   Recording? dco_decode_opt_box_autoadd_recording(dynamic raw);
 
   @protected
@@ -272,6 +281,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProfileDto dco_decode_profile_dto(dynamic raw);
+
+  @protected
+  ReactionDto dco_decode_reaction_dto(dynamic raw);
 
   @protected
   Recording dco_decode_recording(dynamic raw);
@@ -398,6 +410,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PresenceDto sse_decode_box_autoadd_presence_dto(SseDeserializer deserializer);
+
+  @protected
+  ReactionDto sse_decode_box_autoadd_reaction_dto(SseDeserializer deserializer);
 
   @protected
   Recording sse_decode_box_autoadd_recording(SseDeserializer deserializer);
@@ -566,6 +581,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<ReactionDto> sse_decode_list_reaction_dto(SseDeserializer deserializer);
+
+  @protected
   List<TaraMessageDto> sse_decode_list_tara_message_dto(
       SseDeserializer deserializer);
 
@@ -619,6 +637,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  ReactionDto? sse_decode_opt_box_autoadd_reaction_dto(
+      SseDeserializer deserializer);
+
+  @protected
   Recording? sse_decode_opt_box_autoadd_recording(SseDeserializer deserializer);
 
   @protected
@@ -632,6 +654,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProfileDto sse_decode_profile_dto(SseDeserializer deserializer);
+
+  @protected
+  ReactionDto sse_decode_reaction_dto(SseDeserializer deserializer);
 
   @protected
   Recording sse_decode_recording(SseDeserializer deserializer);
@@ -770,6 +795,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_presence_dto(
       PresenceDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_reaction_dto(
+      ReactionDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_recording(
@@ -952,6 +981,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       Uint8List self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_reaction_dto(
+      List<ReactionDto> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_tara_message_dto(
       List<TaraMessageDto> self, SseSerializer serializer);
 
@@ -1006,6 +1039,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       PresenceDto? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_reaction_dto(
+      ReactionDto? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_recording(
       Recording? self, SseSerializer serializer);
 
@@ -1020,6 +1057,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_profile_dto(ProfileDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_reaction_dto(ReactionDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_recording(Recording self, SseSerializer serializer);

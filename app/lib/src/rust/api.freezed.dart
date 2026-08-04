@@ -54,6 +54,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_IncomingDirectMessage value)?
         incomingDirectMessage,
     TResult Function(BridgeEvent_IncomingMedia value)? incomingMedia,
+    TResult Function(BridgeEvent_IncomingReaction value)? incomingReaction,
     TResult Function(BridgeEvent_IncomingCallSignal value)? incomingCallSignal,
     TResult Function(BridgeEvent_IncomingMessageRequest value)?
         incomingMessageRequest,
@@ -80,6 +81,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return incomingDirectMessage(_that);
       case BridgeEvent_IncomingMedia() when incomingMedia != null:
         return incomingMedia(_that);
+      case BridgeEvent_IncomingReaction() when incomingReaction != null:
+        return incomingReaction(_that);
       case BridgeEvent_IncomingCallSignal() when incomingCallSignal != null:
         return incomingCallSignal(_that);
       case BridgeEvent_IncomingMessageRequest()
@@ -134,6 +137,8 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(BridgeEvent_IncomingDirectMessage value)
         incomingDirectMessage,
     required TResult Function(BridgeEvent_IncomingMedia value) incomingMedia,
+    required TResult Function(BridgeEvent_IncomingReaction value)
+        incomingReaction,
     required TResult Function(BridgeEvent_IncomingCallSignal value)
         incomingCallSignal,
     required TResult Function(BridgeEvent_IncomingMessageRequest value)
@@ -165,6 +170,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return incomingDirectMessage(_that);
       case BridgeEvent_IncomingMedia():
         return incomingMedia(_that);
+      case BridgeEvent_IncomingReaction():
+        return incomingReaction(_that);
       case BridgeEvent_IncomingCallSignal():
         return incomingCallSignal(_that);
       case BridgeEvent_IncomingMessageRequest():
@@ -214,6 +221,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_IncomingDirectMessage value)?
         incomingDirectMessage,
     TResult? Function(BridgeEvent_IncomingMedia value)? incomingMedia,
+    TResult? Function(BridgeEvent_IncomingReaction value)? incomingReaction,
     TResult? Function(BridgeEvent_IncomingCallSignal value)? incomingCallSignal,
     TResult? Function(BridgeEvent_IncomingMessageRequest value)?
         incomingMessageRequest,
@@ -239,6 +247,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return incomingDirectMessage(_that);
       case BridgeEvent_IncomingMedia() when incomingMedia != null:
         return incomingMedia(_that);
+      case BridgeEvent_IncomingReaction() when incomingReaction != null:
+        return incomingReaction(_that);
       case BridgeEvent_IncomingCallSignal() when incomingCallSignal != null:
         return incomingCallSignal(_that);
       case BridgeEvent_IncomingMessageRequest()
@@ -290,6 +300,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(ChitthiDto field0)? incomingChitthi,
     TResult Function(DirectMessageDto field0)? incomingDirectMessage,
     TResult Function(MediaMessageDto field0)? incomingMedia,
+    TResult Function(ReactionDto field0)? incomingReaction,
     TResult Function(CallSignalDto field0)? incomingCallSignal,
     TResult Function(MessageRequestDto field0)? incomingMessageRequest,
     TResult Function(String peer, List<String> messageIds, String status)?
@@ -317,6 +328,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return incomingDirectMessage(_that.field0);
       case BridgeEvent_IncomingMedia() when incomingMedia != null:
         return incomingMedia(_that.field0);
+      case BridgeEvent_IncomingReaction() when incomingReaction != null:
+        return incomingReaction(_that.field0);
       case BridgeEvent_IncomingCallSignal() when incomingCallSignal != null:
         return incomingCallSignal(_that.field0);
       case BridgeEvent_IncomingMessageRequest()
@@ -369,6 +382,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(ChitthiDto field0) incomingChitthi,
     required TResult Function(DirectMessageDto field0) incomingDirectMessage,
     required TResult Function(MediaMessageDto field0) incomingMedia,
+    required TResult Function(ReactionDto field0) incomingReaction,
     required TResult Function(CallSignalDto field0) incomingCallSignal,
     required TResult Function(MessageRequestDto field0) incomingMessageRequest,
     required TResult Function(
@@ -396,6 +410,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return incomingDirectMessage(_that.field0);
       case BridgeEvent_IncomingMedia():
         return incomingMedia(_that.field0);
+      case BridgeEvent_IncomingReaction():
+        return incomingReaction(_that.field0);
       case BridgeEvent_IncomingCallSignal():
         return incomingCallSignal(_that.field0);
       case BridgeEvent_IncomingMessageRequest():
@@ -444,6 +460,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(ChitthiDto field0)? incomingChitthi,
     TResult? Function(DirectMessageDto field0)? incomingDirectMessage,
     TResult? Function(MediaMessageDto field0)? incomingMedia,
+    TResult? Function(ReactionDto field0)? incomingReaction,
     TResult? Function(CallSignalDto field0)? incomingCallSignal,
     TResult? Function(MessageRequestDto field0)? incomingMessageRequest,
     TResult? Function(String peer, List<String> messageIds, String status)?
@@ -471,6 +488,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return incomingDirectMessage(_that.field0);
       case BridgeEvent_IncomingMedia() when incomingMedia != null:
         return incomingMedia(_that.field0);
+      case BridgeEvent_IncomingReaction() when incomingReaction != null:
+        return incomingReaction(_that.field0);
       case BridgeEvent_IncomingCallSignal() when incomingCallSignal != null:
         return incomingCallSignal(_that.field0);
       case BridgeEvent_IncomingMessageRequest()
@@ -699,6 +718,72 @@ class _$BridgeEvent_IncomingMediaCopyWithImpl<$Res>
           ? _self.field0
           : field0 // ignore: cast_nullable_to_non_nullable
               as MediaMessageDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_IncomingReaction extends BridgeEvent {
+  const BridgeEvent_IncomingReaction(this.field0) : super._();
+
+  final ReactionDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_IncomingReactionCopyWith<BridgeEvent_IncomingReaction>
+      get copyWith => _$BridgeEvent_IncomingReactionCopyWithImpl<
+          BridgeEvent_IncomingReaction>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_IncomingReaction &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.incomingReaction(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_IncomingReactionCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_IncomingReactionCopyWith(
+          BridgeEvent_IncomingReaction value,
+          $Res Function(BridgeEvent_IncomingReaction) _then) =
+      _$BridgeEvent_IncomingReactionCopyWithImpl;
+  @useResult
+  $Res call({ReactionDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_IncomingReactionCopyWithImpl<$Res>
+    implements $BridgeEvent_IncomingReactionCopyWith<$Res> {
+  _$BridgeEvent_IncomingReactionCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_IncomingReaction _self;
+  final $Res Function(BridgeEvent_IncomingReaction) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_IncomingReaction(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as ReactionDto,
     ));
   }
 }

@@ -43,7 +43,10 @@ use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
 use comrade_core::dak::{open_dm, seal_dm, MeshDm};
 use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
-use comrade_core::dm::{parse_profile_share, parse_receipt, ProfileShare, Receipt, ReceiptKind};
+use comrade_core::dm::{
+    parse_profile_share, parse_reaction, parse_receipt, ProfileShare, ReactionEnvelope, Receipt,
+    ReceiptKind, MAX_REACTION_BYTES,
+};
 use comrade_core::media::{
     build_file_metadata_event, encrypt_media, fetch_and_decrypt_media, FileMetadata,
     MAX_MEDIA_BYTES,
@@ -283,6 +286,40 @@ impl ChitthiDto {
             content: c.content.clone(),
             created_at: c.created_at,
             reply_to: c.reply_to.clone(),
+        }
+    }
+}
+
+/// One person's emoji reaction to one message, as a frontend sees it.
+///
+/// Flat rather than "a message plus its reactions" because reactions arrive
+/// independently of the message they are about — a reaction can outrun the
+/// backfill of its target — so the UI joins them by [`Self::target_id`] the same
+/// way it already resolves a `reply_to` into a quoted preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ReactionDto {
+    /// Event id (hex) of the message reacted to. A text message or an
+    /// attachment — the reaction does not care which.
+    pub target_id: String,
+    /// The conversation it belongs to (the other party's npub).
+    pub peer: String,
+    /// Who reacted, as an npub.
+    pub reactor: String,
+    pub emoji: String,
+    pub created_at: u64,
+    /// Whether *this device* sent it, so the UI can highlight your own.
+    pub outgoing: bool,
+}
+
+impl From<comrade_storage::MessageReaction> for ReactionDto {
+    fn from(r: comrade_storage::MessageReaction) -> Self {
+        Self {
+            target_id: r.target_id,
+            peer: r.peer_npub,
+            reactor: r.reactor_npub,
+            emoji: r.emoji,
+            created_at: r.created_at,
+            outgoing: r.outgoing,
         }
     }
 }
@@ -1109,6 +1146,11 @@ pub enum BridgeEvent {
     IncomingDirectMessage(DirectMessageDto),
     /// A new encrypted-media reference (NIP-94) arrived over the DM channel.
     IncomingMedia(MediaMessageDto),
+    /// A peer reacted to a message, changed their reaction, or took it back — an
+    /// empty [`ReactionDto::emoji`] is the withdrawal. Emitted only when the
+    /// visible state actually changed, so a replay off the two-day backfill does
+    /// not redraw anything.
+    IncomingReaction(ReactionDto),
     /// A call-signaling payload (offer/answer/ICE/hangup) arrived for the
     /// frontend's WebRTC layer.
     IncomingCallSignal(CallSignalDto),
@@ -1904,6 +1946,36 @@ impl ComradeRuntime {
         self.handles()
             .send_dm_reply(target, content, reply_to)
             .await
+    }
+
+    /// React to a message in `peer`'s thread, or take an existing reaction back
+    /// by tapping the same emoji again. Returns the reaction now standing, or
+    /// `None` if the tap withdrew one.
+    ///
+    /// Delegates to [`RuntimeHandles::toggle_reaction`] — see [`Self::send_dm`]
+    /// for why the handle snapshot comes first, and that method for why the
+    /// toggle decision lives on this side of the FFI rather than in each frontend.
+    pub async fn toggle_reaction(
+        &self,
+        peer: &str,
+        target_id: &str,
+        emoji: &str,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        self.handles().toggle_reaction(peer, target_id, emoji).await
+    }
+
+    /// Every reaction in `peer`'s conversation, oldest first — read from the
+    /// encrypted store, so a thread opens with its reactions already on it rather
+    /// than waiting for a live event.
+    ///
+    /// Withdrawn reactions are not returned (the store keeps a tombstone to
+    /// refuse replays; see `EncryptedStore::set_reaction`).
+    pub fn reactions(&self, peer: &str) -> Result<Vec<ReactionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::StoreLocked)?;
+        let rows = store
+            .reactions_with(&to_npub(peer))
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(ReactionDto::from).collect())
     }
 
     /// Retry queued mail now. Delegates to [`RuntimeHandles::flush_outbox`] —
@@ -4196,6 +4268,101 @@ impl RuntimeHandles {
             created_at,
         )
         .await
+    }
+
+    /// React to one of `peer`'s messages, or take an existing reaction back.
+    ///
+    /// **Toggling lives here, not in the frontends.** Tapping the emoji you
+    /// already sent means "remove it", and tapping a different one means
+    /// "replace"; deciding that needs the current reaction, which only this side
+    /// knows. Putting it here is what keeps Android and Flutter from each having
+    /// their own answer — and each having their own bug when the two disagree.
+    ///
+    /// Returns the reaction now standing, or `None` if the tap withdrew one.
+    ///
+    /// The local write happens **before** the send and is kept whatever the send
+    /// does, so the chip appears the moment it is tapped and survives being
+    /// offline. A reaction is deliberately **not** queued in the outbox on
+    /// failure, unlike a message: the outbox persists `StoredMessage` rows, so a
+    /// queued envelope would sit in the conversation as a JSON bubble, and a
+    /// reaction is worth much less than the retry machinery would cost.
+    /// The peer simply does not learn about it. That becomes worth revisiting if
+    /// the outbox ever grows a non-chat lane — at which point reactions should
+    /// use it.
+    pub async fn toggle_reaction(
+        &self,
+        peer: &str,
+        target_id: &str,
+        emoji: &str,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        if target_id.trim().is_empty() {
+            return Err(UiError::Engine("no message to react to".into()));
+        }
+        // The same bound the parser enforces on the way in, applied on the way
+        // out: this device must not send a peer something it would itself refuse.
+        if emoji.is_empty() || emoji.len() > MAX_REACTION_BYTES {
+            return Err(UiError::Engine(format!(
+                "a reaction must be 1..={MAX_REACTION_BYTES} bytes"
+            )));
+        }
+        let store = self.store.clone().ok_or(UiError::StoreLocked)?;
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer_pk = parse_pubkey(peer)?;
+        let peer_npub = to_npub(peer);
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+
+        let current = store
+            .reaction_by(target_id, &me)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        // Tapping what you already sent takes it back; anything else replaces.
+        let clearing = current.as_ref().map(|r| r.emoji.as_str()) == Some(emoji);
+        let next = if clearing { "" } else { emoji };
+        let created_at = now_secs();
+
+        let row = comrade_storage::MessageReaction {
+            target_id: target_id.to_string(),
+            peer_npub: peer_npub.clone(),
+            reactor_npub: me,
+            emoji: next.to_string(),
+            created_at,
+            outgoing: true,
+        };
+        store
+            .set_reaction(&row)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+
+        let json = ReactionEnvelope::new(target_id, next)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+
+        // Same transport precedence a message gets: the local mesh first when the
+        // user has asked for it, a relay otherwise — a reaction sent across the
+        // room should not need the internet either.
+        let plan = SendPlan::for_attempt(self.prefer_local, 0);
+        let local_id = local_message_id(&peer_npub, &json, created_at);
+        let on_mesh = plan.local_first
+            && self
+                .try_mesh(&peer_pk, &local_id, &json, None, created_at)
+                .await;
+        if !on_mesh || plan.force_both {
+            if let Err(e) = vault.send_dm(&peer_pk, &json).await {
+                if !plan.local_first {
+                    self.try_mesh(&peer_pk, &local_id, &json, None, created_at)
+                        .await;
+                }
+                // Logged, not returned: the local reaction stands either way, and
+                // failing the call would make the UI un-draw a chip the user just
+                // tapped over something they cannot act on.
+                tracing::info!(error = %e, "reaction could not be published");
+            }
+        }
+
+        Ok((!clearing).then(|| ReactionDto::from(row)))
     }
 
     /// Park a message in the sender outbox under a locally minted id and
@@ -6617,7 +6784,51 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 7) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 7) Emoji reaction — a peer reacted to one of our messages (or to one of
+    //    theirs). Gated like a beacon and a nudge: a stranger must not be able to
+    //    decorate our messages before their request is accepted, and returning
+    //    either way keeps a reaction from an unaccepted peer from surfacing as a
+    //    message request full of JSON.
+    //
+    //    Not deduped by event id, and deliberately: the store's own timestamp
+    //    check is the stronger guard (it refuses a replay even when the replay
+    //    arrives under a *fresh* wrapper id, which the two-day backfill produces),
+    //    and it also collapses a reaction that reached us over both transports.
+    if let Some(env) = parse_reaction(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            if let Some(store) = store {
+                let row = comrade_storage::MessageReaction {
+                    target_id: env.target_id.clone(),
+                    peer_npub: peer_npub.clone(),
+                    reactor_npub: peer_npub.clone(),
+                    emoji: env.emoji.clone(),
+                    created_at: msg.created_at,
+                    outgoing: false,
+                };
+                match store
+                    .set_reaction(&row)
+                    .and_then(|c| store.flush().map(|()| c))
+                {
+                    // Only news redraws anything — a replay or a repeat is not.
+                    Ok(true) => {
+                        let _ = tx.send(BridgeEvent::IncomingReaction(ReactionDto {
+                            target_id: env.target_id,
+                            peer: peer_npub,
+                            reactor: row.reactor_npub,
+                            emoji: env.emoji,
+                            created_at: msg.created_at,
+                            outgoing: false,
+                        }));
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("failed to persist incoming reaction: {e}"),
+                }
+            }
+        }
+        return;
+    }
+
+    // 8) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         // Everything in the envelope is chosen by the peer. The MIME type
@@ -6685,7 +6896,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 8) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 9) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
     // A message can reach us twice by two routes — sealed over the local mesh
@@ -9494,6 +9705,167 @@ mod tests {
                 incoming_at(sender_hex, event_id, content, created_at),
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_peers_reaction_lands_on_the_message_it_names() {
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        let now = now_secs();
+
+        let react = ReactionEnvelope::new("m1", "🔥").to_json().unwrap();
+        ingress.deliver(&hex, "r1", &react, now);
+        match rx.try_recv().unwrap() {
+            BridgeEvent::IncomingReaction(r) => {
+                assert_eq!(r.target_id, "m1");
+                assert_eq!(r.emoji, "🔥");
+                assert_eq!(r.peer, peer);
+                assert_eq!(r.reactor, peer);
+                assert!(!r.outgoing);
+            }
+            other => panic!("expected IncomingReaction, got {other:?}"),
+        }
+
+        // A reaction is a control envelope, never a chat bubble. Before the
+        // parser existed it would have fallen through to the plain-text branch
+        // and rendered as a message full of JSON.
+        assert!(
+            ingress.store.messages_with(&peer).unwrap().is_empty(),
+            "a reaction must not become a message"
+        );
+        assert_eq!(ingress.store.reactions_with(&peer).unwrap().len(), 1);
+
+        // Changing it replaces rather than stacks…
+        ingress.deliver(
+            &hex,
+            "r2",
+            &ReactionEnvelope::new("m1", "👍").to_json().unwrap(),
+            now + 1,
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::IncomingReaction(_)
+        ));
+        let rows = ingress.store.reactions_with(&peer).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one reaction per person per message: {rows:?}"
+        );
+        assert_eq!(rows[0].emoji, "👍");
+
+        // …and withdrawing it is an empty emoji, reported so the chip can go.
+        ingress.deliver(
+            &hex,
+            "r3",
+            &ReactionEnvelope::clearing("m1").to_json().unwrap(),
+            now + 2,
+        );
+        match rx.try_recv().unwrap() {
+            BridgeEvent::IncomingReaction(r) => assert!(r.emoji.is_empty()),
+            other => panic!("expected IncomingReaction, got {other:?}"),
+        }
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_reaction_redraws_nothing_even_under_a_fresh_wrapper_id() {
+        // The two-day gift-wrap backfill re-scans on every launch, and a replay
+        // can arrive under a *different* wrapper id than the first delivery — so
+        // event-id dedup alone would not catch this. The store's timestamp check
+        // is what does.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        let now = now_secs();
+
+        ingress.deliver(
+            &hex,
+            "r1",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(rx.try_recv().is_ok());
+
+        ingress.deliver(
+            &hex,
+            "r1-again",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a replayed reaction is not news, whatever wrapper it came in"
+        );
+
+        // And the sharper case: an older reaction replayed after a newer one
+        // must not resurrect itself.
+        ingress.deliver(
+            &hex,
+            "r2",
+            &ReactionEnvelope::new("m1", "👍").to_json().unwrap(),
+            now + 5,
+        );
+        assert!(rx.try_recv().is_ok());
+        ingress.deliver(
+            &hex,
+            "r1-replay",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(ingress.store.reactions_with(&peer).unwrap()[0].emoji, "👍");
+    }
+
+    #[tokio::test]
+    async fn a_stranger_cannot_react_before_their_request_is_accepted() {
+        // Same gate a beacon and a nudge sit behind: an unaccepted peer must not
+        // be able to decorate our messages, and must not surface as a message
+        // request full of JSON either.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        let now = now_secs();
+
+        ingress.deliver(
+            &hex,
+            "r1",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no event at all from an unaccepted peer"
+        );
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+        assert!(ingress.store.messages_with(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_reaction_is_not_mistaken_for_chat_text() {
+        // The parser refuses it (see `MAX_REACTION_BYTES`). The thing worth
+        // pinning is what happens *next*: falling through to the plain-text
+        // branch would put a wall of JSON in the conversation.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+
+        let huge = ReactionEnvelope::new("m1", "🔥".repeat(MAX_REACTION_BYTES))
+            .to_json()
+            .unwrap();
+        ingress.deliver(&hex, "r1", &huge, now_secs());
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+        // It does arrive as a message, which is the honest outcome for a payload
+        // this side cannot interpret — but it must not have been stored as a
+        // reaction, and it must not have raised a reaction event.
+        assert!(!matches!(
+            rx.try_recv(),
+            Ok(BridgeEvent::IncomingReaction(_))
+        ));
     }
 
     #[tokio::test]

@@ -78,8 +78,8 @@ use comrade_ui::{
     AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto,
     ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
     FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
-    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReadingDto,
-    ShareVerdictDto, TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError,
+    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReactionDto,
+    ReadingDto, ShareVerdictDto, TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError,
     UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
@@ -541,6 +541,31 @@ impl Comrade {
         handles
             .send_dm_reply(&target, &content, reply_to.as_deref())
             .await
+    }
+
+    /// React to a message in `peer`'s thread with `emoji` — or take an existing
+    /// reaction back by passing the same emoji again. Returns the reaction now
+    /// standing, or `None` if the tap withdrew one.
+    ///
+    /// The toggle is decided on the Rust side (see
+    /// `ComradeRuntime::toggle_reaction`) so the two frontends cannot disagree
+    /// about what tapping an already-sent emoji means.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn toggle_reaction(
+        &self,
+        peer: String,
+        target_id: String,
+        emoji: String,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.toggle_reaction(&peer, &target_id, &emoji).await
+    }
+
+    /// Every reaction in `peer`'s conversation, oldest first, from the encrypted
+    /// store — so a thread opens with its reactions already drawn.
+    pub fn reactions(&self, peer: String) -> Result<Vec<ReactionDto>, UiError> {
+        self.inner.blocking_read().reactions(&peer)
     }
 
     /// Retry every DM sitting in the sender outbox because no relay would take
