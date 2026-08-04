@@ -653,6 +653,23 @@ object ComradeCore {
         service: uniffi.comrade_core.MusicService?,
     ): uniffi.comrade_ui.PlayTargetDto = rethrowing("Play") { ffi.playQuery(query, service) }
 
+    /**
+     * What to do about a `/play`, once this device has searched its own library.
+     *
+     * [foundLocalCopy] is consulted only for `FindLocally` — a local file does
+     * not make a DRM link playable, and core is where that stays decided.
+     *
+     * `null` on failure, deliberately rather than a default route: every route
+     * carries a *sentence*, and defaulting to one would tell the user "name a
+     * song" when they had named one and the bridge was what broke. The caller
+     * says it could not work out what to play, which is what happened.
+     */
+    fun playRoute(
+        plan: uniffi.comrade_ui.PlayPlan,
+        foundLocalCopy: Boolean,
+    ): uniffi.comrade_ui.PlayRoute? =
+        runCatching { ffi.playRoute(plan, foundLocalCopy) }.getOrNull()
+
     /** Name a piece of work. [peer] of null is a note to self — no relay. */
     fun assignTaskTyped(peer: String?, text: String): TaskInfo =
         rethrowing("Task") { runBlocking { ffi.assignTask(peer, text) }.toInfo() }

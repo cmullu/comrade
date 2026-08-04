@@ -15,7 +15,13 @@
 use std::sync::Arc;
 
 use comrade_ui::{
-    AppAction, AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto, CallSessionDto, ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraMessageDto, TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    AppAction, AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto,
+    CallSessionDto, ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto,
+    ConversationDto, CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto,
+    IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
+    MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PlayPlan, PlayRoute,
+    PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraMessageDto, TaskDto,
+    TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -1009,6 +1015,16 @@ pub async fn play_query(
     service: Option<MusicService>,
 ) -> Result<PlayTargetDto, String> {
     Ok(state.read().await.play_query(&query, service))
+}
+
+/// What to do about a `/play`, once the caller has searched its own library.
+///
+/// Pure, so it never touches the runtime — it is a command only so the decision
+/// stays in one place across the frontends rather than being reimplemented in JS
+/// the day desktop grows a player (`docs/TOGETHER.md` §9).
+#[tauri::command]
+pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+    comrade_ui::play_route(plan, found_local_copy)
 }
 
 /// Name a piece of work. `peer` of `None` is a note to self — no relay.

@@ -4,6 +4,8 @@ import mullu.comrade.ComradeCore
 import uniffi.comrade_core.AppAction
 import uniffi.comrade_core.ChatCommand
 import uniffi.comrade_core.CommandSpec
+import uniffi.comrade_core.MusicService
+import uniffi.comrade_ui.PlayRoute
 
 /**
  * Decisions behind the chat composer's in-chat commands — the Android half of
@@ -47,8 +49,14 @@ sealed interface ComposerPlan {
     /** Open a screen on this device. */
     data class Open(val action: AppAction) : ComposerPlan
 
-    /** Start a `/play` flow with this query. */
-    data class Play(val query: String) : ComposerPlan
+    /**
+     * Start a `/play` flow with this query.
+     *
+     * [service] is what the *command* named (`/spotify …`), not what the query
+     * turns out to be — a Spotify URL pasted after `/youtube` is still Spotify,
+     * and `comrade_ui::play_query` is where that is settled.
+     */
+    data class Play(val query: String, val service: MusicService?) : ComposerPlan
 
     /** Show the command list. */
     data object Help : ComposerPlan
@@ -138,7 +146,7 @@ object ChatCommands {
             if (command.query.isBlank()) {
                 ComposerPlan.Explain("Name a song, or paste a link.")
             } else {
-                ComposerPlan.Play(command.query.trim())
+                ComposerPlan.Play(command.query.trim(), command.service)
             }
 
         is ChatCommand.Unknown ->
@@ -175,6 +183,60 @@ object ChatCommands {
             }
         }
         return Resolution.Ok(npubs)
+    }
+
+    /**
+     * What to say after a `/play`, given the route core decided.
+     *
+     * Pure and tested, because every one of these sentences is a claim about
+     * what the app just did or can do, and three of the five are refusals. A
+     * refusal that names the wrong reason is worse than none: it sends someone
+     * looking for a file picker when the real problem is that Spotify will not
+     * let another app decode its audio.
+     *
+     * Returns `null` for [PlayRoute.START_TOGETHER] handled with a title — the
+     * caller says which recording opened, which it knows and this does not.
+     */
+    fun playNote(route: PlayRoute, service: MusicService?, query: String): String = when (route) {
+        // Named, because this screen owns no nav state and cannot open Together
+        // itself — the same limitation `/breathe` has.
+        PlayRoute.START_TOGETHER -> "Playing \"$query\" together — it's under Together."
+        // The confidence bar did its job. Opening the wrong track on someone's
+        // behalf is worse than asking, so this says what to do next.
+        PlayRoute.ASK_FOR_FILE ->
+            "No copy of \"$query\" on this phone. Open Together and pick the file."
+        // Never "not supported yet": this one is not coming, and saying so is
+        // more use than an implied promise. See docs/TOGETHER.md §9.
+        PlayRoute.OPEN_ELSEWHERE ->
+            "${serviceLabel(service)} won't let another app play its audio — open it there."
+        // Core can carry a YouTube invitation, but this app has no player for
+        // one, so sending it would invite someone to something we cannot join.
+        PlayRoute.PLAY_EMBED ->
+            "Comrade can't play YouTube here — only a file from this phone."
+        PlayRoute.NOTHING -> "Name a song, or paste a link."
+    }
+
+    /**
+     * What to say when the route is "no copy here" but this device was never
+     * allowed to look.
+     *
+     * Separate from [playNote]'s `ASK_FOR_FILE` on purpose: that sentence says a
+     * copy is not on the phone, and saying it when Comrade simply cannot read
+     * the music library would send someone hunting for a file they already have.
+     * `LibraryResolver.mayRead` is what distinguishes them.
+     */
+    const val LIBRARY_UNSEEN: String =
+        "Comrade can't read your music library, so it can't look. " +
+            "Open Together and pick the file."
+
+    /** Human name for a music service, for [playNote]. */
+    fun serviceLabel(service: MusicService?): String = when (service) {
+        MusicService.SPOTIFY -> "Spotify"
+        MusicService.APPLE_MUSIC -> "Apple Music"
+        MusicService.YOUTUBE -> "YouTube"
+        // A link we recognised as DRM-bearing but whose service did not survive
+        // — better a true vague sentence than a confidently wrong brand.
+        null -> "That service"
     }
 
     /** Human name for a destination, for the sentences above. */

@@ -9,6 +9,8 @@ import uniffi.comrade_core.AppAction
 import uniffi.comrade_core.ChatCommand
 import uniffi.comrade_core.CommandSpec
 import uniffi.comrade_core.Mention
+import uniffi.comrade_core.MusicService
+import uniffi.comrade_ui.PlayRoute
 
 /**
  * Mirrors `desktop/ui/chat_commands.test.mjs` case for case, so the two
@@ -202,11 +204,86 @@ class ChatCommandsTest {
     @Test
     fun playCarriesTheQueryAndAnEmptyOneAsksForOne() {
         assertEquals(
-            ComposerPlan.Play("Kun Faya Kun"),
+            ComposerPlan.Play("Kun Faya Kun", null),
             ChatCommands.planFor(ChatCommand.Play("Kun Faya Kun", null)),
         )
         val empty = ChatCommands.planFor(ChatCommand.Play("  ", null))
         assertTrue(empty is ComposerPlan.Explain)
+    }
+
+    @Test
+    fun playCarriesTheServiceTheCommandNamed() {
+        // `/spotify kun faya kun` has to reach `play_query`, which is where a
+        // link's own service is allowed to outrank the alias that was typed.
+        assertEquals(
+            ComposerPlan.Play("Kun Faya Kun", MusicService.SPOTIFY),
+            ChatCommands.planFor(ChatCommand.Play("Kun Faya Kun", MusicService.SPOTIFY)),
+        )
+    }
+
+    @Test
+    fun everyPlayRouteSaysSomethingAndOnlyOneClaimsItStarted() {
+        // Three of the five routes are refusals, and a refusal naming the wrong
+        // reason sends someone looking for a file picker when the real problem
+        // is DRM. So each route gets its own sentence, and none may be blank.
+        for (route in PlayRoute.entries) {
+            val note = ChatCommands.playNote(route, MusicService.SPOTIFY, "Kun Faya Kun")
+            assertTrue("$route", note.isNotBlank())
+            if (route != PlayRoute.START_TOGETHER) {
+                assertFalse("$route", note.contains("Playing"))
+            }
+        }
+        assertTrue(
+            ChatCommands.playNote(PlayRoute.START_TOGETHER, null, "Kun Faya Kun")
+                .contains("Kun Faya Kun"),
+        )
+    }
+
+    @Test
+    fun aDrmRefusalNamesTheServiceThatRefused() {
+        assertTrue(
+            ChatCommands.playNote(PlayRoute.OPEN_ELSEWHERE, MusicService.SPOTIFY, "x")
+                .contains("Spotify"),
+        )
+        assertTrue(
+            ChatCommands.playNote(PlayRoute.OPEN_ELSEWHERE, MusicService.APPLE_MUSIC, "x")
+                .contains("Apple Music"),
+        )
+        // No service on a DRM link is possible; a vague true sentence beats a
+        // confidently wrong brand name.
+        assertFalse(
+            ChatCommands.playNote(PlayRoute.OPEN_ELSEWHERE, null, "x").contains("Spotify"),
+        )
+    }
+
+    @Test
+    fun everyServiceHasAName() {
+        for (service in MusicService.entries) {
+            assertTrue("$service", ChatCommands.serviceLabel(service).isNotBlank())
+        }
+        assertTrue(ChatCommands.serviceLabel(null).isNotBlank())
+    }
+
+    @Test
+    fun notAllowedToLookReadsDifferentlyFromLookedAndNotThere() {
+        // The two are different problems: one is answered by picking a file, the
+        // other by granting access. A single sentence for both would send
+        // someone hunting for a file that is already on the phone.
+        val absent = ChatCommands.playNote(PlayRoute.ASK_FOR_FILE, null, "Kun Faya Kun")
+        assertTrue(ChatCommands.LIBRARY_UNSEEN != absent)
+        assertTrue(ChatCommands.LIBRARY_UNSEEN.contains("Together"))
+        // And it must not claim absence, which is the thing it does not know.
+        assertFalse(ChatCommands.LIBRARY_UNSEEN.contains("No copy"))
+    }
+
+    @Test
+    fun theAskForAFileRouteDoesNotBlameTheService() {
+        // "You have no copy" and "Spotify won't allow it" are different
+        // problems with different next steps; conflating them is the failure
+        // these two cases exist to prevent.
+        val note = ChatCommands.playNote(PlayRoute.ASK_FOR_FILE, MusicService.SPOTIFY, "x")
+        assertFalse(note.contains("Spotify"))
+        assertTrue(note.contains("Together"))
     }
 
     // ── The / picker ─────────────────────────────────────────────────────────

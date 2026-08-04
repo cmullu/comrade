@@ -2563,3 +2563,66 @@ code {
   display: flex;
   gap: 0.5rem;
 }
+
+/* ── Task list (see desktop/ui/task_list.mjs) ─────────────────────────────── */
+
+.view-tasks {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+.task-heading {
+  margin: 20px 0 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+
+.task-text {
+  font-size: 0.98rem;
+}
+
+/* A finished task reads as finished before the badge is read. */
+.task-row.is-done .task-text {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.task-sub {
+  font-size: 0.85rem;
+}
+
+.task-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.btn-small {
+  padding: 3px 10px;
+  font-size: 0.85rem;
+}
+
+.task-empty {
+  max-width: 32rem;
+  margin: 12vh auto;
+  text-align: center;
+  line-height: 1.6;
+}
