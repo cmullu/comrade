@@ -167,7 +167,11 @@ sealed class UpdateDownload {
       case 'ready':
         return DownloadReady(version: (map['version'] as String?) ?? '');
       case 'installing':
-        return DownloadInstalling(version: (map['version'] as String?) ?? '');
+        return DownloadInstalling(
+          version: (map['version'] as String?) ?? '',
+          bytesStaged: (map['bytesStaged'] as int?) ?? 0,
+          totalBytes: (map['totalBytes'] as int?) ?? 0,
+        );
       case 'failed':
         return DownloadFailed(
           message: (map['message'] as String?) ?? 'Download failed',
@@ -209,11 +213,30 @@ class DownloadReady extends UpdateDownload {
   final String version;
 }
 
-/// Handed to the system installer; the OS is asking the user to confirm.
+/// On its way into the system installer.
+///
+/// Two phases, told apart by [totalBytes] exactly as [DownloadRunning] tells
+/// "size unknown" apart: while it is positive the APK is still being handed over
+/// and [percent] says how far, and zero means the platform has it and is either
+/// asking the user to confirm or replacing this process.
 class DownloadInstalling extends UpdateDownload {
-  const DownloadInstalling({required this.version});
+  const DownloadInstalling({
+    required this.version,
+    this.bytesStaged = 0,
+    this.totalBytes = 0,
+  });
 
   final String version;
+
+  final int bytesStaged;
+
+  /// 0 once the hand-off is done — there is no progress to report on the
+  /// platform's own work.
+  final int totalBytes;
+
+  /// Whole percent of the hand-off, or null once it is complete.
+  int? get percent =>
+      totalBytes > 0 ? ((bytesStaged * 100) ~/ totalBytes).clamp(0, 100) : null;
 }
 
 class DownloadFailed extends UpdateDownload {

@@ -10,15 +10,13 @@ import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import java.io.File
+import java.io.OutputStream
 import java.security.MessageDigest
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import mullu.comrade.MainActivity
 import mullu.comrade.Notifier
@@ -59,11 +57,14 @@ import mullu.comrade.R
  * The first shipped version of this got both wrong, and the result was an ANR
  * followed by a card stuck on "Waiting for Android to install it…":
  *
- * 1. **The APK is copied into the session on a worker thread.** A release APK
- *    is tens of megabytes; copying it on the caller's thread froze the UI, and
- *    when the caller was a `BroadcastReceiver` it also blew the ten-second
- *    receiver deadline. Every entry point here is asynchronous now — [install]
- *    returns immediately and reports through [UpdateDownloads].
+ * 1. **The APK is copied into the session by a foreground service**, never on
+ *    the caller's thread. A release APK is tens of megabytes; copying it inline
+ *    froze the UI, and when the caller was a `BroadcastReceiver` it also blew the
+ *    ten-second receiver deadline. Moving it to a worker fixed the freeze but
+ *    left the copy invisible — several seconds in which tapping Install looked
+ *    like tapping nothing — so it now runs in [UpdateInstallService] with
+ *    progress in the shade and in the card. [stageAndCommit] is the blocking body
+ *    that service calls, and nothing else may call it.
  * 2. **The confirmation dialog is started from an Activity.**
  *    `STATUS_PENDING_USER_ACTION` hands back an Intent the app has to start, and
  *    a `BroadcastReceiver` is the one context that cannot reliably start it: a
@@ -93,18 +94,20 @@ object UpdateInstaller {
     private const val TAG = "UpdateInstaller"
     private const val READY_ID = 0xC0DE22
 
-    /** Distinct from [READY_ID]: "ready" is cancelled the moment an install starts. */
-    private const val INSTALLED_ID = 0xC0DE24
+    /**
+     * Distinct from [READY_ID] — "ready" is cancelled the moment an install
+     * starts — and distinct from every other id this app posts. It was 0xC0DE24,
+     * which `UpdateDownloadService` was already using for "download failed" via
+     * `PROGRESS_ID + 1`; the two replaced each other in the shade, so a failed
+     * download followed by a successful install left only one of the two notices.
+     */
+    private const val INSTALLED_ID = 0xC0DE27
 
     /**
-     * One at a time, off the main thread. A single thread rather than a pool
-     * because two concurrent sessions for the same package are never wanted, and
-     * it is created lazily so a process that never installs never spawns it.
+     * Whether a session write is in flight. One at a time: two concurrent
+     * sessions for the same package are never wanted, and a double tap must not
+     * open a second one.
      */
-    private val worker by lazy {
-        Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "comrade-update-install") }
-    }
-
     private val working = AtomicBoolean(false)
 
     /** Whether this app may install APKs at all (the per-source user grant). */
@@ -191,53 +194,50 @@ object UpdateInstaller {
 
     // ── Installing ───────────────────────────────────────────────────────────
 
-    /**
-     * Verify [apk], stream it into a session and commit — **on a worker
-     * thread**. Returns as soon as the work is queued; the OS then asks the user
-     * to confirm and [UpdateInstallActivity] reports the outcome.
-     *
-     * Verification has already happened by the time this runs (in
-     * [UpdateDownloadService]); it is repeated here because "install" can also
-     * be tapped days later, from a notification, against a file that has been
-     * sitting in the cache in the meantime. Both halves — parsing the archive
-     * and copying it — are far too slow for the main thread, which is the whole
-     * reason this hands off to [worker].
-     */
-    /**
-     * @param onFailedToCommit run on the main thread when the work ends
-     *   *without* a committed session — the only case in which no `STATUS_*`
-     *   callback will ever arrive, and therefore the only case in which the
-     *   caller has to clean up after itself rather than wait.
-     */
-    fun install(context: Context, apk: File, version: String, onFailedToCommit: () -> Unit = {}) {
-        val app = context.applicationContext
-        if (!canInstall(app)) {
-            UpdateDownloads.update(
-                UpdateDownloadState.Failed(app.getString(R.string.update_install_permission_needed)),
-            )
-            onFailedToCommit()
-            return
-        }
-        // Claimed here, on the caller's thread, so a double tap cannot open two
-        // sessions for the same APK. Released by every exit below.
-        if (!working.compareAndSet(false, true)) return
-        UpdateDownloads.update(UpdateDownloadState.Installing(version, apk.absolutePath))
-        worker.execute {
-            var committed = false
-            try {
-                committed = installBlocking(app, apk, version)
-            } finally {
-                working.set(false)
-                if (!committed) Handler(Looper.getMainLooper()).post(onFailedToCommit)
-            }
-        }
-    }
-
     /** Whether a session write is in flight. Read by the "try again" path. */
     fun isInstalling(): Boolean = working.get()
 
-    /** @return whether a session was committed, and so whether a status is coming. */
-    private fun installBlocking(context: Context, apk: File, version: String): Boolean {
+    /**
+     * Claim the one install slot. False means one is already running, in which
+     * case the caller must leave it alone rather than tear anything down.
+     */
+    internal fun claim(): Boolean = working.compareAndSet(false, true)
+
+    internal fun release() = working.set(false)
+
+    /**
+     * Verify [apk], stream it into a session and commit — **blocking**, and
+     * therefore only ever called from [UpdateInstallService]'s worker.
+     *
+     * Verification has already happened once by the time this runs (in
+     * [UpdateDownloadService]); it is repeated because "install" can also be
+     * tapped days later, from a notification, against a file that has been
+     * sitting in the cache in the meantime. Parsing a release APK and copying it
+     * are both slow enough to be visible, which is why the service that calls
+     * this is a foreground one and why [onProgress] exists at all.
+     *
+     * @param onProgress bytes copied and the total, called often enough to drive
+     *   a progress bar. Called once with `(0, size)` before the archive is even
+     *   parsed, so the gap between the tap and the first byte is accounted for
+     *   too.
+     * @return whether a session was committed, and so whether a `STATUS_*`
+     *   callback is coming. False means this is the end of the road for this
+     *   attempt and the failure has already been reported through
+     *   [UpdateDownloads].
+     */
+    internal fun stageAndCommit(
+        context: Context,
+        apk: File,
+        version: String,
+        onProgress: (Long, Long) -> Unit,
+    ): Boolean {
+        if (!canInstall(context)) {
+            UpdateDownloads.update(
+                UpdateDownloadState.Failed(context.getString(R.string.update_install_permission_needed)),
+            )
+            return false
+        }
+        onProgress(0L, apk.length())
         val verdict = UpdateInstall.verify(readArchive(context, apk), readInstalled(context))
         if (verdict is UpdateInstall.Verdict.Refused) {
             apk.delete()
@@ -276,7 +276,7 @@ object UpdateInstaller {
             sessionId = installer.createSession(params)
             installer.openSession(sessionId).use { session ->
                 session.openWrite("comrade-update", 0, apk.length()).use { out ->
-                    apk.inputStream().use { input -> input.copyTo(out) }
+                    copyReporting(apk, out, onProgress)
                     session.fsync(out)
                 }
                 session.commit(statusSender(context, version, apk))
@@ -289,6 +289,34 @@ object UpdateInstaller {
                 UpdateDownloadState.Failed(failure.message ?: context.getString(R.string.update_install_failed_generic)),
             )
             return false
+        }
+    }
+
+    /**
+     * `copyTo` with progress. Hand-rolled for one reason: the copy is the part of
+     * an install a user actually waits through, and `copyTo` cannot say how far
+     * it has got.
+     */
+    private fun copyReporting(apk: File, out: OutputStream, onProgress: (Long, Long) -> Unit) {
+        val total = apk.length()
+        apk.inputStream().use { input ->
+            val buffer = ByteArray(256 * 1024)
+            var copied = 0L
+            var lastReported = 0L
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                out.write(buffer, 0, read)
+                copied += read
+                // Every 512 KiB: enough to move a progress bar smoothly on a
+                // ~60 MB APK, few enough that the state flow is not the
+                // bottleneck.
+                if (copied - lastReported >= 512 * 1024) {
+                    lastReported = copied
+                    onProgress(copied, total)
+                }
+            }
+            onProgress(copied, total)
         }
     }
 

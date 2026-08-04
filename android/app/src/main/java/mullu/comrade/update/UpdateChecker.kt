@@ -45,6 +45,11 @@ sealed class UpdateStatus {
  * It reads one public GitHub endpoint, compares versions ([UpdateCheck]), and
  * — at most once per version — posts a notification.
  *
+ * It runs from two places, and the second is what makes the notification worth
+ * having: [maybeCheck] on every foreground, and [UpdateCheckJob] once a day
+ * whether or not the app is open. A notice that can only appear while the user is
+ * already looking at the settings card is not a notice.
+ *
  * The APK itself is fetched by [UpdateDownloadService] (a foreground service, so
  * the transfer survives backgrounding and shows progress in the shade) and
  * handed to the system installer by [UpdateInstaller]. That needs
@@ -63,6 +68,12 @@ sealed class UpdateStatus {
  * off leaves a manual "Check now" that only runs when tapped. The request
  * carries no identity: no token, no install id, no version in a query
  * parameter, and the `User-Agent` names the app and nothing about the device.
+ *
+ * The scheduled check widens that disclosure in one specific way worth naming: it
+ * happens with the app closed, so the pattern GitHub can see is now "this IP has
+ * Comrade installed" once a day rather than "someone opened Comrade". Switching
+ * the setting off takes the job out of the queue outright
+ * ([setAutoCheckEnabled]) — it does not merely stop reading the answer.
  *
  * On by default, because the alternative — a sideloaded privacy app whose users
  * never hear that a security fix shipped — is the worse failure.
@@ -92,8 +103,15 @@ object UpdateChecker {
 
     fun isAutoCheckEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO, true)
 
+    /**
+     * Written before the queue is reconciled, because [UpdateCheckJob.sync]
+     * reads the setting back to decide what to do — including taking the job out
+     * when this call turned it off, so switching it off really does stop the
+     * requests rather than leaving a queued job to keep making them.
+     */
     fun setAutoCheckEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_AUTO, enabled).apply()
+        UpdateCheckJob.sync(context)
     }
 
     fun lastCheckedAt(context: Context): Long = prefs(context).getLong(KEY_LAST_CHECKED, 0L)
@@ -146,7 +164,8 @@ object UpdateChecker {
         }
     }
 
-    private suspend fun runCheck(context: Context, notify: Boolean, now: Long) {
+    /** @return the outcome, which is also [status]'s new value. */
+    private suspend fun runCheck(context: Context, notify: Boolean, now: Long): UpdateStatus {
         _status.value = UpdateStatus.Checking
         val body = try {
             withContext(Dispatchers.IO) { fetchLatestRelease() }
@@ -155,17 +174,18 @@ object UpdateChecker {
             // last_checked_at alone means the next foreground retries rather
             // than waiting a day because the user happened to be on a train.
             Log.i(TAG, "update check failed", failure)
-            _status.value = UpdateStatus.Failed(failure.message ?: "Could not reach GitHub", now)
-            return
+            return UpdateStatus.Failed(failure.message ?: "Could not reach GitHub", now)
+                .also { _status.value = it }
         }
         val release = UpdateCheck.parseRelease(body)
         prefs(context).edit().putLong(KEY_LAST_CHECKED, now).apply()
         if (release == null) {
-            _status.value = UpdateStatus.Failed("Could not read the latest release", now)
-            return
+            return UpdateStatus.Failed("Could not read the latest release", now)
+                .also { _status.value = it }
         }
         if (!UpdateCheck.isNewer(currentVersion, release.versionName)) {
-            _status.value = UpdateStatus.UpToDate(now)
+            val upToDate = UpdateStatus.UpToDate(now)
+            _status.value = upToDate
             // An update that was pending and has now been installed should not
             // leave its notice sitting in the shade — nor its APK in the cache,
             // nor an "Install" button offering to install what is running.
@@ -173,9 +193,10 @@ object UpdateChecker {
             UpdateInstaller.clearReady(context)
             UpdateDownloads.update(UpdateDownloadState.Idle)
             UpdateDownloadService.purgeOtherApks(context)
-            return
+            return upToDate
         }
-        _status.value = UpdateStatus.Available(release, now)
+        val available = UpdateStatus.Available(release, now)
+        _status.value = available
         // A finding that supersedes what was downloaded invalidates it: an
         // "Install 0.0.50" button next to "0.0.51 is available" is a trap.
         val downloaded = UpdateDownloads.state.value
@@ -189,7 +210,7 @@ object UpdateChecker {
             UpdateInstaller.clearReady(context)
             UpdateDownloadService.purgeOtherApks(context)
         }
-        if (!notify) return
+        if (!notify) return available
         val store = prefs(context)
         if (UpdateCheck.shouldNotify(release, skippedVersion(context), store.getString(KEY_NOTIFIED, null))) {
             // A release can always wait until morning; the Settings card shows
@@ -203,6 +224,59 @@ object UpdateChecker {
                 Notifier.notifyUpdateAvailable(context, release.versionName)
                 store.edit().putString(KEY_NOTIFIED, release.versionName).apply()
             }
+        }
+        return available
+    }
+
+    /**
+     * Run a check on the scheduler's behalf and report what came of it.
+     *
+     * Unlike [maybeCheck] this always notifies — the whole point of the
+     * scheduled run is the notice, and there is by definition no screen showing
+     * the same answer. The cadence gate is
+     * [UpdateCheck.SCHEDULED_CHECK_MIN_AGE_MS] rather than the full interval; see
+     * that constant for why the difference matters.
+     *
+     * [onFinished] runs exactly once on every path, including the paths that make
+     * no request at all, because [UpdateCheckJob] has told the platform that work
+     * is still going and a job that never finishes counts against the app.
+     */
+    internal fun checkInBackground(
+        context: Context,
+        now: Long = System.currentTimeMillis(),
+        onFinished: (UpdateStatus) -> Unit,
+    ) {
+        val app = context.applicationContext
+        if (!isAutoCheckEnabled(app)) {
+            onFinished(status.value)
+            return
+        }
+        if (!UpdateCheck.shouldCheck(lastCheckedAt(app), now, UpdateCheck.SCHEDULED_CHECK_MIN_AGE_MS)) {
+            // Something checked recently — a foreground open, most likely. Not a
+            // failure, so the job is done rather than retried.
+            onFinished(status.value)
+            return
+        }
+        if (!inFlight.compareAndSet(false, true)) {
+            onFinished(status.value)
+            return
+        }
+        scope.launch {
+            val outcome = try {
+                runCheck(app, notify = true, now = now)
+            } catch (failure: Exception) {
+                // runCheck already handles the IOException a check fails with, so
+                // reaching here means a bug rather than a bad network. Caught
+                // anyway: letting it escape would leave the job unfinished, which
+                // costs the app its future scheduling for a crash that has
+                // already lost nothing but this one check.
+                Log.w(TAG, "scheduled update check threw", failure)
+                UpdateStatus.Failed(failure.message ?: "Update check failed", now)
+                    .also { _status.value = it }
+            } finally {
+                inFlight.set(false)
+            }
+            onFinished(outcome)
         }
     }
 
@@ -277,10 +351,12 @@ object UpdateChecker {
     /**
      * Install what has been downloaded, through [UpdateInstallActivity].
      *
-     * Not a direct call into [UpdateInstaller]: the install has to be driven
-     * from an Activity so the system's confirmation dialog can be started from
-     * one, and it has to be off the main thread so a 50 MB copy does not freeze
-     * the caller. That activity draws nothing — see its doc comment.
+     * Not a direct call into [UpdateInstaller]: the install has to be driven from
+     * an Activity so the system's confirmation dialog can be started from one.
+     * That activity draws nothing and finishes at once, handing the copy to
+     * [UpdateInstallService] — which is a foreground service because tens of
+     * megabytes of copying is a wait the user should be able to see, not several
+     * seconds in which tapping Install appears to do nothing.
      */
     fun install(context: Context) {
         val ready = UpdateDownloads.state.value as? UpdateDownloadState.Ready ?: return

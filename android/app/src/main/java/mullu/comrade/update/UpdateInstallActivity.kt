@@ -52,10 +52,15 @@ import mullu.comrade.R
  * resumed and starting the dialog there would put us back in exactly the
  * background-start case this exists to avoid.
  *
- * The instance stays alive while the copy runs, so the session's callback lands
- * on a resumed activity. If it is destroyed anyway — the user backs out, or the
- * OS reclaims it — the callback's `PendingIntent` launches a fresh one and the
- * work carries on in [UpdateInstaller]'s worker either way.
+ * Each instance is short-lived on purpose. Starting an install hands the copy to
+ * [UpdateInstallService] and finishes immediately: an invisible window that
+ * outlives its own work sits over an app the user can no longer touch, and while
+ * the copy took seconds that was most of what "I clicked install and it stopped
+ * responding" actually was. The session's callback then launches a *fresh*
+ * instance through its `PendingIntent` — which is the normal path now rather than
+ * the exceptional one, so if that launch is ever refused the symptom is the card
+ * sitting on "Waiting for Android to install it…" with its "Try again" button,
+ * not a lost install ([UpdateChecker.retryInstall]).
  */
 class UpdateInstallActivity : Activity() {
 
@@ -113,12 +118,21 @@ class UpdateInstallActivity : Activity() {
             fail(getString(R.string.update_install_permission_needed))
             return
         }
-        // Returns immediately; the copy runs on UpdateInstaller's worker and the
-        // session reports back through statusIntent() below. This instance stays
-        // alive so that report lands on a resumed activity — unless the work
-        // ends without committing a session, in which case no report is coming
-        // and staying would strand an invisible activity on top of the app.
-        UpdateInstaller.install(this, apk, version, onFailedToCommit = ::finish)
+        if (UpdateInstaller.isInstalling()) {
+            // Already staging — a second tap, or the notification tapped while
+            // the card's Install was already working. Get out of the way rather
+            // than restarting anything.
+            finish()
+            return
+        }
+        // The copy runs in a foreground service from here, and this instance
+        // finishes at once. Staying would leave an invisible window over an app
+        // the user can no longer touch for as long as the copy takes, which is
+        // most of what "I clicked install and it stopped responding" was. The
+        // session's callback launches a fresh instance of this activity when
+        // there is something to do about it.
+        UpdateInstallService.start(this, version, apk)
+        finish()
     }
 
     // ── The installer's answer ───────────────────────────────────────────────

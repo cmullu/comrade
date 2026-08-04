@@ -326,6 +326,40 @@ void main() {
       expect(updates.calls, contains('retryInstall'));
     });
 
+    testWidgets('the hand-off to Android shows its progress, not a retry',
+        (WidgetTester tester) async {
+      // Copying a sixty-megabyte APK into the installer session takes seconds
+      // that used to pass with nothing on screen — the field report was "I
+      // clicked install and the app stopped responding". While it is moving,
+      // "nothing happened" is visibly false, so the retry is not offered.
+      final FakeComradeRepository repo = await unlockedFake();
+      final _FakeUpdateChannel updates = _FakeUpdateChannel(
+        status: const UpdateAvailable(
+          version: '0.0.9',
+          tag: 'v0.0.9',
+          notes: '',
+          pageUrl: 'https://github.test/releases/tag/v0.0.9',
+          apkBytes: 8000,
+          checkedAt: 1,
+        ),
+        download: const DownloadInstalling(
+          version: '0.0.9',
+          bytesStaged: 2000,
+          totalBytes: 8000,
+        ),
+        settingsValue: const UpdateSettings(
+          currentVersion: '0.0.8',
+          autoCheck: true,
+          lastCheckedAt: 1,
+        ),
+      );
+      await pumpSettings(tester, repo, updates: updates);
+
+      expect(find.text('Handing it to Android… 25%'), findsOneWidget);
+      expect(find.text('Waiting for Android to install it…'), findsNothing);
+      expect(find.text('Nothing happened? Try again'), findsNothing);
+    });
+
     testWidgets('without the install permission, Install asks for it instead',
         (WidgetTester tester) async {
       final FakeComradeRepository repo = await unlockedFake();

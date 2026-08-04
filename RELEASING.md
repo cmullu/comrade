@@ -68,7 +68,11 @@ a partial set fails fast). It produces:
 Since 2026-07-30 the app checks `releases/latest` once a day and raises a
 low-priority notification when a newer version exists (Settings → **App
 updates** shows the same thing, with the release notes, a manual **Check now**,
-and a **Skip this version**). Two properties matter for release management:
+and a **Skip this version**). Since 2026-08-04 that check also runs **with the
+app closed** — `UpdateCheckJob`, a persisted daily `JobScheduler` job — so a
+release reaches someone who has not opened Comrade since the last one, which is
+the person a security fix most needs to reach. It is still a poll and not push:
+no server knows an install exists. Two properties matter for release management:
 
 - **It reads the tag, so the tag has to be a version.** `UpdateCheck.parseVersion`
   accepts `v1.2.3` / `1.2.3` / `1.2` / `1.2.3-rc1`; a tag it cannot parse means
