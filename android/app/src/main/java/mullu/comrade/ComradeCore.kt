@@ -330,6 +330,18 @@ object ComradeCore {
         val content: String,
         val createdAt: Long,
         val outgoing: Boolean,
+        /**
+         * True when core read Tara's marker off the wire form — see
+         * `comrade_ui::MessageAuthor`. A claim by whichever Comrade sent it, not
+         * an authenticated one, so it may style a bubble and must never gate
+         * anything that matters.
+         *
+         * Flattened to a boolean rather than carrying the enum through: there
+         * are two cases and the UI asks "is this hers", so a `when` over an FFI
+         * enum in every bubble would be ceremony. If a third author ever exists
+         * this becomes the enum again, and the compiler will find every caller.
+         */
+        val fromTara: Boolean = false,
         val status: String? = null,
         val replyTo: String? = null,
     )
@@ -340,6 +352,7 @@ object ComradeCore {
         content = content,
         createdAt = createdAt.toLong(),
         outgoing = outgoing,
+        fromTara = author == uniffi.comrade_ui.MessageAuthor.TARA,
         status = status,
         replyTo = replyTo,
     )

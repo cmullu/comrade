@@ -319,6 +319,33 @@ export function taraDraft(text) {
 }
 
 /**
+ * What a shared Tara answer carries on the wire — the mirror of
+ * `comrade_core::tara::TARA_CHAT_PREFIX`.
+ *
+ * Only needed because a live-arriving DM reaches this frontend as the raw wire
+ * body: `messages_with` already hands back `{author, content}` with the marker
+ * off, but `incoming_direct_message` does not go through that DTO. Both paths
+ * feed the same `state.dms`, so without this mirror a message would read one way
+ * as it arrived and another way after a reload.
+ */
+export const TARA_CHAT_PREFIX = "Tara: ";
+
+/**
+ * Split a raw wire body into `{author, content}`, exactly as
+ * `comrade_ui::split_author` does.
+ *
+ * **Attribution, not attestation.** Anybody can type "Tara: ", so a match means
+ * the sending Comrade says this came from her — see `AUDIT.md` Q17. Style a
+ * bubble with it; never trust it.
+ */
+export function splitAuthor(content) {
+  const text = typeof content === "string" ? content : "";
+  return text.startsWith(TARA_CHAT_PREFIX)
+    ? { author: "tara", content: text.slice(TARA_CHAT_PREFIX.length) }
+    : { author: "human", content: text };
+}
+
+/**
  * Apply the choices a user has made for ambiguous handles, so re-running the
  * same draft reaches the person they picked.
  *

@@ -3339,19 +3339,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MessageAuthor dco_decode_message_author(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return MessageAuthor.values[raw as int];
+  }
+
+  @protected
   MessageDto dco_decode_message_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return MessageDto(
       id: dco_decode_String(arr[0]),
       peer: dco_decode_String(arr[1]),
       content: dco_decode_String(arr[2]),
       createdAt: dco_decode_u_64(arr[3]),
       outgoing: dco_decode_bool(arr[4]),
-      status: dco_decode_opt_String(arr[5]),
-      replyTo: dco_decode_opt_String(arr[6]),
+      author: dco_decode_message_author(arr[5]),
+      status: dco_decode_opt_String(arr[6]),
+      replyTo: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -4823,6 +4830,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MessageAuthor sse_decode_message_author(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    final inner = sse_decode_i_32(deserializer);
+    return MessageAuthor.values[inner];
+  }
+
+  @protected
   MessageDto sse_decode_message_dto(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     final var_id = sse_decode_String(deserializer);
@@ -4830,6 +4844,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     final var_content = sse_decode_String(deserializer);
     final var_createdAt = sse_decode_u_64(deserializer);
     final var_outgoing = sse_decode_bool(deserializer);
+    final var_author = sse_decode_message_author(deserializer);
     final var_status = sse_decode_opt_String(deserializer);
     final var_replyTo = sse_decode_opt_String(deserializer);
     return MessageDto(
@@ -4838,6 +4853,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         content: var_content,
         createdAt: var_createdAt,
         outgoing: var_outgoing,
+        author: var_author,
         status: var_status,
         replyTo: var_replyTo);
   }
@@ -6247,6 +6263,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_message_author(MessageAuthor self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_message_dto(MessageDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
@@ -6254,6 +6276,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.content, serializer);
     sse_encode_u_64(self.createdAt, serializer);
     sse_encode_bool(self.outgoing, serializer);
+    sse_encode_message_author(self.author, serializer);
     sse_encode_opt_String(self.status, serializer);
     sse_encode_opt_String(self.replyTo, serializer);
   }

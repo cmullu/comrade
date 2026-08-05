@@ -1356,9 +1356,18 @@
   function onIncomingDm(p) {
     const key = p.sender || "unknown";
     const list = state.dms.get(key) || [];
+    // A live event carries the raw wire body, unlike `messages_with`, which
+    // hands back an already-split `MessageDto`. Both end up in `state.dms`, so
+    // the split has to happen here or one message would read differently before
+    // and after a reload. If the module has not loaded the marker simply stays
+    // visible — still readable, which is the point of keeping it human-legible.
+    const split = chatCommands
+      ? chatCommands.splitAuthor(p.content)
+      : { author: "human", content: p.content || "" };
     list.push({
       id: p.id,
-      content: p.content || "",
+      content: split.content,
+      author: split.author,
       created_at: p.created_at,
       outgoing: false,
       upi: p.upi_intents || [],
@@ -1484,6 +1493,10 @@
         .map((m) => ({
           id: m.id,
           content: m.content,
+          // Core already split the wire marker off `content` into this — see
+          // `comrade_ui::MessageAuthor`. Only the live-event path has to mirror
+          // the split itself.
+          author: m.author || "human",
           created_at: m.created_at,
           outgoing: !!m.outgoing,
           upi: [],
@@ -1594,6 +1607,7 @@
               list.push({
                 id: m.id,
                 content: m.content,
+                author: m.author || "human",
                 created_at: m.created_at,
                 outgoing: true,
                 upi: [],
@@ -1729,6 +1743,10 @@
       list.push({
         id: msg.id,
         content: msg.content,
+        // Carried rather than assumed "human": core split this DTO, and a
+        // message must not read one way when it is sent and another after a
+        // reload.
+        author: msg.author || "human",
         created_at: msg.created_at,
         outgoing: true,
         upi: [],
@@ -1818,10 +1836,22 @@
   }
 
   function textBubble(m) {
-    const wrap = el("div", { class: "bubble " + (m.outgoing ? "out" : "in") });
+    // Tara sits on the left for *both* people, so this is not simply
+    // `m.outgoing`: her answer is carried by whichever device asked, and
+    // aligning by who sent it would put one line on opposite sides of the two
+    // screens. It also drops the ticks from her bubble — true that this device
+    // sent it, but the question right above carries the same receipt, and a
+    // tick on a third party's line reads as a claim about her. Mirrored in
+    // `ChatsScreen.kt` and `message_bubble.dart`.
+    const hers = m.author === "tara";
+    const mine = Boolean(m.outgoing) && !hers;
+    const wrap = el("div", {
+      class: "bubble " + (mine ? "out" : "in") + (hers ? " is-tara" : ""),
+    });
     // The anchor a quote tap scrolls to. Only messages a relay has confirmed
     // have an id, and only those can be a reply target in the first place.
     if (m.id) wrap.dataset.msgId = m.id;
+    if (hers) wrap.append(el("span", { class: "bubble-author", text: "Tara" }));
     if (m.reply_to) wrap.append(quotePreview(m.reply_to));
     wrap.append(el("span", { class: "bubble-text", text: m.content }));
     wrap.append(
@@ -1829,7 +1859,7 @@
         "div",
         { class: "bubble-meta" },
         el("span", { class: "bubble-time", text: relTime(m.created_at) }),
-        m.outgoing && m.status ? statusTick(m.status) : null,
+        mine && m.status ? statusTick(m.status) : null,
       ),
     );
     // A reply is only addressable if we know the target message's event id.
@@ -6059,6 +6089,7 @@
             id: "mockdm_" + Date.now(),
             peer: args.target,
             content: args.content,
+            author: "human",
             created_at: nowSecs(),
             outgoing: true,
           };
@@ -6213,19 +6244,24 @@
           // returned only a reply would let the composer look correct while the
           // thread stayed empty, which is the half of this the real command does.
           const now = Math.floor(Date.now() / 1000);
-          const line = (id, content) => ({
+          const line = (id, content, author) => ({
             id,
             peer: args.peer,
             content,
+            // The real DTO arrives already split, so the mock must too — a mock
+            // that still carried "Tara: " in `content` would let the preview
+            // build render a prefix the real one never shows.
+            author: author || "human",
             created_at: now,
             outgoing: true,
             status: "sent",
             reply_to: null,
           });
+          const answer = "(mock) What matters most about it to you both?";
           return {
             asked: line("mock-tara-q", args.text),
-            answered: line("mock-tara-a", "Tara: (mock) What matters most about it to you both?"),
-            reply: "(mock) What matters most about it to you both?",
+            answered: line("mock-tara-a", answer, "tara"),
+            reply: answer,
             kept_private: false,
             crisis: false,
           };

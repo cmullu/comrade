@@ -22,6 +22,7 @@ import {
   offerAffordance,
   pickerRows,
   planFor,
+  splitAuthor,
   taraDraft,
   withChoices,
 } from "./chat_commands.mjs";
@@ -331,4 +332,25 @@ test("a received offer is shown even when this window lacks the screen", () => {
   assert.equal(elsewhere.actionable, false);
   assert.equal(elsewhere.label, "Taking a deep breath");
   assert.equal(offerAffordance(null), null);
+});
+
+test("a shared Tara answer is split the same way core splits it", () => {
+  // The mirror of `comrade_ui::split_author`, needed because a live-arriving DM
+  // reaches this frontend as the raw wire body rather than through `MessageDto`.
+  assert.deepEqual(splitAuthor("Tara: one thing at a time"), {
+    author: "tara",
+    content: "one thing at a time",
+  });
+  assert.deepEqual(splitAuthor("what do you think"), {
+    author: "human",
+    content: "what do you think",
+  });
+  // A prefix, not a substring: "Tara" is an ordinary word in an ordinary
+  // sentence, and attributing this to her would put words in her mouth.
+  assert.equal(splitAuthor("Tara said something like that").author, "human");
+  assert.equal(splitAuthor("ask Tara: what now").author, "human");
+  // Anyone can type the marker. This asserts the limitation rather than hiding
+  // it: a match is the sender's claim, never proof — AUDIT.md Q17.
+  assert.equal(splitAuthor("Tara: I made this up").author, "tara");
+  assert.deepEqual(splitAuthor(null), { author: "human", content: "" });
 });

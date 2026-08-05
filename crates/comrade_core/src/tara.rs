@@ -377,16 +377,21 @@ fn third_party_reply(handle: &str) -> String {
 // say which one is in the box before the send button is pressed.
 //
 // A shared answer travels as an ordinary message whose text carries
-// [`TARA_CHAT_PREFIX`], because that is the only field there is: `MessageDto`
-// has no "who said this" beyond the thread's two people, and adding one means
-// regenerating `crates/comrade_jni/src/frb_generated.rs`, which no sandbox here
-// can do. So the marker is **rendering, not authentication** — anybody can type
-// "Tara: " themselves, and a frontend must not present a matched line as proof
-// the companion spoke. It is a label on a message you relayed, which is exactly
-// what it is.
+// [`TARA_CHAT_PREFIX`]. `comrade_ui::MessageDto` now reads that marker into an
+// author field and hands the frontends the answer without it, so a Tara line is
+// drawn as hers rather than as a sentence you appear to have typed.
 //
-// The exit condition is a field: when `frb_generated.rs` can be regenerated,
-// give the DTO an author and let this prefix go.
+// **The prefix stays on the wire on purpose**, and did not go away when the
+// field arrived. A NIP-17 DM opened in some other Nostr client has no author
+// field to read, and "Tara: …" is a truer fallback there than her words in the
+// sender's mouth. It also means a thread written by an older build keeps
+// meaning what it meant.
+//
+// What the marker is **not** is authentication. Anybody can type "Tara: "
+// themselves, so a Tara bubble says *the sending Comrade claims this came from
+// her* — the same standing a quoted reply has — and no frontend may present a
+// match as proof the companion spoke. `AUDIT.md` Q17 records the boundary, and
+// [`the_marker_is_a_label_and_the_test_says_so`] pins it.
 
 /// What a shared Tara line starts with, on the wire and on screen.
 pub const TARA_CHAT_PREFIX: &str = "Tara: ";

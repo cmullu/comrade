@@ -105,10 +105,20 @@ purely so a frontend reaching it from a chat composer cannot also reach `send_dm
 with that text.
 
 `@tara <text>` is Tara **in the room**: the question goes to the peer as your own
-message and her answer follows it, marked with `TARA_CHAT_PREFIX`. It is still
-computed on this device — the shared half changes *who reads the answer*, not
-where it comes from. Three things hold it in place, and they are the reason this
-is not simply "Tara, but public":
+message and her answer follows it, carrying `TARA_CHAT_PREFIX` on the wire and
+arriving at every frontend as `MessageDto.author = MessageAuthor::Tara` with the
+marker already off the text. Both people see her line drawn as hers — left-aligned
+on both devices, since her answer is carried by whichever phone asked and
+aligning by `outgoing` would put it on opposite sides of the two screens. It is
+still computed on this device: the shared half changes *who reads the answer*,
+not where it comes from.
+
+The bubble is **attribution, not attestation**. Nothing signs the marker, so it
+says the sending Comrade claims she wrote this — the same standing a quoted reply
+has. `AUDIT.md` Q17 records the boundary; nothing gates on the field.
+
+Three things hold the shared half in place, and they are the reason this is not
+simply "Tara, but public":
 
 1. **The private thread is untouched.** A shared ask is not a turn in it. The
    "Privacy posture" guarantee below is about that thread and remains exact.

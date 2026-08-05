@@ -88,15 +88,31 @@ grammar cannot tell that case from any other until the reply exists — so the
 check lives in `RuntimeHandles::tara_in_chat`, after the reply and before the
 send. The helplines go with the reply in either room (`AUDIT.md` §8's gate).
 
-**Her answer is a marked ordinary message, not a third participant on the wire.**
-It carries `tara::TARA_CHAT_PREFIX` (`"Tara: "`), because `MessageDto` has no
-author field beyond the thread's two people and adding one means regenerating
-`crates/comrade_jni/src/frb_generated.rs`, which no sandbox here can do. So the
-marker is **rendering, not authentication**: anybody can type it, and a frontend
-must not present a match as proof the companion spoke. The answer also replies to
-the question by event id — two messages sent in the same second share a
-`created_at`, and the receiver's thread sorts on that, so the `e` tag is what
-keeps her answer under what it answered.
+**Her answer is a third participant on screen, and a marked ordinary message on
+the wire.** It carries `tara::TARA_CHAT_PREFIX` (`"Tara: "`) between devices, and
+`comrade_ui::split_author` turns that into `MessageDto.author = MessageAuthor::Tara`
+with the marker off the text — one function, called from both `MessageDto`
+construction sites, so a line cannot read one way as it is sent and another way
+after a reload. All three frontends draw her bubble from the field: left-aligned
+on *both* devices (her answer is carried by whichever phone asked, so aligning by
+`outgoing` would put one line on opposite sides of the two screens), named, in
+its own colour, and without delivery ticks — the question directly above carries
+the same receipt, and a tick on a third party's line reads as a claim about her.
+
+The prefix deliberately **stays** on the wire rather than being dropped now that
+the field exists. A NIP-17 DM opened in some other Nostr client has no author
+field to read, and "Tara: …" is a truer fallback there than her words in the
+sender's mouth.
+
+What the field does not buy is authentication. Nothing signs the marker, so a
+Tara bubble means *the sending Comrade says this came from her* — the standing a
+quoted reply has, not proof. `AUDIT.md` Q17 accepts that explicitly: nothing may
+gate on the field, and the tests on both sides assert that a hand-typed line
+parses rather than hiding it.
+
+The answer also replies to the question by event id — two messages sent in the
+same second share a `created_at`, and the receiver's thread sorts on that, so the
+`e` tag is what keeps her answer under what it answered.
 
 **She is seeded only with what the user typed**, in both rooms. Not the chat
 history, not the peer's messages. A "reflect on this conversation" feature would
@@ -344,12 +360,12 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
   `@tara` now answers in the conversation (`ChatCommand::TaraHere` →
   `RuntimeHandles::tara_in_chat`) and `/tara` stays the private session; §2 has
   the whole shape, including the distress case that sends nothing. Android and
-  desktop both label the audience while typing. Two things are deliberately
-  *not* done: her line is marked with a text prefix rather than an author field
-  (no `frb_generated.rs` regeneration is possible here — §2), and neither
-  frontend styles the marked line as a distinct participant, so it reads as a
-  message from you that begins "Tara: ". Flutter gets neither half, like the
-  rest of this feature.
+  desktop both label the audience while typing. **Closed the rest of the way
+  2026-08-05**: `MessageDto` carries `author: MessageAuthor`, the bindings were
+  regenerated rather than hand-edited, and all three frontends — Flutter
+  included — draw her line as its own participant. What remains is not a gap but
+  an accepted boundary: the marker is unsigned, so the bubble is attribution
+  rather than attestation (`AUDIT.md` Q17).
 - **`/breathe` and friends do not navigate.** `ConversationScreen` owns no nav
   state, so the composer names the tab rather than opening it. One host
   parameter away.
@@ -416,9 +432,10 @@ recording.
 | `comrade_storage` | The `karya` tree; ciphertext-at-rest and panic-wipe pinned. |
 | `comrade_ui::runtime` | `parse_chat_command`, `resolve_mentions`, `play_query`, `assign_task` / `tasks` / `set_task_state`, `offer_action`, `tara_aside`, `tara_in_chat`, and two arms in `dispatch_incoming_dm`. Nothing was added to the dispatcher for `@tara`: her answer is an ordinary DM, so the receiving side already renders it. |
 | `comrade_jni` (uniffi), `desktop/src-tauri` | The same calls. **No `api.rs` change**, so no bridge regeneration. |
-| `desktop/ui/chat_commands.mjs` | What the composer does with a parsed command, the `/` picker, the honest "not here yet" sentences, and which Tara audience a draft implies. 34 `node --test` cases. |
+| `desktop/ui/chat_commands.mjs` | What the composer does with a parsed command, the `/` picker, the honest "not here yet" sentences, and which Tara audience a draft implies, plus the mirror of `split_author` the live-DM path needs. 35 `node --test` cases. |
 | `android/…/ui/ChatCommands.kt` | The same decisions, mirroring the desktop vectors case for case. 35 JVM cases; Compose-free. **Never compiled here** — no Android SDK in the container that wrote it. |
 | `desktop/ui/task_list.mjs` · `android/…/ui/TaskList.kt` | Grouping, which buttons a row offers, the subtitle, the empty copy. Mirrored vectors — 15 `node --test` cases, 11 JVM. Note the field names differ on purpose: Tauri sends serde snake_case, uniffi generates camelCase properties — and so is the state a button sends: `wireState()` is lowercase because `TaskState` is `rename_all = "snake_case"`, while Android passes the uniffi enum and has no string to get wrong. |
 | `desktop/ui/main.js` (Tasks tab) · `android/…/ui/TaskListScreen.kt` | The rendering, and nothing else — every decision above it. |
 | `comrade_ui::play_route` | The five things a frontend may do about a `/play`, from the plan plus its own library answer. Only `StartTogether` opens a session, and only on a library hit. 3 tests. |
 | `ChatCommands.playNote` · `LibraryResolver.mayRead` | The sentence for each route, and the one distinction that is not core's to make: "no copy here" versus "not allowed to look". 6 JVM cases. |
+| `android/…/together/MediaLibraryAccess.kt` | When Comrade asks to read the music library, and which permission a release actually grants — at most one ask, because Android stops showing the dialog after a refusal. 3 JVM cases; Compose-free. **Never compiled here.** |

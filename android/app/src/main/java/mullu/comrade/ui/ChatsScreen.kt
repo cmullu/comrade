@@ -2,6 +2,7 @@ package mullu.comrade.ui
 
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -104,6 +105,7 @@ import mullu.comrade.PresenceMonitor
 import mullu.comrade.handoff.AttachmentHandoffManager
 import mullu.comrade.media.VoiceRecorder
 import mullu.comrade.together.LibraryResolver
+import mullu.comrade.together.MediaLibraryAccess
 import mullu.comrade.together.TogetherManager
 import uniffi.comrade_ui.PlayRoute
 
@@ -776,6 +778,14 @@ fun ConversationScreen(
     // arriving; an empty composer makes this a no-op.
     DisposableEffect(peer) { onDispose { ComradeCore.abandonDraft(peer) } }
 
+    // The library permission and the command that needs it are two halves of a
+    // cycle: `/play` finds it missing, and the answer has to run `/play` again.
+    // Broken by going through state rather than by calling across it — the
+    // command only records what it wanted, the effect below puts the question,
+    // and the launcher's result runs the command once more. Keyed on `peer` so a
+    // question raised in one conversation cannot answer into the next.
+    var pendingLibraryAsk by remember(peer) { mutableStateOf<String?>(null) }
+
     /**
      * Act on an in-chat command, or return false to let [send] deliver the text.
      *
@@ -1022,13 +1032,38 @@ fun ConversationScreen(
                         sending = false
                         return@launch
                     }
+                    // Whether a copy on this phone would change the answer at
+                    // all, asked of core rather than decided here: for a Spotify
+                    // link the route is "open it there" either way, and putting
+                    // a permission dialog in front of someone to reach the same
+                    // sentence is the kind of prompt that teaches people to
+                    // refuse. Only a route that actually differs earns the ask.
+                    val libraryWouldMatter = target.recording != null &&
+                        withContext(Dispatchers.IO) {
+                            val withoutCopy = ComradeCore.playRoute(target.plan, false)
+                            val withCopy = ComradeCore.playRoute(target.plan, true)
+                            withoutCopy != null && withCopy != null && withoutCopy != withCopy
+                        }
                     // "Not allowed to look" and "looked, not there" are different
                     // problems with different next steps, so they are told apart
-                    // before either sentence is chosen. Currently always false —
-                    // the manifest declares no media-read permission; see
-                    // `LibraryResolver.mayRead` and AUDIT.md.
-                    val mayLook = runCatching { LibraryResolver.mayRead(context) }
-                        .getOrDefault(false)
+                    // before either sentence is chosen. `askedBefore` defaults to
+                    // true if the preference cannot be read: an unreadable answer
+                    // must not turn into an endless prompt.
+                    val step = MediaLibraryAccess.next(
+                        granted = runCatching { LibraryResolver.mayRead(context) }
+                            .getOrDefault(false),
+                        askedBefore = runCatching { MediaLibraryAccess.asked(context) }
+                            .getOrDefault(true),
+                    )
+                    if (libraryWouldMatter && step == MediaLibraryAccess.Step.Ask) {
+                        // No sentence: the system dialog is about to say why, and
+                        // the whole command re-runs on the answer. The draft is
+                        // deliberately left alone so a refusal loses nothing.
+                        pendingLibraryAsk = text
+                        sending = false
+                        return@launch
+                    }
+                    val mayLook = step == MediaLibraryAccess.Step.Look
                     val found = withContext(Dispatchers.IO) {
                         target.recording?.takeIf { mayLook }?.let { want ->
                             // Duration is unknown for words the user typed, and
@@ -1080,6 +1115,28 @@ fun ConversationScreen(
             }
         }
         return true
+    }
+
+    // The other half of the cycle described above [runCommand]. Declared here
+    // rather than beside the other launchers because its result calls
+    // [runCommand], which has to exist by this point.
+    val askToReadLibrary = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        val retry = pendingLibraryAsk
+        pendingLibraryAsk = null
+        // Recorded whatever the answer was: what makes a second ask pointless is
+        // that the question was already put. Android stops showing the dialog
+        // after a refusal, so asking again would be a button that does nothing.
+        runCatching { MediaLibraryAccess.rememberAsked(context) }
+        // Granted or refused, the command runs again and takes the route its
+        // answer allows — and cannot ask a second time, because `asked` is now
+        // true, so this terminates.
+        if (retry != null) runCommand(retry)
+    }
+    LaunchedEffect(pendingLibraryAsk) {
+        if (pendingLibraryAsk == null) return@LaunchedEffect
+        askToReadLibrary.launch(MediaLibraryAccess.permissionFor(Build.VERSION.SDK_INT))
     }
 
     fun send() {
@@ -1566,30 +1623,53 @@ fun ConversationScreen(
                                 is ChatItem.TextItem -> {
                                     val msg = item.msg
                                     val quoted = msg.replyTo?.let { byId[it] }
+                                    // Tara sits on the left for *both* people,
+                                    // so this is not simply `msg.outgoing`: her
+                                    // answer is carried by whichever device
+                                    // asked, and aligning by who sent it would
+                                    // put one line on opposite sides of the two
+                                    // phones. It also drops the ticks from her
+                                    // bubble — true that this device sent it,
+                                    // but the question right above carries the
+                                    // same receipt, and a tick on a third
+                                    // party's line reads as a claim about her.
+                                    // Mirrored in `message_bubble.dart` and
+                                    // `main.js`.
+                                    val hers = msg.fromTara
+                                    val mine = msg.outgoing && !hers
                                     SwipeToReply(
                                         onReply = { replyingTo = item },
                                         modifier = gestureModifier,
                                     ) {
                                         Column(
                                             Modifier.fillMaxWidth(),
-                                            horizontalAlignment = if (msg.outgoing) Alignment.End else Alignment.Start,
+                                            horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
                                         ) {
                                             Surface(
                                                 shape = RoundedCornerShape(
                                                     topStart = 18.dp,
                                                     topEnd = 18.dp,
-                                                    bottomStart = if (msg.outgoing) 18.dp else 6.dp,
-                                                    bottomEnd = if (msg.outgoing) 6.dp else 18.dp,
+                                                    bottomStart = if (mine) 18.dp else 6.dp,
+                                                    bottomEnd = if (mine) 6.dp else 18.dp,
                                                 ),
-                                                color = if (msg.outgoing) {
-                                                    MaterialTheme.colorScheme.primaryContainer
-                                                } else {
-                                                    MaterialTheme.colorScheme.surfaceVariant
+                                                color = when {
+                                                    hers -> MaterialTheme.colorScheme.tertiaryContainer
+                                                    mine -> MaterialTheme.colorScheme.primaryContainer
+                                                    else -> MaterialTheme.colorScheme.surfaceVariant
                                                 },
                                                 tonalElevation = 1.dp,
                                                 modifier = Modifier.widthIn(max = 300.dp),
                                             ) {
                                                 Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                                                    if (hers) {
+                                                        Text(
+                                                            stringResource(R.string.tara_author_label),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                            modifier = Modifier.testTag("tara-author"),
+                                                        )
+                                                    }
                                                     if (quoted != null) {
                                                         QuotedPreview(quoted.preview) {
                                                             goToQuoted(msg.replyTo)
@@ -1608,7 +1688,7 @@ fun ConversationScreen(
                                                             style = MaterialTheme.typography.labelSmall,
                                                             color = MaterialTheme.colorScheme.outline,
                                                         )
-                                                        if (msg.outgoing) {
+                                                        if (mine) {
                                                             Text(
                                                                 statusGlyph(msg.status),
                                                                 style = MaterialTheme.typography.labelSmall,

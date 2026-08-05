@@ -851,6 +851,7 @@ MessageInfo _message(rust.MessageDto dto) => MessageInfo(
       content: dto.content,
       createdAt: dto.createdAt.toInt(),
       outgoing: dto.outgoing,
+      fromTara: dto.author == rust.MessageAuthor.tara,
       status: MessageStatus.fromWire(dto.status),
       replyTo: dto.replyTo,
     );

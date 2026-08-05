@@ -178,6 +178,7 @@ class MessageInfo {
     required this.content,
     required this.createdAt,
     required this.outgoing,
+    this.fromTara = false,
     this.status,
     this.replyTo,
   });
@@ -187,6 +188,13 @@ class MessageInfo {
   final String content;
   final int createdAt;
   final bool outgoing;
+
+  /// True when core read Tara's marker off the wire form — see
+  /// `comrade_ui::MessageAuthor`. A claim by whichever Comrade sent it, never an
+  /// authenticated one, so it may style a bubble and must not gate anything.
+  /// Flattened to a bool for the same reason Android's `MessageInfo` does: the
+  /// question a bubble asks is "is this hers".
+  final bool fromTara;
   final MessageStatus? status;
   final String? replyTo;
 
@@ -196,6 +204,7 @@ class MessageInfo {
         content: content,
         createdAt: createdAt,
         outgoing: outgoing,
+        fromTara: fromTara,
         status: status ?? this.status,
         replyTo: replyTo,
       );

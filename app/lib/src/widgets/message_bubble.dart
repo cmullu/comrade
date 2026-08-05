@@ -489,12 +489,25 @@ class MessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final MessageInfo msg = message;
     final ColorScheme colors = Theme.of(context).colorScheme;
-    final bool out = msg.outgoing;
+    final bool hers = msg.fromTara;
+    // Tara sits on the left for *both* people, which is why this is not simply
+    // `msg.outgoing`: her answer is carried by whichever device asked, so
+    // aligning it by who sent it would put the same line on opposite sides of
+    // the two phones and stop reading as a third participant at all. It also
+    // drops the delivery ticks from her bubble — true, since this device did
+    // send it, but the question directly above carries the same receipt and a
+    // tick on a third party's line reads as a claim about her. Mirrored in
+    // `ChatsScreen.kt` and `main.js`.
+    final bool out = msg.outgoing && !hers;
 
     final Widget bubble = Container(
       constraints: BoxConstraints(maxWidth: maxWidth),
       decoration: BoxDecoration(
-        color: out ? colors.primaryContainer : colors.surfaceContainerHighest,
+        color: hers
+            ? colors.tertiaryContainer
+            : out
+                ? colors.primaryContainer
+                : colors.surfaceContainerHighest,
         borderRadius: BorderRadius.only(
           topLeft: const Radius.circular(ComradeRadii.bubble),
           topRight: const Radius.circular(ComradeRadii.bubble),
@@ -511,6 +524,15 @@ class MessageBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
+          if (hers)
+            Text(
+              'Tara',
+              key: const Key('tara-author'),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: colors.onTertiaryContainer,
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
           if (quotedText != null)
             QuotedPreview(quotedText!, onTap: onQuotedTap),
           Text(msg.content, style: Theme.of(context).textTheme.bodyLarge),

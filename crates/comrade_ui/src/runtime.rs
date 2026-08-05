@@ -1444,20 +1444,66 @@ pub struct CrisisResourceDto {
     pub note: String,
 }
 
+/// Who wrote a message, where `outgoing` alone cannot say.
+///
+/// `outgoing` distinguishes the two people; this distinguishes a person from the
+/// companion, so `@tara` can be drawn as a third participant rather than as a
+/// line you appear to have typed. The two are orthogonal: an outgoing
+/// [`MessageAuthor::Tara`] is her answer in a thread you started, and an
+/// incoming one is her answer in a thread they started.
+///
+/// **Attribution, not attestation.** Nothing signs this. The wire carries
+/// [`comrade_core::tara::TARA_CHAT_PREFIX`], which any client — or any person
+/// with a keyboard — can put in front of a sentence, so a Tara bubble means
+/// *the sending Comrade said this came from Tara*, in the same way a quoted
+/// reply means the sender said they were quoting you. It must not be built on
+/// as proof, and `AUDIT.md` Q17 records the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageAuthor {
+    /// One of the two people in the conversation — the ordinary case.
+    Human,
+    /// The companion, answering where both people can read it.
+    Tara,
+}
+
 /// A single direct message in a conversation, from the offline history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct MessageDto {
     pub id: String,
     /// Peer npub the thread is keyed by (sender if incoming, recipient if outgoing).
     pub peer: String,
+    /// What to draw in the bubble — already stripped of any author marker, so a
+    /// frontend never renders the wire form. See [`split_author`].
     pub content: String,
     pub created_at: u64,
     pub outgoing: bool,
+    /// Who wrote [`Self::content`]. See [`MessageAuthor`] for what this does and
+    /// does not claim.
+    pub author: MessageAuthor,
     /// Delivery status of an outgoing message: `sent` / `delivered` / `read`.
     /// `None` for incoming messages (no ticks shown on the receiver's side).
     pub status: Option<String>,
     /// Event id (hex) this message replies to, if any.
     pub reply_to: Option<String>,
+}
+
+/// Split a stored/wire message body into who wrote it and what to draw.
+///
+/// The marker stays on the wire and on disk rather than being stripped before
+/// storage, and that is deliberate on two counts. A NIP-17 DM read in some other
+/// Nostr client still says "Tara: …" instead of putting her words in the
+/// sender's mouth — the fallback rendering is the honest one. And the count in
+/// [`ComradeRuntime::tara_in_chat`] reads the stored rows directly, so the
+/// history keeps meaning the same thing after this function changes.
+///
+/// One place, called from both [`MessageDto`] construction sites, so a message
+/// cannot read one way when it is sent and another way after a reload.
+fn split_author(content: String) -> (MessageAuthor, String) {
+    match comrade_core::tara::tara_chat_answer(&content) {
+        Some(answer) => (MessageAuthor::Tara, answer.to_string()),
+        None => (MessageAuthor::Human, content),
+    }
 }
 
 /// Live connectivity status of the off-grid Saathi mesh (mDNS discovery +
@@ -2491,18 +2537,22 @@ impl ComradeRuntime {
             .messages_with(&peer)
             .map_err(|e| UiError::Storage(e.to_string()))?
             .into_iter()
-            .map(|m| MessageDto {
-                id: m.id,
-                peer: m.peer_npub,
-                content: m.content,
-                created_at: m.created_at,
-                status: if m.outgoing {
-                    Some(m.status.unwrap_or_else(|| "sent".into()))
-                } else {
-                    None
-                },
-                reply_to: m.reply_to,
-                outgoing: m.outgoing,
+            .map(|m| {
+                let (author, content) = split_author(m.content);
+                MessageDto {
+                    id: m.id,
+                    peer: m.peer_npub,
+                    content,
+                    created_at: m.created_at,
+                    author,
+                    status: if m.outgoing {
+                        Some(m.status.unwrap_or_else(|| "sent".into()))
+                    } else {
+                        None
+                    },
+                    reply_to: m.reply_to,
+                    outgoing: m.outgoing,
+                }
             })
             .collect();
         msgs.sort_by_key(|m| m.created_at);
@@ -4927,12 +4977,14 @@ impl RuntimeHandles {
         // leave a composer that must never look like abandoning it.
         self.nudge_watch.sent(&peer_npub);
 
+        let (author, body) = split_author(content.to_string());
         let dto = MessageDto {
             id,
             peer: peer_npub.clone(),
-            content: content.to_string(),
+            content: body,
             created_at,
             outgoing: true,
+            author,
             status: Some(status.into()),
             reply_to: reply_to.map(str::to_string),
         };
@@ -4940,7 +4992,9 @@ impl RuntimeHandles {
             let row = comrade_storage::StoredMessage {
                 id: dto.id.clone(),
                 peer_npub: dto.peer.clone(),
-                content: dto.content.clone(),
+                // The wire form, not `dto.content`: the marker has to survive a
+                // reload for the bubble to be drawn the same way next time.
+                content: content.to_string(),
                 created_at: dto.created_at,
                 outgoing: true,
                 status: Some(status.into()),
@@ -5690,9 +5744,11 @@ impl RuntimeHandles {
     ///    so the check has to be here, after the reply and before the send.
     ///
     /// Both messages are ordinary DMs. The answer carries
-    /// `comrade_core::tara::TARA_CHAT_PREFIX`, which is a rendering marker and
-    /// not an authentication claim — see that constant for why there is no
-    /// author field to use instead, and what would let the prefix go.
+    /// `comrade_core::tara::TARA_CHAT_PREFIX` on the wire, and [`split_author`]
+    /// turns that into [`MessageAuthor::Tara`] with the marker off the text, so
+    /// both DTOs this returns are already in the form a bubble draws. The marker
+    /// is a claim by the sending client, not an authentication — see
+    /// [`MessageAuthor`].
     ///
     /// The private thread is left untouched: a question asked in front of
     /// somebody is not a turn in the private session, and merging the two would
@@ -14155,14 +14211,59 @@ mod tests {
         let thread = rt.messages_with(&peer).unwrap();
         assert_eq!(thread.len(), 2);
         assert_eq!(thread[0].content, "what should i do about this deadline");
-        assert_eq!(
-            comrade_core::tara::tara_chat_answer(&thread[1].content),
-            Some(out.reply.as_str()),
-            "the second message must be the answer, marked as hers"
-        );
+        assert_eq!(thread[0].author, MessageAuthor::Human);
+        // Her words, with the wire marker already off them: a frontend renders
+        // `content` as-is and reads `author` to decide whose bubble it is.
+        assert_eq!(thread[1].content, out.reply);
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
         assert!(thread.iter().all(|m| m.outgoing), "this device sent both");
         assert_eq!(out.asked.unwrap().content, thread[0].content);
         assert_eq!(out.answered.unwrap().content, thread[1].content);
+    }
+
+    #[tokio::test]
+    async fn her_line_is_still_marked_as_hers_after_a_reload() {
+        // The DTO strips the marker; the store must not, or the author would be
+        // whatever the last in-memory copy happened to say and a restart would
+        // silently turn her answer into one of yours.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let out = rt
+            .tara_in_chat(&peer, "what should i say to them")
+            .await
+            .unwrap();
+
+        let stored = rt
+            .ui
+            .store_ref()
+            .unwrap()
+            .messages_with(&to_npub(&peer))
+            .unwrap();
+        assert_eq!(
+            comrade_core::tara::tara_chat_answer(&stored[1].content),
+            Some(out.reply.as_str()),
+            "the wire form has to survive on disk"
+        );
+        // And reading it back through the DTO gives the same split as the send.
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
+        assert_eq!(thread[1].content, out.reply);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_message_is_never_attributed_to_her() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        // Close enough to trip a sloppy match, and it must not: the marker is a
+        // prefix, not a substring, and "Tara" as a topic is an ordinary word.
+        let sent = rt
+            .send_dm(&peer, "Tara said something like that too")
+            .await
+            .unwrap();
+        assert_eq!(sent.author, MessageAuthor::Human);
+        assert_eq!(sent.content, "Tara said something like that too");
     }
 
     #[tokio::test]
@@ -14239,10 +14340,8 @@ mod tests {
             out.reply
         );
         let thread = rt.messages_with(&peer).unwrap();
-        assert_eq!(
-            comrade_core::tara::tara_chat_answer(&thread[1].content),
-            Some(out.reply.as_str())
-        );
+        assert_eq!(thread[1].content, out.reply);
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
     }
 
     #[tokio::test]

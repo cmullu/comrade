@@ -126,6 +126,70 @@ void main() {
       expect(find.text('✓'), findsNothing);
     });
 
+    testWidgets("Tara's answer is named, left-aligned and untickd",
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm-tara',
+              peer: 'npub1x',
+              content: 'One thing at a time.',
+              createdAt: 1752321600,
+              // Outgoing — this device carried her answer — and still drawn as
+              // hers. Aligning by who sent it would put the same line on
+              // opposite sides of the two phones.
+              outgoing: true,
+              fromTara: true,
+              status: MessageStatus.delivered,
+            ),
+            onReply: () {},
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('tara-author')), findsOneWidget);
+      expect(find.text('One thing at a time.'), findsOneWidget);
+      // A tick on a third party's line reads as a claim about her; the question
+      // above it carries the same receipt.
+      expect(find.text('✓✓'), findsNothing);
+      final Column outer = tester.widget<Column>(
+        find
+            .ancestor(
+              of: find.byType(ReplyAffordance),
+              matching: find.byType(Column),
+            )
+            .first,
+      );
+      expect(outer.crossAxisAlignment, CrossAxisAlignment.start);
+    });
+
+    testWidgets('an ordinary outgoing bubble is not named',
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm3',
+              peer: 'npub1x',
+              content: 'Tara said something like that too',
+              createdAt: 1752321600,
+              outgoing: true,
+            ),
+            onReply: () {},
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('tara-author')), findsNothing);
+    });
+
     testWidgets('a reply renders the quoted preview above its own text',
         (WidgetTester tester) async {
       final repo = await unlockedFake();
