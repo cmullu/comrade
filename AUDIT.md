@@ -765,6 +765,31 @@ is small; the content problem is the real constraint:
 >   rather than a blank — desktop had been sending `recording: null` whatever
 >   was typed. Two Android sentences that named a screen to go and open were
 >   rewritten, because the screen now opens itself.
+> - ~~**Sync had no transport faster than a relay.**~~ **Rung added 2026-08-05**,
+>   though **not yet carried by any frontend** — read this entry as "core is
+>   ready", not "it is fast now". §8.2's own note that "a later WebRTC data
+>   channel from 8.1 would make it tight" is the thing being answered.
+>   `send_together` now tries local mesh (~1–5 ms) → direct peer channel
+>   (~20–80 ms) → relay (hundreds), and since the correction deadband is floored
+>   by *half the measured round trip*, the transport sets the floor that no
+>   tuning gets under. Core emits `BridgeEvent::TogetherOutbound` rather than
+>   sending, because the connection belongs to the frontend — the division of
+>   labour `TogetherShareDto` already argues for. The direct path is deliberately
+>   less privileged than the relay one: `direct_signal_admissible` refuses
+>   `start`, and the sender is the session's peer by definition rather than by
+>   anything in the payload, because a data channel proves only "the far end of
+>   this DTLS connection" where a gift wrap proves authorship per message. What
+>   is **missing** is the connection itself on both shipping frontends: nothing
+>   reports `direct_ready(true)`, so nothing is emitted and every signal still
+>   takes the relay. The Kotlin arm and the Dart arm both say so rather than
+>   looking wired. A session-long peer connection (the file handover's one lives
+>   only as long as a transfer) is the next piece.
+> - **`direct_ready` has no timeout, on purpose, and that is a footgun.** A
+>   frontend that reports a live channel and then loses it must report `false`,
+>   or signals go to a socket nobody reads and the session dies on its TTL
+>   instead of falling back to the relay that was there all along. Stated on the
+>   method, the Tauri command and the Kotlin arm; there is no code that enforces
+>   it, and a watchdog is the honest follow-up.
 > - **Nothing in CI renders anything.** Both bugs above were visible instantly
 >   on a device and invisible to 332 JS tests, 514 core tests and two emulator
 >   lanes, because every one of them asserts about values rather than pixels. A

@@ -830,6 +830,26 @@ pub fn new_session_id() -> String {
     hex::encode(bytes)
 }
 
+/// Whether a signal may arrive over a **direct peer channel** rather than a
+/// relay.
+///
+/// Everything except [`TogetherSignal::Start`]. A direct channel only exists
+/// because a session was negotiated inside one, so a channel able to *open* a
+/// session would invert that — and `start` is the single signal the relay's
+/// per-message NIP-44 authentication is genuinely load-bearing for, since it is
+/// the only one that creates state from nothing.
+///
+/// Stated honestly about what is doing the work: today a direct `start` is
+/// already unreachable, because the receiver has no way to attribute a sender
+/// without a live session and refuses on that ground first. This predicate is
+/// the *explicit* statement of the rule, so that a later change which learns to
+/// attribute a peer some other way cannot quietly turn a data channel into an
+/// invitation path. Its own unit test is what pins it; the runtime test above it
+/// can only observe the behaviour both rules share.
+pub fn direct_signal_admissible(signal: &TogetherSignal) -> bool {
+    !matches!(signal, TogetherSignal::Start { .. })
+}
+
 /// Whether a signal sent at `created_at` (seconds) is still worth acting on.
 /// The age gate described on [`TOGETHER_SIGNAL_MAX_AGE_SECS`].
 pub fn signal_is_fresh(created_at: u64, now: u64) -> bool {
@@ -2349,6 +2369,46 @@ mod tests {
             video_id: "dQw4w9WgXcQ".into(),
         }
         .tuning()
+    }
+
+    // ── What a direct channel may carry ─────────────────────────────────────
+
+    #[test]
+    fn a_direct_channel_may_not_carry_an_invitation() {
+        assert!(!direct_signal_admissible(&TogetherSignal::Start {
+            content: TogetherContent::local_file(1000, None),
+            pos_ms: 0,
+            playing: true,
+        }));
+    }
+
+    /// Every other signal must pass, and the list is exhaustive on purpose: a
+    /// new signal kind should have to decide which side of this line it is on
+    /// rather than inheriting an answer.
+    #[test]
+    fn a_direct_channel_may_carry_every_other_signal() {
+        let allowed = [
+            TogetherSignal::Join,
+            TogetherSignal::State {
+                pos_ms: 1,
+                playing: true,
+                effective_at_ms: None,
+            },
+            TogetherSignal::Heartbeat {
+                pos_ms: 1,
+                playing: true,
+                applied_seq: 1,
+                output_latency_ms: 0,
+            },
+            TogetherSignal::End,
+        ];
+        for signal in allowed {
+            assert!(
+                direct_signal_admissible(&signal),
+                "{} was refused the fast path",
+                signal.kind_str(),
+            );
+        }
     }
 
     #[test]

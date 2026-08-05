@@ -1196,6 +1196,32 @@ impl Comrade {
         self.inner.blocking_read().together_session()
     }
 
+    /// Declare whether a direct peer channel is carrying this session's signals,
+    /// so they take it instead of a relay — tens of milliseconds against
+    /// hundreds, which is what decides how tight the sync can be.
+    ///
+    /// `try_read` for the same reason as [`Self::together_report_position`], and
+    /// a sharper one: this is called from WebRTC connection callbacks, and
+    /// blocking one of those is the shape of two bugs this repo has already
+    /// fixed. A skipped declaration costs one relay-routed signal.
+    pub fn together_direct_ready(&self, ready: bool) {
+        if let Ok(rt) = self.inner.try_read() {
+            rt.together_direct_ready(ready);
+        }
+    }
+
+    /// Hand over an envelope that arrived on the direct channel.
+    ///
+    /// Deliberately less privileged than the relay path — it cannot open a
+    /// session, and the sender is the session's peer by definition rather than
+    /// by anything in the payload. Unvalidated input either way: it is parsed
+    /// and dropped on anything unexpected.
+    pub fn together_receive_direct(&self, json: String) {
+        if let Ok(rt) = self.inner.try_read() {
+            rt.together_receive_direct(&json);
+        }
+    }
+
     /// Send one step of handing the file over — for the case `together`
     /// otherwise assumes away, where only one of you has what you are playing.
     pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {

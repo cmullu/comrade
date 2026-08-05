@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1537525246;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1471913872;
 
 // Section: executor
 
@@ -2668,6 +2668,41 @@ fn wire__crate__api__tara_thread_impl(
         },
     )
 }
+fn wire__crate__api__together_direct_ready_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "together_direct_ready",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_ready = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::together_direct_ready(api_ready);
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__together_end_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2773,6 +2808,41 @@ fn wire__crate__api__together_match_score_impl(
                         api_want_ms,
                         api_have_ms,
                     ))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__together_receive_direct_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "together_receive_direct",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_json = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::together_receive_direct(api_json);
+                    })?;
                     Ok(output_ok)
                 })())
             }
@@ -3269,6 +3339,10 @@ const _: fn() = || {
         }
         crate::api::BridgeEvent::TogetherShare(field0) => {
             let _: crate::api::TogetherShareDto = field0;
+        }
+        crate::api::BridgeEvent::TogetherOutbound { session_id, json } => {
+            let _: String = session_id;
+            let _: String = json;
         }
         crate::api::BridgeEvent::AttachmentHandoff(field0) => {
             let _: crate::api::AttachmentHandoffDto = field0;
@@ -3872,14 +3946,22 @@ impl SseDecode for crate::api::BridgeEvent {
                 return crate::api::BridgeEvent::TogetherShare(var_field0);
             }
             16 => {
+                let mut var_sessionId = <String>::sse_decode(deserializer);
+                let mut var_json = <String>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::TogetherOutbound {
+                    session_id: var_sessionId,
+                    json: var_json,
+                };
+            }
+            17 => {
                 let mut var_field0 = <crate::api::AttachmentHandoffDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::AttachmentHandoff(var_field0);
             }
-            17 => {
+            18 => {
                 let mut var_field0 = <crate::api::MeshStatusDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::MeshStatusChanged(var_field0);
             }
-            18 => {
+            19 => {
                 let mut var_ledger = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::LedgerUpdated { ledger: var_ledger };
             }
@@ -5414,18 +5496,20 @@ fn pde_ffi_dispatcher_primary_impl(
         74 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
         75 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
         76 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__together_end_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__together_join_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__together_match_score_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__together_report_position_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__together_set_state_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__together_start_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__toggle_reaction_impl(port, ptr, rust_vec_len, data_len),
-        84 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
-        85 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
-        86 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
-        87 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
-        90 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__together_direct_ready_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__together_end_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__together_join_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__together_match_score_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__together_receive_direct_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__together_report_position_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__together_set_state_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__together_start_impl(port, ptr, rust_vec_len, data_len),
+        85 => wire__crate__api__toggle_reaction_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
+        87 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
+        88 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
+        92 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5441,8 +5525,8 @@ fn pde_ffi_dispatcher_sync_impl(
         5 => wire__crate__api__all_workspaces_impl(ptr, rust_vec_len, data_len),
         27 => wire__crate__api__generate_keypair_impl(ptr, rust_vec_len, data_len),
         45 => wire__crate__api__npub_from_nsec_impl(ptr, rust_vec_len, data_len),
-        88 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
-        89 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
+        90 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
+        91 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5581,14 +5665,20 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::BridgeEvent> {
             crate::api::BridgeEvent::TogetherShare(field0) => {
                 [15.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::BridgeEvent::TogetherOutbound { session_id, json } => [
+                16.into_dart(),
+                session_id.into_into_dart().into_dart(),
+                json.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             crate::api::BridgeEvent::AttachmentHandoff(field0) => {
-                [16.into_dart(), field0.into_into_dart().into_dart()].into_dart()
-            }
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
                 [17.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                [18.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                [18.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
+                [19.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -7100,16 +7190,21 @@ impl SseEncode for crate::api::BridgeEvent {
                 <i32>::sse_encode(15, serializer);
                 <crate::api::TogetherShareDto>::sse_encode(field0, serializer);
             }
-            crate::api::BridgeEvent::AttachmentHandoff(field0) => {
+            crate::api::BridgeEvent::TogetherOutbound { session_id, json } => {
                 <i32>::sse_encode(16, serializer);
+                <String>::sse_encode(session_id, serializer);
+                <String>::sse_encode(json, serializer);
+            }
+            crate::api::BridgeEvent::AttachmentHandoff(field0) => {
+                <i32>::sse_encode(17, serializer);
                 <crate::api::AttachmentHandoffDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::MeshStatusChanged(field0) => {
-                <i32>::sse_encode(17, serializer);
+                <i32>::sse_encode(18, serializer);
                 <crate::api::MeshStatusDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                <i32>::sse_encode(18, serializer);
+                <i32>::sse_encode(19, serializer);
                 <String>::sse_encode(ledger, serializer);
             }
             _ => {

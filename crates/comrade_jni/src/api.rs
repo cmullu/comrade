@@ -654,6 +654,10 @@ pub enum _BridgeEvent {
         by_peer: bool,
     },
     TogetherShare(TogetherShareDto),
+    TogetherOutbound {
+        session_id: String,
+        json: String,
+    },
     AttachmentHandoff(AttachmentHandoffDto),
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
@@ -1279,6 +1283,22 @@ pub async fn together_end() -> Result<(), UiError> {
 pub fn together_report_position(pos_ms: u64, playing: bool, output_latency_ms: u64) {
     if let Ok(rt) = runtime().try_read() {
         rt.together_report_position(pos_ms, playing, output_latency_ms);
+    }
+}
+
+/// Declare whether a direct peer channel is carrying this session — see
+/// [`Comrade::together_direct_ready`] in this crate's uniffi half.
+pub fn together_direct_ready(ready: bool) {
+    if let Ok(rt) = runtime().try_read() {
+        rt.together_direct_ready(ready);
+    }
+}
+
+/// Hand over an envelope that arrived on the direct channel — see
+/// [`Comrade::together_receive_direct`] in this crate's uniffi half.
+pub fn together_receive_direct(json: String) {
+    if let Ok(rt) = runtime().try_read() {
+        rt.together_receive_direct(&json);
     }
 }
 

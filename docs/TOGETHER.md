@@ -308,6 +308,56 @@ relays tolerate even this cadence for two hours is untested**: the in-process
 test relay accepts anything. If they push back, the answer is 15–20 s and a
 wider deadband, not a cleverer algorithm.
 
+## 5a. Which transport carries it, and why that is the real latency lever
+
+Every constant in §5 is chosen against a round trip, and the deadband is floored
+by half of the measured one (§3). So the transport does not merely *affect* how
+tight the sync can be — it **sets the floor**, and no amount of tuning gets under
+it. `send_together` therefore tries three rungs in order:
+
+| Rung | Round trip | When it is there |
+|---|---|---|
+| Local mesh (Saathi, LAN) | ~1–5 ms | Only while the mesh engine runs, which today means the off-grid workspace |
+| **Direct peer channel** | ~20–80 ms | When a frontend reports one up for the session |
+| Relay (gift-wrapped DM) | hundreds of ms | Always |
+
+The relay rung is not a fallback in the apologetic sense — it is the one that
+always works, needs no NAT traversal, and is what makes a session possible
+between two people who can never reach each other directly. The other two are
+what make it *tight*.
+
+**Core does not send on the direct channel; it asks the frontend to.** The
+connection belongs to the frontend — the same division of labour the file
+handover already uses, and for the same reason: mirroring a connection state
+machine in core would create two machines that must agree about something only
+one of them can see. So core emits `BridgeEvent::TogetherOutbound` and the
+frontend puts it on the wire. One event for the whole transport, not one per
+signal kind.
+
+**The direct path is deliberately less privileged than the relay path**, and this
+is the part worth reading twice. A relay message proves who sent it: every signal
+is individually NIP-44 authenticated. A data channel proves only "whoever is on
+the far end of this DTLS connection", which is the peer precisely because the
+connection was negotiated with them inside a live session. Two rules keep that
+honest:
+
+- **It cannot open a session.** `direct_signal_admissible` refuses `start` — the
+  only signal that creates state from nothing, and so the only one that really
+  needs per-message authentication. A channel that could open a session would
+  invert the thing that makes it trustworthy.
+- **The sender is the session's peer by definition, not by claim.** Nothing in
+  the payload is consulted for identity.
+
+Everything past that — the age gate, session scoping, `(seq, actor)` ordering —
+is literally the same code the relay path runs, because it is the same call.
+
+**What `direct_ready` does not have is a timeout.** A frontend that reports a
+live channel and then loses it must report `false`, or signals go into a socket
+nobody reads and the session dies on its TTL rather than falling back to the
+relay that was there the whole time. That is stated on the method, on the Tauri
+command, and in the Kotlin arm, because it is the one way to make this worse than
+not having it.
+
 ## 6. Replay safety
 
 The worst bug this feature could have is a two-day-old "seek to 42:00" coming

@@ -488,6 +488,36 @@ pub async fn together_session(
     Ok(state.read().await.together_session())
 }
 
+/// Declare whether the direct peer channel is carrying this session's signals,
+/// so they take it rather than a relay — tens of milliseconds against hundreds,
+/// which is what decides how tight the sync can be.
+///
+/// Must be set back to `false` when the channel closes: nothing times out behind
+/// it, so a stale `true` sends signals into a socket nobody reads and the session
+/// dies on its TTL instead of falling back to the relay.
+#[tauri::command]
+pub async fn together_direct_ready(
+    state: tauri::State<'_, Runtime>,
+    ready: bool,
+) -> Result<(), String> {
+    state.read().await.together_direct_ready(ready);
+    Ok(())
+}
+
+/// Hand over an envelope that arrived on the direct channel.
+///
+/// Deliberately less privileged than the relay path: it cannot open a session,
+/// and the sender is the session's peer by definition rather than by anything in
+/// the payload. Treated as unvalidated input and dropped on anything unexpected.
+#[tauri::command]
+pub async fn together_receive_direct(
+    state: tauri::State<'_, Runtime>,
+    json: String,
+) -> Result<(), String> {
+    state.read().await.together_receive_direct(&json);
+    Ok(())
+}
+
 /// Send one step of handing the file over, for when only one of you has it.
 ///
 /// `signal_json` is a `comrade_core::share::ShareSignal`. It crosses as JSON

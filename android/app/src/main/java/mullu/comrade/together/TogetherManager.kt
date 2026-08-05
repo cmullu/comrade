@@ -435,6 +435,26 @@ object TogetherManager {
     }
 
     /**
+     * Core asking us to carry a signal over the direct peer channel.
+     *
+     * **Nothing arrives here yet, by construction.** Core only emits an outbound
+     * signal after a frontend has reported a live channel via
+     * `togetherDirectReady(true)`, and this frontend never does — a session-long
+     * peer connection is not built here yet, only the file-handover one that
+     * lives for the length of a transfer. So this drops, and says so, rather
+     * than looking like a wired path that silently loses signals.
+     *
+     * When the connection lands this becomes a `send` on it, and the only other
+     * thing it must do is report `togetherDirectReady(false)` the moment the
+     * channel closes — there is no timeout behind that flag, so a stale `true`
+     * would send every signal into a socket nobody reads and let the session die
+     * on its TTL instead of falling back to the relay.
+     */
+    fun onOutbound(json: String) {
+        Log.d(TAG, "dropping a direct together signal: no session channel on this frontend (${json.length}B)")
+    }
+
+    /**
      * Hand the player the window to draw into, or take it away.
      *
      * Called by the screen as its surface is created and destroyed — which

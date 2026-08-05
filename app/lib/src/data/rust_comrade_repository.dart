@@ -771,6 +771,12 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
       rust.BridgeEvent_TogetherCorrection() => null,
       rust.BridgeEvent_TogetherEnded() => null,
       rust.BridgeEvent_TogetherShare() => null,
+      // Asks the frontend to carry a signal over a direct peer channel. This
+      // frontend has no WebRTC at all (divergence D34), so there is nothing to
+      // carry it on — and dropping it is correct rather than a stub, because
+      // core only ever emits one after a frontend has reported a live channel,
+      // which this one never does.
+      rust.BridgeEvent_TogetherOutbound() => null,
       // Handing a large attachment over needs a WebRTC data channel, which this
       // frontend has none of — see divergence D34 in `SCREEN_INVENTORY.md`. Null
       // rather than a stub so nothing here pretends the transfer is possible.

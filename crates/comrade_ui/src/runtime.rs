@@ -112,10 +112,11 @@ use comrade_core::tara::{
     tara_chat_answer, tara_chat_line, CompanionEngine, JournalSignal, ReflectiveCompanion,
 };
 use comrade_core::together::{
-    command_apply, describe_state_change, heartbeat_interval_ms, parse_together_envelope,
-    projected_peer_pos_ms, session_is_live_at, signal_is_fresh, sync_verdict, valid_youtube_id,
-    ClockEcho, ClockFilter, CommandApply, CommandStamp, StateChange, SyncSample, SyncVerdict,
-    TogetherContent, TogetherEnvelope, TogetherSignal, CLOCK_BURST_PROBES,
+    command_apply, describe_state_change, direct_signal_admissible, heartbeat_interval_ms,
+    parse_together_envelope, projected_peer_pos_ms, session_is_live_at, signal_is_fresh,
+    sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandApply, CommandStamp,
+    StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope, TogetherSignal,
+    CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
@@ -746,6 +747,14 @@ struct TogetherSession {
     last_heard_ms: u64,
     /// Our clock when we last moved the playhead automatically.
     last_seek_ms: u64,
+    /// Whether the frontend has a direct peer-to-peer channel up for this
+    /// session, and signals should go down it instead of to a relay.
+    ///
+    /// Declared by the frontend rather than discovered here, because the
+    /// connection belongs to the frontend — the same division of labour
+    /// [`TogetherShareDto`] describes. It is per-session and never persisted:
+    /// a channel does not outlive the session it was negotiated inside.
+    direct_ready: bool,
     /// The rate trim we last asked this device's player for. Tracked because a
     /// trim is sticky — see `SyncSample::local_rate`; without it the ladder can
     /// never take one back off.
@@ -1613,6 +1622,22 @@ pub enum BridgeEvent {
     /// protocol tweak, which is exactly the tax that keeps protocols from being
     /// tweaked.
     TogetherShare(TogetherShareDto),
+    /// Push this envelope down the direct peer channel, now.
+    ///
+    /// The one place core asks a frontend to *carry* something rather than to
+    /// display it, and the reason is the same one that put WebRTC in the
+    /// frontend to begin with: core owns the protocol, the frontend owns the
+    /// connection. A relay publish happens inside `send_together`; a direct
+    /// send cannot, because the socket is not core's to hold.
+    ///
+    /// One variant for the whole transport rather than one per signal kind —
+    /// the tax [`Self::TogetherShare`] warns about is a bridge event *per
+    /// protocol step*, and this is a single event for a single capability.
+    ///
+    /// A frontend that cannot send it should simply drop it: the session's own
+    /// TTL and the peer's heartbeats are what notice a dead channel, and
+    /// [`RuntimeHandles::together_direct_ready`] is how it says so.
+    TogetherOutbound { session_id: String, json: String },
     /// One step of a large-attachment handoff from `peer`.
     AttachmentHandoff(AttachmentHandoffDto),
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
@@ -2998,6 +3023,29 @@ impl ComradeRuntime {
     /// The live session, if there is one.
     pub fn together_session(&self) -> Option<TogetherSessionDto> {
         self.together.lock().unwrap().as_ref().map(|s| s.dto())
+    }
+
+    /// Tell the runtime a direct peer channel is up (or has gone), so signals
+    /// take it instead of a relay. See
+    /// [`RuntimeHandles::together_direct_ready`].
+    ///
+    /// Shares `self.together` with the handles twin rather than delegating, for
+    /// the same reason [`Self::together_report_position`] does: it is a
+    /// lock-and-set with nothing to await, and routing it through the handles
+    /// would put a `RwLock` in front of a call a frontend makes from a
+    /// connection callback.
+    pub fn together_direct_ready(&self, ready: bool) {
+        if let Some(session) = self.together.lock().unwrap().as_mut() {
+            session.direct_ready = ready;
+        }
+    }
+
+    /// Hand the runtime an envelope that arrived over the direct peer channel.
+    ///
+    /// See [`RuntimeHandles::together_receive_direct`] for why this path is
+    /// deliberately less privileged than the relay one.
+    pub fn together_receive_direct(&self, json: &str) {
+        self.handles().together_receive_direct(json);
     }
 
     /// Send one step of the file handover.
@@ -4857,6 +4905,7 @@ impl ComradeRuntime {
             nudge_watch: self.nudge_watch.clone(),
             presence_active: self.presence_active.clone(),
             together: self.together.clone(),
+            together_starts_seen: self.together_starts_seen.clone(),
         }
     }
 
@@ -4912,6 +4961,10 @@ pub struct RuntimeHandles {
     presence_active: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with [`ComradeRuntime::together`] — see its doc comment.
     together: Arc<Mutex<Option<TogetherSession>>>,
+    /// Shared with the inbox callback's [`TogetherLink`], so an invitation
+    /// deduped on one path is deduped on the other. Carried here because
+    /// [`Self::together_receive_direct`] rebuilds that link.
+    together_starts_seen: Arc<SeenSet>,
 }
 
 impl RuntimeHandles {
@@ -5999,9 +6052,8 @@ impl RuntimeHandles {
     /// back to it. The session lock is taken, used, and **dropped before the
     /// send** — the rule that has already cost this repo two shipped deadlocks.
     async fn send_together(&self, signal: TogetherSignal) -> Result<(), UiError> {
-        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
         let at_ms = now_ms();
-        let (peer_hex, env) = {
+        let (peer_hex, env, session_id, direct_ready) = {
             let mut guard = self.together.lock().unwrap();
             let session = guard
                 .as_mut()
@@ -6014,7 +6066,12 @@ impl RuntimeHandles {
                 session.echo_back,
                 signal,
             );
-            (session.peer_hex.clone(), env)
+            (
+                session.peer_hex.clone(),
+                env,
+                session.id.clone(),
+                session.direct_ready,
+            )
         };
         let peer_pk = parse_pubkey(&peer_hex)?;
         let json = env.to_json().map_err(|e| UiError::Engine(e.to_string()))?;
@@ -6035,6 +6092,30 @@ impl RuntimeHandles {
                 return Ok(());
             }
         }
+        // Then a direct peer channel, when the frontend has one up. Second
+        // rather than first only because the mesh above is a LAN hop and this
+        // is usually an internet one — but against a relay it is the difference
+        // between tens of milliseconds and hundreds, and since the deadband is
+        // floored by half the round trip, it is the difference between a
+        // correction that can be tight and one that cannot.
+        //
+        // Fire-and-forget by construction: the frontend owns the socket, so
+        // "did it arrive" is not answerable here and is not asked. The peer's
+        // heartbeats and the session TTL are what notice a channel that has
+        // stopped carrying, exactly as they notice a relay that has.
+        if direct_ready {
+            let _ = self.events.send(BridgeEvent::TogetherOutbound {
+                session_id,
+                json: json.clone(),
+            });
+            return Ok(());
+        }
+        // Only the relay leg needs the vault, and it is fetched here rather than
+        // up front so the two faster rungs are not gated on something they do
+        // not use. In practice a locked vault has already cleared the session,
+        // so this is a belt on top of a brace — but a `VaultLocked` raised
+        // before a mesh or direct send would be a lie about why nothing went.
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
         vault
             .send_dm(&peer_pk, &json)
             .await
@@ -6087,6 +6168,7 @@ impl RuntimeHandles {
                 peer_at_ms: at_ms,
                 last_heard_ms: at_ms,
                 last_seek_ms: 0,
+                direct_ready: false,
                 local_rate: 1.0,
                 local_output_latency_ms: 0,
                 peer_output_latency_ms: 0,
@@ -6201,6 +6283,75 @@ impl RuntimeHandles {
     /// someone who never agreed to watch anything with you.
     pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
         self.send_together(TogetherSignal::Share { signal }).await
+    }
+
+    /// The frontend telling us whether it has a direct peer channel up for the
+    /// running session.
+    ///
+    /// Idempotent and safe to call with no session — a channel that opens after
+    /// one has ended is simply nothing to record.
+    ///
+    /// Must be set back to `false` the moment the channel closes or fails.
+    /// There is no timeout behind it: signals would keep going out to a socket
+    /// nobody is reading, and the session would die on its TTL rather than
+    /// falling back to the relay that was there all along.
+    pub fn together_direct_ready(&self, ready: bool) {
+        if let Some(session) = self.together.lock().unwrap().as_mut() {
+            session.direct_ready = ready;
+        }
+    }
+
+    /// An envelope that arrived over the direct peer channel.
+    ///
+    /// **Deliberately less privileged than the relay path**, in two ways that
+    /// are the whole of why this is safe to expose:
+    ///
+    /// 1. **It cannot create a session.** A `start` here is dropped. The channel
+    ///    only exists because a session was negotiated inside one, so a channel
+    ///    that could open a session would be an inversion — and it is the one
+    ///    signal the relay's per-message authentication is genuinely load-bearing
+    ///    for.
+    /// 2. **The sender is the session's peer, by definition, not by claim.** The
+    ///    identity comes from the session we are already in; nothing in the
+    ///    payload is consulted for it. A relay message proves who sent it with
+    ///    NIP-44; a data channel proves only "whoever is on the far end of this
+    ///    DTLS connection", which is the peer precisely because the connection
+    ///    was negotiated with them and never renegotiated.
+    ///
+    /// Everything past that — the age gate, session scoping, `(seq, actor)`
+    /// ordering — is the same code the relay path runs, because it is the same
+    /// call.
+    pub fn together_receive_direct(&self, json: &str) {
+        let Some(env) = parse_together_envelope(json) else {
+            return;
+        };
+        if !direct_signal_admissible(&env.signal) {
+            tracing::debug!("refusing a together invite arriving over a direct channel");
+            return;
+        }
+        let known = {
+            let guard = self.together.lock().unwrap();
+            guard.as_ref().map(|s| (s.peer.clone(), s.peer_hex.clone()))
+        };
+        let Some((peer_npub, peer_hex)) = known else {
+            return;
+        };
+        let link = TogetherLink {
+            session: self.together.clone(),
+            starts_seen: self.together_starts_seen.clone(),
+        };
+        // The envelope's own stamp stands in for the gift wrap's `created_at`:
+        // there is no wrap here, and `at_ms` is the sender's claim about when
+        // they sent it — which is exactly what the relay path's `created_at`
+        // is too, in the same units once divided down.
+        handle_together_envelope(
+            &self.events,
+            &link,
+            &peer_npub,
+            &peer_hex,
+            env.at_ms / 1000,
+            env,
+        );
     }
 
     /// Carry one step of a large-attachment handoff to `peer`.
@@ -7575,6 +7726,7 @@ fn handle_together_envelope(
             peer_at_ms: env.at_ms,
             last_heard_ms: at,
             last_seek_ms: 0,
+            direct_ready: false,
             local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
@@ -12162,6 +12314,169 @@ mod tests {
             .unwrap()
     }
 
+    /// Plant a live session the way an invitation would, so the direct-channel
+    /// tests do not need a vault or a relay to have something to be inside of.
+    fn plant_session(rt: &ComradeRuntime, peer_npub: &str, peer_hex: &str) {
+        let link = TogetherLink {
+            session: rt.together.clone(),
+            starts_seen: rt.together_starts_seen.clone(),
+        };
+        let (tx, _rx) = broadcast::channel(16);
+        let start = TogetherEnvelope::new(
+            "s-direct",
+            1,
+            now_ms(),
+            None,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        handle_together_envelope(&tx, &link, peer_npub, peer_hex, now_secs(), start);
+        assert!(rt.together.lock().unwrap().is_some(), "no session planted");
+    }
+
+    // ── The direct low-latency rung ──────────────────────────────────────────
+
+    /// The behaviour that makes the direct path safe to expose: no envelope
+    /// arriving on it can produce a session.
+    ///
+    /// Note what this does *not* prove. Two independent rules deliver it — the
+    /// `Start` refusal (`direct_signal_admissible`) and the fact that a sender
+    /// cannot be attributed without a live session — and this test passes on
+    /// either, so deleting one leaves it green. That was checked, not assumed.
+    /// `together::tests::a_direct_channel_may_not_carry_an_invitation` is what
+    /// pins the refusal itself.
+    #[test]
+    fn a_direct_channel_cannot_open_a_session() {
+        let rt = ComradeRuntime::new();
+        let mut rx = rt.subscribe_events();
+        let invite = together_json(
+            "s-hostile",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: true,
+            },
+        );
+        rt.together_receive_direct(&invite);
+        assert!(
+            rt.together.lock().unwrap().is_none(),
+            "a direct channel opened a session"
+        );
+        assert!(rx.try_recv().is_err(), "it also announced one");
+    }
+
+    /// Even inside a live session: a second invitation arriving down the channel
+    /// must not be able to replace the session it is riding on.
+    #[test]
+    fn a_direct_invite_inside_a_session_changes_nothing() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        let before = rt.together.lock().unwrap().as_ref().map(|s| s.id.clone());
+        let mut rx = rt.subscribe_events();
+        rt.together_receive_direct(&together_json(
+            "s-other",
+            9,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 600_000,
+                playing: true,
+            },
+        ));
+        let after = rt.together.lock().unwrap().as_ref().map(|s| s.id.clone());
+        assert_eq!(before, after, "a direct invite replaced the live session");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// With no session there is nothing to attribute a signal to, and nothing in
+    /// the payload names a sender — so it is dropped rather than guessed at.
+    #[test]
+    fn a_direct_signal_with_no_session_reaches_nothing() {
+        let rt = ComradeRuntime::new();
+        let mut rx = rt.subscribe_events();
+        rt.together_receive_direct(&together_json(
+            "s-nobody",
+            4,
+            TogetherSignal::State {
+                pos_ms: 90_000,
+                playing: true,
+                effective_at_ms: None,
+            },
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The point of the rung: a command that took the fast path is applied
+    /// exactly as one that took the relay, because it is the same call.
+    #[test]
+    fn a_command_over_the_direct_channel_lands_like_one_over_a_relay() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        let mut rx = rt.subscribe_events();
+        rt.together_receive_direct(&together_json(
+            "s-direct",
+            2,
+            TogetherSignal::State {
+                pos_ms: 42_000,
+                playing: true,
+                effective_at_ms: None,
+            },
+        ));
+        let BridgeEvent::TogetherCommand(cmd) = rx.try_recv().unwrap() else {
+            panic!("a direct command did not surface");
+        };
+        assert!(cmd.playing);
+    }
+
+    /// Garbage on the socket is not a session-ending event: the far end of a
+    /// data channel is a peer, but the bytes on it are still unvalidated input.
+    #[test]
+    fn rubbish_on_the_direct_channel_is_ignored_not_fatal() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        let mut rx = rt.subscribe_events();
+        for junk in [
+            "",
+            "{",
+            "null",
+            "{\"comrade_together\":99}",
+            "not json at all",
+        ] {
+            rt.together_receive_direct(junk);
+        }
+        assert!(
+            rt.together.lock().unwrap().is_some(),
+            "junk ended the session"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Declaring a channel is what routes traffic to it, and un-declaring it
+    /// must put traffic back on the relay — there is no timeout behind it.
+    #[test]
+    fn declaring_and_dropping_a_channel_moves_the_traffic() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        let direct = || rt.together.lock().unwrap().as_ref().map(|s| s.direct_ready);
+        assert_eq!(direct(), Some(false), "a session starts on the relay");
+        rt.together_direct_ready(true);
+        assert_eq!(direct(), Some(true));
+        rt.together_direct_ready(false);
+        assert_eq!(direct(), Some(false), "a dead channel must fall back");
+    }
+
+    /// Announcing a channel with no session is a no-op rather than a panic: the
+    /// frontend's connection callbacks are not synchronised with session teardown.
+    #[test]
+    fn declaring_a_channel_with_no_session_is_harmless() {
+        let rt = ComradeRuntime::new();
+        rt.together_direct_ready(true);
+        assert!(rt.together.lock().unwrap().is_none());
+    }
+
     fn a_film() -> TogetherContent {
         TogetherContent::local_file(
             7_200_000,
@@ -13207,6 +13522,7 @@ mod tests {
             peer_at_ms: now_ms(),
             last_heard_ms: now_ms(),
             last_seek_ms: 0,
+            direct_ready: false,
             local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
