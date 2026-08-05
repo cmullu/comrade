@@ -117,6 +117,7 @@ import mullu.comrade.ui.StarIcon
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
 import mullu.comrade.ui.TaskListScreen
+import mullu.comrade.ui.QueueMusicIcon
 import mullu.comrade.ui.TimerIcon
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.purgeDecryptedMedia
@@ -1457,17 +1458,13 @@ private fun ComradeDrawerSheet(
 }
 
 /**
- * Settings as a full-screen pushed destination with a back arrow, replacing the
- * shell (and its bottom bar) entirely while open — not a bottom-nav tab.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-/**
  * The public feed, as a pushed screen.
  *
  * It was a bottom-nav tab until Together took that slot. Kept whole and one tap
  * from anywhere rather than removed: the argument for moving it was that a feed
  * is somewhere you *go*, which is exactly what the drawer is for.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FeedPushedScreen(
     feedItems: List<ComradeCore.ChitthiInfo>,
@@ -1503,6 +1500,11 @@ private fun FeedPushedScreen(
     }
 }
 
+/**
+ * Settings as a full-screen pushed destination with a back arrow, replacing the
+ * shell (and its bottom bar) entirely while open — not a bottom-nav tab.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsPushedScreen(
     profile: ComradeCore.Profile,
