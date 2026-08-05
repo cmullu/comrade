@@ -48,7 +48,52 @@ export const TOGETHER_UI = Object.freeze({
   REPORT_MS: 1000,
   /** After this long with no word from them, say so rather than guess. */
   SILENCE_MS: 90_000,
+  /** A ratio outside these is a broken or hostile header, not a recording.
+   *  Mirrors `TogetherDecisions.MIN_ASPECT`/`MAX_ASPECT`. */
+  MIN_ASPECT: 0.25,
+  MAX_ASPECT: 4.0,
 });
+
+/**
+ * What the recording turned out to be, from the dimensions the player reports.
+ *
+ * A `<video>` element plays audio perfectly well — which is why there is only
+ * one of them — but it renders a black rectangle for a file with no picture, so
+ * someone sharing an album gets a large dead box above the controls. The
+ * element cannot answer this before `loadedmetadata`, and the picked MIME type
+ * is not an answer either: an `.mkv` of an album is `video/x-matroska` with no
+ * video track and a `.mp4` podcast is `video/mp4`.
+ *
+ * Deliberately identical to `TogetherDecisions.pictureOf` on Android, vectors
+ * and all, so the two frontends disagreeing is a red test rather than a field
+ * report (`docs/COMMS_ARCHITECTURE.md` ADR-2).
+ *
+ * @param {number} width `videoWidth`, 0 when there is no video track
+ * @param {number} height `videoHeight`
+ * @returns {{kind: "video", width: number, height: number} | {kind: "none"}}
+ */
+export function pictureOf(width, height) {
+  return width > 0 && height > 0
+    ? { kind: "video", width, height }
+    : { kind: "none" };
+}
+
+/**
+ * The shape to give the player, or `null` when there is no picture to shape.
+ *
+ * Clamped for the same reason as the Android side: the dimensions come out of a
+ * file the other person chose, and a header claiming `1x1000000` must produce
+ * something drawable rather than a layout that takes the window with it.
+ *
+ * @param {{kind: string, width?: number, height?: number}} picture
+ * @returns {number | null}
+ */
+export function aspectRatioOf(picture) {
+  if (!picture || picture.kind !== "video") return null;
+  const ratio = picture.width / picture.height;
+  if (!Number.isFinite(ratio) || ratio <= 0) return null;
+  return Math.min(Math.max(ratio, TOGETHER_UI.MIN_ASPECT), TOGETHER_UI.MAX_ASPECT);
+}
 
 /**
  * A ledger of player events an apply is about to cause.

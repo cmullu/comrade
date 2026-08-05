@@ -263,6 +263,24 @@ When a command DM is lost entirely, the heartbeat is the repair path: it
 carries `applied_seq`, so a peer who is *ahead* of us is adopted wholesale
 rather than corrected against.
 
+**A trim is sticky, so arriving back inside the deadband has to say so.** This
+is the third rule, and it was missing until a soak found it. A player told to
+run at 0.96× keeps running at 0.96× until it is told otherwise — neither
+`MediaPlayer` nor a `<video>` element resets itself — and `trim_rate` cannot
+return `1.0` for any drift large enough to have provoked a correction. So a
+verdict of `Hold` on the way back into the deadband left the trim applied: the
+follower ran permanently at least 2.5% off speed, coasted out the far side of
+the deadband, and was trimmed the other way. Bounded, never divergent, and
+never settled either.
+
+`sync_verdict` therefore returns `Nudge { rate: 1.0 }` rather than `Hold` when
+a trim is applied and the gap has closed, which is what `SyncSample::local_rate`
+is for. Over two simulated hours (`together_soak`) that is **4 rate changes
+instead of 191, and 271 ms of worst-case drift instead of 479 ms**. Worth
+naming because of *where* it would have been noticed: a ±4% wobble is invisible
+on video and an audible tempo and pitch error on music, so "listen together"
+would have been the broken half while "watch together" looked fine.
+
 ## 5. Timing
 
 | Constant | Value | Why |
@@ -369,12 +387,42 @@ FFI bridges, the Tauri commands, the desktop decision module, and the **Android
 frontend end to end** — player, screen, entry point in the conversation bar, and
 a foreground service so a session keeps playing when the app is backgrounded.
 
+Read "tested" narrowly, because it has already been read too widely once. Every
+lane in this repo asserts about *values*; not one of them looks at a pixel. Two
+bugs shipped through a green board on exactly that gap — a film that played as
+sound because nothing gave the decoder a surface, and a session that drew as
+floating text over whatever tab was behind it because the overlay had no
+background — and both were obvious within a second of opening the app on a
+device. What CI can hold is the decision underneath a rendering bug:
+`pictureOf`, `aspectRatioOf` and `keepScreenOn` are pinned on both frontends
+against the same vectors. Whether anything reached the screen is still a human
+with a phone.
+
 Android specifics worth knowing:
 
 - **`MediaPlayer`, not Media3.** The deciding detail is `seekTo(long,
   SEEK_CLOSEST)`, which needs API 26 and `minSdk` is 26. The plain `seekTo(int)`
   lands on the nearest sync frame — with 5–10 s keyframe spacing that is a sync
   failure dressed up as a working feature. No new dependency.
+- **The picture needs a surface, and it is not optional.** A `MediaPlayer` with
+  no surface decodes video and discards it, so a film plays as sound with no
+  error anywhere — which is exactly how this shipped and how it was reported.
+  `TogetherPlayer.attachSurface` and `VideoSurface` in `TogetherScreen.kt` are
+  the fix. The surface and the player have **independent lifetimes**: the
+  surface is destroyed and recreated on every rotation while the session must
+  survive both, so the player holds the last surface it was handed and
+  re-attaches on `open`, and the holder callbacks are the only thing that
+  decides what exists. Detaching passes `null` before the player is released,
+  because a destroyed `Surface` the decoder still holds is a use-after-free in
+  the media server rather than a leak.
+- **Audio-only draws no surface at all.** `TogetherDecisions.pictureOf` reads
+  the decoder's reported dimensions — `0` means no video track — because the
+  picked MIME type cannot answer it: an `.mkv` of an album is
+  `video/x-matroska` and a `.mp4` podcast is `video/mp4`. Desktop makes the
+  same call in `together_sync.mjs` from `videoWidth`, against the same test
+  vectors, so a `<video>` element does not show a black rectangle over
+  someone's music either. Only a *playing* video holds the screen awake; two
+  hours of audio must not.
 - **Background playback is real**, via `FOREGROUND_SERVICE_MEDIA_PLAYBACK` and a
   **framework** `MediaSession` (`android.media.session`, API 21) rather than
   `androidx.media3.session` — same media-key routing, no ~2 MB dependency for

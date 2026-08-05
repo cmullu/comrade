@@ -56,6 +56,13 @@ object TogetherManager {
             val positionMs: Long,
             val durationMs: Long,
             val status: Status,
+            /**
+             * Whether this recording turned out to have a picture, and how big.
+             * Known only after the decoder reports it, so it starts as
+             * [TogetherDecisions.Picture.None] and the surface appears when
+             * there is something to put on it.
+             */
+            val picture: TogetherDecisions.Picture = TogetherDecisions.Picture.None,
         ) : UiState
     }
 
@@ -419,8 +426,23 @@ object TogetherManager {
             override fun onError(message: String) {
                 Log.w(TAG, "player: $message")
             }
+
+            override fun onVideoSize(width: Int, height: Int) {
+                refreshLive(picture = TogetherDecisions.pictureOf(width, height))
+            }
         })
         p.open(uri)
+    }
+
+    /**
+     * Hand the player the window to draw into, or take it away.
+     *
+     * Called by the screen as its surface is created and destroyed — which
+     * happens on every rotation, independently of the session. The player holds
+     * the last value, so the order the two arrive in does not matter.
+     */
+    fun attachSurface(surface: android.view.Surface?) {
+        player?.attachSurface(surface)
     }
 
     /** The one place a player callback becomes an outbound signal, or does not. */
@@ -460,12 +482,14 @@ object TogetherManager {
         playing: Boolean? = null,
         positionMs: Long? = null,
         status: Status? = null,
+        picture: TogetherDecisions.Picture? = null,
     ) {
         val live = _state.value as? UiState.Live ?: return
         _state.value = live.copy(
             playing = playing ?: live.playing,
             positionMs = positionMs ?: live.positionMs,
             status = status ?: live.status,
+            picture = picture ?: live.picture,
         )
     }
 

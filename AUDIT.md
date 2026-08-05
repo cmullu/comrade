@@ -717,6 +717,42 @@ is small; the content problem is the real constraint:
 > - **The Flutter app has no together surface** — all six events are dropped
 >   one variant at a time in `rust_comrade_repository.dart` so that building one
 >   is a compile error rather than a silent no-op.
+> - ~~**A film played as sound, and the session drew as invisible text over
+>   whatever tab was behind it.**~~ **Resolved 2026-08-05**, both reported from
+>   a real device and both structural rather than incidental.
+>   `TogetherPlayer` drove a `MediaPlayer` that was never given a surface —
+>   which decodes video and discards it — and `TogetherScreen` rendered no
+>   surface to give it; `TogetherPlayer.attachSurface` and the `SurfaceView` in
+>   `ui/TogetherScreen.kt`'s `VideoSurface` close that, with the two lifetimes
+>   kept separate because the surface dies on every rotation and the player must
+>   not. The overlay had no background at all, unlike `CallOverlay` which covers
+>   the app the same way; `TogetherOverlay` now supplies one and swallows the
+>   taps that were reaching the tab underneath. The half that could be pinned
+>   here was: `TogetherDecisions.pictureOf`/`aspectRatioOf` decide video from
+>   audio and clamp a hostile header, mirrored in `together_sync.mjs` with the
+>   same vectors on both sides. **The rendering itself is verified on a device,
+>   not by a test** — nothing in CI looks at a pixel.
+> - ~~**A rate trim was never taken back off.**~~ **Resolved 2026-08-05**, found
+>   by the new soak rather than by review. `trim_rate` cannot return `1.0` for
+>   any drift big enough to have provoked it, and `sync_verdict` returned `Hold`
+>   once inside the deadband — so after its first correction a follower ran
+>   permanently ≥2.5% off speed, sailed back out the far side and was trimmed
+>   the other way, forever. `sync_verdict` now returns `Nudge { rate: 1.0 }` on
+>   the way in, using the new `SyncSample::local_rate`; over two simulated hours
+>   that is **4 rate changes instead of 191, and 271 ms of worst-case drift
+>   instead of 479**. Invisible on video and an audible tempo wobble on music,
+>   which is why "listen together" is where it would have been reported.
+> - ~~**The soak the plan called for was never written.**~~ **Resolved
+>   2026-08-05**: `crates/comrade_core/tests/together_soak.rs`, `#[ignore]`d and
+>   gated by `.github/workflows/together.yml` — the `feed_flood_load`
+>   arrangement, and the reason the trim bug above is now a red test. Its first
+>   draft passed while simulating **no drift at all** (integer division rounded
+>   0.8 ms/beat to zero); the fractional accumulator and the "worst drift" line
+>   in its output exist so a future inert version is visible rather than green.
+> - **Nothing in CI renders anything.** Both bugs above were visible instantly
+>   on a device and invisible to 332 JS tests, 514 core tests and two emulator
+>   lanes, because every one of them asserts about values rather than pixels. A
+>   screenshot test on the emulator lanes is the honest fix and is not built.
 >
 > And the limit no test count can cover: **no session and no transfer has ever
 > run between two real devices.** The wire, the clock filter, the drift verdict,

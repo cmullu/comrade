@@ -1250,6 +1250,14 @@ pub struct SyncSample {
     pub local_output_latency_ms: u64,
     /// The same figure for the peer, as they reported it.
     pub peer_output_latency_ms: u64,
+    /// The rate trim currently applied to our player, as an absolute
+    /// multiplier — `1.0` when none is.
+    ///
+    /// Needed because a trim is *sticky*: a player told to run at 0.96 keeps
+    /// running at 0.96 until it is told otherwise, and nothing else in this
+    /// sample says whether that has happened. Without it the ladder can only
+    /// ever say "trim harder", never "stop trimming".
+    pub local_rate: f64,
 }
 
 /// What to do about the peer's reported position.
@@ -1317,7 +1325,20 @@ pub fn sync_verdict(s: &SyncSample, t: SyncTuning) -> SyncVerdict {
     let drift_ms = local_audible_pos_ms(s) - peer_pos_now;
     let deadband = t.min_deadband_ms.max(s.clock.uncertainty_at(s.now_ms)) as i64;
     if drift_ms.abs() <= deadband {
-        return SyncVerdict::Hold;
+        // Caught up — so stop trimming. A trim is sticky, and this rule is the
+        // only thing that ever takes one off: `trim_rate` cannot return 1.0 for
+        // any drift large enough to have provoked it, so without this the
+        // player stays permanently at least 2.5% off speed after its first
+        // correction, sails through the deadband, and is trimmed back the other
+        // way — a sawtooth that never settles. `together_soak` measures it: 191
+        // rate changes over two simulated hours before this branch existed, 4
+        // after, with the worst drift down from 479 ms to 271 ms. Invisible on
+        // video, and an audible tempo wobble on music.
+        return if rate_is_neutral(s.local_rate) {
+            SyncVerdict::Hold
+        } else {
+            SyncVerdict::Nudge { rate: 1.0 }
+        };
     }
 
     if drift_ms.unsigned_abs() <= TOGETHER_SEEK_THRESHOLD_MS && t.can_rate_trim {
@@ -1364,6 +1385,16 @@ pub fn projected_peer_pos_ms(s: &SyncSample) -> i64 {
 /// latency, the same correction applied to the peer above.
 pub fn local_audible_pos_ms(s: &SyncSample) -> i64 {
     s.local_pos_ms as i64 - s.local_output_latency_ms as i64
+}
+
+/// Whether a reported rate is "no trim applied".
+///
+/// A tolerance rather than `== 1.0` because the value makes a round trip
+/// through a player that is free to quantise it — `MediaPlayer` and the DOM
+/// both report back something close to, not identical to, what they were
+/// given, and an exact comparison would leave a trim on forever.
+fn rate_is_neutral(rate: f64) -> bool {
+    !rate.is_finite() || (rate - 1.0).abs() < 0.001
 }
 
 /// The rate that closes `drift_ms` over [`TOGETHER_CORRECTION_WINDOW_MS`],
@@ -2305,6 +2336,7 @@ mod tests {
             we_lead: false,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
+            local_rate: 1.0,
         }
     }
 
@@ -2323,6 +2355,57 @@ mod tests {
     fn a_gap_inside_the_deadband_is_left_alone() {
         let s = follower(60_000, 60_100, measured(100));
         assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+    }
+
+    /// A rate trim is sticky — the player keeps it until told otherwise — so
+    /// arriving back inside the deadband has to *say* so. Without this the
+    /// follower stays permanently off-speed after its first correction and
+    /// sawtooths across the deadband forever; `together_soak` measures the
+    /// difference over two hours (191 rate changes against 4).
+    #[test]
+    fn coming_back_inside_the_deadband_takes_the_trim_off() {
+        let mut s = follower(60_000, 60_100, measured(100));
+        s.local_rate = 0.96;
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Nudge { rate: 1.0 });
+    }
+
+    #[test]
+    fn an_untrimmed_player_inside_the_deadband_is_still_left_alone() {
+        // The steady state has to stay silent, or a ten-second heartbeat
+        // becomes a periodic producer on the critical bus.
+        let s = follower(60_000, 60_100, measured(100));
+        assert_eq!(sync_verdict(&s, fine()), SyncVerdict::Hold);
+    }
+
+    /// The rate makes a round trip through a player free to quantise it, so
+    /// "neutral" is a tolerance. An exact comparison against 1.0 would leave a
+    /// trim on forever on any device that rounds.
+    #[test]
+    fn a_rate_a_player_rounded_still_counts_as_neutral() {
+        let mut s = follower(60_000, 60_100, measured(100));
+        for reported in [1.0, 0.9999, 1.0001] {
+            s.local_rate = reported;
+            assert_eq!(
+                sync_verdict(&s, fine()),
+                SyncVerdict::Hold,
+                "{reported} should read as no trim applied",
+            );
+        }
+    }
+
+    /// Taking a trim off must not resurrect a player the user paused, and must
+    /// not fight a leader who is not correcting at all.
+    #[test]
+    fn a_trim_is_not_taken_off_by_someone_who_is_not_correcting() {
+        let mut paused = follower(60_000, 60_100, measured(100));
+        paused.local_rate = 0.96;
+        paused.local_playing = false;
+        assert_eq!(sync_verdict(&paused, fine()), SyncVerdict::Hold);
+
+        let mut leader = follower(60_000, 60_100, measured(100));
+        leader.local_rate = 0.96;
+        leader.we_lead = true;
+        assert_eq!(sync_verdict(&leader, fine()), SyncVerdict::Hold);
     }
 
     /// The central honesty claim of this module, pinned: with a two-second round

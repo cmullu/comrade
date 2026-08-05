@@ -2494,6 +2494,14 @@ code {
   border-radius: 8px;
   background: #000;
 }
+/* Audio-only: the same element, collapsed to its controls. A <video> renders a
+   black rectangle for a file with no picture, and a shared album should not get
+   a dead box the height of a film. `together_sync.mjs` decides which this is. */
+.together-player-audio {
+  height: 54px;
+  max-height: 54px;
+  background: var(--panel, #161616);
+}
 
 /* ── In-chat commands (see desktop/ui/chat_commands.mjs) ──────────────────── */
 

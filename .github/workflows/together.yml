@@ -1,0 +1,96 @@
+# Watch/listen together — the lane that owns this feature's evidence.
+#
+# It exists for one job the other workflows genuinely do not do: run
+# `together_soak`, which is `#[ignore]`d and therefore invisible to
+# `cargo test --workspace`. That is the same arrangement `feed_flood_load`
+# has in `ci.yml` — an expensive check gets its own gate rather than slowing
+# every commit — and the rule from `.claude/rules/rust.md` is that a guard
+# behind an `#[ignore]` needs a lane or it never runs at all.
+#
+# The soak is deterministic despite the name: injected clock, no relay, no
+# sleeping, no randomness. A failure here is a regression, not a flake.
+#
+# Push-only, matching every other workflow in this repo. A `pull_request`
+# trigger would double every run, since all PRs come from same-repo branches
+# (the audit's O6).
+name: Together
+
+on:
+  push:
+    branches: ["**"]
+    # Scoped deliberately: this lane is additional to `ci.yml`, not a
+    # replacement for it, so it should only cost anything when the feature it
+    # covers is touched. The Rust unit tests and the JS decision vectors still
+    # run on every push through their own workflows regardless.
+    paths:
+      - "crates/comrade_core/src/together.rs"
+      - "crates/comrade_core/tests/together_soak.rs"
+      - "crates/comrade_ui/src/runtime.rs"
+      - "desktop/ui/together_sync*.mjs"
+      - "desktop/ui/together_parity.test.mjs"
+      - "android/app/src/main/java/mullu/comrade/together/**"
+      - "android/app/src/test/java/mullu/comrade/together/**"
+      - ".github/workflows/together.yml"
+
+concurrency:
+  group: together-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  soak:
+    name: Together — two-hour soak
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # `--nocapture` so the measured line ("N seeks, N nudges, worst drift
+      # N ms") lands in the log. The assertions are the gate, but those numbers
+      # are how a tuning change gets judged — they are the only place the
+      # feature reports what it actually does over a full film.
+      - name: Two hours of heartbeats
+        run: >
+          cargo test -p comrade_core --test together_soak --locked
+          -- --ignored --nocapture
+
+      - name: Together unit tests
+        run: cargo test -p comrade_core --locked together
+
+  decisions:
+    name: Together — cross-frontend decisions
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # No package.json and no npm install — these are plain `node:test` files,
+      # the same way `ci.yml` runs the rest of `desktop/ui`.
+      #
+      # `together_parity.test.mjs` is the one that reads the *Kotlin* source and
+      # asserts its constants still match the JS ones. It is why this job is not
+      # redundant with the desktop lane: it fails when an Android-only edit
+      # moves a shared number, which is a change no Rust or JS test would see.
+      - name: Decision vectors and cross-frontend parity
+        run: node --test desktop/ui/together_sync.test.mjs desktop/ui/together_parity.test.mjs

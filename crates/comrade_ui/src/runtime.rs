@@ -746,6 +746,10 @@ struct TogetherSession {
     last_heard_ms: u64,
     /// Our clock when we last moved the playhead automatically.
     last_seek_ms: u64,
+    /// The rate trim we last asked this device's player for. Tracked because a
+    /// trim is sticky — see `SyncSample::local_rate`; without it the ladder can
+    /// never take one back off.
+    local_rate: f64,
     /// How far behind our reported position the sound actually leaves this
     /// device's speaker, as the frontend measured it. Zero means unmeasured.
     local_output_latency_ms: u64,
@@ -6083,6 +6087,7 @@ impl RuntimeHandles {
                 peer_at_ms: at_ms,
                 last_heard_ms: at_ms,
                 last_seek_ms: 0,
+                local_rate: 1.0,
                 local_output_latency_ms: 0,
                 peer_output_latency_ms: 0,
                 clock: ClockFilter::new(),
@@ -7570,6 +7575,7 @@ fn handle_together_envelope(
             peer_at_ms: env.at_ms,
             last_heard_ms: at,
             last_seek_ms: 0,
+            local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
             clock: ClockFilter::new(),
@@ -7675,6 +7681,7 @@ fn handle_together_envelope(
                 peer_at_ms: session.peer_at_ms,
                 now_ms: at,
                 last_seek_ms: session.last_seek_ms,
+                local_rate: session.local_rate,
                 clock,
                 we_lead: session.we_lead,
                 local_output_latency_ms: session.local_output_latency_ms,
@@ -7720,6 +7727,7 @@ fn handle_together_envelope(
                 peer_at_ms: env.at_ms,
                 now_ms: at,
                 last_seek_ms: session.last_seek_ms,
+                local_rate: session.local_rate,
                 clock,
                 we_lead: session.we_lead,
                 local_output_latency_ms: session.local_output_latency_ms,
@@ -7736,6 +7744,8 @@ fn handle_together_envelope(
                 SyncVerdict::Seek { pos_ms } => {
                     session.last_seek_ms = at;
                     session.local_pos_ms = pos_ms;
+                    // A jump supersedes any trim that was closing the old gap.
+                    session.local_rate = 1.0;
                 }
                 SyncVerdict::Adopt {
                     pos_ms,
@@ -7746,7 +7756,12 @@ fn handle_together_envelope(
                     session.local_pos_ms = pos_ms;
                     session.local_playing = playing;
                     session.peer_pos_ms = pos_ms;
+                    // A jump supersedes any trim that was closing the old gap.
+                    session.local_rate = 1.0;
                 }
+                // Remember what we asked the player for: the next verdict needs
+                // it to know whether there is a trim left to take back off.
+                SyncVerdict::Nudge { rate } => session.local_rate = rate,
                 _ => {}
             }
             let session_id = session.id.clone();
@@ -13192,6 +13207,7 @@ mod tests {
             peer_at_ms: now_ms(),
             last_heard_ms: now_ms(),
             last_seek_ms: 0,
+            local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
             clock: ClockFilter::new(),

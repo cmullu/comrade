@@ -4479,6 +4479,26 @@
     if (el) el.textContent = text;
   }
 
+  /**
+   * Give the player the shape the file turned out to need.
+   *
+   * A `<video>` plays audio fine — which is why there is only one element — but
+   * it draws a black rectangle for a file with no picture, so an album shared
+   * with someone got a dead box the height of a film above the controls. The
+   * classification is `together_sync.mjs`, identical to the Android side, so
+   * the two frontends cannot answer this differently; this only applies it.
+   */
+  async function applyTogetherPicture() {
+    const player = $together.player();
+    if (!player) return;
+    const { pictureOf, aspectRatioOf } = await togetherSyncReady;
+    const ratio = aspectRatioOf(pictureOf(player.videoWidth || 0, player.videoHeight || 0));
+    player.classList.toggle("together-player-audio", ratio === null);
+    // Let the real ratio drive the box rather than a fixed max-height, so a
+    // vertical clip stops being letterboxed into a strip.
+    player.style.aspectRatio = ratio === null ? "" : String(ratio);
+  }
+
   function showTogetherPanel() {
     const panel = $together.panel();
     if (panel) panel.hidden = !state.activeContact;
@@ -5885,6 +5905,10 @@
     for (const type of ["play", "pause", "seeked", "ended"]) {
       $("#together-player").addEventListener(type, () => onTogetherLocalEvent(type));
     }
+    // One listener rather than a call beside each `src` assignment: the file
+    // arrives by two routes (picked here, or handed over by the other device)
+    // and only one of them ever waited for metadata.
+    $("#together-player").addEventListener("loadedmetadata", applyTogetherPicture);
     // Feed the runtime our playhead on a slow timer. Not a producer on the
     // event bus: the runtime only emits when the drift verdict is not `hold`.
     setInterval(reportTogetherPosition, 1000);

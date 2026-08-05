@@ -46,6 +46,8 @@ Match the paths above. With `--all`, run every runnable lane regardless.
 | `crates/**`, `src/**`, root `Cargo.toml` | `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets --locked -- -D warnings` · `cargo test --workspace --locked` |
 | `crates/comrade_core/src/media.rs`, or anything media/upload/fetch | **also** `cargo test -p comrade_core -p comrade_ui --features comrade_ui/media-http --locked` |
 | `crates/comrade_ui/**` feed, subscription or memory behaviour | **also** `cargo test -p comrade_ui --test feed_flood_load --locked -- --ignored --nocapture` |
+| `crates/comrade_core/src/together.rs`, or any sync tuning constant | **also** `cargo test -p comrade_core --test together_soak --locked -- --ignored --nocapture` — it is `#[ignore]`d, so `cargo test --workspace` does not run it |
+| `android/**/together/**` shared constants | **also** `node --test desktop/ui/together_parity.test.mjs` — it reads the Kotlin source, so an Android-only edit that moves a shared number fails here and nowhere else |
 | `desktop/ui/**` | `node --test desktop/ui/*.test.mjs` |
 | `desktop/src-tauri/**` | `cd desktop/src-tauri && cargo clippy --all-targets --locked -- -D warnings` (its own lane — `--workspace` excludes it) |
 | `crates/comrade_py/**` | `cargo test -p comrade_py` covers the logic only; the wheel needs `maturin`, unavailable here |
