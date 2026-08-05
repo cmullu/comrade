@@ -38,15 +38,34 @@ pub mod runtime;
 // bridge depends on `comrade_ui` alone, exactly as it does for every DTO.
 pub use comrade_core::share::transport::{RefusalReason, RelayPolicy};
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
-pub use comrade_core::together::{StateChange, SyncVerdict, TogetherContent};
+pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
+// The handoff wire types and the road decision, for the same reason: the desktop
+// shell takes a `HandoffSignal` as JSON and asks which road a size takes, and it
+// must get that answer from the core rather than keeping its own copy of the
+// threshold — a frontend with its own 10 MB constant is a frontend that
+// disagrees with the core the day the cap moves.
+pub use comrade_core::handoff::{
+    route_for_bytes, AttachmentHandoff, AttachmentRoute, HandoffSignal,
+};
+
+// The in-chat command grammar a bridge has to name: a composer calls
+// `parse_chat_command` on every keystroke and switches on the result, and the
+// `/`-autocomplete reads `chat_command_catalog`. Re-exported here for the same
+// reason the together wire types are — so a bridge depends on `comrade_ui` alone.
+pub use comrade_core::command::{AppAction, ChatCommand, CommandSpec, Mention, MusicService};
+pub use comrade_core::karya::TaskState;
+pub use runtime::play_route;
+
 pub use runtime::{
-    AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
-    CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
-    CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto, IceServerDto,
-    JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    MetricDto, PresenceDto, ProfileDto, ReadingDto, RuntimeHandles, SakhaStatusDto,
-    ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
-    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
+    AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto,
+    CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
+    ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto,
+    IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
+    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
+    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
+    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
+    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
+    TogetherShareDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

@@ -9,6 +9,8 @@ import 'package:comrade/src/data/models.dart';
 import 'package:comrade/src/screens/chats/conversation_screen.dart';
 import 'package:comrade/src/state/chat_providers.dart';
 import 'package:comrade/src/util/attachment_caption.dart';
+import 'package:comrade/src/util/chat_thread.dart';
+import 'package:comrade/src/util/message_reactions.dart';
 import 'package:comrade/src/widgets/media_attachment.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -55,6 +57,22 @@ String captionInSheet(WidgetTester tester) =>
         .controller
         ?.text ??
     '';
+
+/// Drag a bubble past the reply threshold and let go.
+///
+/// Reply is a rightward swipe now — the long press belongs to reactions. The
+/// distance comes from `replySwipeTriggerDp` rather than a literal so this cannot
+/// drift out from under the gesture it is exercising, plus `kDragSlopDefault`:
+/// `tester.drag` spends the first slop-worth of movement getting the recognizer
+/// to claim the gesture, and only the remainder is reported as drag deltas. Omit
+/// it and a drag that looks past the threshold arrives just short of it.
+Future<void> _swipeToReply(WidgetTester tester, Finder bubble) async {
+  await tester.drag(
+    bubble,
+    const Offset(replySwipeTriggerDp + kDragSlopDefault + 8, 0),
+  );
+  await tester.pumpAndSettle();
+}
 
 void main() {
   group('mergeChatItems', () {
@@ -279,8 +297,100 @@ void main() {
     });
   });
 
+  group('reacting to a message', () {
+    testWidgets('a long press reacts, and tapping the chip takes it back',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.alice), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.byType(MediaAttachmentBubble));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('message-actions')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('react-🔥')));
+      await tester.pumpAndSettle();
+
+      // The chip is drawn, marked as ours, and the store holds one row.
+      expect(find.byKey(const Key('reaction-🔥')), findsOneWidget);
+      final List<ReactionInfo> stored = await repo.reactions(FakePeers.alice);
+      expect(stored.length, 1);
+      expect(stored.single.emoji, '🔥');
+      expect(stored.single.outgoing, isTrue);
+
+      // Tapping the chip you are already in withdraws yours — the toggle, which
+      // the core decides and this screen only reflects.
+      await tester.tap(find.byKey(const Key('reaction-🔥')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('reaction-🔥')), findsNothing);
+      expect(await repo.reactions(FakePeers.alice), isEmpty);
+    });
+
+    testWidgets('the sheet can reply instead, and the sheet closes first',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.alice), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(find.byType(MediaAttachmentBubble));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('action-reply')));
+      await tester.pumpAndSettle();
+
+      // Gone, not merely covered: a reply focuses the composer, which cannot
+      // happen underneath a sheet.
+      expect(find.byKey(const Key('message-actions')), findsNothing);
+      expect(find.byKey(const Key('dm-reply-chip')), findsOneWidget);
+    });
+
+    testWidgets('a peer reacting to our message shows up live',
+        (WidgetTester tester) async {
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.alice), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      final String target = (await repo.messages(FakePeers.alice)).first.id;
+      repo.emit(IncomingReaction(ReactionInfo(
+        targetId: target,
+        peer: FakePeers.alice,
+        reactor: FakePeers.alice,
+        emoji: '👍',
+        createdAt: 1752321600,
+        outgoing: false,
+      )));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('reaction-👍')), findsOneWidget);
+
+      // …and withdrawing it takes the chip away again. An empty emoji is the
+      // withdrawal on the wire.
+      repo.emit(IncomingReaction(ReactionInfo(
+        targetId: target,
+        peer: FakePeers.alice,
+        reactor: FakePeers.alice,
+        emoji: '',
+        createdAt: 1752321700,
+        outgoing: false,
+      )));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('reaction-👍')), findsNothing);
+    });
+  });
+
   group('replying to an attachment', () {
-    testWidgets('a long press on media aims the composer at it',
+    testWidgets('a rightward swipe on media aims the composer at it',
         (WidgetTester tester) async {
       // The gap this closes: the reply target used to be typed `MessageInfo`,
       // so a thread's attachments were simply unrepliable. Nothing in the core
@@ -293,8 +403,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.byType(MediaAttachmentBubble));
-      await tester.pumpAndSettle();
+      await _swipeToReply(tester, find.byType(MediaAttachmentBubble));
 
       // The seeded attachment is a voice note with no caption: the chip has to
       // say *what* is being replied to, which is why the kind is always named.
@@ -315,8 +424,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.byType(MediaAttachmentBubble));
-      await tester.pumpAndSettle();
+      await _swipeToReply(tester, find.byType(MediaAttachmentBubble));
       await tester.enterText(find.byKey(const Key('dm-input')), 'heard it');
       await tester.pump();
       await tester.tap(find.byKey(const Key('dm-action')));
@@ -330,6 +438,35 @@ void main() {
       expect(find.textContaining('🎤 Voice message'), findsWidgets);
       expect(find.byKey(const Key('dm-reply-chip')), findsNothing,
           reason: 'sending clears the reply');
+    });
+  });
+
+  group('tapping a quote to go to the original', () {
+    testWidgets('the message being quoted is highlighted on arrival',
+        (WidgetTester tester) async {
+      // The seeded thread has "Safe travels." replying to "Boarded 🙂". Tapping
+      // its quote must land on the original *and* say which one it landed on —
+      // the scroll alone does not, which is what the highlight is for.
+      setWindowSize(tester, const Size(420, 900));
+      final FakeComradeRepository repo = await unlockedFake();
+
+      await tester.pumpWidget(
+        harness(const ConversationScreen(peer: FakePeers.alice), repo: repo),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('quote-target-highlight')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('quoted-preview-tap')));
+      await tester.pump();
+      expect(find.byKey(const Key('quote-target-highlight')), findsOneWidget);
+
+      // And it lets go on its own — a flash, not a selection that has to be
+      // dismissed. `pumpAndSettle` alone would not get there: the highlight is
+      // cleared by a timer, not by an animation finishing.
+      await tester.pump(quoteHighlightDuration + const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('quote-target-highlight')), findsNothing);
     });
   });
 
@@ -559,8 +696,7 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
-      await tester.longPress(find.byType(MediaAttachmentBubble));
-      await tester.pumpAndSettle();
+      await _swipeToReply(tester, find.byType(MediaAttachmentBubble));
       await tester.enterText(find.byKey(const Key('dm-input')), 'this one');
       await tester.pump();
       await tester.tap(find.byKey(const Key('dm-attach')));

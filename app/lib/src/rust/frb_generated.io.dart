@@ -30,7 +30,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  AttachmentHandoff dco_decode_attachment_handoff(dynamic raw);
+
+  @protected
+  AttachmentHandoffDto dco_decode_attachment_handoff_dto(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AttachmentHandoff dco_decode_box_autoadd_attachment_handoff(dynamic raw);
+
+  @protected
+  AttachmentHandoffDto dco_decode_box_autoadd_attachment_handoff_dto(
+      dynamic raw);
 
   @protected
   CallSignal dco_decode_box_autoadd_call_signal(dynamic raw);
@@ -48,6 +61,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityDto dco_decode_box_autoadd_identity_dto(dynamic raw);
 
   @protected
+  MediaBytesDto dco_decode_box_autoadd_media_bytes_dto(dynamic raw);
+
+  @protected
   MediaMessageDto dco_decode_box_autoadd_media_message_dto(dynamic raw);
 
   @protected
@@ -61,6 +77,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PresenceDto dco_decode_box_autoadd_presence_dto(dynamic raw);
+
+  @protected
+  ReactionDto dco_decode_box_autoadd_reaction_dto(dynamic raw);
 
   @protected
   Recording dco_decode_box_autoadd_recording(dynamic raw);
@@ -139,6 +158,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FoundProfileDto dco_decode_found_profile_dto(dynamic raw);
 
   @protected
+  HandoffSignal dco_decode_handoff_signal(dynamic raw);
+
+  @protected
   HangupReason dco_decode_hangup_reason(dynamic raw);
 
   @protected
@@ -214,6 +236,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<ReactionDto> dco_decode_list_reaction_dto(dynamic raw);
+
+  @protected
   List<TaraMessageDto> dco_decode_list_tara_message_dto(dynamic raw);
 
   @protected
@@ -235,6 +260,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MeshStatusDto dco_decode_mesh_status_dto(dynamic raw);
 
   @protected
+  MessageAuthor dco_decode_message_author(dynamic raw);
+
+  @protected
   MessageDto dco_decode_message_dto(dynamic raw);
 
   @protected
@@ -253,10 +281,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityDto? dco_decode_opt_box_autoadd_identity_dto(dynamic raw);
 
   @protected
+  MediaBytesDto? dco_decode_opt_box_autoadd_media_bytes_dto(dynamic raw);
+
+  @protected
   MusicLink? dco_decode_opt_box_autoadd_music_link(dynamic raw);
 
   @protected
   PresenceDto? dco_decode_opt_box_autoadd_presence_dto(dynamic raw);
+
+  @protected
+  ReactionDto? dco_decode_opt_box_autoadd_reaction_dto(dynamic raw);
 
   @protected
   Recording? dco_decode_opt_box_autoadd_recording(dynamic raw);
@@ -268,10 +302,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String>? dco_decode_opt_list_String(dynamic raw);
 
   @protected
+  PeerProfileDto dco_decode_peer_profile_dto(dynamic raw);
+
+  @protected
   PresenceDto dco_decode_presence_dto(dynamic raw);
 
   @protected
   ProfileDto dco_decode_profile_dto(dynamic raw);
+
+  @protected
+  ReactionDto dco_decode_reaction_dto(dynamic raw);
 
   @protected
   Recording dco_decode_recording(dynamic raw);
@@ -362,7 +402,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
+  AttachmentHandoff sse_decode_attachment_handoff(SseDeserializer deserializer);
+
+  @protected
+  AttachmentHandoffDto sse_decode_attachment_handoff_dto(
+      SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AttachmentHandoff sse_decode_box_autoadd_attachment_handoff(
+      SseDeserializer deserializer);
+
+  @protected
+  AttachmentHandoffDto sse_decode_box_autoadd_attachment_handoff_dto(
+      SseDeserializer deserializer);
 
   @protected
   CallSignal sse_decode_box_autoadd_call_signal(SseDeserializer deserializer);
@@ -382,6 +437,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityDto sse_decode_box_autoadd_identity_dto(SseDeserializer deserializer);
 
   @protected
+  MediaBytesDto sse_decode_box_autoadd_media_bytes_dto(
+      SseDeserializer deserializer);
+
+  @protected
   MediaMessageDto sse_decode_box_autoadd_media_message_dto(
       SseDeserializer deserializer);
 
@@ -398,6 +457,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PresenceDto sse_decode_box_autoadd_presence_dto(SseDeserializer deserializer);
+
+  @protected
+  ReactionDto sse_decode_box_autoadd_reaction_dto(SseDeserializer deserializer);
 
   @protected
   Recording sse_decode_box_autoadd_recording(SseDeserializer deserializer);
@@ -483,6 +545,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FoundProfileDto sse_decode_found_profile_dto(SseDeserializer deserializer);
 
   @protected
+  HandoffSignal sse_decode_handoff_signal(SseDeserializer deserializer);
+
+  @protected
   HangupReason sse_decode_hangup_reason(SseDeserializer deserializer);
 
   @protected
@@ -566,6 +631,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<ReactionDto> sse_decode_list_reaction_dto(SseDeserializer deserializer);
+
+  @protected
   List<TaraMessageDto> sse_decode_list_tara_message_dto(
       SseDeserializer deserializer);
 
@@ -591,6 +659,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MeshStatusDto sse_decode_mesh_status_dto(SseDeserializer deserializer);
 
   @protected
+  MessageAuthor sse_decode_message_author(SseDeserializer deserializer);
+
+  @protected
   MessageDto sse_decode_message_dto(SseDeserializer deserializer);
 
   @protected
@@ -611,11 +682,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  MediaBytesDto? sse_decode_opt_box_autoadd_media_bytes_dto(
+      SseDeserializer deserializer);
+
+  @protected
   MusicLink? sse_decode_opt_box_autoadd_music_link(
       SseDeserializer deserializer);
 
   @protected
   PresenceDto? sse_decode_opt_box_autoadd_presence_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  ReactionDto? sse_decode_opt_box_autoadd_reaction_dto(
       SseDeserializer deserializer);
 
   @protected
@@ -628,10 +707,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
 
   @protected
+  PeerProfileDto sse_decode_peer_profile_dto(SseDeserializer deserializer);
+
+  @protected
   PresenceDto sse_decode_presence_dto(SseDeserializer deserializer);
 
   @protected
   ProfileDto sse_decode_profile_dto(SseDeserializer deserializer);
+
+  @protected
+  ReactionDto sse_decode_reaction_dto(SseDeserializer deserializer);
 
   @protected
   Recording sse_decode_recording(SseDeserializer deserializer);
@@ -729,7 +814,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
+  void sse_encode_attachment_handoff(
+      AttachmentHandoff self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_attachment_handoff_dto(
+      AttachmentHandoffDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_attachment_handoff(
+      AttachmentHandoff self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_attachment_handoff_dto(
+      AttachmentHandoffDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_call_signal(
@@ -752,6 +853,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       IdentityDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_media_bytes_dto(
+      MediaBytesDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_media_message_dto(
       MediaMessageDto self, SseSerializer serializer);
 
@@ -770,6 +875,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_presence_dto(
       PresenceDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_reaction_dto(
+      ReactionDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_recording(
@@ -862,6 +971,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       FoundProfileDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_handoff_signal(HandoffSignal self, SseSerializer serializer);
+
+  @protected
   void sse_encode_hangup_reason(HangupReason self, SseSerializer serializer);
 
   @protected
@@ -952,6 +1064,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       Uint8List self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_reaction_dto(
+      List<ReactionDto> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_tara_message_dto(
       List<TaraMessageDto> self, SseSerializer serializer);
 
@@ -978,6 +1094,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_mesh_status_dto(MeshStatusDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_message_author(MessageAuthor self, SseSerializer serializer);
+
+  @protected
   void sse_encode_message_dto(MessageDto self, SseSerializer serializer);
 
   @protected
@@ -998,12 +1117,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       IdentityDto? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_media_bytes_dto(
+      MediaBytesDto? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_music_link(
       MusicLink? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_presence_dto(
       PresenceDto? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_reaction_dto(
+      ReactionDto? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_recording(
@@ -1016,10 +1143,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_peer_profile_dto(
+      PeerProfileDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_presence_dto(PresenceDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_profile_dto(ProfileDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_reaction_dto(ReactionDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_recording(Recording self, SseSerializer serializer);

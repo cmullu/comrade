@@ -205,6 +205,64 @@ pub fn new_call_id() -> String {
     hex::encode(bytes)
 }
 
+// ── Is a call signal too old to act on? ──────────────────────────────────────
+//
+// Relays redeliver at least once and the Vault inbox backfills up to two days
+// on every launch, so without a staleness check a days-old `Offer` re-rings
+// every time the app starts. That is the whole job.
+//
+// It was implemented as `now - created_at > 90`, and `created_at` is the
+// *sender's* clock. Nothing tolerated the two clocks disagreeing, which makes
+// the check a live hazard rather than a guard: a peer whose clock is more than
+// ninety seconds slow has *every* call signal dropped — offer, answer, ICE and
+// hangup alike — while their chat messages, which have no age check at all,
+// keep arriving perfectly. "Calls stopped working, messages are fine" is the
+// exact shape of that, it needs no code change to start happening, and no log
+// line says "stale" loudly enough to connect the two.
+//
+// The asymmetry was already visible in the old code: a `saturating_sub` meant a
+// *future* timestamp (their clock ahead of ours) silently became age zero and
+// passed, while the same error in the other direction dropped everything. A
+// guard whose behaviour depends on which way the clocks drift was never
+// deliberate.
+//
+// So: keep the two-day protection, and stop pretending the clocks agree.
+
+/// How old a call signal may be, by its sender's clock, before it is assumed to
+/// belong to a call that has already given up.
+///
+/// Ninety seconds is the real intent: both frontends' ring timeout is 45s and
+/// the connect timeout 30s, so nothing older than this can still matter to a
+/// live call.
+pub const CALL_SIGNAL_MAX_AGE_SECS: u64 = 90;
+
+/// Slack added to [`CALL_SIGNAL_MAX_AGE_SECS`] to absorb the two devices' clocks
+/// disagreeing.
+///
+/// Ten minutes is chosen from both ends. It is far more skew than a device with
+/// working time sync ever shows, so a genuinely stale signal is still rejected;
+/// and it is two orders of magnitude below the two-day backfill window this
+/// guard exists to filter, so a days-old offer still cannot re-ring. Widening
+/// this costs nothing but a slightly longer window in which a redelivered
+/// signal for a dead call is dispatched and then ignored by the state machine
+/// on `call_id`; getting it wrong the other way silently kills every call.
+pub const CALL_SIGNAL_CLOCK_SKEW_TOLERANCE_SECS: u64 = 600;
+
+/// Whether a call signal sent at `created_at` (the sender's clock) is too old to
+/// act on at `now` (ours).
+///
+/// A timestamp in the future is never stale: it means our clock is behind
+/// theirs, and the signal is if anything newer than we can tell.
+pub fn call_signal_is_stale(created_at: u64, now: u64) -> bool {
+    let Some(age) = now.checked_sub(created_at) else {
+        return false;
+    };
+    if created_at >= now {
+        return false;
+    }
+    age > CALL_SIGNAL_MAX_AGE_SECS + CALL_SIGNAL_CLOCK_SKEW_TOLERANCE_SECS
+}
+
 // ── Retrying a refused call signal ───────────────────────────────────────────
 //
 // A chat DM a relay refuses is queued in the outbox and retried for minutes
@@ -695,6 +753,61 @@ mod tests {
         assert_eq!(a.len(), 32, "128 bits as hex");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    /// The regression: the staleness guard compared `now` against the
+    /// *sender's* clock with no tolerance at all, so a peer whose clock ran
+    /// more than 90 seconds slow had every call signal dropped — while their
+    /// chat, which has no age check, kept arriving. "Calls stopped working,
+    /// messages are fine", from nothing but clock drift.
+    const HOUR: u64 = 3_600;
+    const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn a_peer_whose_clock_is_slow_can_still_call() {
+        // Five minutes of skew is unremarkable on a device with no working time
+        // sync; under the old `age > 90` rule it silenced every signal.
+        assert!(!call_signal_is_stale(NOW - 5 * 60, NOW));
+        // Right at the tolerance, still fine.
+        let edge = CALL_SIGNAL_MAX_AGE_SECS + CALL_SIGNAL_CLOCK_SKEW_TOLERANCE_SECS;
+        assert!(!call_signal_is_stale(NOW - edge, NOW));
+    }
+
+    #[test]
+    fn a_peer_whose_clock_is_fast_can_still_call() {
+        // Their clock ahead of ours: the signal is, as far as we can tell,
+        // newer than now. Never stale — and never a panic on the subtraction.
+        assert!(!call_signal_is_stale(NOW + 5 * 60, NOW));
+        assert!(!call_signal_is_stale(NOW + 2 * HOUR, NOW));
+        assert!(!call_signal_is_stale(NOW, NOW));
+    }
+
+    #[test]
+    fn a_signal_backfilled_from_a_previous_session_is_still_rejected() {
+        // The job this guard actually exists for: the Vault inbox re-scans up
+        // to two days on every launch, and a days-old Offer must not re-ring.
+        assert!(call_signal_is_stale(NOW - 2 * 24 * HOUR, NOW));
+        assert!(call_signal_is_stale(NOW - 24 * HOUR, NOW));
+        assert!(call_signal_is_stale(NOW - HOUR, NOW));
+        // Just past the tolerance.
+        let edge = CALL_SIGNAL_MAX_AGE_SECS + CALL_SIGNAL_CLOCK_SKEW_TOLERANCE_SECS;
+        assert!(call_signal_is_stale(NOW - edge - 1, NOW));
+    }
+
+    /// The two bounds the tolerance sits between. Compile-time, because both
+    /// sides are constants and a build is a better place to learn that someone
+    /// widened the tolerance past the backfill window this guard exists to
+    /// filter — or narrowed it back below real-world clock skew, which is the
+    /// regression above.
+    const _WINDOW_BOUNDS: () = {
+        assert!(
+            CALL_SIGNAL_MAX_AGE_SECS + CALL_SIGNAL_CLOCK_SKEW_TOLERANCE_SECS < 24 * 3_600,
+            "the staleness window must stay well inside the 2-day inbox backfill",
+        );
+        assert!(
+            CALL_SIGNAL_CLOCK_SKEW_TOLERANCE_SECS >= 300,
+            "the tolerance must cover the clock skew a real device shows",
+        );
+    };
 
     /// The regression: a relay that refuses a burst of trickled ICE used to
     /// cost the call every candidate — `send_call_signal` did one `send_dm` and

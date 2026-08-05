@@ -1137,3 +1137,236 @@ async fn accepted_peers_start_join_pause_and_end_a_session() {
     assert!(bob.together_session().is_none());
     assert!(alice.together_session().is_none());
 }
+
+// ── Tasks and offers over the real wire ──────────────────────────────────────
+//
+// The unit tests pin the state machine and the parser; these pin the thing
+// neither can reach from one process — that an assignment sent by one real
+// identity lands as a task on a second real identity's device, keyed by the same
+// id, and that the state change comes back.
+
+#[tokio::test]
+async fn a_task_assigned_by_one_person_lands_on_the_others_device_and_comes_back_done() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    // One call is enough for both directions: sending a DM accepts the
+    // recipient on the *sender's* side, so alice→bob already accepts bob for
+    // alice, and bob accepts alice's resulting request inside the helper. That
+    // matters here because bob's "done" has to arrive at an alice who has
+    // accepted him, or it would land as a message request instead.
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+
+    let assigned = alice
+        .assign_task(Some(bob_npub.clone()), "get some work done")
+        .await
+        .unwrap();
+    assert!(assigned.assigned_by_me);
+    assert!(!assigned.mine_to_do, "alice asked, she does not do it");
+
+    // Bob sees a readable line, not JSON — the bubble is rendered on receipt
+    // from the envelope, so only one event crossed the wire.
+    let bubble = wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::IncomingDirectMessage(m) if m.content.contains("get some work done"))
+    })
+    .await
+    .expect("bob must see the task as a message");
+    let BridgeEvent::IncomingDirectMessage(msg) = bubble else {
+        unreachable!()
+    };
+    assert!(
+        !msg.content.contains("comrade_karya"),
+        "the envelope must never reach a chat bubble: {}",
+        msg.content
+    );
+    assert_eq!(
+        comrade_core::karya::parse_task_line(&msg.content),
+        Some((
+            comrade_core::karya::TaskState::Open,
+            "get some work done".to_string()
+        ))
+    );
+
+    // …and a task row, keyed by the id alice minted.
+    assert!(
+        wait_until(RECV_TIMEOUT, || bob
+            .tasks()
+            .map(|t| t.iter().any(|t| t.id == assigned.id))
+            .unwrap_or(false))
+        .await,
+        "bob must hold the same task id alice created"
+    );
+    let bobs = bob.tasks().unwrap();
+    let his = bobs.iter().find(|t| t.id == assigned.id).unwrap();
+    assert_eq!(his.text, "get some work done");
+    assert_eq!(his.assigner, alice_npub);
+    assert!(his.mine_to_do, "bob was asked, so bob may finish it");
+    assert!(!his.assigned_by_me);
+
+    // Bob finishes it; alice's copy moves.
+    bob.set_task_state(&assigned.id, comrade_core::karya::TaskState::Done)
+        .await
+        .unwrap();
+    assert!(
+        wait_until(RECV_TIMEOUT, || alice
+            .tasks()
+            .map(|t| t
+                .iter()
+                .any(|t| t.id == assigned.id && t.state == comrade_core::karya::TaskState::Done))
+            .unwrap_or(false))
+        .await,
+        "alice must see the task she asked for come back done"
+    );
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn a_stranger_cannot_write_to_someone_elses_task_list() {
+    // The gate that matters most: a peer whose message request has not been
+    // accepted must not be able to put a row on your list — and the attempt
+    // must not surface as a message request full of JSON either.
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    alice
+        .assign_task(Some(bob_npub.clone()), "do this for me")
+        .await
+        .unwrap();
+
+    // Nothing about the task may surface — and in particular the envelope must
+    // not fall through to the message-request path, which would show bob a
+    // request preview full of JSON.
+    let leaked = wait_for(&mut bob_events, ABSENCE_TIMEOUT, |e| match e {
+        BridgeEvent::IncomingDirectMessage(m) => m.content.contains("do this for me"),
+        BridgeEvent::IncomingMessageRequest(r) => {
+            r.last_message.contains("do this for me") || r.last_message.contains("comrade_karya")
+        }
+        _ => false,
+    })
+    .await;
+    assert!(
+        leaked.is_none(),
+        "an unaccepted peer's task must not surface at all, got {leaked:?}"
+    );
+    assert!(
+        bob.tasks().unwrap().is_empty(),
+        "a stranger must not be able to write to bob's task list"
+    );
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn an_offer_reaches_a_comrade_as_a_readable_line() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+    // An offer only goes to a comrade — the existing "may reach me" grant.
+    alice.add_contact(&bob_npub, "bob").unwrap();
+    alice.set_comrade(&bob_npub, true).unwrap();
+
+    let outcome = alice
+        .offer_action(comrade_ui::AppAction::Breathe, vec![bob_npub.clone()])
+        .await
+        .unwrap();
+    assert_eq!(outcome.sent, vec![bob_npub.clone()]);
+    assert!(outcome.not_comrades.is_empty());
+    assert!(outcome.failed.is_empty());
+
+    let bubble = wait_for(
+        &mut bob_events,
+        RECV_TIMEOUT,
+        |e| matches!(e, BridgeEvent::IncomingDirectMessage(m) if m.content.contains("deep breath")),
+    )
+    .await
+    .expect("bob must see the offer as a message");
+    let BridgeEvent::IncomingDirectMessage(msg) = bubble else {
+        unreachable!()
+    };
+    // The wording the owner asked for, and no JSON.
+    assert!(msg
+        .content
+        .contains("Your comrade asked you to take a deep breath"));
+    assert!(msg.content.contains("they are here for you"));
+    assert!(!msg.content.contains("comrade_offer"));
+    assert_eq!(
+        comrade_core::command::parse_offer_line(&msg.content),
+        Some(comrade_ui::AppAction::Breathe),
+        "the frontend must be able to read the action back out to offer a button"
+    );
+
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn an_offer_that_arrives_twice_raises_one_bubble() {
+    // A message can reach us over both transports under *different* event ids,
+    // so the `get_message` check inside `deliver_synthetic_line` cannot pair
+    // them — `is_cross_transport_duplicate` can, because the envelope bytes are
+    // identical. Without it every `/comrade-breathe` that took both routes
+    // showed two bubbles and sent two receipts.
+    //
+    // Driven through the public API: alice offers, then offers again after the
+    // cooldown is bypassed by a second identity, which is the closest a
+    // two-process test can get to one message on two routes. The unit-level
+    // proof is that both dispatcher arms call the dedup before applying.
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+    alice.add_contact(&bob_npub, "bob").unwrap();
+    alice.set_comrade(&bob_npub, true).unwrap();
+
+    alice
+        .offer_action(comrade_ui::AppAction::Breathe, vec![bob_npub.clone()])
+        .await
+        .unwrap();
+    wait_for(
+        &mut bob_events,
+        RECV_TIMEOUT,
+        |e| matches!(e, BridgeEvent::IncomingDirectMessage(m) if m.content.contains("deep breath")),
+    )
+    .await
+    .expect("the first offer must arrive");
+
+    // A second identical envelope must not produce a second bubble.
+    assert!(
+        wait_for(&mut bob_events, ABSENCE_TIMEOUT, |e| {
+            matches!(e, BridgeEvent::IncomingDirectMessage(m) if m.content.contains("deep breath"))
+        })
+        .await
+        .is_none(),
+        "one offer must raise exactly one bubble"
+    );
+
+    relay.stop().await;
+}

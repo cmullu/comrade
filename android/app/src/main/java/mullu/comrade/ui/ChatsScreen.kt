@@ -2,8 +2,10 @@ package mullu.comrade.ui
 
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -19,32 +21,42 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,16 +69,21 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
@@ -78,13 +95,19 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.R
 import mullu.comrade.ComradeCore
 import mullu.comrade.Notifier
 import mullu.comrade.PresenceMonitor
+import mullu.comrade.handoff.AttachmentHandoffManager
 import mullu.comrade.media.VoiceRecorder
+import mullu.comrade.together.LibraryResolver
+import mullu.comrade.together.MediaLibraryAccess
+import mullu.comrade.together.TogetherManager
+import uniffi.comrade_ui.PlayRoute
 
 /**
  * Identity-stable avatar hues: the same key renders the same colour on every
@@ -508,6 +531,37 @@ fun ConversationScreen(
         draft = next
         if (next.text.isBlank()) ComradeCore.abandonDraft(peer) else ComradeCore.noteDraft(peer)
     }
+
+    // ── In-chat commands (grammar in `comrade_core::command`) ────────────────
+    //
+    // The `/` picker's rows, and whether the composer currently holds a private
+    // aside. Both are derived from the draft rather than stored, so they cannot
+    // fall out of step with what is actually in the box.
+    val commandCatalog = remember { runCatching { ComradeCore.chatCommandCatalog() }.getOrDefault(emptyList()) }
+    val pickerRows = remember(draft.text, commandCatalog) {
+        ChatCommands.pickerRows(draft.text, commandCatalog)
+    }
+    // Decided from the raw text, so it is right the moment `@tara ` is typed —
+    // before there is anything to parse. A private thing that looks like a
+    // message is how somebody sends one by accident, and now the reverse is
+    // possible too: `@tara` reaches the other person and `/tara` does not.
+    val taraAudience = remember(draft.text) { ChatCommands.taraDraft(draft.text) }
+    var commandNote by remember { mutableStateOf<String?>(null) }
+    // Which contact a user picked for an ambiguous `@handle`, by handle. Kept for
+    // the life of the conversation rather than the draft: someone who has just
+    // said which "ana" they meant should not be asked again on the next command.
+    // `ChatCommands.withChoices` refuses a pin that no longer names a candidate,
+    // so a stale one cannot retarget a message.
+    var mentionChoices by remember(peer) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // The question the composer is currently asking about a handle, if any. Keyed
+    // on `peer` like the rest of the per-thread state: a question raised in one
+    // conversation means nothing in the next.
+    var choosing by remember(peer) { mutableStateOf<ComposerPlan.Choose?>(null) }
+    // A question about an ambiguous handle belongs to the text that raised it, so
+    // editing the box withdraws it rather than leaving a chooser hanging over a
+    // draft it no longer describes. Keyed on the text, so it does not fire on the
+    // recomposition that *shows* the chooser — only when the draft actually moves.
+    LaunchedEffect(draft.text) { choosing = null }
     var emojiOpen by remember { mutableStateOf(false) }
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -515,6 +569,16 @@ fun ConversationScreen(
     // care which kind of event it names, so "reply to that photo" needs nothing
     // from the core that "reply to that message" did not already have.
     var replyingTo by remember { mutableStateOf<ChatItem?>(null) }
+    // Reactions on this thread, and which message a long press is acting on.
+    // Reloaded by the same effect as the messages, and re-read after every
+    // toggle so a chip reflects what the store actually holds rather than what
+    // the UI hoped for.
+    var reactions by remember(peer) { mutableStateOf<List<ComradeCore.ReactionInfo>>(emptyList()) }
+    var actingOn by remember { mutableStateOf<ChatItem?>(null) }
+    // The full picker, opened from the reaction row's "+" for anything outside
+    // the quick six. Held separately from `actingOn` because the action sheet
+    // closes when it opens, and the target has to outlive that.
+    var pickingFor by remember { mutableStateOf<ChatItem?>(null) }
     var attaching by remember { mutableStateOf(false) }
     // Voice notes: tap the action icon to record, tap again to send.
     var recording by remember { mutableStateOf(false) }
@@ -528,9 +592,13 @@ fun ConversationScreen(
     // the watermark advances — Telegram leaves the line where you found it for
     // the rest of the visit, which is what makes it useful to read down to.
     var unreadBoundaryKey by remember(peer) { mutableStateOf<String?>(null) }
+    // The item flashing because its quote was tapped to reach it. Keyed on the
+    // item key, not the index, for the same reason as the unread boundary above.
+    var highlightKey by remember(peer) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val recorder = remember { VoiceRecorder(context) }
     // What this device can actually capture, probed once. Capability-gated so a
     // tablet with no camera gets a mic and nothing to swap to, rather than a
@@ -561,6 +629,78 @@ fun ConversationScreen(
     // Keyed over the merged thread, not just the messages: a reply to an
     // attachment resolves to that attachment, and quoting it says what it was.
     val byId = remember(chatItems) { chatItems.associateBy { it.eventId } }
+    // Chips per message, grouped once per reaction change rather than per bubble
+    // per recomposition. `outgoing` is the "yours" marker rather than the local
+    // npub, which this screen has no reason to hold: the core already decided
+    // which rows this device sent.
+    val chipsByTarget = remember(reactions) {
+        reactions
+            .groupBy { it.targetId }
+            .mapValues { (_, rows) ->
+                summariseReactions(
+                    rows.map {
+                        ReactionRow(
+                            targetId = it.targetId,
+                            // Every outgoing row is collapsed to one synthetic
+                            // reactor id so `mine` is exactly "this device sent
+                            // one", with no npub lookup.
+                            reactor = if (it.outgoing) MINE_REACTOR else it.reactor,
+                            emoji = it.emoji,
+                        )
+                    },
+                    mineReactor = MINE_REACTOR,
+                )
+            }
+    }
+    // The emoji this device has on a given message, for the sheet's highlight.
+    val myReactionByTarget = remember(reactions) {
+        reactions.filter { it.outgoing }.associate { it.targetId to it.emoji }
+    }
+
+    /**
+     * Toggle a reaction and re-read the thread's reactions from the store.
+     *
+     * Re-reading rather than patching the list in place: the core owns whether a
+     * tap added, replaced or withdrew (see `ComradeRuntime::toggle_reaction`), and
+     * a local guess at which of the three happened is a second implementation of
+     * the rule that exists precisely so there is only one.
+     */
+    fun toggleReaction(item: ChatItem, emoji: String) {
+        scope.launch {
+            val (failure, fresh) = withContext(Dispatchers.IO) {
+                val failure = runCatching {
+                    ComradeCore.toggleReactionTyped(peer, item.eventId, emoji)
+                }.exceptionOrNull()
+                failure to runCatching { ComradeCore.reactions(peer) }.getOrNull()
+            }
+            if (failure != null) error = failure.message ?: "Could not react."
+            fresh?.let { reactions = it }
+        }
+    }
+
+    /**
+     * Go to the message a reply is quoting, and flash it on arrival.
+     *
+     * The flash is not decoration. The scroll lands the target somewhere in a
+     * screenful of other messages and says nothing about which one it was; without
+     * the highlight the jump reads as the thread having lost your place. The
+     * jump-to-latest button appears on the way, which is the way back.
+     *
+     * Does nothing when the original is not in the loaded thread — see
+     * [indexOfEventId]. Staying put is the honest outcome there.
+     */
+    fun goToQuoted(targetId: String?) {
+        val index = indexOfEventId(chatItems.map { it.eventId }, targetId) ?: return
+        val key = chatItems[index].key
+        highlightKey = key
+        scope.launch {
+            listState.animateScrollToItem(index)
+            delay(QUOTE_HIGHLIGHT_MS)
+            // Only the newest tap gets to end the flash, so tapping through a
+            // chain of replies keeps highlighting where you actually are.
+            if (highlightKey == key) highlightKey = null
+        }
+    }
 
     // `chatTick` is a GLOBAL event tick — it fires for activity in any
     // conversation, and repeatedly while this one is open. So a reload must
@@ -568,11 +708,19 @@ fun ConversationScreen(
     // auto-scroll only on first load or when they were already near it,
     // otherwise light up the jump-to-latest button instead.
     LaunchedEffect(peer, chatTick) {
-        val (msgs, media) = withContext(Dispatchers.IO) {
-            val msgs = runCatching { ComradeCore.messages(peer) }.getOrDefault(emptyList())
-            val media = runCatching { ComradeCore.media(peer) }.getOrDefault(emptyList())
-            msgs to media
+        val loaded = withContext(Dispatchers.IO) {
+            Triple(
+                runCatching { ComradeCore.messages(peer) }.getOrDefault(emptyList()),
+                runCatching { ComradeCore.media(peer) }.getOrDefault(emptyList()),
+                // Reactions ride the same tick: an IncomingReaction bumps
+                // chatTick, and reading them here rather than in their own
+                // effect keeps a bubble and its chips from being drawn a frame
+                // apart.
+                runCatching { ComradeCore.reactions(peer) }.getOrDefault(emptyList()),
+            )
         }
+        val (msgs, media) = loaded.first to loaded.second
+        reactions = loaded.third
         val grew = msgs.size + media.size > messages.size + mediaItems.size
         val wasNearBottom = isNearBottom(
             lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1,
@@ -630,9 +778,373 @@ fun ConversationScreen(
     // arriving; an empty composer makes this a no-op.
     DisposableEffect(peer) { onDispose { ComradeCore.abandonDraft(peer) } }
 
+    // The library permission and the command that needs it are two halves of a
+    // cycle: `/play` finds it missing, and the answer has to run `/play` again.
+    // Broken by going through state rather than by calling across it — the
+    // command only records what it wanted, the effect below puts the question,
+    // and the launcher's result runs the command once more. Keyed on `peer` so a
+    // question raised in one conversation cannot answer into the next.
+    var pendingLibraryAsk by remember(peer) { mutableStateOf<String?>(null) }
+
+    /**
+     * Act on an in-chat command, or return false to let [send] deliver the text.
+     *
+     * The grammar is Rust ([ComradeCore.parseChatCommand]) and the decision is
+     * [ChatCommands.planFor]; this only carries it out. Everything that touches
+     * a relay runs on IO, and the composer is cleared only once the call has
+     * actually succeeded — a command that failed must leave the text where the
+     * user can try again.
+     */
+    fun runCommand(text: String): Boolean {
+        val command = runCatching { ComradeCore.parseChatCommand(text) }.getOrNull()
+        if (command == null) {
+            // **Fail closed.** Returning false here would hand the text to
+            // [send], and for `/tara i can't stand my brother` that means
+            // sending somebody their own private thought. So anything that
+            // *looks* like a command is refused rather than delivered when the
+            // grammar is unreachable — `taraDraft` is pure Kotlin and cannot
+            // itself fail, which is why it can be trusted at this point.
+            if (ChatCommands.taraDraft(text) != null || text.startsWith("/")) {
+                commandNote = "Couldn't read that command — nothing was sent."
+                return true
+            }
+            return false
+        }
+        if (command is uniffi.comrade_core.ChatCommand.Plain ||
+            command is uniffi.comrade_core.ChatCommand.Pay
+        ) {
+            return false
+        }
+        val mentions = ChatCommands.withChoices(
+            runCatching { ComradeCore.resolveMentions(text) }.getOrDefault(emptyList()),
+            mentionChoices,
+        )
+        val plan = ChatCommands.planFor(command, mentions)
+
+        // Empties the composer. Deliberately does **not** touch [commandNote]:
+        // it used to, and every `/task` confirmation was erased on the line
+        // after it was set, so the command appeared to do nothing at all.
+        fun clearDraft() {
+            editDraft(TextFieldValue())
+        }
+
+        // Set and cleared in one place, so a chooser cannot outlive the draft
+        // that raised it: any other plan means the question no longer applies.
+        choosing = plan as? ComposerPlan.Choose
+
+        when (plan) {
+            is ComposerPlan.Send -> return false
+
+            // Say why and keep the text: a command the user has to retype is a
+            // command they stop using.
+            is ComposerPlan.Explain -> commandNote = plan.message
+
+            // Nothing to do here — the chooser is rendered from [choosing] above,
+            // and picking a row re-runs this whole function with the choice
+            // applied. The text stays in the box; it is still what the user meant.
+            is ComposerPlan.Choose -> Unit
+
+            is ComposerPlan.Help -> commandNote = commandCatalog.joinToString("\n") {
+                "/${it.name} ${it.argument} — ${it.help}"
+            }
+
+            is ComposerPlan.Aside -> {
+                sending = true
+                scope.launch {
+                    runCatching { withContext(Dispatchers.IO) { ComradeCore.taraAsideTyped(plan.text) } }
+                        .onSuccess { reply ->
+                            // Shown in the composer's own note, not as a chat
+                            // bubble: this never went anywhere, and putting it in
+                            // the thread would make it look as though it had.
+                            //
+                            // The helplines were missing here until now: an aside
+                            // that tripped the distress detector showed the reply
+                            // alone, so `AUDIT.md` §8's gate held on the Tara tab
+                            // and not in the composer that can reach the same
+                            // engine. The reply text asks the reader to call
+                            // somebody; leaving out *who* was the whole failure.
+                            val helplines = if (reply.crisis) {
+                                ChatCommands.crisisLines(
+                                    withContext(Dispatchers.IO) {
+                                        runCatching { ComradeCore.taraCrisisResources() }
+                                            .getOrDefault(emptyList())
+                                    },
+                                )
+                            } else {
+                                ""
+                            }
+                            commandNote = listOf(reply.text, helplines)
+                                .filter { it.isNotEmpty() }
+                                .joinToString("\n\n")
+                            editDraft(TextFieldValue())
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Tara could not answer."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.TaraHere -> {
+                sending = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            ComradeCore.taraInChatTyped(peer, plan.text)
+                        }
+                    }
+                        .onSuccess { turn ->
+                            if (turn.keptPrivate) {
+                                // Core refused to publish this one, and the note
+                                // has to say so: the user asked in the open and
+                                // is owed the fact that nothing was sent, or they
+                                // will assume the other person read it. The
+                                // helplines come with it — `AUDIT.md` §8's gate
+                                // holds wherever a distress reply is shown.
+                                val helplines = if (turn.crisis) {
+                                    ChatCommands.crisisLines(
+                                        withContext(Dispatchers.IO) {
+                                            runCatching { ComradeCore.taraCrisisResources() }
+                                                .getOrDefault(emptyList())
+                                        },
+                                    )
+                                } else {
+                                    ""
+                                }
+                                commandNote = listOf(
+                                    turn.reply,
+                                    "(Kept between us — this one wasn't sent.)",
+                                    helplines,
+                                ).filter { it.isNotEmpty() }.joinToString("\n\n")
+                            } else {
+                                // Both messages are already stored; appending
+                                // them beats a reload, which would race the relay
+                                // and could show the answer before the question.
+                                messages = messages +
+                                    listOfNotNull(turn.asked, turn.answered)
+                                commandNote = null
+                                scope.launch {
+                                    listState.scrollToItem(
+                                        messages.size + mediaItems.size - 1,
+                                    )
+                                }
+                            }
+                            clearDraft()
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Tara could not answer."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.Task -> {
+                sending = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            ComradeCore.assignTaskTyped(plan.peer, plan.text)
+                        }
+                    }
+                        .onSuccess {
+                            // Names where the list is: this screen owns no nav
+                            // state, so it cannot open Tasks itself, and a
+                            // confirmation about a list you cannot find is the
+                            // gap this screen used to have.
+                            commandNote = if (plan.peer != null) {
+                                "Asked them — it's under Tasks in the menu."
+                            } else {
+                                "Added to your list — it's under Tasks in the menu."
+                            }
+                            clearDraft()
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Could not add that."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.Offer -> {
+                sending = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            ComradeCore.offerActionTyped(plan.action, plan.peers)
+                        }
+                    }
+                        .onSuccess { outcome ->
+                            // A deliberate command that silently did nothing
+                            // reads as a bug, so say which of the three reasons
+                            // applied rather than guessing at the friendliest.
+                            commandNote = when {
+                                outcome.sent.isNotEmpty() -> null
+                                outcome.notComrades.isNotEmpty() ->
+                                    "Mark them a comrade first — this only goes to comrades."
+                                outcome.onCooldown.isNotEmpty() ->
+                                    "They were told recently — leaving them be for now."
+                                else -> "Couldn't reach them just now."
+                            }
+                            if (outcome.sent.isNotEmpty()) clearDraft()
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Could not send that."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.Open -> {
+                // Navigating out of a conversation from its own composer needs a
+                // host that owns the nav state; until `ConversationScreen` takes
+                // one, say where it is rather than doing nothing.
+                commandNote = "${ChatCommands.labelFor(plan.action)} is on the ${
+                    if (plan.action == uniffi.comrade_core.AppAction.BREATHE ||
+                        plan.action == uniffi.comrade_core.AppAction.FOCUS ||
+                        plan.action == uniffi.comrade_core.AppAction.READ
+                    ) {
+                        "Focus"
+                    } else {
+                        plan.action.name.lowercase().replaceFirstChar { c -> c.uppercase() }
+                    }
+                } tab."
+            }
+
+            is ComposerPlan.Play -> {
+                sending = true
+                scope.launch {
+                    // Three steps, and only the middle one is this frontend's:
+                    // core says what the query names, `MediaStore` says whether
+                    // a copy is here, and core turns those two answers into a
+                    // route. Nothing about *when* a session may open is decided
+                    // in this file.
+                    val target = withContext(Dispatchers.IO) {
+                        runCatching { ComradeCore.playQuery(plan.query, plan.service) }.getOrNull()
+                    }
+                    if (target == null) {
+                        // Fail closed, like the grammar above: a query nobody
+                        // resolved must not fall through to a file picker.
+                        commandNote = "Couldn't work out what to play — nothing was sent."
+                        sending = false
+                        return@launch
+                    }
+                    // Whether a copy on this phone would change the answer at
+                    // all, asked of core rather than decided here: for a Spotify
+                    // link the route is "open it there" either way, and putting
+                    // a permission dialog in front of someone to reach the same
+                    // sentence is the kind of prompt that teaches people to
+                    // refuse. Only a route that actually differs earns the ask.
+                    val libraryWouldMatter = target.recording != null &&
+                        withContext(Dispatchers.IO) {
+                            val withoutCopy = ComradeCore.playRoute(target.plan, false)
+                            val withCopy = ComradeCore.playRoute(target.plan, true)
+                            withoutCopy != null && withCopy != null && withoutCopy != withCopy
+                        }
+                    // "Not allowed to look" and "looked, not there" are different
+                    // problems with different next steps, so they are told apart
+                    // before either sentence is chosen. `askedBefore` defaults to
+                    // true if the preference cannot be read: an unreadable answer
+                    // must not turn into an endless prompt.
+                    val step = MediaLibraryAccess.next(
+                        granted = runCatching { LibraryResolver.mayRead(context) }
+                            .getOrDefault(false),
+                        askedBefore = runCatching { MediaLibraryAccess.asked(context) }
+                            .getOrDefault(true),
+                    )
+                    if (libraryWouldMatter && step == MediaLibraryAccess.Step.Ask) {
+                        // No sentence: the system dialog is about to say why, and
+                        // the whole command re-runs on the answer. The draft is
+                        // deliberately left alone so a refusal loses nothing.
+                        pendingLibraryAsk = text
+                        sending = false
+                        return@launch
+                    }
+                    val mayLook = step == MediaLibraryAccess.Step.Look
+                    val found = withContext(Dispatchers.IO) {
+                        target.recording?.takeIf { mayLook }?.let { want ->
+                            // Duration is unknown for words the user typed, and
+                            // `match_score` treats an unknown length as neutral
+                            // rather than as a mismatch — that is what lets
+                            // "Kun Faya Kun" match at all.
+                            runCatching { LibraryResolver.resolve(context, want, 0L) }.getOrNull()
+                        }
+                    }
+                    val route = withContext(Dispatchers.IO) {
+                        ComradeCore.playRoute(target.plan, found != null)
+                    }
+                    if (route == null) {
+                        commandNote = "Couldn't work out what to play — nothing was sent."
+                        sending = false
+                        return@launch
+                    }
+                    // Held locally rather than written straight to [commandNote]:
+                    // a note is only cleared when the user taps it, so a
+                    // conditional write would let the previous command's
+                    // sentence stand in for this one's.
+                    var failed: String? = null
+                    if (route == PlayRoute.START_TOGETHER && found != null) {
+                        // A label, not an npub: an invitation that says
+                        // "npub1…" wants to listen with you is unreadable.
+                        val label = withContext(Dispatchers.IO) {
+                            runCatching { ComradeCore.contacts() }.getOrNull()
+                                ?.firstOrNull { it.npub == peer }
+                                ?.let { peerTitle(it.npub, it.alias, it.name) }
+                                ?: shortNpub(peer)
+                        }
+                        runCatching {
+                            TogetherManager.start(context, peer, label, found.uri, found.recording)
+                        }
+                            .onSuccess { clearDraft() }
+                            .onFailure { failed = it.message ?: "Could not start that." }
+                    }
+                    // Said on every route, the successful one included: this
+                    // screen owns no nav state, so it can start the session but
+                    // cannot show it, and a session the user cannot find is the
+                    // same gap the task list had.
+                    commandNote = when {
+                        failed != null -> failed
+                        route == PlayRoute.ASK_FOR_FILE && !mayLook -> ChatCommands.LIBRARY_UNSEEN
+                        else -> ChatCommands.playNote(route, target.service, plan.query)
+                    }
+                    sending = false
+                }
+            }
+        }
+        return true
+    }
+
+    // The other half of the cycle described above [runCommand]. Declared here
+    // rather than beside the other launchers because its result calls
+    // [runCommand], which has to exist by this point.
+    val askToReadLibrary = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        val retry = pendingLibraryAsk
+        pendingLibraryAsk = null
+        // Recorded whatever the answer was: what makes a second ask pointless is
+        // that the question was already put. Android stops showing the dialog
+        // after a refusal, so asking again would be a button that does nothing.
+        runCatching { MediaLibraryAccess.rememberAsked(context) }
+        // Granted or refused, the command runs again and takes the route its
+        // answer allows — and cannot ask a second time, because `asked` is now
+        // true, so this terminates.
+        if (retry != null) runCommand(retry)
+    }
+    LaunchedEffect(pendingLibraryAsk) {
+        if (pendingLibraryAsk == null) return@LaunchedEffect
+        askToReadLibrary.launch(MediaLibraryAccess.permissionFor(Build.VERSION.SDK_INT))
+    }
+
     fun send() {
         val text = draft.text.trim()
         if (text.isEmpty() || sending) return
+        // A command is intercepted before anything reaches the DM path — an
+        // aside in particular must never be able to reach `sendDmReplyTyped`.
+        if (runCommand(text)) return
         sending = true
         error = null
         val replyId = replyingTo?.eventId
@@ -670,12 +1182,46 @@ fun ConversationScreen(
     fun sendAttachment(pending: PendingAttachment, caption: String) {
         if (attaching) return
         pendingAttachment = null
+        // Past the hosted ceiling the file does not go through a host at all: it
+        // is handed to the other device over a data channel, which the manager
+        // owns so that leaving this screen does not kill a 400 MB transfer. It
+        // deliberately produces no chat bubble — there is no NIP-94 event to make
+        // one from — so the handoff panel is what reports it.
+        if (pending.peerToPeer) {
+            val uri = pending.uri
+            if (uri == null) {
+                error = "Lost track of that file — pick it again."
+                return
+            }
+            val refusal = AttachmentHandoffManager.offer(
+                context = context,
+                peer = peer,
+                uri = uri,
+                fileName = pending.name,
+                mimeType = pending.mime,
+                caption = caption,
+                sizeBytes = pending.sizeBytes,
+            )
+            if (refusal != null) {
+                error = refusal
+                return
+            }
+            error = null
+            if (pending.consumesDraft) editDraft(TextFieldValue())
+            return
+        }
+        // Non-null for every hosted attachment: the road was chosen from the size
+        // and the bytes were read for exactly this call.
+        val bytes = pending.bytes ?: run {
+            error = "Lost track of that file — pick it again."
+            return
+        }
         attaching = true
         error = null
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    ComradeCore.sendMediaBytesTyped(peer, pending.mime, caption, pending.bytes)
+                    ComradeCore.sendMediaBytesTyped(peer, pending.mime, caption, bytes)
                 }
             }.onSuccess {
                 attaching = false
@@ -710,8 +1256,36 @@ fun ConversationScreen(
             name = name,
             mime = mime,
             bytes = bytes,
+            uri = null,
+            sizeBytes = bytes.size.toLong(),
             seedCaption = captionForAttachment(draft.text, replyPending),
             consumesDraft = captionConsumesDraft(draft.text, replyPending),
+            // Anything held in memory took the hosted road to get here: the cap
+            // is what made reading it safe.
+            peerToPeer = false,
+        )
+    }
+
+    // A pick too large for the hosted road. The bytes stay where they are — the
+    // URI is what gets sent from, a chunk at a time — so nothing about a 400 MB
+    // file is ever in memory on this side.
+    fun offerLargeAttachment(name: String, mime: String, uri: Uri, sizeBytes: Long) {
+        val refusal = peerToPeerAttachmentRejection(name, sizeBytes)
+        if (refusal != null) {
+            error = refusal
+            return
+        }
+        error = null
+        val replyPending = replyingTo != null
+        pendingAttachment = PendingAttachment(
+            name = name,
+            mime = mime,
+            bytes = null,
+            uri = uri,
+            sizeBytes = sizeBytes,
+            seedCaption = captionForAttachment(draft.text, replyPending),
+            consumesDraft = captionConsumesDraft(draft.text, replyPending),
+            peerToPeer = true,
         )
     }
 
@@ -726,20 +1300,37 @@ fun ConversationScreen(
             runCatching {
                 withContext(Dispatchers.IO) {
                     val described = describePickedFile(context, uri)
-                    // Refuse from the provider's own size where it reports one,
-                    // rather than slurping a 1 GB video into memory to learn it
-                    // is a 1 GB video.
-                    val declared = described.size
+                    // The size decides the road, so it is worth two cheap
+                    // questions before the expensive one: the provider's own
+                    // column, then the descriptor's `statSize`. Reading a 1 GB
+                    // video into memory to learn that it is a 1 GB video is what
+                    // both of them avoid.
+                    val declared = described.size ?: pickedFileLength(context, uri)
+                    val peerToPeer = declared != null &&
+                        ComradeCore.attachmentRouteForBytes(declared) ==
+                        uniffi.comrade_core.AttachmentRoute.PEER_TO_PEER
+                    if (peerToPeer) {
+                        peerToPeerAttachmentRejection(described.name, declared ?: 0)
+                            ?.let { throw IllegalStateException(it) }
+                        // No bytes: the transfer reads them from the provider as
+                        // the receiver asks for them.
+                        return@withContext PickedFile(described.name, described.mime, declared, null)
+                    }
                     if (declared != null) {
                         attachmentRejection(described.name, declared)
                             ?.let { throw IllegalStateException(it) }
                     }
                     val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                         ?: throw IllegalStateException("Could not read the file.")
-                    Triple(described.name, described.mime, bytes)
+                    PickedFile(described.name, described.mime, declared, bytes)
                 }
-            }.onSuccess { (name, mime, bytes) ->
-                offerAttachment(name, mime, bytes)
+            }.onSuccess { picked ->
+                val bytes = picked.bytes
+                if (bytes != null) {
+                    offerAttachment(picked.name, picked.mime, bytes)
+                } else {
+                    offerLargeAttachment(picked.name, picked.mime, uri, picked.size ?: 0)
+                }
             }.onFailure {
                 error = it.message ?: "Could not read the file."
             }
@@ -955,6 +1546,18 @@ fun ConversationScreen(
                     // own list items), so item indices keep matching `chatItems`
                     // and the scroll arithmetic above stays honest.
                     val prevAt = chatItems.getOrNull(index - 1)?.createdAt
+                    // Tinted while this item is the target of a quote tap, and
+                    // animated so the flash fades rather than blinking. Around the
+                    // bubble only, not the separators above it: a target that
+                    // happens to open a new day must not tint that day's header.
+                    val highlight by animateColorAsState(
+                        targetValue = if (item.key == highlightKey) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                        } else {
+                            Color.Transparent
+                        },
+                        label = "quote-target-highlight",
+                    )
                     Column(Modifier.fillMaxWidth()) {
                         if (startsNewDay(prevAt, item.createdAt)) {
                             DaySeparator(dayLabel(item.createdAt, nowSecs))
@@ -962,72 +1565,144 @@ fun ConversationScreen(
                         if (item.key == unreadBoundaryKey) {
                             UnreadSeparator(stringResource(R.string.unread_messages))
                         }
-                        when (item) {
-                            is ChatItem.MediaItem -> Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = if (item.info.outgoing) Arrangement.End else Arrangement.Start,
-                            ) {
-                                MediaAttachmentBubble(
-                                    item.info,
-                                    onReply = { replyingTo = item },
+                        // Reply is a *swipe* now and react is the long press —
+                        // Telegram's split. Long-press used to be reply, which
+                        // left reactions with no gesture to live on and made the
+                        // one discoverable interaction on a message the less
+                        // common of the two.
+                        //
+                        // The accessibility action is not a nicety here: a drag
+                        // and a long press are both invisible to a screen reader,
+                        // so without it reply and react would be gesture-only.
+                        val replyLabel = stringResource(R.string.message_action_reply)
+                        val reactLabel = stringResource(R.string.message_action_react)
+                        val gestureModifier = Modifier
+                            .fillMaxWidth()
+                            .semantics {
+                                customActions = listOf(
+                                    CustomAccessibilityAction(replyLabel) {
+                                        replyingTo = item
+                                        true
+                                    },
+                                    CustomAccessibilityAction(reactLabel) {
+                                        actingOn = item
+                                        true
+                                    },
                                 )
                             }
-                            is ChatItem.TextItem -> {
-                                val msg = item.msg
-                                val quoted = msg.replyTo?.let { byId[it] }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .combinedClickable(
-                                            onClick = {},
-                                            onLongClick = { replyingTo = item },
-                                        ),
-                                    horizontalArrangement = if (msg.outgoing) Arrangement.End else Arrangement.Start,
+                            .combinedClickable(
+                                onClick = {},
+                                onLongClick = { actingOn = item },
+                            )
+                        val chips = chipsByTarget[item.eventId].orEmpty()
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(highlight, RoundedCornerShape(18.dp)),
+                        ) {
+                            when (item) {
+                                is ChatItem.MediaItem -> SwipeToReply(
+                                    onReply = { replyingTo = item },
+                                    modifier = gestureModifier,
                                 ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(
-                                            topStart = 18.dp,
-                                            topEnd = 18.dp,
-                                            bottomStart = if (msg.outgoing) 18.dp else 6.dp,
-                                            bottomEnd = if (msg.outgoing) 6.dp else 18.dp,
-                                        ),
-                                        color = if (msg.outgoing) {
-                                            MaterialTheme.colorScheme.primaryContainer
+                                    Column(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalAlignment = if (item.info.outgoing) {
+                                            Alignment.End
                                         } else {
-                                            MaterialTheme.colorScheme.surfaceVariant
+                                            Alignment.Start
                                         },
-                                        tonalElevation = 1.dp,
-                                        modifier = Modifier.widthIn(max = 300.dp),
                                     ) {
-                                        Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
-                                            if (quoted != null) {
-                                                QuotedPreview(quoted.preview)
-                                            }
-                                            Text(msg.content, style = MaterialTheme.typography.bodyLarge)
-                                            Row(
-                                                modifier = Modifier
-                                                    .align(Alignment.End)
-                                                    .padding(top = 2.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        MediaAttachmentBubble(
+                                            item.info,
+                                            onReply = { replyingTo = item },
+                                        )
+                                        ReactionChips(chips) { toggleReaction(item, it) }
+                                    }
+                                }
+                                is ChatItem.TextItem -> {
+                                    val msg = item.msg
+                                    val quoted = msg.replyTo?.let { byId[it] }
+                                    // Tara sits on the left for *both* people,
+                                    // so this is not simply `msg.outgoing`: her
+                                    // answer is carried by whichever device
+                                    // asked, and aligning by who sent it would
+                                    // put one line on opposite sides of the two
+                                    // phones. It also drops the ticks from her
+                                    // bubble — true that this device sent it,
+                                    // but the question right above carries the
+                                    // same receipt, and a tick on a third
+                                    // party's line reads as a claim about her.
+                                    // Mirrored in `message_bubble.dart` and
+                                    // `main.js`.
+                                    val hers = msg.fromTara
+                                    val mine = msg.outgoing && !hers
+                                    SwipeToReply(
+                                        onReply = { replyingTo = item },
+                                        modifier = gestureModifier,
+                                    ) {
+                                        Column(
+                                            Modifier.fillMaxWidth(),
+                                            horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
+                                        ) {
+                                            Surface(
+                                                shape = RoundedCornerShape(
+                                                    topStart = 18.dp,
+                                                    topEnd = 18.dp,
+                                                    bottomStart = if (mine) 18.dp else 6.dp,
+                                                    bottomEnd = if (mine) 6.dp else 18.dp,
+                                                ),
+                                                color = when {
+                                                    hers -> MaterialTheme.colorScheme.tertiaryContainer
+                                                    mine -> MaterialTheme.colorScheme.primaryContainer
+                                                    else -> MaterialTheme.colorScheme.surfaceVariant
+                                                },
+                                                tonalElevation = 1.dp,
+                                                modifier = Modifier.widthIn(max = 300.dp),
                                             ) {
-                                                Text(
-                                                    clockTime(msg.createdAt),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.outline,
-                                                )
-                                                if (msg.outgoing) {
-                                                    Text(
-                                                        statusGlyph(msg.status),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = if (msg.status == "read") {
-                                                            MaterialTheme.colorScheme.primary
-                                                        } else {
-                                                            MaterialTheme.colorScheme.outline
-                                                        },
-                                                    )
+                                                Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                                                    if (hers) {
+                                                        Text(
+                                                            stringResource(R.string.tara_author_label),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                            modifier = Modifier.testTag("tara-author"),
+                                                        )
+                                                    }
+                                                    if (quoted != null) {
+                                                        QuotedPreview(quoted.preview) {
+                                                            goToQuoted(msg.replyTo)
+                                                        }
+                                                    }
+                                                    Text(msg.content, style = MaterialTheme.typography.bodyLarge)
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .align(Alignment.End)
+                                                            .padding(top = 2.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                    ) {
+                                                        Text(
+                                                            clockTime(msg.createdAt),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.outline,
+                                                        )
+                                                        if (mine) {
+                                                            Text(
+                                                                statusGlyph(msg.status),
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = if (msg.status == "read") {
+                                                                    MaterialTheme.colorScheme.primary
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.outline
+                                                                },
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             }
+                                            ReactionChips(chips) { toggleReaction(item, it) }
                                         }
                                     }
                                 }
@@ -1068,6 +1743,10 @@ fun ConversationScreen(
                 }
             }
         }
+
+        // A large attachment being handed straight to this peer, if there is
+        // one. Rendered from the manager's flow, so it survives this screen.
+        AttachmentHandoffPanel(peer)
 
         error?.let {
             Text(
@@ -1138,6 +1817,119 @@ fun ConversationScreen(
         // the pill read as one control instead of a row of loose buttons. Only
         // the round button (and its swap) live outside, because they are the
         // ones whose meaning changes.
+        // The `/` picker sits above the field so choosing a row does not shift
+        // the composer under the thumb mid-tap.
+        //
+        // **It scrolls, and it is capped.** A bare `/` matches the whole
+        // catalogue — every command in `comrade_core::command::catalog` — and each
+        // row is two lines, so an uncapped `Column` grew taller than the screen:
+        // the rows past the fold were unreachable and the thread was pushed out
+        // of sight. `heightIn` bounds it to roughly four rows, which is what
+        // leaves the conversation visible while you type.
+        if (pickerRows.isNotEmpty()) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = PICKER_MAX_HEIGHT)
+                    .padding(horizontal = 12.dp)
+                    .testTag("dm-command-picker"),
+            ) {
+                // Keyed by name, per `.claude/rules/android.md`: the list is
+                // re-filtered on every keystroke, and without a key the row state
+                // reattaches to whichever command now sits at that index.
+                items(pickerRows, key = { it.name }) { spec ->
+                    Text(
+                        text = "/${spec.name}  ${spec.argument}\n${spec.help}",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                editDraft(
+                                    TextFieldValue(ChatCommands.completionFor(spec)).let {
+                                        it.copy(selection = TextRange(it.text.length))
+                                    },
+                                )
+                            }
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                    )
+                }
+            }
+        }
+
+        // Two contacts answer to one handle, so ask which — rather than the dead
+        // end this used to be, which said "pick which one" and gave nothing to
+        // pick. The key is on every row: the whole reason the handle is ambiguous
+        // is often that both people also chose the same name.
+        choosing?.let { question ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = PICKER_MAX_HEIGHT)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("dm-mention-chooser"),
+            ) {
+                Text(
+                    text = stringResource(R.string.mention_which_one, question.handle),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                for (candidate in question.candidates) {
+                    Text(
+                        text = ChatCommands.candidateLabel(
+                            peerTitle(candidate.npub, candidate.alias, candidate.name),
+                            candidate.npub,
+                        ),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                mentionChoices = mentionChoices +
+                                    (question.handle to candidate.npub)
+                                // Re-run the same draft, now that the handle
+                                // resolves. The text never left the box, so this
+                                // is the command the user already meant.
+                                runCommand(draft.text.trim())
+                            }
+                            .padding(vertical = 8.dp),
+                    )
+                }
+            }
+        }
+
+        // Tara addressed from a chat must not look like a message — and now must
+        // not look like the *wrong audience* either. Said in words as well as in
+        // the field's own styling, because the words are what a first-time user
+        // needs and the styling is what a returning one reads at a glance.
+        taraAudience?.let { audience ->
+            Text(
+                text = stringResource(
+                    when (audience) {
+                        ChatCommands.TaraAudience.Private -> R.string.aside_only_you
+                        ChatCommands.TaraAudience.Shared -> R.string.tara_here_both_see
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .testTag("dm-aside-note"),
+            )
+        }
+
+        commandNote?.let { note ->
+            Text(
+                text = note,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { commandNote = null }
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("dm-command-note"),
+            )
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1148,7 +1940,17 @@ fun ConversationScreen(
             OutlinedTextField(
                 value = draft,
                 onValueChange = { editDraft(it) },
-                placeholder = { Text("Message") },
+                placeholder = {
+                    Text(
+                        when (taraAudience) {
+                            ChatCommands.TaraAudience.Private ->
+                                stringResource(R.string.aside_placeholder)
+                            ChatCommands.TaraAudience.Shared ->
+                                stringResource(R.string.tara_here_placeholder)
+                            null -> "Message"
+                        },
+                    )
+                },
                 shape = RoundedCornerShape(26.dp),
                 modifier = Modifier
                     .weight(1f)
@@ -1225,6 +2027,46 @@ fun ConversationScreen(
             // deleted.
             onDismiss = { pendingAttachment = null },
             onSend = { caption -> sendAttachment(pending, caption) },
+        )
+    }
+
+    // Long press on a message: react, or reach the actions.
+    actingOn?.let { item ->
+        MessageActionSheet(
+            myReaction = myReactionByTarget[item.eventId],
+            onReact = {
+                toggleReaction(item, it)
+                actingOn = null
+            },
+            onMoreEmoji = {
+                // Hand the target over before closing, or the picker opens with
+                // nothing to react to.
+                pickingFor = item
+                actingOn = null
+            },
+            onReply = {
+                replyingTo = item
+                actingOn = null
+            },
+            onCopy = {
+                clipboard.setText(AnnotatedString(item.preview))
+                actingOn = null
+            },
+            onDismiss = { actingOn = null },
+        )
+    }
+
+    // "+" from the reaction row: the same picker the composer uses, pointed at a
+    // message instead of the draft. Closes on a pick — unlike the composer's,
+    // where choosing several in a row is the common case; one message takes one
+    // reaction, so staying open would only invite a second toggle that undoes it.
+    pickingFor?.let { item ->
+        EmojiPickerSheet(
+            onPick = {
+                toggleReaction(item, it)
+                pickingFor = null
+            },
+            onDismiss = { pickingFor = null },
         )
     }
 }
@@ -1353,6 +2195,16 @@ private fun ComposerActionIcon(
  */
 private const val SWIPE_THRESHOLD_PX = 64f
 
+/**
+ * How tall the `/` picker and the mention chooser may grow before they scroll.
+ *
+ * Both sit between the thread and the composer, so their height is taken from
+ * the conversation. A bare `/` lists the entire catalogue and two contacts can
+ * answer to one handle — neither list has a small upper bound, and before this
+ * cap the rows past the fold could not be reached at all.
+ */
+private val PICKER_MAX_HEIGHT = 200.dp
+
 /** Centred "Today" / "Yesterday" / "12 Jul 2026" pill between days. */
 @Composable
 private fun DaySeparator(label: String) {
@@ -1408,24 +2260,267 @@ private fun UnreadSeparator(label: String) {
     }
 }
 
-/** A small quoted line rendered above a reply's own text. */
+/**
+ * A small quoted line rendered above a reply's own text.
+ *
+ * Tapping it goes to the message being quoted. [onTap] is null when there is
+ * nowhere to go — the original is outside the loaded history — and then the quote
+ * renders with no tap target and no accent bar, so a tap that could not work is
+ * never offered. Mirrors `message_bubble.dart`'s `QuotedPreview`.
+ */
 @Composable
-private fun QuotedPreview(text: String) {
+private fun QuotedPreview(text: String, onTap: (() -> Unit)? = null) {
+    val label = stringResource(R.string.message_goto_quoted)
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = 4.dp),
+            .padding(bottom = 4.dp)
+            .then(
+                if (onTap == null) {
+                    Modifier
+                } else {
+                    Modifier.clickable(onClickLabel = label, onClick = onTap)
+                },
+            ),
     ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // The accent bar is the affordance: it says "this points at something
+            // else", which is what makes the tap discoverable at all.
+            if (onTap != null) {
+                Box(
+                    Modifier
+                        .width(3.dp)
+                        .height(28.dp)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            }
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+// ── Reactions and the gestures that reach them ────────────────────────────────
+
+/**
+ * The reaction chips under one bubble. Tapping a chip toggles *your* reaction in
+ * it — adding yours if you were not in it, taking yours back if you were — which
+ * is why [ReactionChip.mine] has to be drawn: without the highlight, tapping is
+ * a coin flip between the two.
+ *
+ * Renders nothing at all for an empty list, so a message with no reactions costs
+ * no vertical space.
+ */
+@Composable
+private fun ReactionChips(chips: List<ReactionChip>, onToggle: (String) -> Unit) {
+    if (chips.isEmpty()) return
+    Row(
+        modifier = Modifier.padding(top = 3.dp).testTag("dm-reactions"),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        for (chip in chips) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (chip.mine) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                modifier = Modifier.clickable { onToggle(chip.emoji) },
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(chip.emoji, style = MaterialTheme.typography.labelLarge)
+                    // The count is only informative once more than one person is
+                    // in it; "🔥 1" is noise next to "🔥".
+                    if (chip.count > 1) {
+                        Text(
+                            chip.count.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (chip.mine) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * What a long press on a message opens: the quick reaction row, then the actions.
+ *
+ * A bottom sheet rather than the floating row Telegram anchors over the bubble.
+ * The reachability argument decides it: an anchored popup has to be positioned
+ * against a bubble that may be at the very top or bottom of the list, and the
+ * failure mode is a row half off screen. A sheet is always in the same place and
+ * always within a thumb's reach.
+ *
+ * [myReaction] is the emoji this device has already sent on this message, if any
+ * — highlighted, so it is visible that tapping it again removes it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageActionSheet(
+    myReaction: String?,
+    onReact: (String) -> Unit,
+    onMoreEmoji: () -> Unit,
+    onReply: () -> Unit,
+    onCopy: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        modifier = Modifier.testTag("message-actions"),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                for (emoji in QUICK_REACTIONS) {
+                    val mine = emoji == myReaction
+                    Surface(
+                        shape = CircleShape,
+                        color = if (mine) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                        } else {
+                            Color.Transparent
+                        },
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable { onReact(emoji) }
+                            .testTag("react-$emoji"),
+                    ) {
+                        Text(
+                            emoji,
+                            style = MaterialTheme.typography.headlineSmall,
+                            modifier = Modifier.padding(8.dp),
+                        )
+                    }
+                }
+                // Anything outside the six. Same sheet the composer's emoji
+                // button opens, so there is one picker in the app.
+                IconButton(onClick = onMoreEmoji, modifier = Modifier.testTag("react-more")) {
+                    Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.react_more))
+                }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            SheetAction(
+                icon = ReplyIcon,
+                label = stringResource(R.string.message_action_reply),
+                onClick = onReply,
+                testTag = "action-reply",
+            )
+            SheetAction(
+                icon = CopyIcon,
+                label = stringResource(R.string.message_action_copy),
+                onClick = onCopy,
+                testTag = "action-copy",
+            )
+        }
+    }
+}
+
+/** One full-width row of [MessageActionSheet]. */
+@Composable
+private fun SheetAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+/**
+ * Wraps a bubble so dragging it rightward and letting go replies to it.
+ *
+ * The arrow fades in behind the bubble as the drag approaches the trigger, so the
+ * gesture teaches itself — there is no other way to discover it. On release the
+ * offset returns to zero whether or not it fired, because the bubble is not a
+ * pane that stays open; the reply chip above the composer is the result.
+ *
+ * `onReply` is *also* exposed as a [CustomAccessibilityAction] by the caller: a
+ * drag is invisible to a screen reader, and reply must not be a gesture-only
+ * feature. The numbers live in [replySwipeOffsetDp] / [replySwipeTriggered] so a
+ * JVM test can pin them and the Flutter side can match them.
+ */
+@Composable
+private fun SwipeToReply(
+    onReply: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    var drag by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val offsetDp = replySwipeOffsetDp(drag)
+    val armed = replySwipeTriggered(drag)
+    Box(modifier) {
+        if (offsetDp > 1f) {
+            Icon(
+                ReplyIcon,
+                contentDescription = null,
+                tint = if (armed) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.outline
+                },
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 4.dp)
+                    .size(20.dp)
+                    .alpha((offsetDp / REPLY_SWIPE_TRIGGER_DP).coerceIn(0f, 1f)),
+            )
+        }
+        Box(
+            Modifier
+                .offset(x = offsetDp.dp)
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        // Accumulated in dp, not pixels, so the threshold means
+                        // the same distance on every screen density.
+                        drag += with(density) { delta.toDp().value }
+                    },
+                    onDragStopped = {
+                        if (replySwipeTriggered(drag)) onReply()
+                        drag = 0f
+                    },
+                ),
+        ) {
+            content()
+        }
     }
 }
 
@@ -1530,3 +2625,19 @@ fun RequestsScreen(
         }
     }
 }
+
+/**
+ * What a pick turned out to be, once the provider has been asked.
+ *
+ * [bytes] is null for a file taking the peer-to-peer road: it was deliberately
+ * not read, because the point of that road is that a 400 MB attachment never has
+ * to fit in memory. [size] is null only when neither the provider's `SIZE` column
+ * nor the descriptor's `statSize` knew — in which case the bytes were read and
+ * their length is the answer.
+ */
+private class PickedFile(
+    val name: String,
+    val mime: String,
+    val size: Long?,
+    val bytes: ByteArray?,
+)

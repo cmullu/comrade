@@ -574,6 +574,29 @@ impl SabhaEngine {
         name: &str,
         about: Option<&str>,
     ) -> Result<EventId, SabhaError> {
+        // `None` has always meant "don't touch the published bio", which is
+        // exactly `Leave` — so the old signature keeps its old meaning and every
+        // existing caller keeps its behaviour.
+        self.publish_profile_patch(ProfilePatch {
+            name,
+            about: about.map_or(MetadataEdit::Leave, MetadataEdit::Set),
+            picture: MetadataEdit::Leave,
+        })
+        .await
+    }
+
+    /// Publish our Kind-0 profile, saying explicitly which fields to touch.
+    ///
+    /// The reason this exists alongside [`Self::publish_profile`]: `Option<&str>`
+    /// cannot express both "leave what is published alone" and "remove it", and
+    /// both are needed. Launch republishes must leave a bio set from another
+    /// client untouched; a user clearing their own bio must actually clear it.
+    /// With one `Option` those are the same value.
+    pub async fn publish_profile_patch(
+        &self,
+        patch: ProfilePatch<'_>,
+    ) -> Result<EventId, SabhaError> {
+        let name = patch.name;
         // At onboarding this runs moments after `connect()` merely *initiated*
         // the relay dials; sending immediately would reach zero relays and the
         // handle would silently never become discoverable. Wait (bounded) for
@@ -581,7 +604,7 @@ impl SabhaEngine {
         wait_for_any_relay(&self.client, CONNECT_WAIT).await;
         // Best-effort: a missing/unreachable current profile merges from empty.
         let existing = self.fetch_profile(&self.our_pk).await.unwrap_or_default();
-        let metadata = merged_metadata(existing, name, about);
+        let metadata = merged_metadata(existing, &patch);
         let output = self
             .client
             .send_event_builder(EventBuilder::metadata(&metadata))
@@ -737,17 +760,54 @@ fn newest_metadata_per_author(
         .collect()
 }
 
-/// Overlay the handle (and optional about) onto the currently published
-/// profile, preserving every other field (picture, banner, nip05, lud16,
-/// custom fields, …) — Kind-0 replaces wholesale, so publishing a stub would
-/// wipe whatever the user set from other Nostr clients on the same keypair.
-fn merged_metadata(existing: Option<Metadata>, name: &str, about: Option<&str>) -> Metadata {
-    let mut metadata = existing.unwrap_or_default();
-    metadata.name = Some(name.to_string());
-    metadata.display_name = Some(name.to_string());
-    if let Some(about) = about {
-        metadata.about = Some(about.to_string());
+/// What to do with one field of a published profile.
+///
+/// Three states rather than an `Option`, because "leave it alone" and "remove
+/// it" are different intentions with the same `None`. Kind-0 replaces wholesale,
+/// so conflating them means either a launch wipes a bio somebody set elsewhere,
+/// or a user can never clear one. Both have to be expressible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetadataEdit<'a> {
+    /// Keep whatever is currently published, whoever published it.
+    #[default]
+    Leave,
+    /// Replace it with this.
+    Set(&'a str),
+    /// Remove the field.
+    Clear,
+}
+
+impl MetadataEdit<'_> {
+    /// Apply this edit to one field of the metadata being built.
+    fn apply(self, field: &mut Option<String>) {
+        match self {
+            MetadataEdit::Leave => {}
+            MetadataEdit::Set(value) => *field = Some(value.to_string()),
+            MetadataEdit::Clear => *field = None,
+        }
     }
+}
+
+/// Which fields of our published profile to write, and how.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfilePatch<'a> {
+    /// The @handle. Always written — it is the field Comrade owns, and every
+    /// caller has one.
+    pub name: &'a str,
+    pub about: MetadataEdit<'a>,
+    pub picture: MetadataEdit<'a>,
+}
+
+/// Overlay the patch onto the currently published profile, preserving every
+/// field it says nothing about (banner, nip05, lud16, custom fields, …) —
+/// Kind-0 replaces wholesale, so publishing a stub would wipe whatever the user
+/// set from other Nostr clients on the same keypair.
+fn merged_metadata(existing: Option<Metadata>, patch: &ProfilePatch<'_>) -> Metadata {
+    let mut metadata = existing.unwrap_or_default();
+    metadata.name = Some(patch.name.to_string());
+    metadata.display_name = Some(patch.name.to_string());
+    patch.about.apply(&mut metadata.about);
+    patch.picture.apply(&mut metadata.picture);
     metadata
 }
 
@@ -875,7 +935,14 @@ mod tests {
         published.picture = Some("https://example.com/me.png".into());
         published.lud16 = Some("me@wallet.example".into());
 
-        let merged = merged_metadata(Some(published), "new_name", None);
+        let merged = merged_metadata(
+            Some(published),
+            &ProfilePatch {
+                name: "new_name",
+                about: MetadataEdit::Leave,
+                picture: MetadataEdit::Leave,
+            },
+        );
         assert_eq!(merged.name.as_deref(), Some("new_name"));
         assert_eq!(merged.display_name.as_deref(), Some("new_name"));
         assert_eq!(merged.about.as_deref(), Some("my bio"), "bio preserved");
@@ -888,10 +955,93 @@ mod tests {
         assert_eq!(merged.lud16.as_deref(), Some("me@wallet.example"));
 
         // No published profile yet → clean two-field start (+ about if given).
-        let fresh = merged_metadata(None, "charlie", Some("hi"));
+        let fresh = merged_metadata(
+            None,
+            &ProfilePatch {
+                name: "charlie",
+                about: MetadataEdit::Set("hi"),
+                picture: MetadataEdit::Leave,
+            },
+        );
         assert_eq!(fresh.name.as_deref(), Some("charlie"));
         assert_eq!(fresh.about.as_deref(), Some("hi"));
         assert_eq!(fresh.picture, None);
+    }
+
+    #[test]
+    fn leave_set_and_clear_are_three_distinct_outcomes() {
+        // The reason `Option<&str>` was not enough: "don't touch it" and "remove
+        // it" both used to be `None`, so one of them was unreachable. A launch
+        // republish needs the first; a user clearing their bio needs the second.
+        let published = || {
+            let mut m = Metadata::new().name("me").about("my bio");
+            m.picture = Some("https://example.com/me.png".into());
+            Some(m)
+        };
+
+        let left = merged_metadata(
+            published(),
+            &ProfilePatch {
+                name: "me",
+                about: MetadataEdit::Leave,
+                picture: MetadataEdit::Leave,
+            },
+        );
+        assert_eq!(
+            left.about.as_deref(),
+            Some("my bio"),
+            "Leave must not touch it"
+        );
+        assert_eq!(left.picture.as_deref(), Some("https://example.com/me.png"));
+
+        let set = merged_metadata(
+            published(),
+            &ProfilePatch {
+                name: "me",
+                about: MetadataEdit::Set("new bio"),
+                picture: MetadataEdit::Set("https://example.com/new.png"),
+            },
+        );
+        assert_eq!(set.about.as_deref(), Some("new bio"));
+        assert_eq!(set.picture.as_deref(), Some("https://example.com/new.png"));
+
+        let cleared = merged_metadata(
+            published(),
+            &ProfilePatch {
+                name: "me",
+                about: MetadataEdit::Clear,
+                picture: MetadataEdit::Clear,
+            },
+        );
+        assert_eq!(cleared.about, None, "Clear must actually remove the field");
+        assert_eq!(cleared.picture, None);
+        // Clearing one field must not disturb the other, or "remove my picture"
+        // silently becomes "remove my picture and my bio".
+        let one = merged_metadata(
+            published(),
+            &ProfilePatch {
+                name: "me",
+                about: MetadataEdit::Leave,
+                picture: MetadataEdit::Clear,
+            },
+        );
+        assert_eq!(one.about.as_deref(), Some("my bio"));
+        assert_eq!(one.picture, None);
+    }
+
+    #[test]
+    fn the_old_publish_profile_signature_keeps_its_old_meaning() {
+        // `publish_profile(name, None)` has always meant "leave the bio alone".
+        // If that ever became `Clear`, every launch would wipe a bio set from
+        // another client — the exact bug the merge exists to prevent.
+        assert_eq!(
+            Option::<&str>::None.map_or(MetadataEdit::Leave, MetadataEdit::Set),
+            MetadataEdit::Leave
+        );
+        assert_eq!(
+            Some("hi").map_or(MetadataEdit::Leave, MetadataEdit::Set),
+            MetadataEdit::Set("hi")
+        );
     }
 
     #[test]

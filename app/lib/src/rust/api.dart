@@ -10,7 +10,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'api.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `pump_bridge_events`, `runtime`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ShareVerdictDto`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AttachmentRoute`, `ShareVerdictDto`
 
 /// The comrade_jni crate version (e.g. "0.1.0").
 String version() => RustLib.instance.api.crateApiVersion();
@@ -126,6 +126,27 @@ Future<MessageDto> sendDmReply(
     RustLib.instance.api.crateApiSendDmReply(
         target: target, content: content, replyTo: replyTo);
 
+/// React to a message in `peer`'s thread — or take an existing reaction back by
+/// passing the same emoji again. Returns the reaction now standing, or `None` if
+/// the tap withdrew one.
+///
+/// The toggle is decided on the Rust side (see `ComradeRuntime::toggle_reaction`)
+/// so this frontend and Android cannot disagree about what tapping an
+/// already-sent emoji means.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<ReactionDto?> toggleReaction(
+        {required String peer,
+        required String targetId,
+        required String emoji}) =>
+    RustLib.instance.api
+        .crateApiToggleReaction(peer: peer, targetId: targetId, emoji: emoji);
+
+/// Every reaction in `peer`'s conversation, oldest first, read from the encrypted
+/// store — so a thread opens with its reactions already drawn.
+Future<List<ReactionDto>> reactions({required String peer}) =>
+    RustLib.instance.api.crateApiReactions(peer: peer);
+
 /// Retry every DM sitting in the sender outbox because no relay would take it.
 /// Returns how many a relay accepted this pass.
 ///
@@ -188,6 +209,27 @@ Future<ProfileDto> profile() => RustLib.instance.api.crateApiProfile();
 
 Future<ProfileDto> setUsername({required String name}) =>
     RustLib.instance.api.crateApiSetUsername(name: name);
+
+/// Set (or clear, with an empty string) this identity's bio, and republish.
+Future<ProfileDto> setAbout({required String about}) =>
+    RustLib.instance.api.crateApiSetAbout(about: about);
+
+/// Everything a profile page draws for one peer, from the local cache alone —
+/// no relay round trip, so it answers offline and immediately.
+Future<PeerProfileDto> peerProfile({required String npub}) =>
+    RustLib.instance.api.crateApiPeerProfile(npub: npub);
+
+/// A peer's cached avatar bytes, or `None` to draw initials. Reads the encrypted
+/// store and never the network, so calling it discloses nothing to anyone.
+Future<MediaBytesDto?> peerAvatar({required String npub}) =>
+    RustLib.instance.api.crateApiPeerAvatar(npub: npub);
+
+/// Whether peer-published pictures may be fetched at all (default on).
+Future<bool> remoteAvatarsEnabled() =>
+    RustLib.instance.api.crateApiRemoteAvatarsEnabled();
+
+Future<void> setRemoteAvatarsEnabled({required bool on_}) =>
+    RustLib.instance.api.crateApiSetRemoteAvatarsEnabled(on_: on_);
 
 Future<ContactDto> addContact({required String npub, required String alias}) =>
     RustLib.instance.api.crateApiAddContact(npub: npub, alias: alias);
@@ -364,12 +406,20 @@ Future<IcePathKind> shareClassifyPath(
         localType: localType, remoteType: remoteType);
 
 /// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+///
+/// `consent_granted` answers a question a previous call asked by returning
+/// `NeedsConsent`. It can only turn that into `Allow`; a refusal stays refused
+/// however insistently a frontend claims consent.
 Future<TransferVerdict> shareTransferVerdict(
         {required IcePathKind path,
         required BigInt totalBytes,
-        required RelayPolicy policy}) =>
+        required RelayPolicy policy,
+        required bool consentGranted}) =>
     RustLib.instance.api.crateApiShareTransferVerdict(
-        path: path, totalBytes: totalBytes, policy: policy);
+        path: path,
+        totalBytes: totalBytes,
+        policy: policy,
+        consentGranted: consentGranted);
 
 /// Whether a transfer connection built under `policy` may be offered TURN.
 Future<bool> shareIceServersAllowed({required RelayPolicy policy}) =>
@@ -487,6 +537,58 @@ Future<String> syncLedger() => RustLib.instance.api.crateApiSyncLedger();
 Stream<BridgeEvent> bridgeEventStream() =>
     RustLib.instance.api.crateApiBridgeEventStream();
 
+class AttachmentHandoff {
+  final ShareOffer shape;
+  final String mimeType;
+  final String fileName;
+  final String caption;
+
+  const AttachmentHandoff({
+    required this.shape,
+    required this.mimeType,
+    required this.fileName,
+    required this.caption,
+  });
+
+  @override
+  int get hashCode =>
+      shape.hashCode ^ mimeType.hashCode ^ fileName.hashCode ^ caption.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentHandoff &&
+          runtimeType == other.runtimeType &&
+          shape == other.shape &&
+          mimeType == other.mimeType &&
+          fileName == other.fileName &&
+          caption == other.caption;
+}
+
+class AttachmentHandoffDto {
+  final String transferId;
+  final String peer;
+  final HandoffSignal signal;
+
+  const AttachmentHandoffDto({
+    required this.transferId,
+    required this.peer,
+    required this.signal,
+  });
+
+  @override
+  int get hashCode => transferId.hashCode ^ peer.hashCode ^ signal.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AttachmentHandoffDto &&
+          runtimeType == other.runtimeType &&
+          transferId == other.transferId &&
+          peer == other.peer &&
+          signal == other.signal;
+}
+
 @freezed
 sealed class BridgeEvent with _$BridgeEvent {
   const BridgeEvent._();
@@ -500,6 +602,9 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.incomingMedia(
     MediaMessageDto field0,
   ) = BridgeEvent_IncomingMedia;
+  const factory BridgeEvent.incomingReaction(
+    ReactionDto field0,
+  ) = BridgeEvent_IncomingReaction;
   const factory BridgeEvent.incomingCallSignal(
     CallSignalDto field0,
   ) = BridgeEvent_IncomingCallSignal;
@@ -546,6 +651,9 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.togetherShare(
     TogetherShareDto field0,
   ) = BridgeEvent_TogetherShare;
+  const factory BridgeEvent.attachmentHandoff(
+    AttachmentHandoffDto field0,
+  ) = BridgeEvent_AttachmentHandoff;
   const factory BridgeEvent.meshStatusChanged(
     MeshStatusDto field0,
   ) = BridgeEvent_MeshStatusChanged;
@@ -904,15 +1012,24 @@ class FoundProfileDto {
   final String npub;
   final String? name;
   final String? about;
+  final String? picture;
+  final String? nip05;
 
   const FoundProfileDto({
     required this.npub,
     this.name,
     this.about,
+    this.picture,
+    this.nip05,
   });
 
   @override
-  int get hashCode => npub.hashCode ^ name.hashCode ^ about.hashCode;
+  int get hashCode =>
+      npub.hashCode ^
+      name.hashCode ^
+      about.hashCode ^
+      picture.hashCode ^
+      nip05.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -921,7 +1038,27 @@ class FoundProfileDto {
           runtimeType == other.runtimeType &&
           npub == other.npub &&
           name == other.name &&
-          about == other.about;
+          about == other.about &&
+          picture == other.picture &&
+          nip05 == other.nip05;
+}
+
+@freezed
+sealed class HandoffSignal with _$HandoffSignal {
+  const HandoffSignal._();
+
+  const factory HandoffSignal.offer({
+    required AttachmentHandoff attachment,
+  }) = HandoffSignal_Offer;
+  const factory HandoffSignal.accept() = HandoffSignal_Accept;
+  const factory HandoffSignal.decline() = HandoffSignal_Decline;
+  const factory HandoffSignal.refuse({
+    required RefusalReason reason,
+  }) = HandoffSignal_Refuse;
+  const factory HandoffSignal.withdraw() = HandoffSignal_Withdraw;
+  const factory HandoffSignal.transport({
+    required TransferSignal signal,
+  }) = HandoffSignal_Transport;
 }
 
 enum HangupReason {
@@ -1111,12 +1248,19 @@ class MeshStatusDto {
           peerCount == other.peerCount;
 }
 
+enum MessageAuthor {
+  human,
+  tara,
+  ;
+}
+
 class MessageDto {
   final String id;
   final String peer;
   final String content;
   final BigInt createdAt;
   final bool outgoing;
+  final MessageAuthor author;
   final String? status;
   final String? replyTo;
 
@@ -1126,6 +1270,7 @@ class MessageDto {
     required this.content,
     required this.createdAt,
     required this.outgoing,
+    required this.author,
     this.status,
     this.replyTo,
   });
@@ -1137,6 +1282,7 @@ class MessageDto {
       content.hashCode ^
       createdAt.hashCode ^
       outgoing.hashCode ^
+      author.hashCode ^
       status.hashCode ^
       replyTo.hashCode;
 
@@ -1150,6 +1296,7 @@ class MessageDto {
           content == other.content &&
           createdAt == other.createdAt &&
           outgoing == other.outgoing &&
+          author == other.author &&
           status == other.status &&
           replyTo == other.replyTo;
 }
@@ -1215,6 +1362,81 @@ sealed class MusicLink with _$MusicLink {
   }) = MusicLink_Youtube;
 }
 
+class PeerProfileDto {
+  final String npub;
+  final String alias;
+  final String? name;
+  final String? about;
+  final String? picture;
+  final String? nip05;
+  final String? lud16;
+  final bool avatarCached;
+  final bool contact;
+  final bool comrade;
+  final bool blocked;
+  final bool online;
+  final BigInt lastSeenAt;
+  final bool peerMarkedUs;
+  final BigInt updatedAt;
+
+  const PeerProfileDto({
+    required this.npub,
+    required this.alias,
+    this.name,
+    this.about,
+    this.picture,
+    this.nip05,
+    this.lud16,
+    required this.avatarCached,
+    required this.contact,
+    required this.comrade,
+    required this.blocked,
+    required this.online,
+    required this.lastSeenAt,
+    required this.peerMarkedUs,
+    required this.updatedAt,
+  });
+
+  @override
+  int get hashCode =>
+      npub.hashCode ^
+      alias.hashCode ^
+      name.hashCode ^
+      about.hashCode ^
+      picture.hashCode ^
+      nip05.hashCode ^
+      lud16.hashCode ^
+      avatarCached.hashCode ^
+      contact.hashCode ^
+      comrade.hashCode ^
+      blocked.hashCode ^
+      online.hashCode ^
+      lastSeenAt.hashCode ^
+      peerMarkedUs.hashCode ^
+      updatedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PeerProfileDto &&
+          runtimeType == other.runtimeType &&
+          npub == other.npub &&
+          alias == other.alias &&
+          name == other.name &&
+          about == other.about &&
+          picture == other.picture &&
+          nip05 == other.nip05 &&
+          lud16 == other.lud16 &&
+          avatarCached == other.avatarCached &&
+          contact == other.contact &&
+          comrade == other.comrade &&
+          blocked == other.blocked &&
+          online == other.online &&
+          lastSeenAt == other.lastSeenAt &&
+          peerMarkedUs == other.peerMarkedUs &&
+          updatedAt == other.updatedAt;
+}
+
 class PresenceDto {
   final String peer;
   final bool online;
@@ -1249,14 +1471,25 @@ class PresenceDto {
 class ProfileDto {
   final String npub;
   final String? username;
+  final String? about;
+  final String? picture;
+  final bool avatarCached;
 
   const ProfileDto({
     required this.npub,
     this.username,
+    this.about,
+    this.picture,
+    required this.avatarCached,
   });
 
   @override
-  int get hashCode => npub.hashCode ^ username.hashCode;
+  int get hashCode =>
+      npub.hashCode ^
+      username.hashCode ^
+      about.hashCode ^
+      picture.hashCode ^
+      avatarCached.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1264,7 +1497,49 @@ class ProfileDto {
       other is ProfileDto &&
           runtimeType == other.runtimeType &&
           npub == other.npub &&
-          username == other.username;
+          username == other.username &&
+          about == other.about &&
+          picture == other.picture &&
+          avatarCached == other.avatarCached;
+}
+
+class ReactionDto {
+  final String targetId;
+  final String peer;
+  final String reactor;
+  final String emoji;
+  final BigInt createdAt;
+  final bool outgoing;
+
+  const ReactionDto({
+    required this.targetId,
+    required this.peer,
+    required this.reactor,
+    required this.emoji,
+    required this.createdAt,
+    required this.outgoing,
+  });
+
+  @override
+  int get hashCode =>
+      targetId.hashCode ^
+      peer.hashCode ^
+      reactor.hashCode ^
+      emoji.hashCode ^
+      createdAt.hashCode ^
+      outgoing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReactionDto &&
+          runtimeType == other.runtimeType &&
+          targetId == other.targetId &&
+          peer == other.peer &&
+          reactor == other.reactor &&
+          emoji == other.emoji &&
+          createdAt == other.createdAt &&
+          outgoing == other.outgoing;
 }
 
 class Recording {

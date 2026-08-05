@@ -1,11 +1,11 @@
-package mullu.comrade.together
+package mullu.comrade.transfer
 
 import uniffi.comrade_core.RefusalReason
 import uniffi.comrade_ui.ShareVerdictDto
 
 /**
  * The file-handover arithmetic, with **zero Android imports** so it runs on the
- * JVM in [mullu.comrade.together.ShareDecisionsTest].
+ * JVM in [mullu.comrade.transfer.ShareDecisionsTest].
  *
  * Every function here is a port of `comrade_core::share`, and the Rust test
  * vectors are ported alongside them — the same arrangement
@@ -28,6 +28,24 @@ object ShareDecisions {
 
     /** How many chunks to keep asking for at a time. */
     const val REQUEST_WINDOW = 64
+
+    /**
+     * The file name an incoming transfer lands under, from the offer's hash.
+     *
+     * Pure and here rather than beside the file I/O so it can be tested, because
+     * the input is **peer-supplied and used to build a path**. Everything
+     * outside lowercase hex is dropped, which is what makes `../../databases/x`
+     * impossible rather than merely unlikely; the length cap keeps a peer from
+     * choosing a name longer than the filesystem will take. An offer whose hash
+     * survives as nothing at all still gets a name, because refusing to name it
+     * would mean refusing a transfer over a cosmetic detail.
+     */
+    fun incomingFileName(sha256: String): String {
+        val safe = sha256.lowercase()
+            .filter { it.isDigit() || it in 'a'..'f' }
+            .take(64)
+        return if (safe.isEmpty()) "incoming.bin" else "$safe.bin"
+    }
 
     /** Prefix `bytes` with its big-endian chunk index. */
     fun frameChunk(index: Int, bytes: ByteArray): ByteArray {

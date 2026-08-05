@@ -178,6 +178,7 @@ class MessageInfo {
     required this.content,
     required this.createdAt,
     required this.outgoing,
+    this.fromTara = false,
     this.status,
     this.replyTo,
   });
@@ -187,6 +188,13 @@ class MessageInfo {
   final String content;
   final int createdAt;
   final bool outgoing;
+
+  /// True when core read Tara's marker off the wire form — see
+  /// `comrade_ui::MessageAuthor`. A claim by whichever Comrade sent it, never an
+  /// authenticated one, so it may style a bubble and must not gate anything.
+  /// Flattened to a bool for the same reason Android's `MessageInfo` does: the
+  /// question a bubble asks is "is this hers".
+  final bool fromTara;
   final MessageStatus? status;
   final String? replyTo;
 
@@ -196,6 +204,7 @@ class MessageInfo {
         content: content,
         createdAt: createdAt,
         outgoing: outgoing,
+        fromTara: fromTara,
         status: status ?? this.status,
         replyTo: replyTo,
       );
@@ -236,6 +245,35 @@ class MediaMessageInfo {
   final String sender;
   final int createdAt;
   final int size;
+  final bool outgoing;
+}
+
+/// One person's emoji reaction to one message.
+///
+/// Flat rather than "a message plus its reactions" because reactions arrive
+/// independently of the message they are about — a reaction can outrun the
+/// backfill of its target — so the UI joins them by [targetId], the same way it
+/// resolves a `replyTo` into a quoted preview.
+class ReactionInfo {
+  const ReactionInfo({
+    required this.targetId,
+    required this.peer,
+    required this.reactor,
+    required this.emoji,
+    required this.createdAt,
+    required this.outgoing,
+  });
+
+  /// Event id of the message reacted to — a text message or an attachment.
+  final String targetId;
+  final String peer;
+  final String reactor;
+
+  /// Empty on a withdrawal, which is how the wire says "I take mine back".
+  final String emoji;
+  final int createdAt;
+
+  /// Whether *this device* sent it, so the UI can highlight your own.
   final bool outgoing;
 }
 
@@ -491,6 +529,16 @@ class IncomingDirectMessage extends BridgeEvent {
 class IncomingMedia extends BridgeEvent {
   const IncomingMedia(this.media);
   final MediaMessageInfo media;
+}
+
+/// A peer reacted to a message, changed their reaction, or took it back — an
+/// empty [ReactionInfo.emoji] is the withdrawal.
+///
+/// Emitted only when the visible state actually changed, so a replay off the
+/// two-day gift-wrap backfill redraws nothing.
+class IncomingReaction extends BridgeEvent {
+  const IncomingReaction(this.reaction);
+  final ReactionInfo reaction;
 }
 
 class IncomingMessageRequest extends BridgeEvent {

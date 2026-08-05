@@ -196,14 +196,77 @@ class BreathingScreenTest {
     }
 
     @Test
-    fun progressIsClampedBecauseTheClockOutlivesTheSit() {
-        // Elapsed deliberately keeps counting after the sit completes, so the
-        // ratio goes past 1 — and shortening the duration mid-sit can put it
-        // well past. A progress bar handed 3.4 is a wrong drawing at best.
+    fun progressIsClampedBecauseShorteningASitJumpsElapsedPastTheTotal() {
+        // The counter stops at the total now, so it no longer walks past 1 by
+        // itself — but dropping from 5 min to 1 min mid-sit moves the total under
+        // elapsed in a single tap. A progress bar handed 3.4 is a wrong drawing
+        // at best.
         assertEquals(1f, breathingProgress(200, 60), 0.0001f)
         assertEquals(1f, breathingProgress(300, 60), 0.0001f)
         assertEquals(0f, breathingProgress(-10, 60), 0.0001f)
         // A zero-length sit is already over rather than a division by zero.
         assertEquals(1f, breathingProgress(0, 0), 0.0001f)
+    }
+
+    @Test
+    fun aSitEndsOnAWholeBreath() {
+        // THE regression for this round. The screen used to count on for ever:
+        // reaching the chosen length changed the button's word and nothing else,
+        // so a one-minute sit kept breathing indefinitely. Reported from a
+        // handset as "it doesn't seem to be stopping after 1 min".
+        //
+        // Every offered length has to land on a cycle boundary, because that is
+        // what lets the sit end on an out-breath and a settle instead of freezing
+        // part-way up an inhale with the haptic mid-ramp.
+        for (minutes in listOf(1, 2, 3, 5)) {
+            val run = breathingRunSeconds(minutes)
+            assertEquals("$minutes min must end on a whole breath", 0, run % CYCLE_SECONDS)
+            assertTrue("$minutes min must run at least one breath", run >= CYCLE_SECONDS)
+        }
+    }
+
+    @Test
+    fun theChipsStayHonestInBothDirections() {
+        // Rounding to nearest, not up: no chip may be more than half a cycle from
+        // the number it shows. Someone who chose one minute because that is all
+        // they had should not be held for eighty seconds.
+        for (minutes in listOf(1, 2, 3, 5)) {
+            val drift = breathingRunSeconds(minutes) - minutes * 60
+            assertTrue(
+                "$minutes min drifts ${drift}s from the chip",
+                kotlin.math.abs(drift) <= CYCLE_SECONDS / 2,
+            )
+        }
+        // The real numbers, pinned so a cycle change shows up as a diff here.
+        assertEquals(56, breathingRunSeconds(1))
+        assertEquals(126, breathingRunSeconds(2))
+        assertEquals(182, breathingRunSeconds(3))
+        assertEquals(294, breathingRunSeconds(5))
+    }
+
+    @Test
+    fun aSitIsNeverZeroLength() {
+        // A sit always gets at least one full breath — a zero or negative minute
+        // count is a caller bug, and rounding it to "already over" would open the
+        // screen on the completed state with the circle still.
+        assertEquals(CYCLE_SECONDS, breathingRunSeconds(0))
+        assertEquals(CYCLE_SECONDS, breathingRunSeconds(-3))
+    }
+
+    @Test
+    fun theSitStopsAtTheEndOfABreathNotPartWayUpAnInhale() {
+        // The property the completed state leans on: because a run is a whole
+        // number of cycles, the final second is the last of HOLD_EMPTY, and the
+        // circle is therefore already at its smallest when the screen goes still.
+        // BreathingScreen asserts this by snapping to MIN_SCALE on completion —
+        // if this ever stops holding, that snap becomes a visible jump.
+        for (minutes in listOf(1, 2, 3, 5)) {
+            val run = breathingRunSeconds(minutes)
+            assertEquals(
+                "$minutes min must finish on the settle",
+                BreathPhase.HOLD_EMPTY,
+                breathingPhase(run - 1),
+            )
+        }
     }
 }

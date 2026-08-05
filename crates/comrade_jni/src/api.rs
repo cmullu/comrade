@@ -71,18 +71,20 @@ use crate::frb_generated::StreamSink;
 // no Rust downstream.)
 pub use crate::{KeypairDto, WorkspaceKeyLabel};
 pub use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+pub use comrade_core::handoff::{AttachmentHandoff, AttachmentRoute, HandoffSignal};
 pub use comrade_core::share::transport::{
     IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
 pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
 pub use comrade_ui::{
-    BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ContactDto,
-    ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto, IceServerDto,
-    IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto, MessageDto,
-    MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ShareVerdictDto, TaraMessageDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
-    TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    AttachmentHandoffDto, BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto,
+    ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
+    IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
+    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto,
+    ProfileDto, ReactionDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto,
+    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
+    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -155,6 +157,12 @@ pub struct _DirectMessageDto {
     pub reply_to: Option<String>,
 }
 
+#[frb(mirror(MessageAuthor))]
+pub enum _MessageAuthor {
+    Human,
+    Tara,
+}
+
 #[frb(mirror(MessageDto))]
 pub struct _MessageDto {
     pub id: String,
@@ -162,6 +170,7 @@ pub struct _MessageDto {
     pub content: String,
     pub created_at: u64,
     pub outgoing: bool,
+    pub author: MessageAuthor,
     pub status: Option<String>,
     pub reply_to: Option<String>,
 }
@@ -189,6 +198,9 @@ pub struct _MessageRequestDto {
 pub struct _ProfileDto {
     pub npub: String,
     pub username: Option<String>,
+    pub about: Option<String>,
+    pub picture: Option<String>,
+    pub avatar_cached: bool,
 }
 
 #[frb(mirror(FoundProfileDto))]
@@ -196,6 +208,27 @@ pub struct _FoundProfileDto {
     pub npub: String,
     pub name: Option<String>,
     pub about: Option<String>,
+    pub picture: Option<String>,
+    pub nip05: Option<String>,
+}
+
+#[frb(mirror(PeerProfileDto))]
+pub struct _PeerProfileDto {
+    pub npub: String,
+    pub alias: String,
+    pub name: Option<String>,
+    pub about: Option<String>,
+    pub picture: Option<String>,
+    pub nip05: Option<String>,
+    pub lud16: Option<String>,
+    pub avatar_cached: bool,
+    pub contact: bool,
+    pub comrade: bool,
+    pub blocked: bool,
+    pub online: bool,
+    pub last_seen_at: u64,
+    pub peer_marked_us: bool,
+    pub updated_at: u64,
 }
 
 #[frb(mirror(ContactDto))]
@@ -304,6 +337,16 @@ pub struct _MediaMessageDto {
     pub sender: String,
     pub created_at: u64,
     pub size: u64,
+    pub outgoing: bool,
+}
+
+#[frb(mirror(ReactionDto))]
+pub struct _ReactionDto {
+    pub target_id: String,
+    pub peer: String,
+    pub reactor: String,
+    pub emoji: String,
+    pub created_at: u64,
     pub outgoing: bool,
 }
 
@@ -532,6 +575,37 @@ pub struct _TogetherShareDto {
     pub signal: ShareSignal,
 }
 
+#[frb(mirror(AttachmentHandoff))]
+pub struct _AttachmentHandoff {
+    pub shape: ShareOffer,
+    pub mime_type: String,
+    pub file_name: String,
+    pub caption: String,
+}
+
+#[frb(mirror(HandoffSignal))]
+pub enum _HandoffSignal {
+    Offer { attachment: AttachmentHandoff },
+    Accept,
+    Decline,
+    Refuse { reason: RefusalReason },
+    Withdraw,
+    Transport { signal: TransferSignal },
+}
+
+#[frb(mirror(AttachmentRoute))]
+pub enum _AttachmentRoute {
+    Hosted,
+    PeerToPeer,
+}
+
+#[frb(mirror(AttachmentHandoffDto))]
+pub struct _AttachmentHandoffDto {
+    pub transfer_id: String,
+    pub peer: String,
+    pub signal: HandoffSignal,
+}
+
 #[frb(mirror(ShareVerdictDto))]
 pub struct _ShareVerdictDto {
     pub verdict: String,
@@ -545,6 +619,7 @@ pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
     IncomingDirectMessage(DirectMessageDto),
     IncomingMedia(MediaMessageDto),
+    IncomingReaction(ReactionDto),
     IncomingCallSignal(CallSignalDto),
     IncomingMessageRequest(MessageRequestDto),
     MessageStatus {
@@ -579,6 +654,7 @@ pub enum _BridgeEvent {
         by_peer: bool,
     },
     TogetherShare(TogetherShareDto),
+    AttachmentHandoff(AttachmentHandoffDto),
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
         ledger: String,
@@ -776,6 +852,30 @@ pub async fn send_dm_reply(
         .await
 }
 
+/// React to a message in `peer`'s thread — or take an existing reaction back by
+/// passing the same emoji again. Returns the reaction now standing, or `None` if
+/// the tap withdrew one.
+///
+/// The toggle is decided on the Rust side (see `ComradeRuntime::toggle_reaction`)
+/// so this frontend and Android cannot disagree about what tapping an
+/// already-sent emoji means.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn toggle_reaction(
+    peer: String,
+    target_id: String,
+    emoji: String,
+) -> Result<Option<ReactionDto>, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.toggle_reaction(&peer, &target_id, &emoji).await
+}
+
+/// Every reaction in `peer`'s conversation, oldest first, read from the encrypted
+/// store — so a thread opens with its reactions already drawn.
+pub async fn reactions(peer: String) -> Result<Vec<ReactionDto>, UiError> {
+    runtime().read().await.reactions(&peer)
+}
+
 /// Retry every DM sitting in the sender outbox because no relay would take it.
 /// Returns how many a relay accepted this pass.
 ///
@@ -859,6 +959,32 @@ pub fn profile() -> Result<ProfileDto, UiError> {
 
 pub async fn set_username(name: String) -> Result<ProfileDto, UiError> {
     runtime().write().await.set_username(&name).await
+}
+
+/// Set (or clear, with an empty string) this identity's bio, and republish.
+pub async fn set_about(about: String) -> Result<ProfileDto, UiError> {
+    runtime().write().await.set_about(&about).await
+}
+
+/// Everything a profile page draws for one peer, from the local cache alone —
+/// no relay round trip, so it answers offline and immediately.
+pub fn peer_profile(npub: String) -> Result<PeerProfileDto, UiError> {
+    runtime().blocking_read().peer_profile(&npub)
+}
+
+/// A peer's cached avatar bytes, or `None` to draw initials. Reads the encrypted
+/// store and never the network, so calling it discloses nothing to anyone.
+pub fn peer_avatar(npub: String) -> Result<Option<MediaBytesDto>, UiError> {
+    runtime().blocking_read().peer_avatar(&npub)
+}
+
+/// Whether peer-published pictures may be fetched at all (default on).
+pub fn remote_avatars_enabled() -> Result<bool, UiError> {
+    runtime().blocking_read().remote_avatars_enabled()
+}
+
+pub fn set_remote_avatars_enabled(on: bool) -> Result<(), UiError> {
+    runtime().blocking_read().set_remote_avatars_enabled(on)
 }
 
 pub fn add_contact(npub: String, alias: String) -> Result<ContactDto, UiError> {
@@ -1087,12 +1213,17 @@ pub fn share_classify_path(local_type: String, remote_type: String) -> IcePathKi
 }
 
 /// Whether a transfer over `path` may proceed under `policy` — see the uniffi twin.
+///
+/// `consent_granted` answers a question a previous call asked by returning
+/// `NeedsConsent`. It can only turn that into `Allow`; a refusal stays refused
+/// however insistently a frontend claims consent.
 pub fn share_transfer_verdict(
     path: IcePathKind,
     total_bytes: u64,
     policy: RelayPolicy,
+    consent_granted: bool,
 ) -> TransferVerdict {
-    comrade_core::share::transport::decide(path, total_bytes, policy)
+    comrade_core::share::transport::decide_with_consent(path, total_bytes, policy, consent_granted)
 }
 
 /// Whether a transfer connection built under `policy` may be offered TURN.

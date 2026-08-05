@@ -35,15 +35,27 @@ use comrade_core::attention::{
     self, FocusOutcome, UsageSignal, FOCUS_MAX_MINUTES, FOCUS_MIN_MINUTES,
 };
 use comrade_core::call::{
-    call_signal_retry_delay_ms, derive_sas, ice_servers_for, new_call_id, parse_call_envelope,
-    validate_turn_url, CallEnvelope, CallMediaKind, CallSignal, HangupReason, IceServer,
-    IceStrategy,
+    call_signal_is_stale, call_signal_retry_delay_ms, derive_sas, ice_servers_for, new_call_id,
+    parse_call_envelope, validate_turn_url, CallEnvelope, CallMediaKind, CallSignal, HangupReason,
+    IceServer, IceStrategy,
+};
+use comrade_core::command::{
+    self, parse_offer_envelope, render_offer_line, AppAction, ChatCommand, CommandSpec, Mention,
+    MusicService, OfferEnvelope,
 };
 use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
 use comrade_core::dak::{open_dm, seal_dm, MeshDm};
 use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
-use comrade_core::dm::{parse_profile_share, parse_receipt, ProfileShare, Receipt, ReceiptKind};
+use comrade_core::dm::{
+    parse_profile_share, parse_reaction, parse_receipt, ProfileShare, ReactionEnvelope, Receipt,
+    ReceiptKind, MAX_REACTION_BYTES,
+};
+use comrade_core::handoff::{parse_handoff_envelope, HandoffEnvelope, HandoffSignal};
+use comrade_core::karya::{
+    new_task_id, parse_karya_envelope, render_task_line, KaryaEnvelope, Party, Task, TaskSignal,
+    TaskState,
+};
 use comrade_core::media::{
     build_file_metadata_event, encrypt_media, fetch_and_decrypt_media, FileMetadata,
     MAX_MEDIA_BYTES,
@@ -65,7 +77,40 @@ use comrade_core::share::transport::{
     self as share_transport, IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
 use comrade_core::share::ShareSignal;
-use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
+
+/// Read a stored [`SharePrefs`] back into a policy.
+///
+/// **An unrecognised string is [`RelayPolicy::DirectOnly`]**, not a panic and
+/// not `Always`. The value can only be wrong if an older or newer build wrote
+/// it, and the safe reading of "I do not know what this device agreed to" is
+/// the one that carries nobody's bytes but our own.
+fn relay_policy_from_prefs(prefs: &comrade_storage::SharePrefs) -> RelayPolicy {
+    match prefs.relay_policy.as_str() {
+        "under_bytes" => RelayPolicy::UnderBytes {
+            limit: prefs.relay_limit_bytes,
+        },
+        "ask_each_time" => RelayPolicy::AskEachTime,
+        "always" => RelayPolicy::Always,
+        _ => RelayPolicy::DirectOnly,
+    }
+}
+
+/// The inverse. Round-trips through [`relay_policy_from_prefs`] by test.
+fn relay_policy_to_prefs(policy: RelayPolicy) -> comrade_storage::SharePrefs {
+    let (name, limit) = match policy {
+        RelayPolicy::DirectOnly => ("direct_only", 0),
+        RelayPolicy::UnderBytes { limit } => ("under_bytes", limit),
+        RelayPolicy::AskEachTime => ("ask_each_time", 0),
+        RelayPolicy::Always => ("always", 0),
+    };
+    comrade_storage::SharePrefs {
+        relay_policy: name.to_string(),
+        relay_limit_bytes: limit,
+    }
+}
+use comrade_core::tara::{
+    tara_chat_answer, tara_chat_line, CompanionEngine, JournalSignal, ReflectiveCompanion,
+};
 use comrade_core::together::{
     command_apply, describe_state_change, heartbeat_interval_ms, parse_together_envelope,
     projected_peer_pos_ms, session_is_live_at, signal_is_fresh, sync_verdict, valid_youtube_id,
@@ -130,6 +175,36 @@ const PROFILE_TTL_SECS: u64 = 24 * 60 * 60;
 const PROFILE_NEGATIVE_TTL_SECS: u64 = 5 * 60;
 /// Upper bound on network fetches per [`ComradeRuntime::refresh_peer_profiles`] call.
 const PROFILE_REFRESH_CAP: usize = 16;
+/// Encrypted-store tree holding vetted avatar *bytes*, keyed by their SHA-256.
+///
+/// A separate tree, and content-addressed, for two reasons. `EncryptedStore::put`
+/// serialises through `serde_json`, so a `Vec<u8>` field on
+/// [`PeerProfileRecord`] would be stored as a JSON array of decimal numbers —
+/// roughly four bytes on disk per byte of image. And keying by hash means two
+/// peers who publish the same picture share one copy. `put_bytes` is the raw
+/// path; `DEVICE_SEED_KEY` already uses it for the same reason.
+const PEER_AVATAR_BLOBS_TREE: &str = "peer_avatar_blobs";
+/// Re-fetch a cached avatar after this long. Much longer than the profile TTL:
+/// people change their handle far more often than their picture, and each refetch
+/// costs a whole image.
+const AVATAR_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// How long a failed or refused avatar fetch is left alone before another try, so
+/// a dead URL is not re-attempted on every sweep.
+const AVATAR_NEGATIVE_TTL_SECS: u64 = 15 * 60;
+/// Upper bound on avatar downloads per refresh sweep. Lower than the profile
+/// cap: each of these is an image, not a line of JSON.
+const AVATAR_FETCH_CAP: usize = 8;
+/// The longest bio this build will store or publish. Matches the caption bound,
+/// so the two peer-chosen free-text fields agree.
+const MAX_ABOUT_LEN: usize = 512;
+/// Settings key for the user's own bio.
+///
+/// Not in the `StoredIdentity` label, which is where the @handle lives: that slot
+/// holds one string and already overloads `"primary"` as a legacy no-username
+/// marker. A second meaning on it would be a third thing one field means.
+const PROFILE_ABOUT_KEY: &str = "profile_about";
+/// Settings key for whether peer-published pictures may be fetched at all.
+const REMOTE_AVATARS_KEY: &str = "remote_avatars";
 /// Publish attempts before giving up until the next launch (see
 /// [`publish_profile_with_retry`]).
 const PUBLISH_ATTEMPTS: u32 = 5;
@@ -198,13 +273,11 @@ const CROSS_TRANSPORT_DEDUP_CAPACITY: usize = 512;
 const TRANSPORT_RELAY: &str = "relay";
 const TRANSPORT_MESH: &str = "mesh";
 
-/// A call signal older than this is meaningless — the ring timeout has long
-/// since passed on the sender's side (an `Offer`), and every other signal
-/// kind (`Answer`/`Ice`/`Hangup`/…) is equally transient. Relays redeliver
-/// at-least-once and the Vault inbox subscription backfills up to 2 days on
-/// every launch, so without this a days-old `Offer` re-rings on every app
-/// start.
-const CALL_SIGNAL_MAX_AGE_SECS: u64 = 90;
+// The call-signal staleness rule now lives in `comrade_core::call`
+// (`call_signal_is_stale`, with its max age and clock-skew tolerance) so it is
+// a tested decision rather than an inline comparison. It used to be `age > 90`
+// against the *sender's* clock with no tolerance, which silently killed every
+// call between two devices whose clocks disagreed by more than that.
 /// Encrypted-store tree holding the Sakha/Sakhi pairing record (there is only
 /// ever one partner per device, but a tree keeps the storage shape uniform
 /// with the rest of the repository layer).
@@ -252,6 +325,40 @@ impl ChitthiDto {
             content: c.content.clone(),
             created_at: c.created_at,
             reply_to: c.reply_to.clone(),
+        }
+    }
+}
+
+/// One person's emoji reaction to one message, as a frontend sees it.
+///
+/// Flat rather than "a message plus its reactions" because reactions arrive
+/// independently of the message they are about — a reaction can outrun the
+/// backfill of its target — so the UI joins them by [`Self::target_id`] the same
+/// way it already resolves a `reply_to` into a quoted preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ReactionDto {
+    /// Event id (hex) of the message reacted to. A text message or an
+    /// attachment — the reaction does not care which.
+    pub target_id: String,
+    /// The conversation it belongs to (the other party's npub).
+    pub peer: String,
+    /// Who reacted, as an npub.
+    pub reactor: String,
+    pub emoji: String,
+    pub created_at: u64,
+    /// Whether *this device* sent it, so the UI can highlight your own.
+    pub outgoing: bool,
+}
+
+impl From<comrade_storage::MessageReaction> for ReactionDto {
+    fn from(r: comrade_storage::MessageReaction) -> Self {
+        Self {
+            target_id: r.target_id,
+            peer: r.peer_npub,
+            reactor: r.reactor_npub,
+            emoji: r.emoji,
+            created_at: r.created_at,
+            outgoing: r.outgoing,
         }
     }
 }
@@ -416,6 +523,181 @@ pub struct TogetherShareDto {
     pub session_id: String,
     pub peer: String,
     pub signal: ShareSignal,
+}
+
+// ── In-chat commands (see `comrade_core::command`) ───────────────────────────
+
+/// One `@handle` from a composer, resolved against the saved contacts.
+///
+/// Three outcomes, and the middle one is the point: `npub` set is a match,
+/// `candidates` non-empty is **more than one contact answering to that handle**,
+/// and both empty means nobody does. A handle is a self-declared alias, not an
+/// identifier ([`ContactDto`]), so picking one of two silently is how a private
+/// message reaches the wrong person — the ambiguity is returned for the UI to
+/// ask about rather than resolved by guessing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct MentionMatchDto {
+    /// Lowercased handle, without the `@`.
+    pub handle: String,
+    /// Byte span in the text that was parsed, so a composer can draw a chip.
+    pub start: u32,
+    pub end: u32,
+    /// The single contact this names, when exactly one does.
+    pub npub: Option<String>,
+    /// Every contact answering to the handle when more than one does. Empty
+    /// otherwise.
+    pub candidates: Vec<ContactDto>,
+}
+
+/// One task, as a list wants it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TaskDto {
+    pub id: String,
+    pub text: String,
+    pub assigner: String,
+    /// `None` for a note to self, which never reached a relay.
+    pub assignee: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub state: TaskState,
+    /// Whether the local user named this task. With [`Self::assignee`] this is
+    /// everything a UI needs to know which buttons to offer — computed here so
+    /// three frontends do not each re-derive it from npub comparisons.
+    pub assigned_by_me: bool,
+    /// Whether the local user is the one being asked, and so may finish or
+    /// decline it. True for a note to self.
+    pub mine_to_do: bool,
+}
+
+/// The result of offering an in-app action: who was told, and why the others
+/// were not.
+///
+/// **A bare count was not enough, and the reason is a bug this replaced.**
+/// `offer_action` can reach zero three ways — nobody named was a comrade, the
+/// shared cooldown was still running, or every send failed — and a frontend
+/// holding only `0` said *"they were told recently"* for all three. Telling
+/// somebody their message was throttled when the truth is "that person is not
+/// your comrade" is worse than saying nothing: it names a cause that is not
+/// real, and the actual fix (mark them a comrade) is never suggested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct OfferOutcomeDto {
+    /// Comrades who were actually told.
+    pub sent: Vec<String>,
+    /// Named peers who are not comrades — the offer never applied to them.
+    /// Marking them a comrade is the fix, and the UI should say so.
+    pub not_comrades: Vec<String>,
+    /// Comrades left alone because the shared nudge cooldown is still running.
+    pub on_cooldown: Vec<String>,
+    /// Comrades the send failed for outright — no relay took it, and unlike a
+    /// chat message a control envelope is not queued (see
+    /// `RuntimeHandles::send_control_envelope`).
+    pub failed: Vec<String>,
+}
+
+/// What can actually be done with a `/play` query, decided once.
+///
+/// The decision rather than the prose: each frontend renders its own words from
+/// this, which is what lets desktop say "no player here yet"
+/// (`docs/TOGETHER.md` §9) while Android opens a session, without either
+/// sentence living in core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayPlan {
+    /// A session can open right now — [`PlayTargetDto::content`] is set.
+    OpenNow,
+    /// We know what recording is meant; look for it in this device's own
+    /// library ([`comrade_core::together::match_score`]), and fall back to
+    /// `comrade_core::share` if it is not there.
+    FindLocally,
+    /// The link names something we may not play ourselves — Spotify and Apple
+    /// Music serve DRM audio no third-party client may decode
+    /// ([`comrade_core::together::MusicLink::playable_in_place`]). All we can
+    /// honestly do is say where to open it.
+    NameOnly,
+    /// Nothing usable in the query.
+    Empty,
+}
+
+/// A `/play` query, resolved as far as it can be without a network or a library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct PlayTargetDto {
+    pub plan: PlayPlan,
+    /// Where to open it, when the command or the link said.
+    pub service: Option<MusicService>,
+    /// Set when the query was a service link we recognised.
+    pub link: Option<comrade_core::together::MusicLink>,
+    /// Set when a session can open immediately, i.e. [`PlayPlan::OpenNow`].
+    pub content: Option<TogetherContent>,
+    /// The recording the query names by words. `None` for a link, whose id
+    /// names the thing and whose title is the player's to report.
+    pub recording: Option<comrade_core::together::Recording>,
+}
+
+/// What a frontend should actually *do* about a `/play`, once it has looked in
+/// its own library.
+///
+/// [`PlayPlan`] is how far the query got before anyone searched; this is the step
+/// after, and it is separate because only the frontend can search — `MediaStore`
+/// on Android, a file the user picked on desktop. Deciding *here* is what stops
+/// each frontend inventing its own idea of when a `/play` may open a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayRoute {
+    /// This device found its own copy and is confident it is the right one, so a
+    /// session can open on it now.
+    StartTogether,
+    /// We know which recording is meant and this device has no copy of it near
+    /// enough to open unasked. Ask for a file rather than guessing — that is
+    /// [`comrade_core::together::MATCH_CONFIDENT`]'s whole purpose.
+    AskForFile,
+    /// The link names audio no third-party client may decode (Spotify, Apple
+    /// Music). All we can honestly do is say where to open it.
+    OpenElsewhere,
+    /// A YouTube embed, which can be driven in place by a frontend that has a
+    /// webview to drive it in.
+    PlayEmbed,
+    /// Nothing usable in the query.
+    Nothing,
+}
+
+/// Decide [`PlayRoute`] from a resolved query and what the caller's own library
+/// turned up.
+///
+/// `found_local_copy` is the frontend's answer to "is a copy of this on *this*
+/// device, above the confidence bar" — and it is consulted **only** for
+/// [`PlayPlan::FindLocally`]. A caller that has a local file of a Spotify track
+/// still gets [`PlayRoute::OpenElsewhere`]: the plan is about what the *query*
+/// named, and a link to DRM audio does not become playable because something
+/// with a similar title happens to be on the phone.
+pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+    match plan {
+        PlayPlan::Empty => PlayRoute::Nothing,
+        PlayPlan::NameOnly => PlayRoute::OpenElsewhere,
+        PlayPlan::OpenNow => PlayRoute::PlayEmbed,
+        PlayPlan::FindLocally => {
+            if found_local_copy {
+                PlayRoute::StartTogether
+            } else {
+                PlayRoute::AskForFile
+            }
+        }
+    }
+}
+
+/// One step of handing a large attachment over, on its way to the frontend that
+/// owns the peer connection.
+///
+/// Same division of labour as [`TogetherShareDto`], for the same reason: WebRTC
+/// lives in the frontend, and mirroring the negotiation here as well would mean
+/// two state machines that have to agree — the shape of both call bugs this repo
+/// has already fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AttachmentHandoffDto {
+    /// Scopes every signal of one transfer. A signal naming a transfer the
+    /// frontend does not have is its to drop.
+    pub transfer_id: String,
+    pub peer: String,
+    pub signal: HandoffSignal,
 }
 
 /// Whether a transfer may run over the path ICE actually chose.
@@ -797,6 +1079,62 @@ fn to_npub(pubkey: &str) -> String {
 pub struct ProfileDto {
     pub npub: String,
     pub username: Option<String>,
+    /// The user's own bio, as this device has it. Editable — see
+    /// [`ComradeRuntime::set_about`].
+    #[serde(default)]
+    pub about: Option<String>,
+    /// The `picture` URL currently published for this identity. Shown to the user
+    /// because it is what everybody else sees, and because it is public.
+    #[serde(default)]
+    pub picture: Option<String>,
+    /// Whether the bytes of that picture are in the local cache, i.e. whether a
+    /// real avatar can be drawn rather than initials.
+    #[serde(default)]
+    pub avatar_cached: bool,
+}
+
+/// Everything a profile page draws for a peer, from the local cache alone — one
+/// call, no relay, works with no connection at all.
+///
+/// Assembled from three places that a frontend would otherwise have to join
+/// itself: the saved contact (alias, comrade), the cached Kind-0 record (handle,
+/// bio, picture, nip05) and presence recomputed against the clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct PeerProfileDto {
+    pub npub: String,
+    /// The user-chosen local alias (petname). Empty = none set. First in the
+    /// display precedence alias → name → key, and the only one of the three the
+    /// peer cannot influence.
+    pub alias: String,
+    /// The peer's own published @handle — a self-declared claim, never an
+    /// identifier.
+    pub name: Option<String>,
+    pub about: Option<String>,
+    /// The `picture` URL as published. Handed over so a page can say "they have a
+    /// picture we have not loaded"; a frontend must never fetch it itself.
+    pub picture: Option<String>,
+    /// Unverified: the core does not check NIP-05, so this carries no flag a UI
+    /// could turn into a checkmark.
+    pub nip05: Option<String>,
+    pub lud16: Option<String>,
+    /// Whether vetted bytes for `picture` are cached right now — the
+    /// avatar-vs-initials test, and the only avatar question a renderer asks.
+    pub avatar_cached: bool,
+    pub contact: bool,
+    pub comrade: bool,
+    /// Whether this peer is blocked. Reported so the page can say so; there is no
+    /// unblock command to pair with it, and inventing a button would be a switch
+    /// that does nothing.
+    pub blocked: bool,
+    /// Recomputed against the current clock, never a stored flag — and always
+    /// `false` for a peer who is not a comrade, because presence only flows
+    /// between comrades.
+    pub online: bool,
+    pub last_seen_at: u64,
+    pub peer_marked_us: bool,
+    /// When the cached record was last written. Lets a page say "as of …" rather
+    /// than presenting a day-old bio as live truth.
+    pub updated_at: u64,
 }
 
 /// A profile discovered via relay search. `npub` is the identity; `name` is a
@@ -806,6 +1144,14 @@ pub struct FoundProfileDto {
     pub npub: String,
     pub name: Option<String>,
     pub about: Option<String>,
+    /// The `picture` URL as published. Handed over so a row can show that a
+    /// picture *exists*; a frontend must never fetch it for a stranger.
+    #[serde(default)]
+    pub picture: Option<String>,
+    /// A NIP-05 address, unverified — the core does not check it, so no frontend
+    /// is given a boolean it could draw a checkmark from.
+    #[serde(default)]
+    pub nip05: Option<String>,
 }
 
 /// A saved contact: an npub pinned on first add (trust-on-first-use) with a
@@ -898,15 +1244,55 @@ pub struct MetricDto {
 /// self-declared, non-unique handle — a display aid, never an identifier.
 /// Every field defaults so rows written by older builds keep deserialising
 /// when the record grows (e.g. the planned avatar field).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PeerProfileRecord {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     about: Option<String>,
+    /// The `picture` URL exactly as the peer published it. Kept even when the
+    /// bytes are never fetched, so a profile page can say "they have a picture we
+    /// have not loaded" instead of implying they have none.
+    #[serde(default)]
+    picture: Option<String>,
+    #[serde(default)]
+    nip05: Option<String>,
+    #[serde(default)]
+    lud16: Option<String>,
+    /// SHA-256 of the *vetted* avatar bytes in [`PEER_AVATAR_BLOBS_TREE`].
+    /// `Some` is exactly "an avatar is cached", so a contact row costs the same
+    /// single store read it already paid for `name`.
+    #[serde(default)]
+    avatar_sha256: Option<String>,
+    /// The sniffed type of those bytes — never the one the host declared.
+    #[serde(default)]
+    avatar_mime: Option<String>,
+    #[serde(default)]
+    avatar_fetched_at: u64,
+    /// When a fetch last failed or was refused, driving the negative TTL so a
+    /// broken URL is not retried on every sweep.
+    #[serde(default)]
+    avatar_failed_at: u64,
     /// When this record was last written (unix seconds) — drives the TTL.
     #[serde(default)]
     updated_at: u64,
+}
+
+/// What a caller *learned* about a peer's profile — every field optional,
+/// because almost no caller learns all of them at once.
+///
+/// This exists so [`merge_peer_profile`] can be the only writer. A caller that
+/// means "I learned a name" must not thereby claim "and there is no bio", which
+/// is exactly what a whole-record write does.
+#[derive(Debug, Clone, Default)]
+struct PeerProfilePatch {
+    name: Option<String>,
+    about: Option<String>,
+    picture: Option<String>,
+    nip05: Option<String>,
+    lud16: Option<String>,
+    avatar: Option<(String, String)>,
+    avatar_failed: bool,
 }
 
 /// A private journal entry as the frontend sees it. Journal entries are
@@ -945,6 +1331,30 @@ pub struct TaraMessageDto {
     /// surface the crisis resources alongside it (AUDIT §8 honesty gate).
     pub crisis: bool,
     pub created_at: u64,
+}
+
+/// What happened when Tara was asked something **in a conversation** —
+/// `@tara …`, the shared spelling. See [`RuntimeHandles::tara_in_chat`].
+///
+/// Both messages come back so the composer can put them straight into the thread
+/// it is already showing, in the order they were sent, without a reload that
+/// would race the relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TaraChatDto {
+    /// The question as it now sits in the thread. `None` when nothing was sent.
+    pub asked: Option<MessageDto>,
+    /// Tara's answer as it sits in the thread. `None` when it stayed private.
+    pub answered: Option<MessageDto>,
+    /// Tara's words, always — the only field set when nothing was shared, and
+    /// what a composer shows in its own note in that case.
+    pub reply: String,
+    /// **Nothing left this device.** True when the question tripped the distress
+    /// detector: a helpline hand-off is not something to publish into somebody
+    /// else's chat on the asker's behalf, whichever sigil they typed.
+    pub kept_private: bool,
+    /// Whether the reply carries the crisis hand-off, so the frontend shows the
+    /// resources beside it exactly as the private thread does.
+    pub crisis: bool,
 }
 
 impl From<comrade_storage::TaraMessage> for TaraMessageDto {
@@ -1034,20 +1444,66 @@ pub struct CrisisResourceDto {
     pub note: String,
 }
 
+/// Who wrote a message, where `outgoing` alone cannot say.
+///
+/// `outgoing` distinguishes the two people; this distinguishes a person from the
+/// companion, so `@tara` can be drawn as a third participant rather than as a
+/// line you appear to have typed. The two are orthogonal: an outgoing
+/// [`MessageAuthor::Tara`] is her answer in a thread you started, and an
+/// incoming one is her answer in a thread they started.
+///
+/// **Attribution, not attestation.** Nothing signs this. The wire carries
+/// [`comrade_core::tara::TARA_CHAT_PREFIX`], which any client — or any person
+/// with a keyboard — can put in front of a sentence, so a Tara bubble means
+/// *the sending Comrade said this came from Tara*, in the same way a quoted
+/// reply means the sender said they were quoting you. It must not be built on
+/// as proof, and `AUDIT.md` Q17 records the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageAuthor {
+    /// One of the two people in the conversation — the ordinary case.
+    Human,
+    /// The companion, answering where both people can read it.
+    Tara,
+}
+
 /// A single direct message in a conversation, from the offline history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct MessageDto {
     pub id: String,
     /// Peer npub the thread is keyed by (sender if incoming, recipient if outgoing).
     pub peer: String,
+    /// What to draw in the bubble — already stripped of any author marker, so a
+    /// frontend never renders the wire form. See [`split_author`].
     pub content: String,
     pub created_at: u64,
     pub outgoing: bool,
+    /// Who wrote [`Self::content`]. See [`MessageAuthor`] for what this does and
+    /// does not claim.
+    pub author: MessageAuthor,
     /// Delivery status of an outgoing message: `sent` / `delivered` / `read`.
     /// `None` for incoming messages (no ticks shown on the receiver's side).
     pub status: Option<String>,
     /// Event id (hex) this message replies to, if any.
     pub reply_to: Option<String>,
+}
+
+/// Split a stored/wire message body into who wrote it and what to draw.
+///
+/// The marker stays on the wire and on disk rather than being stripped before
+/// storage, and that is deliberate on two counts. A NIP-17 DM read in some other
+/// Nostr client still says "Tara: …" instead of putting her words in the
+/// sender's mouth — the fallback rendering is the honest one. And the count in
+/// [`ComradeRuntime::tara_in_chat`] reads the stored rows directly, so the
+/// history keeps meaning the same thing after this function changes.
+///
+/// One place, called from both [`MessageDto`] construction sites, so a message
+/// cannot read one way when it is sent and another way after a reload.
+fn split_author(content: String) -> (MessageAuthor, String) {
+    match comrade_core::tara::tara_chat_answer(&content) {
+        Some(answer) => (MessageAuthor::Tara, answer.to_string()),
+        None => (MessageAuthor::Human, content),
+    }
 }
 
 /// Live connectivity status of the off-grid Saathi mesh (mDNS discovery +
@@ -1078,6 +1534,11 @@ pub enum BridgeEvent {
     IncomingDirectMessage(DirectMessageDto),
     /// A new encrypted-media reference (NIP-94) arrived over the DM channel.
     IncomingMedia(MediaMessageDto),
+    /// A peer reacted to a message, changed their reaction, or took it back — an
+    /// empty [`ReactionDto::emoji`] is the withdrawal. Emitted only when the
+    /// visible state actually changed, so a replay off the two-day backfill does
+    /// not redraw anything.
+    IncomingReaction(ReactionDto),
     /// A call-signaling payload (offer/answer/ICE/hangup) arrived for the
     /// frontend's WebRTC layer.
     IncomingCallSignal(CallSignalDto),
@@ -1148,6 +1609,8 @@ pub enum BridgeEvent {
     /// protocol tweak, which is exactly the tax that keeps protocols from being
     /// tweaked.
     TogetherShare(TogetherShareDto),
+    /// One step of a large-attachment handoff from `peer`.
+    AttachmentHandoff(AttachmentHandoffDto),
     /// The off-grid mesh's connectivity changed: it started/stopped, or a peer
     /// joined/left via mDNS. Drives the persistent local-mesh status indicator.
     MeshStatusChanged(MeshStatusDto),
@@ -1320,10 +1783,24 @@ impl ComradeRuntime {
     /// Abort any in-flight profile-publish retry loop and start one for
     /// `name`. Last spawn wins — the relays only ever see the newest handle.
     fn spawn_profile_publish(&mut self, sabha: Arc<SabhaEngine>, name: String) {
+        // Leave: a launch republish and a handle change have no opinion about the
+        // bio, and must not overwrite one the user set from another Nostr client.
+        // This is the property `merged_metadata_preserves_foreign_profile_fields`
+        // has always pinned, kept intact now that clearing is expressible.
+        self.spawn_profile_publish_with(sabha, name, OwnedMetadataEdit::Leave);
+    }
+
+    /// As [`Self::spawn_profile_publish`], but saying what to do with the bio.
+    fn spawn_profile_publish_with(
+        &mut self,
+        sabha: Arc<SabhaEngine>,
+        name: String,
+        about: OwnedMetadataEdit,
+    ) {
         if let Some(task) = self.publish_task.take() {
             task.abort();
         }
-        self.publish_task = Some(tokio::spawn(publish_profile_with_retry(sabha, name)));
+        self.publish_task = Some(tokio::spawn(publish_profile_with_retry(sabha, name, about)));
     }
 
     // ── Event bus ──────────────────────────────────────────────────────────
@@ -1405,6 +1882,16 @@ impl ComradeRuntime {
                     tracing::info!(restored, "restored queued messages from the outbox");
                 }
                 self.outbox = Arc::new(Outbox::from_snapshot(snapshot));
+            }
+        }
+
+        // The relay policy is a stored preference, so seed the in-memory cell
+        // the WebRTC callbacks read. It is deliberately *only* seeded here: a
+        // locked vault has no preference to read, and the cell's default is the
+        // refusing one, so a failure to load can only ever be conservative.
+        if let Some(store) = self.ui.store_ref() {
+            if let Ok(prefs) = store.load_share_prefs() {
+                *self.share_policy.lock().unwrap() = relay_policy_from_prefs(&prefs);
             }
         }
 
@@ -1865,6 +2352,36 @@ impl ComradeRuntime {
             .await
     }
 
+    /// React to a message in `peer`'s thread, or take an existing reaction back
+    /// by tapping the same emoji again. Returns the reaction now standing, or
+    /// `None` if the tap withdrew one.
+    ///
+    /// Delegates to [`RuntimeHandles::toggle_reaction`] — see [`Self::send_dm`]
+    /// for why the handle snapshot comes first, and that method for why the
+    /// toggle decision lives on this side of the FFI rather than in each frontend.
+    pub async fn toggle_reaction(
+        &self,
+        peer: &str,
+        target_id: &str,
+        emoji: &str,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        self.handles().toggle_reaction(peer, target_id, emoji).await
+    }
+
+    /// Every reaction in `peer`'s conversation, oldest first — read from the
+    /// encrypted store, so a thread opens with its reactions already on it rather
+    /// than waiting for a live event.
+    ///
+    /// Withdrawn reactions are not returned (the store keeps a tombstone to
+    /// refuse replays; see `EncryptedStore::set_reaction`).
+    pub fn reactions(&self, peer: &str) -> Result<Vec<ReactionDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::StoreLocked)?;
+        let rows = store
+            .reactions_with(&to_npub(peer))
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(ReactionDto::from).collect())
+    }
+
     /// Retry queued mail now. Delegates to [`RuntimeHandles::flush_outbox`] —
     /// see [`Self::send_dm`]. Returns how many messages a relay accepted.
     ///
@@ -2020,18 +2537,22 @@ impl ComradeRuntime {
             .messages_with(&peer)
             .map_err(|e| UiError::Storage(e.to_string()))?
             .into_iter()
-            .map(|m| MessageDto {
-                id: m.id,
-                peer: m.peer_npub,
-                content: m.content,
-                created_at: m.created_at,
-                status: if m.outgoing {
-                    Some(m.status.unwrap_or_else(|| "sent".into()))
-                } else {
-                    None
-                },
-                reply_to: m.reply_to,
-                outgoing: m.outgoing,
+            .map(|m| {
+                let (author, content) = split_author(m.content);
+                MessageDto {
+                    id: m.id,
+                    peer: m.peer_npub,
+                    content,
+                    created_at: m.created_at,
+                    author,
+                    status: if m.outgoing {
+                        Some(m.status.unwrap_or_else(|| "sent".into()))
+                    } else {
+                        None
+                    },
+                    reply_to: m.reply_to,
+                    outgoing: m.outgoing,
+                }
             })
             .collect();
         msgs.sort_by_key(|m| m.created_at);
@@ -2493,12 +3014,26 @@ impl ComradeRuntime {
         *self.share_policy.lock().unwrap()
     }
 
-    /// Change it. The next transfer connection is built under the new policy;
-    /// one already running is not renegotiated, because tearing down a transfer
-    /// someone is watching from is a worse answer than letting it finish under
-    /// the rules it started with.
-    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
+    /// Change it, and remember it. The next transfer connection is built under
+    /// the new policy; one already running is not renegotiated, because tearing
+    /// down a transfer someone is watching from is a worse answer than letting
+    /// it finish under the rules it started with.
+    ///
+    /// The cell is updated even when the vault is locked, so a frontend can set
+    /// a policy for this session without one; it just will not survive the
+    /// process. Persistence failures are reported rather than swallowed —
+    /// silently forgetting a choice about someone else's bandwidth is the kind
+    /// of quiet default this codebase does not do.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) -> Result<(), UiError> {
         *self.share_policy.lock().unwrap() = policy;
+        let Some(store) = self.ui.store_ref() else {
+            return Err(UiError::VaultLocked);
+        };
+        let prefs = relay_policy_to_prefs(policy);
+        store
+            .save_share_prefs(&prefs)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))
     }
 
     /// Whether a transfer connection may be handed TURN servers at all.
@@ -2518,14 +3053,25 @@ impl ComradeRuntime {
     /// browser-supplied, so classification is lenient about case and spacing and
     /// anything it does not recognise becomes
     /// [`IcePathKind::Unknown`] — which is *refused*, never waved through.
+    ///
+    /// `consent_granted` is the answer to a question a *previous* call asked by
+    /// returning `needs_consent`; it can only ever turn that into `allow`, never
+    /// move a refusal — see [`share_transport::decide_with_consent`] for why
+    /// that asymmetry is load-bearing.
     pub fn share_transfer_verdict(
         &self,
         local_candidate_type: &str,
         remote_candidate_type: &str,
         total_bytes: u64,
+        consent_granted: bool,
     ) -> ShareVerdictDto {
         let path = IcePathKind::classify(local_candidate_type, remote_candidate_type);
-        let verdict = share_transport::decide(path, total_bytes, self.share_relay_policy());
+        let verdict = share_transport::decide_with_consent(
+            path,
+            total_bytes,
+            self.share_relay_policy(),
+            consent_granted,
+        );
         ShareVerdictDto {
             verdict: match verdict {
                 TransferVerdict::Allow => "allow",
@@ -2636,10 +3182,154 @@ impl ComradeRuntime {
     /// The local profile: npub plus the chosen @handle (if set).
     pub fn profile(&self) -> Result<ProfileDto, UiError> {
         let id = self.ui.current_identity().ok_or(UiError::NoIdentity)?;
+        // The bio and picture live in the store, so they read as `None` while the
+        // vault is locked — the same way this method already tolerates having no
+        // store at all rather than failing.
+        let own = self
+            .ui
+            .store_ref()
+            .and_then(|store| cached_peer_profile(store, &id.npub));
         Ok(ProfileDto {
             npub: id.npub,
             username: self.ui.username(),
+            about: self.ui.store_ref().and_then(stored_about),
+            picture: own.as_ref().and_then(|r| r.picture.clone()),
+            avatar_cached: own.is_some_and(|r| r.avatar_sha256.is_some()),
         })
+    }
+
+    /// Everything a profile page draws for one peer, from the local cache alone.
+    ///
+    /// No relay round trip, so it works offline and returns instantly; a caller
+    /// that wants fresher data runs [`Self::refresh_peer_profiles`] and reads
+    /// again. Accepts an npub or hex key, and resolves to the canonical npub the
+    /// contact is stored under.
+    pub fn peer_profile(&self, npub: &str) -> Result<PeerProfileDto, UiError> {
+        let canonical = self.canonical_contact_npub(npub)?;
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let contact = store
+            .get_contact(&canonical)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let record = cached_peer_profile(store, &canonical).unwrap_or_default();
+        let presence = store
+            .get_peer_presence(&canonical)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let now = now_secs();
+        let comrade = contact.as_ref().is_some_and(|c| c.comrade);
+        let blocked = store
+            .get_conversation_meta(&canonical)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.state == STATE_BLOCKED);
+        Ok(PeerProfileDto {
+            alias: contact
+                .as_ref()
+                .and_then(|c| user_alias(&c.petname, &canonical))
+                .unwrap_or_default(),
+            name: record.name,
+            about: record.about,
+            picture: record.picture,
+            nip05: record.nip05,
+            lud16: record.lud16,
+            avatar_cached: record.avatar_sha256.is_some(),
+            contact: contact.is_some(),
+            comrade,
+            blocked,
+            // Presence only flows between comrades, so a non-comrade is never
+            // "online" however recent their last beacon looks.
+            online: comrade
+                && presence
+                    .as_ref()
+                    .is_some_and(|p| p.online && is_online_at(p.expires_at, now)),
+            last_seen_at: presence.as_ref().map_or(0, |p| p.last_seen_at),
+            peer_marked_us: presence.as_ref().is_some_and(|p| p.peer_marked_us),
+            updated_at: record.updated_at,
+            npub: canonical,
+        })
+    }
+
+    /// A peer's cached avatar bytes, base64-encoded, or `None` to draw initials.
+    ///
+    /// Reads the encrypted store and never the network — so this is safe to call
+    /// while rendering, and calling it can never disclose anything to anyone. The
+    /// fetch that fills the cache is a separate, gated decision.
+    pub fn peer_avatar(&self, npub: &str) -> Result<Option<MediaBytesDto>, UiError> {
+        let canonical = self.canonical_contact_npub(npub)?;
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let Some(record) = cached_peer_profile(store, &canonical) else {
+            return Ok(None);
+        };
+        let (Some(sha), Some(mime)) = (record.avatar_sha256, record.avatar_mime) else {
+            return Ok(None);
+        };
+        let Some(bytes) = store
+            .get_bytes(PEER_AVATAR_BLOBS_TREE, &sha)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+        else {
+            // The record points at bytes that are gone. Initials, not an error:
+            // there is nothing the user could do about it and nothing is broken.
+            return Ok(None);
+        };
+        Ok(Some(MediaBytesDto {
+            mime_type: mime,
+            base64: B64.encode(bytes),
+        }))
+    }
+
+    /// Whether peer-published pictures may be fetched at all.
+    ///
+    /// Default **on**, which is a deliberate trade the owner made explicitly: a
+    /// profile page whose avatars are all initials until someone finds a setting
+    /// is a worse product, and the fetch is narrowed instead — accepted contacts
+    /// only, and every guard in [`comrade_core::avatar`]. The switch exists
+    /// because the cost is a real one and belongs to the user.
+    pub fn remote_avatars_enabled(&self) -> Result<bool, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .get::<bool>(SETTINGS_TREE, REMOTE_AVATARS_KEY)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .unwrap_or(true))
+    }
+
+    /// Turn peer-published picture fetching on or off.
+    pub fn set_remote_avatars_enabled(&self, on: bool) -> Result<(), UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        store
+            .put(SETTINGS_TREE, REMOTE_AVATARS_KEY, &on)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))
+    }
+
+    /// Set (or clear, with an empty string) this identity's bio, and republish.
+    ///
+    /// Stripped of control characters and bounded — our own text should not carry
+    /// a newline that would forge a second line on somebody else's profile page
+    /// either. Persisted locally first, so an offline edit sticks and republishes
+    /// on the next launch, which is how the handle already behaves.
+    pub async fn set_about(&mut self, about: &str) -> Result<ProfileDto, UiError> {
+        let cleaned = sanitise_untrusted_text(about, MAX_ABOUT_LEN);
+        {
+            let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+            if cleaned.is_empty() {
+                let _ = store.delete(SETTINGS_TREE, PROFILE_ABOUT_KEY);
+            } else {
+                store
+                    .put(SETTINGS_TREE, PROFILE_ABOUT_KEY, &cleaned)
+                    .map_err(|e| UiError::Storage(e.to_string()))?;
+            }
+            store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+        }
+        // Republish so the change reaches the network. An empty bio publishes as
+        // `Clear`, which is the case `Option<&str>` could not express at all.
+        if let (Some(sabha), Some(handle)) = (self.sabha.clone(), self.ui.username()) {
+            let edit = if cleaned.is_empty() {
+                OwnedMetadataEdit::Clear
+            } else {
+                OwnedMetadataEdit::Set(cleaned)
+            };
+            self.spawn_profile_publish_with(sabha, handle, edit);
+        }
+        self.profile()
     }
 
     /// Claim a display handle for this identity.
@@ -3164,6 +3854,224 @@ impl ComradeRuntime {
                 note: r.note.to_string(),
             })
             .collect()
+    }
+
+    // ── In-chat commands (see `comrade_core::command`) ───────────────────────
+    //
+    // The grammar itself is pure and lives in core, so these are thin: parse,
+    // resolve `@handles` against the saved contacts, and act. The one rule worth
+    // restating here is that **nothing in this section guesses who somebody
+    // meant** — see [`Self::resolve_mentions`].
+
+    /// What the text in a composer means. Pure; no vault needed, so a composer
+    /// can call it on every keystroke before anything is unlocked.
+    pub fn parse_chat_command(&self, text: &str) -> ChatCommand {
+        command::parse(text)
+    }
+
+    /// Every command a composer should offer, for `/`-autocomplete and `/help`.
+    ///
+    /// One list for every frontend — the failure `/pay` demonstrates, having
+    /// shipped a live composer preview on desktop and never on Flutter.
+    pub fn chat_command_catalog(&self) -> Vec<CommandSpec> {
+        command::catalog()
+    }
+
+    /// Every `@handle` in `text`, unresolved. Pure — for drawing chips while
+    /// typing, before it is worth touching the store.
+    pub fn chat_mentions(&self, text: &str) -> Vec<Mention> {
+        command::mentions(text)
+    }
+
+    /// Every `@handle` in `text`, resolved against the saved contacts.
+    ///
+    /// Matching follows [`ContactDto`]'s display precedence — the user's own
+    /// alias first, then the peer's published handle — and **never the published
+    /// handle alone when an alias matched**, because a handle is self-declared
+    /// and non-unique while an alias is the local user's own word for somebody.
+    ///
+    /// Two contacts answering to one handle is a real state, not an edge case:
+    /// anyone may publish any name. It comes back as
+    /// [`MentionMatchDto::candidates`] for the UI to ask about. Resolving it by
+    /// picking the first is how `/task … @ana` reaches the wrong Ana.
+    pub fn resolve_mentions(&self, text: &str) -> Result<Vec<MentionMatchDto>, UiError> {
+        let contacts = self.list_contacts()?;
+        Ok(command::mentions(text)
+            .into_iter()
+            .map(|m| {
+                // Alias first. A contact the user named themself outranks a
+                // handle anybody could claim, so an exact alias match is taken
+                // as decisive even if some other contact publishes that name.
+                let by_alias: Vec<&ContactDto> = contacts
+                    .iter()
+                    .filter(|c| c.alias.to_lowercase() == m.handle)
+                    .collect();
+                let matched = if by_alias.is_empty() {
+                    contacts
+                        .iter()
+                        .filter(|c| {
+                            c.name.as_deref().is_some_and(|n| {
+                                n.trim_start_matches('@').to_lowercase() == m.handle
+                            })
+                        })
+                        .collect()
+                } else {
+                    by_alias
+                };
+                let (npub, candidates) = match matched.len() {
+                    1 => (Some(matched[0].npub.clone()), Vec::new()),
+                    0 => (None, Vec::new()),
+                    _ => (None, matched.into_iter().cloned().collect()),
+                };
+                MentionMatchDto {
+                    handle: m.handle,
+                    start: m.start,
+                    end: m.end,
+                    npub,
+                    candidates,
+                }
+            })
+            .collect())
+    }
+
+    /// How far a `/play` query gets without a network or a library.
+    ///
+    /// Pure. A link resolves to what it identifies
+    /// ([`comrade_core::together::parse_music_link`]); free text resolves to the
+    /// [`Recording`] it names ([`comrade_core::command::recording_from_query`]),
+    /// which is what a library resolver then searches for. **Nothing here
+    /// contacts a service** — turning a query into a catalogue id is
+    /// `comrade_core::catalogue`'s job, behind a feature and a disclosure.
+    ///
+    /// [`Recording`]: comrade_core::together::Recording
+    pub fn play_query(&self, query: &str, service: Option<MusicService>) -> PlayTargetDto {
+        use comrade_core::together::{parse_music_link, MusicLink};
+
+        let q = query.trim();
+        if q.is_empty() {
+            return PlayTargetDto {
+                plan: PlayPlan::Empty,
+                service,
+                link: None,
+                content: None,
+                recording: None,
+            };
+        }
+        if let Some(link) = parse_music_link(q) {
+            // Only YouTube can be driven by us, and only through its embed.
+            let content = match &link {
+                MusicLink::Youtube { video_id } => Some(TogetherContent::Youtube {
+                    video_id: video_id.clone(),
+                }),
+                _ => None,
+            };
+            let plan = if content.is_some() {
+                PlayPlan::OpenNow
+            } else {
+                PlayPlan::NameOnly
+            };
+            // A link's own service wins over the alias that was typed: a
+            // Spotify URL pasted after `/youtube` is still a Spotify URL.
+            let service = Some(match &link {
+                MusicLink::Spotify { .. } => MusicService::Spotify,
+                MusicLink::AppleMusic { .. } => MusicService::AppleMusic,
+                MusicLink::Youtube { .. } => MusicService::Youtube,
+            });
+            return PlayTargetDto {
+                plan,
+                service,
+                link: Some(link),
+                content,
+                recording: None,
+            };
+        }
+        PlayTargetDto {
+            plan: PlayPlan::FindLocally,
+            service,
+            link: None,
+            content: None,
+            recording: Some(command::recording_from_query(q)),
+        }
+    }
+
+    // ── Tasks (see `comrade_core::karya`) ────────────────────────────────────
+
+    /// Name a piece of work. `peer` of `None` is a note to self, which never
+    /// touches a relay.
+    ///
+    /// Delegates to [`RuntimeHandles::assign_task`] — see [`Self::send_dm`] for
+    /// why the network half never runs under the runtime lock.
+    pub async fn assign_task(&self, peer: Option<String>, text: &str) -> Result<TaskDto, UiError> {
+        self.handles().assign_task(peer, text).await
+    }
+
+    /// Every task this device knows about, newest first.
+    pub fn tasks(&self) -> Result<Vec<TaskDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let me = self.my_npub()?;
+        Ok(store
+            .tasks()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .filter_map(|row| task_dto(row, &me))
+            .collect())
+    }
+
+    /// Move a task to `state`, and tell the other party if there is one.
+    ///
+    /// Delegates to [`RuntimeHandles::set_task_state`].
+    pub async fn set_task_state(&self, id: &str, state: TaskState) -> Result<TaskDto, UiError> {
+        self.handles().set_task_state(id, state).await
+    }
+
+    /// Offer an in-app action to `peers` — "I thought this might help".
+    ///
+    /// Returns [`OfferOutcomeDto`] rather than a count, because a deliberate
+    /// command that silently did nothing reads as a bug and the *reason* it did
+    /// nothing is the part a UI has to say out loud. See that type for why a
+    /// bare number was actively misleading.
+    ///
+    /// Delegates to [`RuntimeHandles::offer_action`].
+    pub async fn offer_action(
+        &self,
+        action: AppAction,
+        peers: Vec<String>,
+    ) -> Result<OfferOutcomeDto, UiError> {
+        self.handles().offer_action(action, peers).await
+    }
+
+    /// Say something to Tara from inside a conversation — a **private aside**.
+    ///
+    /// Identical to [`Self::tara_send`] and deliberately so: it is the same
+    /// thread, the same store, the same engine, and above all the same
+    /// locality. The separate name exists because the *call site* is different
+    /// and that difference is the whole feature — a frontend reaching this from
+    /// a chat composer must never be able to reach `send_dm` with the same text.
+    ///
+    /// What is **not** passed: the conversation. Not the peer's messages, not
+    /// the history, not who the chat is with. Seeding a companion with the other
+    /// person's words would make them a participant in something they never
+    /// opted into, and the peer is not a party to this at all.
+    pub fn tara_aside(&self, text: &str) -> Result<TaraMessageDto, UiError> {
+        self.tara_send(text)
+    }
+
+    /// Ask Tara in front of the person you are talking to — the `@tara …`
+    /// spelling, and the counterpart to [`Self::tara_aside`]'s `/tara`.
+    ///
+    /// Delegates to [`RuntimeHandles::tara_in_chat`], which is where the
+    /// reasoning is — including why a question that trips the distress detector
+    /// is answered without sending anything.
+    pub async fn tara_in_chat(&self, peer: &str, text: &str) -> Result<TaraChatDto, UiError> {
+        self.handles().tara_in_chat(peer, text).await
+    }
+
+    /// This device's own npub, for deciding which side of a task we are on.
+    fn my_npub(&self) -> Result<String, UiError> {
+        self.ui
+            .current_identity()
+            .map(|i| i.npub)
+            .ok_or(UiError::NoIdentity)
     }
 
     // ── Attention (wellbeing pillar #5 — strictly local, never networked) ─────
@@ -4069,12 +4977,14 @@ impl RuntimeHandles {
         // leave a composer that must never look like abandoning it.
         self.nudge_watch.sent(&peer_npub);
 
+        let (author, body) = split_author(content.to_string());
         let dto = MessageDto {
             id,
             peer: peer_npub.clone(),
-            content: content.to_string(),
+            content: body,
             created_at,
             outgoing: true,
+            author,
             status: Some(status.into()),
             reply_to: reply_to.map(str::to_string),
         };
@@ -4082,7 +4992,9 @@ impl RuntimeHandles {
             let row = comrade_storage::StoredMessage {
                 id: dto.id.clone(),
                 peer_npub: dto.peer.clone(),
-                content: dto.content.clone(),
+                // The wire form, not `dto.content`: the marker has to survive a
+                // reload for the bubble to be drawn the same way next time.
+                content: content.to_string(),
                 created_at: dto.created_at,
                 outgoing: true,
                 status: Some(status.into()),
@@ -4130,6 +5042,101 @@ impl RuntimeHandles {
             created_at,
         )
         .await
+    }
+
+    /// React to one of `peer`'s messages, or take an existing reaction back.
+    ///
+    /// **Toggling lives here, not in the frontends.** Tapping the emoji you
+    /// already sent means "remove it", and tapping a different one means
+    /// "replace"; deciding that needs the current reaction, which only this side
+    /// knows. Putting it here is what keeps Android and Flutter from each having
+    /// their own answer — and each having their own bug when the two disagree.
+    ///
+    /// Returns the reaction now standing, or `None` if the tap withdrew one.
+    ///
+    /// The local write happens **before** the send and is kept whatever the send
+    /// does, so the chip appears the moment it is tapped and survives being
+    /// offline. A reaction is deliberately **not** queued in the outbox on
+    /// failure, unlike a message: the outbox persists `StoredMessage` rows, so a
+    /// queued envelope would sit in the conversation as a JSON bubble, and a
+    /// reaction is worth much less than the retry machinery would cost.
+    /// The peer simply does not learn about it. That becomes worth revisiting if
+    /// the outbox ever grows a non-chat lane — at which point reactions should
+    /// use it.
+    pub async fn toggle_reaction(
+        &self,
+        peer: &str,
+        target_id: &str,
+        emoji: &str,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        if target_id.trim().is_empty() {
+            return Err(UiError::Engine("no message to react to".into()));
+        }
+        // The same bound the parser enforces on the way in, applied on the way
+        // out: this device must not send a peer something it would itself refuse.
+        if emoji.is_empty() || emoji.len() > MAX_REACTION_BYTES {
+            return Err(UiError::Engine(format!(
+                "a reaction must be 1..={MAX_REACTION_BYTES} bytes"
+            )));
+        }
+        let store = self.store.clone().ok_or(UiError::StoreLocked)?;
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer_pk = parse_pubkey(peer)?;
+        let peer_npub = to_npub(peer);
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+
+        let current = store
+            .reaction_by(target_id, &me)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        // Tapping what you already sent takes it back; anything else replaces.
+        let clearing = current.as_ref().map(|r| r.emoji.as_str()) == Some(emoji);
+        let next = if clearing { "" } else { emoji };
+        let created_at = now_secs();
+
+        let row = comrade_storage::MessageReaction {
+            target_id: target_id.to_string(),
+            peer_npub: peer_npub.clone(),
+            reactor_npub: me,
+            emoji: next.to_string(),
+            created_at,
+            outgoing: true,
+        };
+        store
+            .set_reaction(&row)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+
+        let json = ReactionEnvelope::new(target_id, next)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+
+        // Same transport precedence a message gets: the local mesh first when the
+        // user has asked for it, a relay otherwise — a reaction sent across the
+        // room should not need the internet either.
+        let plan = SendPlan::for_attempt(self.prefer_local, 0);
+        let local_id = local_message_id(&peer_npub, &json, created_at);
+        let on_mesh = plan.local_first
+            && self
+                .try_mesh(&peer_pk, &local_id, &json, None, created_at)
+                .await;
+        if !on_mesh || plan.force_both {
+            if let Err(e) = vault.send_dm(&peer_pk, &json).await {
+                if !plan.local_first {
+                    self.try_mesh(&peer_pk, &local_id, &json, None, created_at)
+                        .await;
+                }
+                // Logged, not returned: the local reaction stands either way, and
+                // failing the call would make the UI un-draw a chip the user just
+                // tapped over something they cannot act on.
+                tracing::info!(error = %e, "reaction could not be published");
+            }
+        }
+
+        Ok((!clearing).then(|| ReactionDto::from(row)))
     }
 
     /// Park a message in the sender outbox under a locally minted id and
@@ -4591,6 +5598,296 @@ impl RuntimeHandles {
         deliver_nudges(&vault, recipients).await
     }
 
+    // ── Tasks and offers (see `comrade_core::karya`, `comrade_core::command`) ─
+
+    /// Send a control envelope to `target` without it becoming a chat message.
+    ///
+    /// [`Self::send_dm`] is the *chat* path: it persists a `StoredMessage`,
+    /// queues in the outbox, drives the chat-list preview and cancels the draft
+    /// nudge. Putting an envelope through it puts raw JSON in the sender's own
+    /// thread and in their chat list — the exact defect `AUDIT.md`'s 2026-07-29
+    /// entry records for media references ("a chat bubble full of
+    /// machine-readable noise, and the chat list's preview").
+    ///
+    /// So this goes straight to the vault, the way every other control envelope
+    /// here already does ([`Self::send_call_signal`], `deliver_nudges`,
+    /// [`Self::together_start`], the receipt sender). The cost is deliberate and
+    /// worth naming: **no outbox retry**. A task or an offer no relay accepts is
+    /// not queued for later, because a "would you do this?" that silently
+    /// arrives an hour after the conversation moved on is worse than one the
+    /// sender was told to re-send — and the local row exists either way.
+    async fn send_control_envelope(&self, target: &str, json: &str) -> Result<(), UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer = parse_pubkey(target)?;
+        vault
+            .send_dm(&peer, json)
+            .await
+            .map(|_| ())
+            .map_err(|e| UiError::Engine(e.to_string()))
+    }
+
+    /// Name a piece of work. `peer` of `None` is a note to self.
+    ///
+    /// A note to self never reaches a relay — it is stored and returned, and
+    /// that is the whole operation. An assignment stores the row *first* and
+    /// then sends, so a relay that refuses does not lose the task the user
+    /// typed; the assigner has a record of having asked either way, and the
+    /// outbox is not used because a task nobody received is better re-asked than
+    /// delivered silently an hour later.
+    pub async fn assign_task(&self, peer: Option<String>, text: &str) -> Result<TaskDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+        let task = Task::new(
+            new_task_id(),
+            text,
+            me.clone(),
+            peer.as_deref().map(to_npub),
+            now_secs(),
+        );
+        if task.text.is_empty() {
+            return Err(UiError::Engine("a task needs to say what to do".into()));
+        }
+        store
+            .save_task(&stored_task(&task))
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        if let Some(target) = peer {
+            let envelope = KaryaEnvelope::new(TaskSignal::Assign {
+                id: task.id.clone(),
+                text: task.text.clone(),
+            });
+            let json = envelope
+                .to_json()
+                .map_err(|e| UiError::Engine(e.to_string()))?;
+            // One message, not two: the receiver renders its own chat bubble
+            // from the envelope (`apply_karya_signal`) rather than us sending a
+            // second, human-readable copy. Two events per assignment would
+            // double the relay traffic and let the bubble disagree with the row.
+            self.send_control_envelope(&target, &json).await?;
+        }
+        task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
+    }
+
+    /// Move a task to `state` on this device's say-so, and tell the other party.
+    ///
+    /// The permission check is [`Task::apply`]'s, which is where the table
+    /// lives; a refusal comes back as one error rather than three, because a
+    /// caller learning *which* rule stopped them learns about a task that may
+    /// not be theirs.
+    pub async fn set_task_state(&self, id: &str, state: TaskState) -> Result<TaskDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+        let row = store
+            .task(id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .ok_or_else(|| UiError::Engine("no such task".into()))?;
+        let mut task =
+            task_from_stored(&row).ok_or_else(|| UiError::Engine("bad task row".into()))?;
+        if !task.apply(state, &me, now_secs()) {
+            return Err(UiError::Engine("that is not yours to change".into()));
+        }
+        store
+            .save_task(&stored_task(&task))
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        // Whoever is on the other side needs to hear it. On a note to self there
+        // is nobody, and no relay is touched.
+        let other = if task.assigner_npub == me {
+            task.assignee_npub.clone()
+        } else {
+            Some(task.assigner_npub.clone())
+        };
+        if let Some(target) = other.filter(|t| *t != me) {
+            let json = KaryaEnvelope::new(TaskSignal::State {
+                id: task.id.clone(),
+                state,
+            })
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+            if let Err(e) = self.send_control_envelope(&target, &json).await {
+                // The local row already moved, and it is the copy this device
+                // trusts. A peer who never hears will see it next time they act
+                // on the task and are told it is already finished.
+                tracing::debug!("task state not sent: {e}");
+            }
+        }
+        task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
+    }
+
+    /// Ask Tara **in front of the other person** — the `@tara …` spelling.
+    ///
+    /// WhatsApp's `@Meta AI`, with three differences that are the point of this
+    /// app rather than incidental to it:
+    ///
+    /// 1. **The answer is computed here.** `ReflectiveCompanion` is on-device
+    ///    template matching, so nothing about the question leaves the phone
+    ///    except the two messages the user chose to send.
+    /// 2. **The peer's messages are not passed to her.** Exactly as
+    ///    [`ComradeRuntime::tara_aside`] documents: she answers the sentence she
+    ///    was handed, not the conversation around it. The other person is a
+    ///    *reader* here, never material.
+    /// 3. **Distress never gets published.** If the question trips
+    ///    `detect_distress`, this sends nothing at all and comes back with
+    ///    `kept_private`. Someone typing the wrong sigil while in a bad place
+    ///    must not have their crisis hand-off delivered into a chat, and the
+    ///    grammar cannot tell that case from any other before the reply exists —
+    ///    so the check has to be here, after the reply and before the send.
+    ///
+    /// Both messages are ordinary DMs. The answer carries
+    /// `comrade_core::tara::TARA_CHAT_PREFIX` on the wire, and [`split_author`]
+    /// turns that into [`MessageAuthor::Tara`] with the marker off the text, so
+    /// both DTOs this returns are already in the form a bubble draws. The marker
+    /// is a claim by the sending client, not an authentication — see
+    /// [`MessageAuthor`].
+    ///
+    /// The private thread is left untouched: a question asked in front of
+    /// somebody is not a turn in the private session, and merging the two would
+    /// mean a shared chat could reshape (and be read out of) a journal-adjacent
+    /// space the peer has no part in. The rotation seed therefore counts the Tara
+    /// lines *in this thread* rather than that thread's turns.
+    pub async fn tara_in_chat(&self, peer: &str, text: &str) -> Result<TaraChatDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(UiError::Engine("nothing was asked".into()));
+        }
+        let peer_npub = to_npub(peer);
+        // Everything that reads the store happens before the first await, the
+        // discipline every send path in this impl follows.
+        let prior = store
+            .messages_with(&peer_npub)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .iter()
+            .filter(|m| tara_chat_answer(&m.content).is_some())
+            .count() as u64;
+
+        let reply = ReflectiveCompanion.reply(text, prior);
+        if reply.crisis {
+            return Ok(TaraChatDto {
+                asked: None,
+                answered: None,
+                reply: reply.text,
+                kept_private: true,
+                crisis: true,
+            });
+        }
+
+        // The question first, so the thread reads in the order it happened even
+        // if the second send is the one that fails.
+        let asked = self.send_dm(&peer_npub, text).await?;
+        // The answer *replies* to the question, which is both true and load
+        // bearing: two messages sent in the same second carry the same
+        // `created_at`, and the receiver's thread sorts on that — so arrival
+        // order alone could show her answer above what it answered. The `e` tag
+        // pairs them however they land.
+        //
+        // Only when the question actually reached a relay: an offline send comes
+        // back with a local outbox id, and tagging that would name an event no
+        // relay has ever seen.
+        let reply_to = Some(asked.id.as_str())
+            .filter(|id| !comrade_core::dak::outbox::is_local_message_id(id));
+        let answered = self
+            .send_dm_reply(&peer_npub, &tara_chat_line(&reply.text), reply_to)
+            .await?;
+        Ok(TaraChatDto {
+            asked: Some(asked),
+            answered: Some(answered),
+            reply: reply.text,
+            kept_private: false,
+            crisis: false,
+        })
+    }
+
+    /// Offer an in-app action to `peers`, reporting who was told and who was not.
+    ///
+    /// Three gates, and each one is a lesson this repo already paid for:
+    ///
+    /// 1. **Comrades only.** Marking someone a comrade is the existing
+    ///    "this person may reach me" grant ([`ComradeRuntime::set_comrade`]);
+    ///    an offer is a notification, so it lives inside that grant rather
+    ///    than beside it. Anyone named who is not one comes back in
+    ///    [`OfferOutcomeDto::not_comrades`] so the UI can say which.
+    /// 2. **The shared nudge cooldown.** `comrade_core::nudge::nudged_recently`
+    ///    is a floor on *notifications*, not on any one reason for them — the
+    ///    reasoning `AUDIT.md` records for the breathing screen's own trigger.
+    ///    Someone told twenty minutes ago that a comrade might need them learns
+    ///    nothing from being told to breathe now, and being able to send this
+    ///    repeatedly would make it a way to needle somebody.
+    /// 3. **A control envelope, not a chat message** — see
+    ///    [`Self::send_control_envelope`] for why, and for what that costs.
+    ///
+    /// Never partially fails in the sense of erroring: an unreachable comrade
+    /// lands in [`OfferOutcomeDto::failed`] and the rest still go.
+    pub async fn offer_action(
+        &self,
+        action: AppAction,
+        peers: Vec<String>,
+    ) -> Result<OfferOutcomeDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let now = now_secs();
+        // Everything that reads the store, and the cooldown claim, happen before
+        // the first await — the discipline every send path here follows.
+        let comrades: std::collections::HashSet<String> = store
+            .list_comrades()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|c| c.npub)
+            .collect();
+
+        let mut outcome = OfferOutcomeDto {
+            sent: Vec::new(),
+            not_comrades: Vec::new(),
+            on_cooldown: Vec::new(),
+            failed: Vec::new(),
+        };
+        let mut wanted: Vec<String> = Vec::new();
+        for npub in peers.iter().map(|p| to_npub(p)) {
+            if comrades.contains(&npub) {
+                wanted.push(npub);
+            } else {
+                outcome.not_comrades.push(npub);
+            }
+        }
+        if wanted.is_empty() {
+            return Ok(outcome);
+        }
+        // `due_among` claims the cooldown for everyone it returns, so whoever it
+        // leaves out is on cooldown by definition.
+        let due = self.nudge_watch.due_among(&wanted, now);
+        outcome.on_cooldown = wanted
+            .iter()
+            .filter(|npub| !due.contains(npub))
+            .cloned()
+            .collect();
+        if due.is_empty() {
+            return Ok(outcome);
+        }
+
+        let json = OfferEnvelope::new(action)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        for target in due {
+            match self.send_control_envelope(&target, &json).await {
+                Ok(()) => outcome.sent.push(target),
+                Err(e) => {
+                    tracing::debug!(%target, "offer not sent: {e}");
+                    outcome.failed.push(target);
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
     pub async fn broadcast_chitthi(
         &self,
         content: &str,
@@ -4899,6 +6196,42 @@ impl RuntimeHandles {
     /// someone who never agreed to watch anything with you.
     pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
         self.send_together(TogetherSignal::Share { signal }).await
+    }
+
+    /// Carry one step of a large-attachment handoff to `peer`.
+    ///
+    /// Deliberately **not** routed through [`Self::send_together`]: that refuses
+    /// outside a live session, which is right for a playhead and wrong for an
+    /// attachment — nobody starts a watch-together session to send a video file.
+    /// The gate a handoff gets instead is the one on receipt
+    /// ([`IncomingGate::Accepted`]), which is the same bar a call signal has to
+    /// clear, and for the same reason: both open a peer connection and both leak
+    /// ICE candidates to whoever is on the other end. A stranger cannot get that
+    /// far, and an accepted contact still has to be told and still has to agree —
+    /// [`HandoffSignal::Accept`] comes from a person pressing a button, not from
+    /// this runtime.
+    ///
+    /// Relay-first, unlike a together signal. A handoff is a handful of messages
+    /// over the life of one transfer rather than a heartbeat every ten seconds,
+    /// so the mesh's latency advantage buys nothing here — and the mesh reaches
+    /// only the local network, where a large file would have found a `host`
+    /// candidate anyway.
+    pub async fn attachment_handoff_send(
+        &self,
+        peer: &str,
+        transfer_id: &str,
+        signal: HandoffSignal,
+    ) -> Result<(), UiError> {
+        let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
+        let peer_pk = parse_pubkey(peer)?;
+        let json = HandoffEnvelope::new(transfer_id, signal)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        vault
+            .send_dm(&peer_pk, &json)
+            .await
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        Ok(())
     }
 
     /// One pass of the session loop: expire a session we have stopped hearing
@@ -5398,13 +6731,97 @@ fn timestamped_store_id(created_at: u64) -> String {
     format!("{created_at:020}-{}", &tail[..12])
 }
 
-/// The peer's published @handle from the local profile cache, if known.
-fn cached_peer_name(store: &comrade_storage::EncryptedStore, npub: &str) -> Option<String> {
+/// This identity's own bio, from the settings tree.
+///
+/// A free function taking the store, matching the other cache readers here, so
+/// [`ComradeRuntime::profile`] can call it without caring whether the vault
+/// happens to be unlocked.
+fn stored_about(store: &comrade_storage::EncryptedStore) -> Option<String> {
+    store
+        .get::<String>(SETTINGS_TREE, PROFILE_ABOUT_KEY)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+}
+
+/// The peer's whole cached profile, not just the handle.
+///
+/// The accessor that was missing: `about` has been persisted by
+/// [`cache_found_profiles`] and [`ProfileRefresher::run`] since bios were first
+/// cached, and nothing could read it back — every reader went through
+/// [`cached_peer_name`], which takes `.name` and drops the rest. A profile page
+/// for an existing contact had no way to reach their bio at all.
+fn cached_peer_profile(
+    store: &comrade_storage::EncryptedStore,
+    npub: &str,
+) -> Option<PeerProfileRecord> {
     store
         .get::<PeerProfileRecord>(PEER_PROFILES_TREE, npub)
         .ok()
         .flatten()
-        .and_then(|r| r.name)
+}
+
+/// The peer's published @handle from the local profile cache, if known.
+fn cached_peer_name(store: &comrade_storage::EncryptedStore, npub: &str) -> Option<String> {
+    cached_peer_profile(store, npub).and_then(|r| r.name)
+}
+
+/// Fold what we just learned into the cached record, leaving alone anything the
+/// caller had no opinion about.
+///
+/// **The only writer of [`PEER_PROFILES_TREE`].** `store_profile_record` is the
+/// raw put and must not be called from anywhere else. The reason is a bug this
+/// replaces: `cache_pushed_peer_name` built a whole record with `about: None`, so
+/// a peer's profile-share envelope — which arrives when a request is accepted —
+/// erased any bio already cached for them. Nothing read `about`, so nothing
+/// noticed; the moment a profile page renders one, it becomes "their bio vanished
+/// when I accepted them". Every new field would have inherited the same shape.
+fn merge_peer_profile(
+    store: &comrade_storage::EncryptedStore,
+    npub: &str,
+    patch: PeerProfilePatch,
+) -> bool {
+    let mut record = cached_peer_profile(store, npub).unwrap_or_default();
+    let now = now_secs();
+    // A `None` in the patch means "learned nothing about this", never "it is
+    // empty" — the whole point of the merge.
+    if patch.name.is_some() {
+        record.name = patch.name;
+    }
+    if patch.about.is_some() {
+        record.about = patch.about;
+    }
+    if patch.picture.is_some() {
+        // A changed URL invalidates the cached bytes: they are the old picture.
+        if record.picture != patch.picture {
+            record.avatar_sha256 = None;
+            record.avatar_mime = None;
+            record.avatar_fetched_at = 0;
+            record.avatar_failed_at = 0;
+        }
+        record.picture = patch.picture;
+    }
+    if patch.nip05.is_some() {
+        record.nip05 = patch.nip05;
+    }
+    if patch.lud16.is_some() {
+        record.lud16 = patch.lud16;
+    }
+    if let Some((sha, mime)) = patch.avatar {
+        record.avatar_sha256 = Some(sha);
+        record.avatar_mime = Some(mime);
+        record.avatar_fetched_at = now;
+        record.avatar_failed_at = 0;
+    }
+    if patch.avatar_failed {
+        // Stamp the failure and nothing else. A refresh that could not reach the
+        // host must not throw away a picture we already have — the same reasoning
+        // the refresher already applies to a name a silent relay set did not
+        // return.
+        record.avatar_failed_at = now;
+    }
+    record.updated_at = now;
+    store_profile_record(store, npub, &record)
 }
 
 /// Legacy builds auto-filled an empty alias with the first 12 characters of
@@ -5432,6 +6849,10 @@ fn found_profile_dto(pk: &PublicKey, meta: Option<&Metadata>) -> FoundProfileDto
         npub: pk.to_bech32().unwrap_or_else(|_| pk.to_hex()),
         name: meta.and_then(display_name_of),
         about: meta.and_then(|m| m.about.clone()),
+        // Carried so a search row can say "has a picture" and still draw initials.
+        // Nothing is ever fetched for a stranger — see `may_fetch_avatar`.
+        picture: meta.and_then(|m| m.picture.clone()),
+        nip05: meta.and_then(|m| m.nip05.clone()),
     }
 }
 
@@ -5462,18 +6883,22 @@ fn cache_found_profiles(
     let Some(store) = store else {
         return;
     };
-    let now = now_secs();
     let mut wrote = false;
     for profile in found {
         if profile.name.is_none() {
             continue; // nothing displayable; don't shadow a future fetch
         }
-        let record = PeerProfileRecord {
-            name: profile.name.clone(),
-            about: profile.about.clone(),
-            updated_at: now,
-        };
-        wrote |= store_profile_record(store, &profile.npub, &record);
+        wrote |= merge_peer_profile(
+            store,
+            &profile.npub,
+            PeerProfilePatch {
+                name: profile.name.clone(),
+                about: profile.about.clone(),
+                picture: profile.picture.clone(),
+                nip05: profile.nip05.clone(),
+                ..Default::default()
+            },
+        );
     }
     if wrote {
         if let Err(e) = store.flush() {
@@ -5544,12 +6969,14 @@ fn ensure_pending(store: Option<&Arc<comrade_storage::EncryptedStore>>, peer_npu
 
 /// Cache a peer's shared display handle (from a profile-share envelope).
 fn cache_pushed_peer_name(store: &comrade_storage::EncryptedStore, npub: &str, name: &str) {
-    let record = PeerProfileRecord {
+    // A profile share carries a handle and nothing else, so it must claim nothing
+    // else. This used to write a whole record with `about: None` and erase a bio
+    // we already had — see `merge_peer_profile`.
+    let learned = PeerProfilePatch {
         name: Some(name.to_string()),
-        about: None,
-        updated_at: now_secs(),
+        ..Default::default()
     };
-    if store_profile_record(store, npub, &record) {
+    if merge_peer_profile(store, npub, learned) {
         let _ = store.flush();
     }
 }
@@ -5679,6 +7106,181 @@ async fn deliver_nudges(vault: &Arc<VaultEngine>, recipients: Vec<PublicKey>) ->
         }
     }
     sent
+}
+
+/// Apply an incoming task signal to the local store, returning the chat line to
+/// show for it — or `None` when nothing should be shown.
+///
+/// `None` covers every case where the signal changed nothing: a redelivered
+/// assignment (relays deliver at-least-once and the inbox backfills two days on
+/// every launch, so this *will* happen), a state change for a task we have never
+/// heard of, and a state change the sender has no standing to make. That last
+/// one is the forgery check, and it is [`Task::apply`]'s table doing the work:
+/// `peer_npub` is the authenticated sender of a gift-wrapped DM, so a peer who
+/// is not party to the task, or is the wrong party for that transition, moves
+/// nothing.
+fn apply_karya_signal(
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    peer_npub: &str,
+    me: &str,
+    created_at: u64,
+    signal: &TaskSignal,
+) -> Option<String> {
+    let store = store?;
+    match signal {
+        TaskSignal::Assign { id, text } => {
+            // Already have it: a redelivery, not a new ask.
+            if store.task(id).ok().flatten().is_some() {
+                return None;
+            }
+            // The sender is the assigner and we are the assignee — the only
+            // shape an incoming assignment can have. A peer cannot assign a
+            // task to somebody else through us.
+            let task = Task::new(
+                id.clone(),
+                text,
+                peer_npub.to_string(),
+                Some(me.to_string()),
+                created_at,
+            );
+            if task.text.is_empty() {
+                return None;
+            }
+            let line = render_task_line(TaskState::Open, &task.text);
+            if let Err(e) = store
+                .save_task(&stored_task(&task))
+                .and_then(|()| store.flush())
+            {
+                warn!("failed to persist incoming task: {e}");
+                return None;
+            }
+            Some(line)
+        }
+        TaskSignal::State { id, state } => {
+            let row = store.task(id).ok().flatten()?;
+            let mut task = task_from_stored(&row)?;
+            if !task.apply(*state, peer_npub, created_at) {
+                tracing::debug!(
+                    peer = %peer_npub,
+                    task = %id,
+                    "task state change refused — not theirs to make"
+                );
+                return None;
+            }
+            let line = render_task_line(*state, &task.text);
+            if let Err(e) = store
+                .save_task(&stored_task(&task))
+                .and_then(|()| store.flush())
+            {
+                warn!("failed to persist task state: {e}");
+                return None;
+            }
+            Some(line)
+        }
+    }
+}
+
+/// Persist and surface a chat line this device generated from a control
+/// envelope, so a task or an offer reads as the message it is.
+///
+/// Reuses the incoming event's real id, so a wrapper redelivered by the *same*
+/// transport is caught by the `get_message` check below. That is **not** enough
+/// on its own: the same envelope arriving over the other transport carries a
+/// different event id, and pairing those is the caller's job — both arms of the
+/// dispatcher run `is_cross_transport_duplicate` on the envelope bytes before
+/// reaching here. Sends a delivered receipt for the same reason the plain-chat
+/// path does: the message *did* arrive.
+#[allow(clippy::too_many_arguments)]
+fn deliver_synthetic_line(
+    vault: &Arc<VaultEngine>,
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    tx: &broadcast::Sender<BridgeEvent>,
+    route: &DmRoute<'_>,
+    msg: &VaultMessage,
+    peer_npub: &str,
+    line: String,
+) {
+    if let Some(store) = store {
+        if store.get_message(&msg.event_id).ok().flatten().is_some() {
+            return;
+        }
+        let row = comrade_storage::StoredMessage {
+            id: msg.event_id.clone(),
+            peer_npub: peer_npub.to_string(),
+            content: line.clone(),
+            created_at: msg.created_at,
+            outgoing: false,
+            status: None,
+            reply_to: None,
+        };
+        if let Err(e) = store.save_message(&row).and_then(|()| store.flush()) {
+            warn!("failed to persist a rendered control line: {e}");
+        }
+    }
+    send_delivered_receipt(vault, route.mesh, &msg.sender_pubkey, &msg.event_id);
+    let _ = tx.send(BridgeEvent::IncomingDirectMessage(DirectMessageDto {
+        id: msg.event_id.clone(),
+        sender: peer_npub.to_string(),
+        content: line,
+        created_at: msg.created_at,
+        upi_intents: Vec::new(),
+        reply_to: None,
+    }));
+}
+
+// ── Task conversions ─────────────────────────────────────────────────────────
+//
+// Three shapes for one thing, and each earns its place: `karya::Task` holds the
+// state machine, `StoredTask` is what `comrade_storage` can persist without
+// depending on `comrade_core`, and `TaskDto` is what a list renders. The two
+// conversions live here, once, rather than at each call site.
+
+/// A `karya::Task` as the store holds it.
+fn stored_task(task: &Task) -> comrade_storage::StoredTask {
+    comrade_storage::StoredTask {
+        id: task.id.clone(),
+        text: task.text.clone(),
+        assigner_npub: task.assigner_npub.clone(),
+        assignee_npub: task.assignee_npub.clone(),
+        created_at: task.created_at,
+        state: task.state.as_str().to_string(),
+        updated_at: task.updated_at,
+    }
+}
+
+/// A stored row back as a `karya::Task`, or `None` if its state is one this
+/// build does not know — a row from a newer version is skipped rather than
+/// coerced into `Open`, which would resurrect somebody's finished task.
+fn task_from_stored(row: &comrade_storage::StoredTask) -> Option<Task> {
+    Some(Task {
+        id: row.id.clone(),
+        text: row.text.clone(),
+        assigner_npub: row.assigner_npub.clone(),
+        assignee_npub: row.assignee_npub.clone(),
+        created_at: row.created_at,
+        state: TaskState::from_str_opt(&row.state)?,
+        updated_at: row.updated_at,
+    })
+}
+
+/// A stored row as a list wants it, from the point of view of `me`.
+fn task_dto(row: comrade_storage::StoredTask, me: &str) -> Option<TaskDto> {
+    let task = task_from_stored(&row)?;
+    let assigned_by_me = task.assigner_npub == me;
+    Some(TaskDto {
+        // `Party::Assignee` is what carries the power to finish or decline, and
+        // on a note to self it is the same person as the assigner — so this is
+        // the one honest source for "may I tick this off".
+        mine_to_do: matches!(task.party(me), Some(Party::Assignee)),
+        assigned_by_me,
+        id: task.id,
+        text: task.text,
+        assigner: task.assigner_npub,
+        assignee: task.assignee_npub,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        state: task.state,
+    })
 }
 
 /// Whether `peer`'s last beacon still claims them online at `now`. The one
@@ -6512,9 +8114,19 @@ fn dispatch_incoming_dm(
     //    launch) must not re-ring or re-apply a signal already handled.
     if let Some(env) = parse_call_envelope(&msg.content) {
         if matches!(gate, IncomingGate::Accepted) {
-            let age = now_secs().saturating_sub(msg.created_at);
-            if age > CALL_SIGNAL_MAX_AGE_SECS {
-                tracing::debug!(event_id = %msg.event_id, age, "dropping stale call signal");
+            let now = now_secs();
+            if call_signal_is_stale(msg.created_at, now) {
+                // Warn, not debug: this is the one drop that looks to a user
+                // exactly like "calls are broken" while chat keeps working, so
+                // it has to be visible in a log someone actually captures.
+                tracing::warn!(
+                    event_id = %msg.event_id,
+                    kind = env.signal.kind_str(),
+                    created_at = msg.created_at,
+                    now,
+                    "dropping a call signal as stale — if this is a live call, \
+                     the two devices' clocks disagree by more than the tolerance",
+                );
             } else if dedup.already_seen(&msg.event_id) {
                 tracing::debug!(event_id = %msg.event_id, "dropping duplicate call signal");
             } else {
@@ -6551,7 +8163,126 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 7) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
+    // 6a) Handing a large attachment over. Gated identically to the together
+    //     envelope above and to a call signal — both of those also end in a peer
+    //     connection, and a stranger must not be able to make this device gather
+    //     ICE candidates for them. Returning either way, so an ungated one is
+    //     dropped rather than surfacing as a message request full of JSON.
+    //
+    //     No session to check against and no replay window to enforce here: the
+    //     `transfer_id` is the scope, and the frontend that owns the transfer is
+    //     the only thing that knows which ids are live. A signal for an id it
+    //     never started is its to ignore — which is also why a *sender-only*
+    //     signal arriving for a transfer this side started is checked there and
+    //     not here.
+    if let Some(env) = parse_handoff_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            let _ = tx.send(BridgeEvent::AttachmentHandoff(AttachmentHandoffDto {
+                transfer_id: env.transfer_id,
+                peer: peer_npub.clone(),
+                signal: env.signal,
+            }));
+        }
+        return;
+    }
+
+    // 7) Emoji reaction — a peer reacted to one of our messages (or to one of
+    //    theirs). Gated like a beacon and a nudge: a stranger must not be able to
+    //    decorate our messages before their request is accepted, and returning
+    //    either way keeps a reaction from an unaccepted peer from surfacing as a
+    //    message request full of JSON.
+    //
+    //    Not deduped by event id, and deliberately: the store's own timestamp
+    //    check is the stronger guard (it refuses a replay even when the replay
+    //    arrives under a *fresh* wrapper id, which the two-day backfill produces),
+    //    and it also collapses a reaction that reached us over both transports.
+    if let Some(env) = parse_reaction(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            if let Some(store) = store {
+                let row = comrade_storage::MessageReaction {
+                    target_id: env.target_id.clone(),
+                    peer_npub: peer_npub.clone(),
+                    reactor_npub: peer_npub.clone(),
+                    emoji: env.emoji.clone(),
+                    created_at: msg.created_at,
+                    outgoing: false,
+                };
+                match store
+                    .set_reaction(&row)
+                    .and_then(|c| store.flush().map(|()| c))
+                {
+                    // Only news redraws anything — a replay or a repeat is not.
+                    Ok(true) => {
+                        let _ = tx.send(BridgeEvent::IncomingReaction(ReactionDto {
+                            target_id: env.target_id,
+                            peer: peer_npub,
+                            reactor: row.reactor_npub,
+                            emoji: env.emoji,
+                            created_at: msg.created_at,
+                            outgoing: false,
+                        }));
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("failed to persist incoming reaction: {e}"),
+                }
+            }
+        }
+        return;
+    }
+
+    // 8) A task: named, or moved to a new state. Gated exactly like a call
+    //    signal — a stranger who can write to your task list has been handed a
+    //    harassment channel, and in an app about wellbeing that is worse than
+    //    the feature is good. Returns either way, so an ungated one is dropped
+    //    rather than surfacing as a message request full of JSON.
+    if let Some(env) = parse_karya_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted)
+            // A control envelope reaches us twice when a message travels both
+            // routes — sealed over the mesh now, over a relay when the internet
+            // returns — and the two copies carry *different* event ids, so the
+            // id check inside `deliver_synthetic_line` cannot pair them. This
+            // can, because the envelope bytes are identical.
+            && !route.is_cross_transport_duplicate(&peer_npub, &msg.content)
+        {
+            let me = vault.our_npub();
+            if let Some(line) =
+                apply_karya_signal(store, &peer_npub, &me, msg.created_at, &env.signal)
+            {
+                deliver_synthetic_line(vault, store, tx, route, &msg, &peer_npub, line);
+            }
+        }
+        return;
+    }
+
+    // 9) An offer — "I thought this might help". Gated like a task, and the
+    //    action must be one this build actually has a screen for: a bubble
+    //    naming a destination that does not exist here would be a button that
+    //    goes nowhere.
+    if let Some(env) = parse_offer_envelope(&msg.content) {
+        // Same two-route pairing as a task, and unlike a task an offer has no
+        // id of its own to fall back on — every `/comrade-breathe` sends byte-
+        // identical JSON — so this check is the only thing between one offer and
+        // two bubbles.
+        if matches!(gate, IncomingGate::Accepted)
+            && !route.is_cross_transport_duplicate(&peer_npub, &msg.content)
+        {
+            match env.app_action() {
+                Some(action) => deliver_synthetic_line(
+                    vault,
+                    store,
+                    tx,
+                    route,
+                    &msg,
+                    &peer_npub,
+                    render_offer_line(action),
+                ),
+                None => tracing::debug!(action = %env.action, "offer names an unknown action"),
+            }
+        }
+        return;
+    }
+
+    // 10) Media envelope — dedup by the NIP-94 event id (a redelivered wrapper
     //    carries the same reference), persist the ref, then surface (gated).
     if let Some(env) = parse_media_envelope(&msg.content) {
         // Everything in the envelope is chosen by the peer. The MIME type
@@ -6619,7 +8350,7 @@ fn dispatch_incoming_dm(
         return;
     }
 
-    // 8) Plain chat text — dedup by event id (a redelivered wrapper must not
+    // 11) Plain chat text — dedup by event id (a redelivered wrapper must not
     //    re-notify or re-send a delivered receipt), persist first, then
     //    deliver or gate into a request.
     // A message can reach us twice by two routes — sealed over the local mesh
@@ -6749,18 +8480,22 @@ impl ProfileRefresher {
         let mut changed = 0usize;
         for (npub, pk, previous) in stale {
             let meta = found.get(&pk);
-            let record = PeerProfileRecord {
-                // A silent relay set must not erase a name we already knew.
-                name: meta
-                    .and_then(display_name_of)
-                    .or_else(|| previous.as_ref().and_then(|p| p.name.clone())),
-                about: meta
-                    .and_then(|m| m.about.clone())
-                    .or_else(|| previous.as_ref().and_then(|p| p.about.clone())),
-                updated_at: now,
+            // A silent relay set must not erase what we already knew — which is
+            // now the merge's default rather than an `.or_else` per field, so a
+            // field added later inherits the behaviour instead of forgetting it.
+            let learned = PeerProfilePatch {
+                name: meta.and_then(display_name_of),
+                about: meta.and_then(|m| m.about.clone()),
+                picture: meta.and_then(|m| m.picture.clone()),
+                nip05: meta.and_then(|m| m.nip05.clone()),
+                lud16: meta.and_then(|m| m.lud16.clone()),
+                ..Default::default()
             };
-            let name_changed = record.name != previous.as_ref().and_then(|p| p.name.clone());
-            if store_profile_record(&self.store, &npub, &record) {
+            let name_changed = learned
+                .name
+                .as_ref()
+                .is_some_and(|n| Some(n) != previous.as_ref().and_then(|p| p.name.as_ref()));
+            if merge_peer_profile(&self.store, &npub, learned) {
                 wrote = true;
                 if name_changed {
                     changed += 1;
@@ -6772,7 +8507,140 @@ impl ProfileRefresher {
                 warn!("failed to flush profile cache: {e}");
             }
         }
+        self.refresh_avatars().await;
         Ok(changed)
+    }
+
+    /// Second phase: fetch the pictures the first phase just discovered.
+    ///
+    /// Folded into the same sweep rather than given its own entry point, because
+    /// this is the code that already learned the `picture` URLs, both frontends
+    /// already call `refresh_peer_profiles`, and one cap is easier to reason about
+    /// than two.
+    ///
+    /// Every skip below is a deliberate gate, not an optimisation:
+    ///
+    /// - the setting is off → nothing is fetched, at all, for anyone;
+    /// - the peer is not accepted and not a saved contact → opening a stranger's
+    ///   profile must never make this device call a host they chose;
+    /// - a blocked peer → we do not fetch anything on their behalf;
+    /// - the bytes are already cached and fresh → an avatar changes far less often
+    ///   than a handle, hence [`AVATAR_TTL_SECS`];
+    /// - a recent failure → [`AVATAR_NEGATIVE_TTL_SECS`] stops a dead URL being
+    ///   retried on every single sweep.
+    ///
+    /// Errors are never propagated: a picture that will not load is a cosmetic
+    /// problem, and failing the whole profile refresh over one would cost the
+    /// handles too.
+    async fn refresh_avatars(&self) {
+        let enabled = self
+            .store
+            .get::<bool>(SETTINGS_TREE, REMOTE_AVATARS_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(true);
+        if !enabled {
+            return;
+        }
+        let now = now_secs();
+        let mut due: Vec<(String, String)> = Vec::new();
+        let contacts: std::collections::HashSet<String> = self
+            .store
+            .list_contacts()
+            .map(|cs| cs.into_iter().map(|c| c.npub).collect())
+            .unwrap_or_default();
+        for npub in contacts.iter() {
+            if due.len() >= AVATAR_FETCH_CAP {
+                break;
+            }
+            let Some(record) = cached_peer_profile(&self.store, npub) else {
+                continue;
+            };
+            let Some(url) = record.picture.clone() else {
+                continue;
+            };
+            // Blocked is checked here rather than filtered above, so the reason a
+            // peer was skipped stays visible at the point of the decision.
+            let blocked = self
+                .store
+                .get_conversation_meta(npub)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.state == STATE_BLOCKED);
+            if blocked {
+                continue;
+            }
+            let cached_fresh = record.avatar_sha256.is_some()
+                && now.saturating_sub(record.avatar_fetched_at) < AVATAR_TTL_SECS;
+            if cached_fresh {
+                continue;
+            }
+            if now.saturating_sub(record.avatar_failed_at) < AVATAR_NEGATIVE_TTL_SECS {
+                continue;
+            }
+            due.push((npub.clone(), url));
+        }
+        if due.is_empty() {
+            return;
+        }
+        let mut wrote = false;
+        for (npub, url) in due {
+            match comrade_core::media::fetch_avatar(&url).await {
+                Ok((bytes, mime)) => {
+                    let sha = comrade_core::crypto::sha256_hex(&bytes);
+                    if let Err(e) = self.store.put_bytes(PEER_AVATAR_BLOBS_TREE, &sha, &bytes) {
+                        warn!("failed to cache avatar bytes: {e}");
+                        continue;
+                    }
+                    wrote |= merge_peer_profile(
+                        &self.store,
+                        &npub,
+                        PeerProfilePatch {
+                            avatar: Some((sha, mime)),
+                            ..Default::default()
+                        },
+                    );
+                }
+                Err(e) => {
+                    // Stamp the failure and keep whatever picture we already had.
+                    tracing::debug!("avatar fetch failed for {npub}: {e}");
+                    wrote |= merge_peer_profile(
+                        &self.store,
+                        &npub,
+                        PeerProfilePatch {
+                            avatar_failed: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        if wrote {
+            if let Err(e) = self.store.flush() {
+                warn!("failed to flush avatar cache: {e}");
+            }
+        }
+    }
+}
+
+/// An owned [`comrade_core::sabha::MetadataEdit`], for crossing a task boundary.
+///
+/// `MetadataEdit` borrows, which is right at the publish call and wrong for a
+/// `tokio::spawn` that outlives the caller's stack frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OwnedMetadataEdit {
+    Leave,
+    Set(String),
+    Clear,
+}
+
+impl OwnedMetadataEdit {
+    fn as_edit(&self) -> comrade_core::sabha::MetadataEdit<'_> {
+        match self {
+            OwnedMetadataEdit::Leave => comrade_core::sabha::MetadataEdit::Leave,
+            OwnedMetadataEdit::Set(v) => comrade_core::sabha::MetadataEdit::Set(v),
+            OwnedMetadataEdit::Clear => comrade_core::sabha::MetadataEdit::Clear,
+        }
     }
 }
 
@@ -6784,13 +8652,24 @@ impl ProfileRefresher {
 /// nothing. `publish_profile` itself waits (bounded) for a connection; this
 /// wrapper keeps trying across transient failures. It is also spawned on
 /// every launch (Kind-0 is replaceable, so republishing is idempotent).
-async fn publish_profile_with_retry(sabha: Arc<SabhaEngine>, name: String) {
+async fn publish_profile_with_retry(
+    sabha: Arc<SabhaEngine>,
+    name: String,
+    about: OwnedMetadataEdit,
+) {
     // Make sure dials were at least initiated, even if the feed loop that
     // normally calls connect() hasn't run yet. Idempotent.
     sabha.connect().await;
     let mut delay = std::time::Duration::from_secs(2);
     for attempt in 1..=PUBLISH_ATTEMPTS {
-        match sabha.publish_profile(&name, None).await {
+        let patch = comrade_core::sabha::ProfilePatch {
+            name: &name,
+            about: about.as_edit(),
+            // A handle or bio publish never touches the picture: that has its own
+            // path, and clobbering it here would drop an avatar set elsewhere.
+            picture: comrade_core::sabha::MetadataEdit::Leave,
+        };
+        match sabha.publish_profile_patch(patch).await {
             Ok(_) => {
                 tracing::info!(attempt, "profile handle published to relays");
                 return;
@@ -7940,6 +9819,379 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_profile_joins_the_contact_the_cache_and_presence() {
+        // The one call a profile page makes. Without it a frontend would have to
+        // join three stores itself, and each one would join them differently.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+
+        rt.add_contact(&peer, "Chas").unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                name: Some("charlie".into()),
+                about: Some("gardener".into()),
+                picture: Some("https://example.com/c.png".into()),
+                nip05: Some("charlie@example.com".into()),
+                ..Default::default()
+            },
+        );
+
+        let p = rt.peer_profile(&peer).unwrap();
+        assert_eq!(p.npub, peer);
+        assert_eq!(p.alias, "Chas", "the alias the *user* chose comes first");
+        assert_eq!(p.name.as_deref(), Some("charlie"));
+        assert_eq!(p.about.as_deref(), Some("gardener"));
+        assert_eq!(p.picture.as_deref(), Some("https://example.com/c.png"));
+        assert_eq!(p.nip05.as_deref(), Some("charlie@example.com"));
+        assert!(p.contact);
+        assert!(!p.comrade);
+        assert!(!p.blocked);
+        assert!(
+            !p.avatar_cached,
+            "a URL is not bytes; nothing has been fetched"
+        );
+        assert!(
+            !p.online,
+            "presence only flows between comrades, so a plain contact is never online"
+        );
+        assert!(p.updated_at > 0, "the page can say how fresh this is");
+    }
+
+    #[tokio::test]
+    async fn a_stranger_has_a_profile_too_rather_than_an_error() {
+        // Opening the profile of someone who is not a contact is the ordinary
+        // case for a message request — it must render, not fail.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+
+        let p = rt.peer_profile(&peer).unwrap();
+        assert_eq!(p.npub, peer, "the key is the one thing always known");
+        assert_eq!(p.alias, "");
+        assert_eq!(p.name, None);
+        assert!(!p.contact);
+        assert!(!p.avatar_cached);
+    }
+
+    #[tokio::test]
+    async fn peer_profile_and_peer_avatar_need_an_unlocked_vault() {
+        let rt = ComradeRuntime::new();
+        assert!(matches!(
+            rt.peer_profile("npub1anything"),
+            Err(UiError::VaultLocked) | Err(UiError::Engine(_))
+        ));
+        assert!(matches!(
+            rt.remote_avatars_enabled(),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.set_remote_avatars_enabled(false),
+            Err(UiError::VaultLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_avatar_record_pointing_at_missing_bytes_reads_as_initials() {
+        // Not an error: there is nothing the user could do, and nothing is broken.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                avatar: Some(("sha-with-no-blob".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(rt.peer_avatar(&peer).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_cached_avatar_comes_back_base64_with_its_sniffed_type() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        store
+            .put_bytes(PEER_AVATAR_BLOBS_TREE, "abc", b"\x89PNG-ish")
+            .unwrap();
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                avatar: Some(("abc".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+
+        let bytes = rt.peer_avatar(&peer).unwrap().expect("cached avatar");
+        assert_eq!(bytes.mime_type, "image/png");
+        assert_eq!(B64.decode(bytes.base64).unwrap(), b"\x89PNG-ish");
+        assert!(rt.peer_profile(&peer).unwrap().avatar_cached);
+    }
+
+    #[tokio::test]
+    async fn remote_avatars_default_to_on_and_survive_a_round_trip() {
+        // Default on is an explicit owner decision, not an accident of `unwrap_or`.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(rt.remote_avatars_enabled().unwrap(), "default is on");
+        rt.set_remote_avatars_enabled(false).unwrap();
+        assert!(!rt.remote_avatars_enabled().unwrap());
+        rt.set_remote_avatars_enabled(true).unwrap();
+        assert!(rt.remote_avatars_enabled().unwrap());
+    }
+
+    #[tokio::test]
+    async fn set_about_strips_controls_bounds_length_and_clears_on_empty() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        rt.ui.generate_identity().unwrap();
+
+        let p = rt.set_about("  gardener\n, occasionally  ").await.unwrap();
+        assert_eq!(
+            p.about.as_deref(),
+            Some("gardener, occasionally"),
+            "our own text should not carry a newline onto somebody else's page either"
+        );
+
+        let long = "x".repeat(MAX_ABOUT_LEN + 50);
+        let p = rt.set_about(&long).await.unwrap();
+        assert_eq!(p.about.as_deref().map(str::len), Some(MAX_ABOUT_LEN));
+
+        // Empty clears — the case a plain `Option<&str>` could not express.
+        let p = rt.set_about("   ").await.unwrap();
+        assert_eq!(p.about, None);
+        assert_eq!(rt.profile().unwrap().about, None, "and it stays cleared");
+    }
+
+    #[tokio::test]
+    async fn a_profile_share_no_longer_erases_a_cached_bio() {
+        // The bug this fixes, and it fails before the merge writer exists.
+        //
+        // `cache_pushed_peer_name` built a whole `PeerProfileRecord` with
+        // `about: None`, so a peer's profile-share envelope — which arrives
+        // exactly when a message request is accepted — wiped any bio already
+        // cached for them. Nothing read `about`, so nothing ever noticed. The
+        // moment a profile page renders one it becomes "their bio vanished when I
+        // accepted them", reported as data loss and reproducible only by
+        // accepting a request.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        let peer = nostr_sdk::Keys::generate()
+            .public_key()
+            .to_bech32()
+            .unwrap();
+
+        // A search or a refresh cached everything the relay knew.
+        merge_peer_profile(
+            store,
+            &peer,
+            PeerProfilePatch {
+                name: Some("charlie".into()),
+                about: Some("gardener, occasionally".into()),
+                picture: Some("https://example.com/c.png".into()),
+                nip05: Some("charlie@example.com".into()),
+                ..Default::default()
+            },
+        );
+
+        // Then they accepted, and pushed us their handle over the DM channel.
+        cache_pushed_peer_name(store, &peer, "charlie");
+
+        let after = cached_peer_profile(store, &peer).expect("record still there");
+        assert_eq!(after.name.as_deref(), Some("charlie"));
+        assert_eq!(
+            after.about.as_deref(),
+            Some("gardener, occasionally"),
+            "a share that carries only a handle must not claim there is no bio"
+        );
+        assert_eq!(
+            after.picture.as_deref(),
+            Some("https://example.com/c.png"),
+            "nor that there is no picture"
+        );
+        assert_eq!(after.nip05.as_deref(), Some("charlie@example.com"));
+    }
+
+    #[tokio::test]
+    async fn profile_rows_written_by_older_builds_still_deserialise() {
+        // The record grew from three fields to ten. Every one of them defaults, so
+        // a row a shipped build wrote must still read back — this puts the exact
+        // bytes an older build stored, rather than a struct this build built, which
+        // is the only version of the test that proves anything.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        for (npub, json, name, about, updated) in [
+            (
+                "npub_three_field",
+                br#"{"name":"charlie","about":"bio","updated_at":7}"#.as_slice(),
+                Some("charlie"),
+                Some("bio"),
+                7u64,
+            ),
+            // Older still: before `about` was cached at all.
+            (
+                "npub_one_field",
+                br#"{"name":"dana"}"#.as_slice(),
+                Some("dana"),
+                None,
+                0,
+            ),
+        ] {
+            store.put_bytes(PEER_PROFILES_TREE, npub, json).unwrap();
+            let r = cached_peer_profile(store, npub)
+                .unwrap_or_else(|| panic!("{npub} no longer deserialises"));
+            assert_eq!(r.name.as_deref(), name);
+            assert_eq!(r.about.as_deref(), about);
+            assert_eq!(r.updated_at, updated);
+            assert_eq!(
+                r.picture, None,
+                "a field the writer never knew reads as None"
+            );
+            assert_eq!(r.avatar_sha256, None);
+            assert_eq!(r.avatar_failed_at, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changed_picture_url_invalidates_the_cached_bytes() {
+        // The bytes we hold are the *old* picture. Keeping them against a new URL
+        // would show a contact's previous avatar indefinitely.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        let peer = "npub_picture_change";
+
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/one.png".into()),
+                avatar: Some(("deadbeef".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+        assert!(cached_peer_profile(store, peer)
+            .unwrap()
+            .avatar_sha256
+            .is_some());
+
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/two.png".into()),
+                ..Default::default()
+            },
+        );
+        let after = cached_peer_profile(store, peer).unwrap();
+        assert_eq!(
+            after.picture.as_deref(),
+            Some("https://example.com/two.png")
+        );
+        assert_eq!(
+            after.avatar_sha256, None,
+            "the cached bytes are the old picture and must not survive the URL change"
+        );
+
+        // Re-publishing the *same* URL must not throw away a good cache, or every
+        // refresh sweep would re-download every avatar.
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                avatar: Some(("cafe".into(), "image/png".into())),
+                ..Default::default()
+            },
+        );
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/two.png".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cached_peer_profile(store, peer)
+                .unwrap()
+                .avatar_sha256
+                .as_deref(),
+            Some("cafe"),
+            "an unchanged URL is not a reason to refetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_avatar_fetch_keeps_the_picture_already_cached() {
+        // A refresh that could not reach the host must not blank an avatar we
+        // already have — the same discipline the name refresh already applies.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+        let peer = "npub_failed_fetch";
+
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                picture: Some("https://example.com/a.png".into()),
+                avatar: Some(("abc123".into(), "image/webp".into())),
+                ..Default::default()
+            },
+        );
+        merge_peer_profile(
+            store,
+            peer,
+            PeerProfilePatch {
+                avatar_failed: true,
+                ..Default::default()
+            },
+        );
+
+        let after = cached_peer_profile(store, peer).unwrap();
+        assert_eq!(after.avatar_sha256.as_deref(), Some("abc123"));
+        assert_eq!(after.avatar_mime.as_deref(), Some("image/webp"));
+        assert!(
+            after.avatar_failed_at > 0,
+            "the failure is stamped so the negative TTL can hold off a retry"
+        );
+    }
+
+    #[tokio::test]
     async fn legacy_placeholder_petnames_no_longer_mask_published_names() {
         // Old builds auto-filled an empty alias with the first 12 chars of
         // the npub. Those placeholders must read as "no alias" so the peer's
@@ -7979,8 +10231,8 @@ mod tests {
                 &peer,
                 &PeerProfileRecord {
                     name: Some("charlie".into()),
-                    about: None,
                     updated_at: 1,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -8031,8 +10283,8 @@ mod tests {
                 &peer,
                 &PeerProfileRecord {
                     name: Some("charlie".into()),
-                    about: None,
                     updated_at: 1,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -9431,6 +11683,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peers_reaction_lands_on_the_message_it_names() {
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        let now = now_secs();
+
+        let react = ReactionEnvelope::new("m1", "🔥").to_json().unwrap();
+        ingress.deliver(&hex, "r1", &react, now);
+        match rx.try_recv().unwrap() {
+            BridgeEvent::IncomingReaction(r) => {
+                assert_eq!(r.target_id, "m1");
+                assert_eq!(r.emoji, "🔥");
+                assert_eq!(r.peer, peer);
+                assert_eq!(r.reactor, peer);
+                assert!(!r.outgoing);
+            }
+            other => panic!("expected IncomingReaction, got {other:?}"),
+        }
+
+        // A reaction is a control envelope, never a chat bubble. Before the
+        // parser existed it would have fallen through to the plain-text branch
+        // and rendered as a message full of JSON.
+        assert!(
+            ingress.store.messages_with(&peer).unwrap().is_empty(),
+            "a reaction must not become a message"
+        );
+        assert_eq!(ingress.store.reactions_with(&peer).unwrap().len(), 1);
+
+        // Changing it replaces rather than stacks…
+        ingress.deliver(
+            &hex,
+            "r2",
+            &ReactionEnvelope::new("m1", "👍").to_json().unwrap(),
+            now + 1,
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::IncomingReaction(_)
+        ));
+        let rows = ingress.store.reactions_with(&peer).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one reaction per person per message: {rows:?}"
+        );
+        assert_eq!(rows[0].emoji, "👍");
+
+        // …and withdrawing it is an empty emoji, reported so the chip can go.
+        ingress.deliver(
+            &hex,
+            "r3",
+            &ReactionEnvelope::clearing("m1").to_json().unwrap(),
+            now + 2,
+        );
+        match rx.try_recv().unwrap() {
+            BridgeEvent::IncomingReaction(r) => assert!(r.emoji.is_empty()),
+            other => panic!("expected IncomingReaction, got {other:?}"),
+        }
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_reaction_redraws_nothing_even_under_a_fresh_wrapper_id() {
+        // The two-day gift-wrap backfill re-scans on every launch, and a replay
+        // can arrive under a *different* wrapper id than the first delivery — so
+        // event-id dedup alone would not catch this. The store's timestamp check
+        // is what does.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+        let now = now_secs();
+
+        ingress.deliver(
+            &hex,
+            "r1",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(rx.try_recv().is_ok());
+
+        ingress.deliver(
+            &hex,
+            "r1-again",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a replayed reaction is not news, whatever wrapper it came in"
+        );
+
+        // And the sharper case: an older reaction replayed after a newer one
+        // must not resurrect itself.
+        ingress.deliver(
+            &hex,
+            "r2",
+            &ReactionEnvelope::new("m1", "👍").to_json().unwrap(),
+            now + 5,
+        );
+        assert!(rx.try_recv().is_ok());
+        ingress.deliver(
+            &hex,
+            "r1-replay",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(ingress.store.reactions_with(&peer).unwrap()[0].emoji, "👍");
+    }
+
+    #[tokio::test]
+    async fn a_stranger_cannot_react_before_their_request_is_accepted() {
+        // Same gate a beacon and a nudge sit behind: an unaccepted peer must not
+        // be able to decorate our messages, and must not surface as a message
+        // request full of JSON either.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        let now = now_secs();
+
+        ingress.deliver(
+            &hex,
+            "r1",
+            &ReactionEnvelope::new("m1", "🔥").to_json().unwrap(),
+            now,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no event at all from an unaccepted peer"
+        );
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+        assert!(ingress.store.messages_with(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_reaction_is_not_mistaken_for_chat_text() {
+        // The parser refuses it (see `MAX_REACTION_BYTES`). The thing worth
+        // pinning is what happens *next*: falling through to the plain-text
+        // branch would put a wall of JSON in the conversation.
+        let dir = TempDir::new().unwrap();
+        let (ingress, mut rx) = Ingress::new(&dir).await;
+        let (hex, peer) = stranger();
+        accepted_peer(&ingress.store, &peer, false);
+
+        let huge = ReactionEnvelope::new("m1", "🔥".repeat(MAX_REACTION_BYTES))
+            .to_json()
+            .unwrap();
+        ingress.deliver(&hex, "r1", &huge, now_secs());
+        assert!(ingress.store.reactions_with(&peer).unwrap().is_empty());
+        // It does arrive as a message, which is the honest outcome for a payload
+        // this side cannot interpret — but it must not have been stored as a
+        // reaction, and it must not have raised a reaction event.
+        assert!(!matches!(
+            rx.try_recv(),
+            Ok(BridgeEvent::IncomingReaction(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn a_comrade_who_gave_up_on_a_message_is_announced_once() {
         let dir = TempDir::new().unwrap();
         let (ingress, mut rx) = Ingress::new(&dir).await;
@@ -10275,6 +12688,170 @@ mod tests {
         );
     }
 
+    // ── Handing a large attachment over ─────────────────────────────────────
+
+    fn handoff_json(transfer_id: &str, signal: HandoffSignal) -> String {
+        HandoffEnvelope::new(transfer_id, signal).to_json().unwrap()
+    }
+
+    fn an_attachment_offer() -> HandoffSignal {
+        HandoffSignal::Offer {
+            attachment: comrade_core::handoff::AttachmentHandoff {
+                shape: comrade_core::share::ShareOffer {
+                    total_bytes: 400 * 1024 * 1024,
+                    chunk_bytes: comrade_core::share::SHARE_CHUNK_BYTES,
+                    sha256: "c".repeat(64),
+                    duration_ms: 0,
+                },
+                mime_type: "video/mp4".into(),
+                file_name: "holiday.mp4".into(),
+                caption: "the last morning".into(),
+            },
+        }
+    }
+
+    /// The gate. A handoff has no session to hide behind, so the *only* thing
+    /// standing between a stranger and this device gathering ICE candidates for
+    /// them is the accepted-conversation check — the same one a call signal gets.
+    #[tokio::test]
+    async fn a_handoff_from_someone_not_accepted_negotiates_nothing() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        // Deliberately *not* `accepted_peer`: a pending request is the case.
+        let (hex, _peer) = stranger();
+
+        let body = handoff_json("t-stranger", an_attachment_offer());
+        let mut msg = incoming(&hex, "h1", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(
+            rx.try_recv().is_err(),
+            "an offer from a stranger reached the frontend"
+        );
+    }
+
+    /// And it must not fall through into the message-request bucket either: a
+    /// person should never see a chat request whose body is a wall of JSON.
+    #[tokio::test]
+    async fn an_ungated_handoff_is_dropped_rather_than_shown_as_a_request() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, _peer) = stranger();
+
+        let body = handoff_json("t-x", HandoffSignal::Accept);
+        let mut msg = incoming(&hex, "h2", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        match rx.try_recv() {
+            Err(_) => {}
+            Ok(BridgeEvent::IncomingMessageRequest(r)) => {
+                panic!("surfaced as a message request: {}", r.last_message)
+            }
+            Ok(other) => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// From an accepted contact it goes straight through, unchanged and with no
+    /// runtime-side transfer state — the frontend owns the peer connection, so it
+    /// owns which transfer ids are live.
+    #[tokio::test]
+    async fn a_handoff_from_an_accepted_contact_reaches_the_frontend_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let body = handoff_json("t-live", an_attachment_offer());
+        let mut msg = incoming(&hex, "h3", &body);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+
+        let mut seen = None;
+        while let Ok(event) = rx.try_recv() {
+            if let BridgeEvent::AttachmentHandoff(dto) = event {
+                seen = Some(dto);
+            }
+        }
+        let dto = seen.expect("the handoff never reached the frontend");
+        assert_eq!(dto.transfer_id, "t-live");
+        assert_eq!(dto.peer, peer);
+        match dto.signal {
+            HandoffSignal::Offer { attachment } => {
+                // The whole point of the offer arriving first: 400 MB is a
+                // decision, and it is answerable before a byte moves.
+                assert_eq!(attachment.shape.total_bytes, 400 * 1024 * 1024);
+                assert_eq!(attachment.file_name, "holiday.mp4");
+                assert_eq!(attachment.caption, "the last morning");
+            }
+            other => panic!("signal changed in transit: {other:?}"),
+        }
+    }
+
+    /// A together envelope and a handoff envelope must not shadow each other:
+    /// both are JSON DM bodies, and whichever is parsed first would swallow the
+    /// other if the markers were not distinct.
+    #[tokio::test]
+    async fn a_together_envelope_is_not_mistaken_for_a_handoff() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s-not-a-handoff",
+            1,
+            TogetherSignal::Share {
+                signal: a_transfer_offer(),
+            },
+        );
+        let mut msg = incoming(&hex, "h4", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, BridgeEvent::AttachmentHandoff(_)),
+                "a together share was routed as an attachment handoff"
+            );
+        }
+    }
+
     /// Inside a session it goes straight through, unchanged. The runtime keeps
     /// no transfer state on purpose — see [`TogetherShareDto`].
     #[tokio::test]
@@ -10415,7 +12992,7 @@ mod tests {
             !rt.share_ice_servers_allowed(),
             "a direct-only transfer connection must not be handed TURN"
         );
-        let v = rt.share_transfer_verdict("relay", "host", 8_000_000_000);
+        let v = rt.share_transfer_verdict("relay", "host", 8_000_000_000, false);
         assert_eq!(v.verdict, "refuse");
         assert_eq!(v.path, "relay");
         assert_eq!(v.reason, Some(RefusalReason::RelayForbidden));
@@ -10425,7 +13002,7 @@ mod tests {
     #[test]
     fn a_path_ice_has_not_settled_on_is_refused_rather_than_assumed_direct() {
         let rt = ComradeRuntime::new();
-        let v = rt.share_transfer_verdict("", "", 1);
+        let v = rt.share_transfer_verdict("", "", 1, false);
         assert_eq!(v.path, "unknown");
         assert_eq!(v.reason, Some(RefusalReason::PathUnknown));
     }
@@ -10437,7 +13014,8 @@ mod tests {
         let rt = ComradeRuntime::new();
         for (local, remote) in [("host", "host"), ("srflx", "host"), ("srflx", "srflx")] {
             assert_eq!(
-                rt.share_transfer_verdict(local, remote, u64::MAX).verdict,
+                rt.share_transfer_verdict(local, remote, u64::MAX, false)
+                    .verdict,
                 "allow",
                 "{local}/{remote}"
             );
@@ -10447,31 +13025,134 @@ mod tests {
     #[test]
     fn changing_the_policy_changes_the_answer_and_the_ice_list_together() {
         let rt = ComradeRuntime::new();
-        rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10_000_000 });
+        // No store attached, so the choice holds for this process and says so
+        // rather than reporting a save that did not happen.
+        assert!(matches!(
+            rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10_000_000 }),
+            Err(UiError::VaultLocked)
+        ));
+        assert_eq!(
+            rt.share_relay_policy(),
+            RelayPolicy::UnderBytes { limit: 10_000_000 },
+            "the cell still took the change"
+        );
         assert!(
             rt.share_ice_servers_allowed(),
             "a policy that can use a relay must be allowed to gather one"
         );
         assert_eq!(
-            rt.share_transfer_verdict("relay", "host", 9_000_000)
+            rt.share_transfer_verdict("relay", "host", 9_000_000, false)
                 .verdict,
             "allow"
         );
-        let big = rt.share_transfer_verdict("relay", "host", 11_000_000);
+        let big = rt.share_transfer_verdict("relay", "host", 11_000_000, false);
         assert_eq!(big.verdict, "refuse");
         assert_eq!(
             big.reason,
             Some(RefusalReason::TooLargeForRelay { limit: 10_000_000 })
         );
 
-        rt.set_share_relay_policy(RelayPolicy::AskEachTime);
-        let ask = rt.share_transfer_verdict("relay", "relay", 500);
+        let _ = rt.set_share_relay_policy(RelayPolicy::AskEachTime);
+        let ask = rt.share_transfer_verdict("relay", "relay", 500, false);
         assert_eq!(ask.verdict, "needs_consent");
         assert_eq!(
             ask.relayed_bytes,
             Some(500),
             "the question has to be able to name the size"
         );
+    }
+
+    /// The consent loop end to end: the runtime asks, the frontend answers,
+    /// and the same call that asked now allows.
+    #[test]
+    fn a_yes_is_carried_back_into_the_call_that_asked_for_it() {
+        let rt = ComradeRuntime::new();
+        let _ = rt.set_share_relay_policy(RelayPolicy::AskEachTime);
+        let asked = rt.share_transfer_verdict("relay", "relay", 500, false);
+        assert_eq!(asked.verdict, "needs_consent");
+        assert_eq!(
+            rt.share_transfer_verdict("relay", "relay", 500, true)
+                .verdict,
+            "allow"
+        );
+    }
+
+    /// The frontend is the least trustworthy caller this policy has, so the one
+    /// thing it must not be able to do is talk its way past a refusal.
+    #[test]
+    fn a_frontend_claiming_consent_cannot_talk_past_a_refusal() {
+        let rt = ComradeRuntime::new();
+        // Default policy: relayed bulk is refused outright, consent or not.
+        let v = rt.share_transfer_verdict("relay", "host", 1_000, true);
+        assert_eq!(v.verdict, "refuse");
+        assert_eq!(v.reason, Some(RefusalReason::RelayForbidden));
+
+        // Over the allowance: the refusal names a limit, and a yes does not
+        // raise it — changing the limit is a policy change, not a dialog.
+        let _ = rt.set_share_relay_policy(RelayPolicy::UnderBytes { limit: 10 });
+        let over = rt.share_transfer_verdict("relay", "host", 11, true);
+        assert_eq!(over.verdict, "refuse");
+        assert_eq!(
+            over.reason,
+            Some(RefusalReason::TooLargeForRelay { limit: 10 })
+        );
+
+        // And an unsettled path stays unsettled.
+        assert_eq!(
+            rt.share_transfer_verdict("", "", 1, true).reason,
+            Some(RefusalReason::PathUnknown)
+        );
+    }
+
+    /// Every policy survives a write and a read, so a choice made once is the
+    /// choice the next launch enforces.
+    #[tokio::test]
+    async fn a_relay_policy_outlives_the_process_that_chose_it() {
+        let dir = TempDir::new().unwrap();
+        for policy in [
+            RelayPolicy::UnderBytes { limit: 42 },
+            RelayPolicy::AskEachTime,
+            RelayPolicy::Always,
+            RelayPolicy::DirectOnly,
+        ] {
+            let mut rt = ComradeRuntime::new();
+            rt.unlock_vault(dir.path(), "pin").await.unwrap();
+            rt.set_share_relay_policy(policy).unwrap();
+            // redb holds the file exclusively, so the "next launch" cannot open
+            // it until this one is gone — which is also the situation being
+            // modelled.
+            drop(rt);
+
+            let mut next = ComradeRuntime::new();
+            assert_eq!(
+                next.share_relay_policy(),
+                RelayPolicy::DirectOnly,
+                "a locked vault has no preference to read yet"
+            );
+            next.unlock_vault(dir.path(), "pin").await.unwrap();
+            assert_eq!(
+                next.share_relay_policy(),
+                policy,
+                "{policy:?} did not survive"
+            );
+            drop(next);
+        }
+    }
+
+    /// A stored value this build does not recognise — an older or newer write —
+    /// must read as the policy that carries nobody's bytes, never as permission.
+    #[test]
+    fn an_unreadable_stored_policy_falls_back_to_refusing() {
+        for stored in ["", "relay_everything", "ALWAYS", "always "] {
+            assert_eq!(
+                relay_policy_from_prefs(&comrade_storage::SharePrefs {
+                    relay_policy: stored.to_string(),
+                    relay_limit_bytes: 999,
+                }),
+                RelayPolicy::DirectOnly,
+                "{stored:?} was read as something other than direct-only"
+            );
+        }
     }
 
     /// The pump's budget, from the runtime rather than a frontend's own copy.
@@ -10590,6 +13271,30 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "the same wrapper event id must only ever dispatch one IncomingCallSignal"
+        );
+
+        // The regression: this check compared `now` against the *sender's*
+        // clock with no tolerance, so a peer whose clock ran a few minutes slow
+        // had every call signal dropped as "stale" while their chat — which has
+        // no age check — kept arriving. Calls dead, messages fine, from nothing
+        // but clock drift.
+        let mut skewed = incoming(&hex, "e3", &envelope);
+        skewed.created_at = now_secs().saturating_sub(5 * 60);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, skewed);
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeEvent::IncomingCallSignal(_))),
+            "a live call signal from a peer whose clock is five minutes slow must still ring",
+        );
+
+        // …and the same signal from a peer whose clock is *ahead* of ours, which
+        // the old `saturating_sub` happened to allow by accident rather than by
+        // decision.
+        let mut ahead = incoming(&hex, "e4", &envelope);
+        ahead.created_at = now_secs() + 5 * 60;
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, ahead);
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeEvent::IncomingCallSignal(_))),
+            "a call signal from a peer whose clock is ahead of ours must ring",
         );
     }
 
@@ -11353,5 +14058,487 @@ mod tests {
             rt.broadcast_anonymous_chitthi("   ", None).await,
             Err(UiError::Engine(_))
         ));
+    }
+
+    // ── In-chat commands, tasks and offers ───────────────────────────────────
+
+    #[tokio::test]
+    async fn parsing_and_the_catalogue_need_no_vault() {
+        // A composer calls these on every keystroke, including before unlock.
+        let rt = ComradeRuntime::new();
+        assert!(matches!(
+            rt.parse_chat_command("/task ship it"),
+            ChatCommand::Task { .. }
+        ));
+        assert!(matches!(
+            rt.parse_chat_command("20/80 split"),
+            ChatCommand::Plain
+        ));
+        assert!(!rt.chat_command_catalog().is_empty());
+        assert_eq!(rt.chat_mentions("hi @ana").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_handle_resolves_to_the_contact_the_user_named() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+
+        let found = rt.resolve_mentions("/task ship it @ana").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].npub.as_deref(), Some(ana.as_str()));
+        assert!(found[0].candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_handle_resolves_to_nobody_rather_than_a_guess() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+
+        let found = rt.resolve_mentions("@bina").unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].npub.is_none());
+        assert!(found[0].candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_contacts_answering_to_one_handle_come_back_as_a_question() {
+        // Two people can publish the same name. Picking one is how a private
+        // message reaches the wrong person, so the ambiguity is returned.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_h1, one) = stranger();
+        let (_h2, two) = stranger();
+        rt.add_contact(&one, "ana").unwrap();
+        rt.add_contact(&two, "ana").unwrap();
+
+        let found = rt.resolve_mentions("@ana").unwrap();
+        assert!(found[0].npub.is_none(), "must not pick one of two");
+        assert_eq!(found[0].candidates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_note_to_self_never_needs_a_relay() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let task = rt.assign_task(None, "water the plants").await.unwrap();
+        assert_eq!(task.text, "water the plants");
+        assert_eq!(task.state, TaskState::Open);
+        assert!(task.assignee.is_none());
+        assert!(task.assigned_by_me);
+        assert!(task.mine_to_do, "the one person holding it may tick it off");
+
+        assert_eq!(rt.tasks().unwrap().len(), 1);
+        let done = rt.set_task_state(&task.id, TaskState::Done).await.unwrap();
+        assert_eq!(done.state, TaskState::Done);
+        assert_eq!(rt.tasks().unwrap()[0].state, TaskState::Done);
+    }
+
+    #[tokio::test]
+    async fn an_empty_task_is_refused_rather_than_stored() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        assert!(matches!(
+            rt.assign_task(None, "   ").await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(rt.tasks().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_finished_task_cannot_be_reopened_through_the_runtime() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let task = rt.assign_task(None, "ship it").await.unwrap();
+        rt.set_task_state(&task.id, TaskState::Done).await.unwrap();
+        assert!(matches!(
+            rt.set_task_state(&task.id, TaskState::Open).await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(matches!(
+            rt.set_task_state("no-such-task", TaskState::Done).await,
+            Err(UiError::Engine(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn tasks_and_offers_need_an_unlocked_vault() {
+        let rt = ComradeRuntime::new();
+        assert!(matches!(rt.tasks(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.assign_task(None, "x").await,
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.offer_action(AppAction::Breathe, vec!["npub1x".into()])
+                .await,
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.tara_aside("hello"), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.tara_in_chat("npub1x", "hello").await,
+            Err(UiError::VaultLocked)
+        ));
+    }
+
+    // ── Tara in the room (`@tara …`) ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_shared_ask_puts_the_question_and_the_answer_in_the_thread() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt
+            .tara_in_chat(&peer, "what should i do about this deadline")
+            .await
+            .unwrap();
+        assert!(!out.kept_private);
+        assert!(!out.crisis);
+
+        // Order matters: the question, then her answer. A thread that showed
+        // the reply first would read as though she spoke unprompted.
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].content, "what should i do about this deadline");
+        assert_eq!(thread[0].author, MessageAuthor::Human);
+        // Her words, with the wire marker already off them: a frontend renders
+        // `content` as-is and reads `author` to decide whose bubble it is.
+        assert_eq!(thread[1].content, out.reply);
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
+        assert!(thread.iter().all(|m| m.outgoing), "this device sent both");
+        assert_eq!(out.asked.unwrap().content, thread[0].content);
+        assert_eq!(out.answered.unwrap().content, thread[1].content);
+    }
+
+    #[tokio::test]
+    async fn her_line_is_still_marked_as_hers_after_a_reload() {
+        // The DTO strips the marker; the store must not, or the author would be
+        // whatever the last in-memory copy happened to say and a restart would
+        // silently turn her answer into one of yours.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let out = rt
+            .tara_in_chat(&peer, "what should i say to them")
+            .await
+            .unwrap();
+
+        let stored = rt
+            .ui
+            .store_ref()
+            .unwrap()
+            .messages_with(&to_npub(&peer))
+            .unwrap();
+        assert_eq!(
+            comrade_core::tara::tara_chat_answer(&stored[1].content),
+            Some(out.reply.as_str()),
+            "the wire form has to survive on disk"
+        );
+        // And reading it back through the DTO gives the same split as the send.
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
+        assert_eq!(thread[1].content, out.reply);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_message_is_never_attributed_to_her() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        // Close enough to trip a sloppy match, and it must not: the marker is a
+        // prefix, not a substring, and "Tara" as a topic is an ordinary word.
+        let sent = rt
+            .send_dm(&peer, "Tara said something like that too")
+            .await
+            .unwrap();
+        assert_eq!(sent.author, MessageAuthor::Human);
+        assert_eq!(sent.content, "Tara said something like that too");
+    }
+
+    #[tokio::test]
+    async fn an_offline_shared_ask_does_not_tag_an_event_no_relay_has_seen() {
+        // Both messages queue with a local outbox id, and the answer must not
+        // claim to reply to one — an `e` tag naming a local id points at nothing.
+        // (Online, the tag is what keeps her answer under the question when both
+        // land in the same second; `created_at` alone cannot.)
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt.tara_in_chat(&peer, "what now").await.unwrap();
+        let answered = out.answered.unwrap();
+        assert!(comrade_core::dak::outbox::is_local_message_id(
+            &out.asked.unwrap().id
+        ));
+        assert_eq!(answered.reply_to, None);
+    }
+
+    #[tokio::test]
+    async fn a_shared_ask_does_not_touch_the_private_thread() {
+        // The private session is journal-adjacent. A question asked in front of
+        // somebody is not a turn in it, in either direction.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        rt.tara_in_chat(&peer, "help us pick a film").await.unwrap();
+        assert!(
+            rt.tara_thread().unwrap().is_empty(),
+            "the shared ask leaked into the private thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn distress_in_a_shared_ask_is_answered_but_never_sent() {
+        // The safety property of the whole feature. Someone who types `@tara`
+        // instead of `/tara` while in a bad place must not have their crisis
+        // hand-off delivered into somebody else's chat.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt.tara_in_chat(&peer, "i want to die").await.unwrap();
+        assert!(out.kept_private);
+        assert!(out.crisis);
+        assert!(out.asked.is_none() && out.answered.is_none());
+        assert!(!out.reply.is_empty(), "she still answers, only privately");
+
+        assert!(
+            rt.messages_with(&peer).unwrap().is_empty(),
+            "nothing at all may reach the thread"
+        );
+        assert_eq!(rt.outbox_pending(), 0, "nor the outbox — it is not a retry");
+    }
+
+    #[tokio::test]
+    async fn naming_a_third_party_still_reframes_when_the_room_can_read_it() {
+        // The gate that already guards the private aside has to hold here too,
+        // and it matters more: a characterisation of @ana would now be sent to
+        // the person you are talking to.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt
+            .tara_in_chat(&peer, "what does @ana think of herself")
+            .await
+            .unwrap();
+        assert!(
+            out.reply.contains("what's coming up for you about @ana"),
+            "no reframe: {}",
+            out.reply
+        );
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread[1].content, out.reply);
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
+    }
+
+    #[tokio::test]
+    async fn a_bare_shared_address_asks_nothing_and_sends_nothing() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        assert!(matches!(
+            rt.tara_in_chat(&peer, "   ").await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(rt.messages_with(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_offer_to_someone_who_is_not_a_comrade_is_not_sent() {
+        // Marking someone a comrade is the existing "may reach me" grant; an
+        // offer is a notification, so it lives inside that grant.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+
+        // …and it must be reported as "not a comrade", not as a cooldown: the UI
+        // has to be able to suggest the actual fix.
+        let outcome = rt
+            .offer_action(AppAction::Breathe, vec![ana.clone()])
+            .await
+            .unwrap();
+        assert!(outcome.sent.is_empty(), "a contact is not yet a comrade");
+        assert_eq!(outcome.not_comrades, vec![ana.clone()]);
+        assert!(outcome.on_cooldown.is_empty());
+
+        let none = rt.offer_action(AppAction::Breathe, vec![]).await.unwrap();
+        assert!(none.sent.is_empty() && none.not_comrades.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_second_offer_inside_the_cooldown_tells_nobody_twice() {
+        // The cooldown is a floor on notifications, shared with the nudge —
+        // being able to send this repeatedly would make it a way to needle
+        // somebody. What is pinned is that the *second* call reaches nobody and
+        // says why.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let (_hex, ana) = stranger();
+        rt.add_contact(&ana, "ana").unwrap();
+        rt.set_comrade(&ana, true).unwrap();
+
+        // The first call claims the cooldown for ana.
+        let _ = rt.offer_action(AppAction::Breathe, vec![ana.clone()]).await;
+        let second = rt
+            .offer_action(AppAction::Breathe, vec![ana.clone()])
+            .await
+            .unwrap();
+        assert!(
+            second.sent.is_empty(),
+            "the cooldown must swallow the second"
+        );
+        assert_eq!(
+            second.on_cooldown,
+            vec![ana.clone()],
+            "and it must say the cooldown is why, not that ana is a stranger"
+        );
+        assert!(second.not_comrades.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_aside_stays_on_this_device_and_reaches_the_tara_thread() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let reply = rt.tara_aside("i keep putting this off").unwrap();
+        assert!(reply.from_tara);
+        // Same thread as the Tara tab — one companion, one history.
+        let thread = rt.tara_thread().unwrap();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].text, "i keep putting this off");
+        // And nothing was queued for anybody.
+        assert_eq!(rt.outbox_pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_aside_about_a_named_person_is_turned_around() {
+        // The request's own example, end to end through the runtime.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let reply = rt
+            .tara_aside("what does she @xyz thinking of herself")
+            .unwrap();
+        assert!(reply.text.contains("what's coming up for you about @xyz"));
+        assert!(!reply.crisis);
+    }
+
+    #[tokio::test]
+    async fn a_play_query_resolves_links_and_words_without_touching_a_network() {
+        let rt = ComradeRuntime::new();
+
+        // A YouTube link is the one thing we can drive ourselves.
+        let yt = rt.play_query("https://youtu.be/dQw4w9WgXcQ", None);
+        assert_eq!(yt.plan, PlayPlan::OpenNow);
+        assert!(matches!(yt.content, Some(TogetherContent::Youtube { .. })));
+        assert_eq!(yt.service, Some(MusicService::Youtube));
+
+        // Spotify serves DRM audio no third party may decode, so the honest
+        // answer is "here is what to open".
+        let sp = rt.play_query(
+            "https://open.spotify.com/track/1234567890abcdefghijkl",
+            None,
+        );
+        assert_eq!(sp.plan, PlayPlan::NameOnly);
+        assert!(sp.content.is_none());
+        assert_eq!(sp.service, Some(MusicService::Spotify));
+
+        // Free text names a recording to look for locally.
+        let words = rt.play_query("Kun Faya Kun", Some(MusicService::Spotify));
+        assert_eq!(words.plan, PlayPlan::FindLocally);
+        assert_eq!(words.recording.unwrap().title, "Kun Faya Kun");
+
+        assert_eq!(rt.play_query("  ", None).plan, PlayPlan::Empty);
+    }
+
+    #[tokio::test]
+    async fn a_links_own_service_outranks_the_alias_that_was_typed() {
+        // `/youtube <spotify url>` is still a Spotify URL.
+        let rt = ComradeRuntime::new();
+        let t = rt.play_query(
+            "https://open.spotify.com/track/1234567890abcdefghijkl",
+            Some(MusicService::Youtube),
+        );
+        assert_eq!(t.service, Some(MusicService::Spotify));
+    }
+
+    #[test]
+    fn a_local_copy_is_what_turns_a_query_into_a_session() {
+        // The only branch the library answer decides.
+        assert_eq!(
+            play_route(PlayPlan::FindLocally, true),
+            PlayRoute::StartTogether
+        );
+        // Asking beats guessing: below the confidence bar we do not open a file
+        // on somebody's behalf.
+        assert_eq!(
+            play_route(PlayPlan::FindLocally, false),
+            PlayRoute::AskForFile
+        );
+    }
+
+    #[test]
+    fn a_local_file_does_not_make_a_drm_link_playable() {
+        // The plan describes what the *query* named. Someone with a similarly
+        // titled mp3 on their phone has not acquired the right to decode a
+        // Spotify stream, and a `/play <spotify url>` that quietly started a
+        // session on a different file would put the two of them on different
+        // audio while the UI claimed otherwise.
+        for found in [true, false] {
+            assert_eq!(
+                play_route(PlayPlan::NameOnly, found),
+                PlayRoute::OpenElsewhere,
+                "found={found}",
+            );
+            assert_eq!(
+                play_route(PlayPlan::OpenNow, found),
+                PlayRoute::PlayEmbed,
+                "found={found}",
+            );
+            assert_eq!(
+                play_route(PlayPlan::Empty, found),
+                PlayRoute::Nothing,
+                "found={found}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_plan_routes_somewhere_and_only_one_route_starts_a_session() {
+        // A plan falling through to a route that opens a player would open one
+        // on a query nobody resolved.
+        for plan in [
+            PlayPlan::OpenNow,
+            PlayPlan::FindLocally,
+            PlayPlan::NameOnly,
+            PlayPlan::Empty,
+        ] {
+            for found in [true, false] {
+                let route = play_route(plan, found);
+                if route == PlayRoute::StartTogether {
+                    assert_eq!(plan, PlayPlan::FindLocally, "only a library hit starts one");
+                    assert!(found, "and only when a copy was actually found");
+                }
+            }
+        }
     }
 }

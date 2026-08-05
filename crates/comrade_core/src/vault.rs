@@ -214,6 +214,26 @@ impl VaultEngine {
         info!("Vault engine connected");
     }
 
+    /// This device's own public key — the identity every gift wrap is addressed
+    /// to.
+    ///
+    /// Exposed because the inbox dispatcher needs to know which side of an
+    /// incoming control envelope we are on (a task addressed to us, for
+    /// instance), and it runs from a background callback that holds this engine
+    /// but not the view-model's identity. The secret key stays private.
+    pub fn our_public_key(&self) -> PublicKey {
+        self.our_keys.public_key()
+    }
+
+    /// [`Self::our_public_key`] as a canonical bech32 `npub`, which is the form
+    /// every stored row and DTO is keyed by.
+    pub fn our_npub(&self) -> String {
+        self.our_keys
+            .public_key()
+            .to_bech32()
+            .unwrap_or_else(|_| self.our_keys.public_key().to_hex())
+    }
+
     pub async fn disconnect(&self) {
         self.client.disconnect().await;
     }

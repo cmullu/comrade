@@ -330,6 +330,18 @@ object ComradeCore {
         val content: String,
         val createdAt: Long,
         val outgoing: Boolean,
+        /**
+         * True when core read Tara's marker off the wire form — see
+         * `comrade_ui::MessageAuthor`. A claim by whichever Comrade sent it, not
+         * an authenticated one, so it may style a bubble and must never gate
+         * anything that matters.
+         *
+         * Flattened to a boolean rather than carrying the enum through: there
+         * are two cases and the UI asks "is this hers", so a `when` over an FFI
+         * enum in every bubble would be ceremony. If a third author ever exists
+         * this becomes the enum again, and the compiler will find every caller.
+         */
+        val fromTara: Boolean = false,
         val status: String? = null,
         val replyTo: String? = null,
     )
@@ -340,6 +352,7 @@ object ComradeCore {
         content = content,
         createdAt = createdAt.toLong(),
         outgoing = outgoing,
+        fromTara = author == uniffi.comrade_ui.MessageAuthor.TARA,
         status = status,
         replyTo = replyTo,
     )
@@ -573,6 +586,186 @@ object ComradeCore {
         }
     }
 
+    // ── In-chat commands (grammar in `comrade_core::command`) ─────────────────
+    //
+    // The grammar is Rust, deliberately: `VoiceCommand.kt` used to be the only
+    // command parser in the app, and a second one here for the composer would be
+    // the same drift `/pay` already suffered across four implementations. These
+    // are wrappers, nothing more.
+
+    data class MentionMatchInfo(
+        /** Lowercased handle without the leading `@`. */
+        val handle: String,
+        /** Byte span in the text that was parsed, for drawing a chip. */
+        val start: Int,
+        val end: Int,
+        /** The one contact this names, or null. */
+        val npub: String?,
+        /**
+         * Every contact answering to the handle when more than one does. A
+         * non-empty list with a null [npub] is an ambiguity the UI must ask
+         * about — picking one is how a private message reaches the wrong person.
+         */
+        val candidates: List<ContactInfo>,
+    )
+
+    data class TaskInfo(
+        val id: String,
+        val text: String,
+        val assigner: String,
+        /** Null for a note to self, which never reached a relay. */
+        val assignee: String?,
+        val createdAt: Long,
+        val updatedAt: Long,
+        val state: uniffi.comrade_core.TaskState,
+        /** Whether this device named the task. */
+        val assignedByMe: Boolean,
+        /** Whether this device may finish or decline it. True for a note to self. */
+        val mineToDo: Boolean,
+    )
+
+    private fun uniffi.comrade_ui.MentionMatchDto.toInfo() = MentionMatchInfo(
+        handle = handle,
+        start = start.toInt(),
+        end = end.toInt(),
+        npub = npub,
+        candidates = candidates.map { it.toInfo() },
+    )
+
+    private fun uniffi.comrade_ui.TaskDto.toInfo() = TaskInfo(
+        id = id,
+        text = text,
+        assigner = assigner,
+        assignee = assignee,
+        createdAt = createdAt.toLong(),
+        updatedAt = updatedAt.toLong(),
+        state = state,
+        assignedByMe = assignedByMe,
+        mineToDo = mineToDo,
+    )
+
+    /** What the composer's text means. Pure — safe to call on every keystroke. */
+    fun parseChatCommand(text: String): uniffi.comrade_core.ChatCommand =
+        rethrowing("Command") { ffi.parseChatCommand(text) }
+
+    /** Every command the composer offers, for the `/` picker and `/help`. */
+    fun chatCommandCatalog(): List<uniffi.comrade_core.CommandSpec> =
+        rethrowing("Command") { ffi.chatCommandCatalog() }
+
+    /** Every `@handle` in [text], unresolved — for chips while typing. */
+    fun chatMentions(text: String): List<uniffi.comrade_core.Mention> =
+        rethrowing("Command") { ffi.chatMentions(text) }
+
+    /** Every `@handle` in [text], resolved against the saved contacts. */
+    fun resolveMentions(text: String): List<MentionMatchInfo> =
+        rethrowing("Command") { ffi.resolveMentions(text).map { it.toInfo() } }
+
+    /** How far a `/play` query gets with no network and no library. */
+    fun playQuery(
+        query: String,
+        service: uniffi.comrade_core.MusicService?,
+    ): uniffi.comrade_ui.PlayTargetDto = rethrowing("Play") { ffi.playQuery(query, service) }
+
+    /**
+     * What to do about a `/play`, once this device has searched its own library.
+     *
+     * [foundLocalCopy] is consulted only for `FindLocally` — a local file does
+     * not make a DRM link playable, and core is where that stays decided.
+     *
+     * `null` on failure, deliberately rather than a default route: every route
+     * carries a *sentence*, and defaulting to one would tell the user "name a
+     * song" when they had named one and the bridge was what broke. The caller
+     * says it could not work out what to play, which is what happened.
+     */
+    fun playRoute(
+        plan: uniffi.comrade_ui.PlayPlan,
+        foundLocalCopy: Boolean,
+    ): uniffi.comrade_ui.PlayRoute? =
+        runCatching { ffi.playRoute(plan, foundLocalCopy) }.getOrNull()
+
+    /** Name a piece of work. [peer] of null is a note to self — no relay. */
+    fun assignTaskTyped(peer: String?, text: String): TaskInfo =
+        rethrowing("Task") { runBlocking { ffi.assignTask(peer, text) }.toInfo() }
+
+    /** Every task this device knows about, newest first. */
+    fun tasks(): List<TaskInfo> = rethrowing("Tasks") { ffi.tasks().map { it.toInfo() } }
+
+    /** Move a task; throws if this device has no standing to make that change. */
+    fun setTaskStateTyped(id: String, state: uniffi.comrade_core.TaskState): TaskInfo =
+        rethrowing("Task") { runBlocking { ffi.setTaskState(id, state) }.toInfo() }
+
+    /**
+     * Who was told when an action was offered, and why the others were not.
+     *
+     * A bare count could not tell "the cooldown is running" from "that person is
+     * not your comrade", so the UI said the first for both — naming a cause that
+     * was not real and never suggesting the fix.
+     */
+    data class OfferOutcome(
+        val sent: List<String>,
+        val notComrades: List<String>,
+        val onCooldown: List<String>,
+        val failed: List<String>,
+    )
+
+    private fun uniffi.comrade_ui.OfferOutcomeDto.toInfo() = OfferOutcome(
+        sent = sent,
+        notComrades = notComrades,
+        onCooldown = onCooldown,
+        failed = failed,
+    )
+
+    /** Offer an in-app action to comrades. See [OfferOutcome]. */
+    fun offerActionTyped(
+        action: uniffi.comrade_core.AppAction,
+        peers: List<String>,
+    ): OfferOutcome = rethrowing("Offer") {
+        runBlocking { ffi.offerAction(action, peers) }.toInfo()
+    }
+
+    /**
+     * Say something to Tara from inside a conversation — a private aside. Never
+     * reaches the peer; same thread and same store as the Tara tab.
+     */
+    fun taraAsideTyped(text: String): TaraMessageInfo =
+        rethrowing("Tara") { ffi.taraAside(text).toInfo() }
+
+    /**
+     * What came back from asking Tara **in** a conversation — the `@tara …`
+     * spelling, which the other person sees.
+     *
+     * [asked] and [answered] are the two messages now in the thread, so a
+     * composer can append them without a reload that would race the relay. Both
+     * are null when [keptPrivate] is true — see [taraInChatTyped].
+     */
+    data class TaraChatTurn(
+        val asked: MessageInfo?,
+        val answered: MessageInfo?,
+        val reply: String,
+        val keptPrivate: Boolean,
+        val crisis: Boolean,
+    )
+
+    private fun uniffi.comrade_ui.TaraChatDto.toInfo() = TaraChatTurn(
+        asked = asked?.toInfo(),
+        answered = answered?.toInfo(),
+        reply = reply,
+        keptPrivate = keptPrivate,
+        crisis = crisis,
+    )
+
+    /**
+     * Ask Tara in front of the person you are talking to. Sends two messages —
+     * the question and her answer — unless the question tripped the distress
+     * detector, in which case **nothing is sent** and `keptPrivate` says so.
+     *
+     * That exception is core's, not this frontend's: see
+     * `RuntimeHandles::tara_in_chat`. A caller must not send the reply itself
+     * when it comes back private.
+     */
+    fun taraInChatTyped(peer: String, text: String): TaraChatTurn =
+        rethrowing("Tara") { runBlocking { ffi.taraInChat(peer, text) }.toInfo() }
+
     // ── Attention (usage mirror · focus · long read — strictly local) ─────────
     //
     // Wellbeing pillar #5 (docs/ATTENTION.md). Nothing here is ever networked,
@@ -747,6 +940,50 @@ object ComradeCore {
      */
     fun media(peer: String): List<MediaMessageInfo> =
         rethrowing("Media history") { ffi.mediaWith(peer).map { it.toInfo() } }
+
+    /** One person's emoji reaction to one message — see [reactions]. */
+    data class ReactionInfo(
+        /** Event id of the message reacted to. A text message or an attachment. */
+        val targetId: String,
+        val peer: String,
+        val reactor: String,
+        val emoji: String,
+        val createdAt: Long,
+        /** Whether *this device* sent it — mirrors [MessageInfo.outgoing]. */
+        val outgoing: Boolean,
+    )
+
+    private fun uniffi.comrade_ui.ReactionDto.toInfo() = ReactionInfo(
+        targetId = targetId,
+        peer = peer,
+        reactor = reactor,
+        emoji = emoji,
+        createdAt = createdAt.toLong(),
+        outgoing = outgoing,
+    )
+
+    /**
+     * Every reaction in [peer]'s conversation, oldest first, from the encrypted
+     * store — so a thread opens with its reactions already drawn rather than
+     * waiting for a live event.
+     */
+    fun reactions(peer: String): List<ReactionInfo> =
+        rethrowing("Reactions") { ffi.reactions(peer).map { it.toInfo() } }
+
+    /**
+     * React to a message, or take an existing reaction back by passing the same
+     * emoji again. Returns the reaction now standing, or `null` if the tap
+     * withdrew one.
+     *
+     * The toggle is decided in Rust, not here — see
+     * `ComradeRuntime::toggle_reaction`. That is deliberate: "tapping what you
+     * already sent removes it" needs the current reaction to decide, and a copy
+     * of that rule in each frontend is a copy that can disagree.
+     */
+    fun toggleReactionTyped(peer: String, targetId: String, emoji: String): ReactionInfo? =
+        rethrowing("React") {
+            runBlocking { ffi.toggleReaction(peer, targetId, emoji) }?.toInfo()
+        }
 
     /** Encrypt + send raw media bytes (no base64 round-trip — uniffi carries `ByteArray` natively). */
     fun sendMediaBytesTyped(
@@ -928,6 +1165,44 @@ object ComradeCore {
         rethrowing("Send file") { runBlocking { ffi.togetherShare(signal) } }
     }
 
+    // ── Handing a large attachment over ──────────────────────────────────────
+
+    /**
+     * Send one step of handing a large attachment over — the road a file takes
+     * when it is past the 10 MB the hosted path can carry.
+     *
+     * Unlike [togetherShareTyped] this does **not** need a live session: nobody
+     * starts a listening session to send a video file. The gate is on receipt
+     * instead, and it is the same one a call signal clears — see
+     * `comrade_core::handoff`.
+     */
+    fun attachmentHandoffSendTyped(
+        peer: String,
+        transferId: String,
+        signal: uniffi.comrade_core.HandoffSignal,
+    ) {
+        rethrowing("Send attachment") {
+            runBlocking { ffi.attachmentHandoffSend(peer, transferId, signal) }
+        }
+    }
+
+    /**
+     * Which road an attachment of this size takes. Asked of the core rather than
+     * compared against a local constant, so a UI can never disagree with the
+     * threshold the core enforces.
+     */
+    fun attachmentRouteForBytes(totalBytes: Long): uniffi.comrade_core.AttachmentRoute =
+        uniffi.comrade.attachmentRouteForBytes(totalBytes.toULong())
+
+    /**
+     * A fresh id scoping every signal of one handoff.
+     *
+     * Minted by the core rather than here because the id *is* the replay guard —
+     * 128 bits from the same CSPRNG on every frontend, so an id a third party
+     * could predict never becomes an injected `Accept`.
+     */
+    fun newAttachmentTransferId(): String = uniffi.comrade.newAttachmentTransferId()
+
     /**
      * Whether a *transfer* connection may be given TURN at all. Under the
      * default policy it may not, so a relay candidate is never gathered and
@@ -947,8 +1222,14 @@ object ComradeCore {
         localCandidateType: String,
         remoteCandidateType: String,
         totalBytes: Long,
+        consentGranted: Boolean = false,
     ): uniffi.comrade_ui.ShareVerdictDto =
-        ffi.shareTransferVerdict(localCandidateType, remoteCandidateType, totalBytes.toULong())
+        ffi.shareTransferVerdict(
+            localCandidateType,
+            remoteCandidateType,
+            totalBytes.toULong(),
+            consentGranted,
+        )
 
     /** How many chunks may go into a data channel currently holding this much. */
     fun shareChunksToSend(bufferedBytes: Long): Int =
@@ -959,10 +1240,15 @@ object ComradeCore {
         runCatching { ffi.shareRelayPolicy() }
             .getOrDefault(uniffi.comrade_core.RelayPolicy.DirectOnly)
 
-    /** Change it. Takes effect on the next transfer connection. */
-    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy) {
-        runCatching { ffi.setShareRelayPolicy(policy) }
-    }
+    /**
+     * Change it, and remember it. Takes effect on the next transfer connection.
+     *
+     * Returns whether it was written down: with the vault locked the choice
+     * still applies to this process but will not survive it, and a settings
+     * screen that showed a saved preference which was not saved would be lying.
+     */
+    fun setShareRelayPolicy(policy: uniffi.comrade_core.RelayPolicy): Boolean =
+        runCatching { ffi.setShareRelayPolicy(policy) }.isSuccess
 
     data class CallRecordInfo(
         val id: String,

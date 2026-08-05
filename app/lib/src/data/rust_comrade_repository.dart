@@ -52,6 +52,24 @@
 ///   disclosure with no UI to explain it is the one thing this feature must
 ///   not be. It is one line here the day that screen exists.
 ///
+/// And a whole family that `api.rs` deliberately does *not* export yet: the
+/// in-chat commands (`/task`, `@tara`, `/comrade-breathe`, `/play` — see
+/// `docs/CHAT_ACTIONS.md`). They are on the uniffi surface for Kotlin and on
+/// the Tauri surface for desktop, and they were kept off the FRB surface on
+/// purpose. Two reasons, and the second is the real one:
+///
+/// * The composer here has no picker, no mention chips and no aside styling,
+///   and an aside that looks like a message is precisely the failure that
+///   feature must not have — `@tara` reaching `sendDmReply` would send somebody
+///   their own private thought.
+/// * Adding them would have meant regenerating `frb_generated.rs`, and the
+///   change that introduced them could not do that (`flutter_rust_bridge_codegen`
+///   was unavailable), so half of it would have been hand-edited. That file is
+///   generated, never edited by hand.
+///
+/// The Rust side is complete and frontend-agnostic; this is a UI gap and a
+/// codegen step, in that order.
+///
 /// Each is a one-line addition to the interface plus a fake implementation
 /// when a screen wants it. Nothing here is half-wired: every method the
 /// interface declares is implemented by both this class and
@@ -277,6 +295,22 @@ class RustComradeRepository implements ComradeRepository {
   @override
   Future<List<MediaMessageInfo>> media(String peer) async =>
       (await _guard(() => rust.mediaWith(peer: peer))).map(_media).toList();
+
+  @override
+  Future<List<ReactionInfo>> reactions(String peer) async =>
+      (await _guard(() => rust.reactions(peer: peer))).map(_reaction).toList();
+
+  @override
+  Future<ReactionInfo?> toggleReaction({
+    required String peer,
+    required String targetId,
+    required String emoji,
+  }) async {
+    final rust.ReactionDto? dto = await _guard(
+      () => rust.toggleReaction(peer: peer, targetId: targetId, emoji: emoji),
+    );
+    return dto == null ? null : _reaction(dto);
+  }
 
   @override
   Future<MediaMessageInfo> sendMedia({
@@ -686,6 +720,8 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
         )),
       rust.BridgeEvent_IncomingMedia(:final rust.MediaMessageDto field0) =>
         IncomingMedia(_media(field0)),
+      rust.BridgeEvent_IncomingReaction(:final rust.ReactionDto field0) =>
+        IncomingReaction(_reaction(field0)),
       rust.BridgeEvent_IncomingCallSignal(:final rust.CallSignalDto field0) =>
         _incomingCallSignal(field0),
       rust.BridgeEvent_IncomingMessageRequest(
@@ -735,6 +771,10 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
       rust.BridgeEvent_TogetherCorrection() => null,
       rust.BridgeEvent_TogetherEnded() => null,
       rust.BridgeEvent_TogetherShare() => null,
+      // Handing a large attachment over needs a WebRTC data channel, which this
+      // frontend has none of — see divergence D34 in `SCREEN_INVENTORY.md`. Null
+      // rather than a stub so nothing here pretends the transfer is possible.
+      rust.BridgeEvent_AttachmentHandoff() => null,
     };
 
 /// Flatten the typed `CallSignal` union back into the flat shape the call UI
@@ -811,6 +851,7 @@ MessageInfo _message(rust.MessageDto dto) => MessageInfo(
       content: dto.content,
       createdAt: dto.createdAt.toInt(),
       outgoing: dto.outgoing,
+      fromTara: dto.author == rust.MessageAuthor.tara,
       status: MessageStatus.fromWire(dto.status),
       replyTo: dto.replyTo,
     );
@@ -830,6 +871,15 @@ MediaMessageInfo _media(rust.MediaMessageDto dto) => MediaMessageInfo(
       sender: dto.sender,
       createdAt: dto.createdAt.toInt(),
       size: dto.size.toInt(),
+      outgoing: dto.outgoing,
+    );
+
+ReactionInfo _reaction(rust.ReactionDto dto) => ReactionInfo(
+      targetId: dto.targetId,
+      peer: dto.peer,
+      reactor: dto.reactor,
+      emoji: dto.emoji,
+      createdAt: dto.createdAt.toInt(),
       outgoing: dto.outgoing,
     );
 

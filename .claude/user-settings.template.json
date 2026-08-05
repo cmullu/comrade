@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Template for ~/.claude/settings.json — the USER scope, which cannot be committed",
+    "because it lives outside the repository. Claude Code honours a few keys only at",
+    "user scope, so they cannot go in .claude/settings.json no matter how much we would",
+    "like them to travel with the code.",
+    "",
+    "The cloud sandbox wipes ~/.claude with every container, so those keys would be lost",
+    "each session. .claude/hooks/seed-user-settings.sh installs this file on SessionStart",
+    "when ~/.claude/settings.json is absent, which is what makes the setting survive a",
+    "throwaway container. __PROJECT_DIR__ is substituted with the repository root at seed",
+    "time; an absolute path is required because the status line runs outside a project",
+    "context and cannot expand ${CLAUDE_PROJECT_DIR}.",
+    "",
+    "The seeder never overwrites an existing file, so anything you set by hand wins.",
+    "Edit that file directly for personal preferences; edit this one for what every",
+    "container should start with."
+  ],
+  "statusLine": {
+    "type": "command",
+    "command": "bash __PROJECT_DIR__/.claude/hooks/statusline.sh"
+  },
+  "teammateMode": "in-process"
+}

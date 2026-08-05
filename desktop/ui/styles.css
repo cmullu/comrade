@@ -829,6 +829,25 @@ code {
   border-bottom-right-radius: 4px;
 }
 
+/* A shared Tara answer. Always on the left, whichever device carried it, so she
+   reads as a third participant rather than as one side's message — the same
+   rule `ChatsScreen.kt` and `message_bubble.dart` apply. Tinted rather than
+   given the accent, which belongs to "you said this". */
+.bubble.is-tara {
+  align-self: flex-start;
+  background: var(--panel-2);
+  border-left: 3px solid var(--accent);
+  border-bottom-left-radius: 4px;
+}
+
+.bubble-author {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
 .bubble-text {
   display: block;
 }
@@ -877,6 +896,40 @@ code {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A quote whose original is in the thread: tapping it goes there. Rendered as a
+   <button>, so the inherited control styling has to be undone back to the plain
+   quote above — everything here is a reset except the cursor and the hover. */
+.bubble-quote-link {
+  display: block;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border: none;
+  border-left: 2px solid currentColor;
+}
+
+.bubble-quote-link:hover,
+.bubble-quote-link:focus-visible {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+/* The flash on arriving at a jumped-to message. Transitions on the way out so it
+   fades rather than snapping off; `prefers-reduced-motion` drops the fade but
+   keeps the highlight, because the highlight is the information. */
+.bubble.bubble-jumped {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  transition: background 220ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble.bubble-jumped {
+    transition: none;
+  }
 }
 
 /* Hover-revealed "reply" affordance hugging the outer edge of a bubble. */
@@ -1091,6 +1144,114 @@ code {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* Which road this file takes. Quiet for the hosted road — it is the one people
+   already expect — and marked for the direct one, because that road asks
+   something of the recipient that the other does not. */
+.attach-preview-route {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.attach-preview-route.is-direct {
+  padding: 7px 9px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attach-preview-note {
+  font-size: 12px;
+  color: var(--warn, var(--text-dim));
+}
+
+/* ── The large-attachment card ──────────────────────────────────────────────
+   Sits above the composer, inside the conversation it belongs to. Bordered for
+   the same reason the relay question is: until it is answered, nothing about
+   this file has happened yet. */
+.handoff-card {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.handoff-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.handoff-glyph {
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.handoff-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.handoff-kind {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* A peer chose this filename, so it is bounded in `safeDisplayName` *and* here:
+   the truncation is what stops a long name pushing the buttons off the card. */
+.handoff-detail,
+.handoff-status {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-caption {
+  font-size: 13px;
+  /* A peer wrote this and it can be 512 characters — five lines at this width,
+     measured in Chromium. It wraps rather than stretching the card, and it stops
+     at four lines rather than pushing the conversation off its own screen: the
+     length is bounded in `boundedCaption`, and this is the half of that bound the
+     layout owes. */
+  max-height: 4.4em;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.handoff-refusal {
+  font-size: 12px;
+  color: var(--warn, var(--text));
+}
+
+.handoff-bar {
+  height: 4px;
+  overflow: hidden;
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.handoff-bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent, currentColor);
+  transition: width 120ms linear;
+}
+
+.handoff-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.handoff-actions:empty {
+  display: none;
 }
 
 .bubble audio {
@@ -2332,4 +2493,429 @@ code {
   max-height: 42vh;
   border-radius: 8px;
   background: #000;
+}
+
+/* ── In-chat commands (see desktop/ui/chat_commands.mjs) ──────────────────── */
+
+/* The `/` picker sits above the field, so choosing a row does not shift the
+   composer under the pointer mid-click. */
+.command-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  padding: 4px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px;
+  background: var(--panel, #161616);
+}
+
+.command-row {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, auto) 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-row:hover,
+.command-row:focus-visible {
+  background: var(--hover, #232323);
+}
+
+.command-name {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-weight: 600;
+}
+
+.command-arg {
+  font-family: var(--mono, ui-monospace, monospace);
+  opacity: 0.55;
+}
+
+.command-help {
+  opacity: 0.75;
+}
+
+/* What will happen if Enter is pressed now — including why it will not. */
+.command-hint {
+  margin: 0 0 4px;
+  opacity: 0.8;
+}
+
+/* An aside must not look like a message, or somebody sends one by accident.
+   Both the note and the field itself change, so the difference is visible
+   whether or not the note is in view. */
+.aside-note {
+  margin: 0 0 4px;
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.input.composer-aside {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--panel, #161616) 88%, currentColor 12%);
+}
+
+/* `@tara` is the same companion with the opposite audience, so it gets its own
+   treatment rather than the aside's: solid and tinted, because this text *is*
+   going somewhere. A dashed border here would say "private" about a message the
+   other person is about to read. */
+.input.composer-tara-here {
+  border-style: solid;
+  border-color: var(--accent, #6ea8fe);
+}
+
+/* "Which @ana did you mean?" — the same list shape as the `/` picker, because it
+   is the same gesture: a bounded, scrolling set of rows above the field. */
+.mention-chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  padding: 4px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px;
+  background: var(--panel, #161616);
+}
+
+.chooser-question {
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+/* The relay-consent question. Bordered rather than inline text because it is
+   the one thing in this panel that stops until it is answered. */
+.share-consent {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.share-consent-text {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.share-consent-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ─── Profile page ────────────────────────────────────────────────────────────
+   Reached from the identity chip and from a conversation header, never from the
+   tab rail — so it has no `.tab` of its own and `switchTab` correctly leaves
+   every rail button deselected while it is open.
+
+   Every value below is an existing `:root` token. No new hex, and no
+   `prefers-color-scheme` block: this file is dark-only by design and a second
+   colour source is how two platforms start rendering visibly different
+   products (SCREEN_INVENTORY D25). */
+.view-profile {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.profile-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-back {
+  align-self: flex-start;
+}
+
+.profile-identity {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* The avatar shrinks with the header on scroll. The *curve* is
+   `collapsedAvatarSize` in profile_view.mjs, shared with the other two
+   frontends; the custom property is only how this renderer applies it. */
+.profile-avatar {
+  --profile-avatar-size: 96px;
+  flex: 0 0 auto;
+  width: var(--profile-avatar-size);
+  height: var(--profile-avatar-size);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: calc(var(--profile-avatar-size) / 2.4);
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  transition: width 120ms linear, height 120ms linear, font-size 120ms linear;
+}
+
+.profile-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-titles {
+  min-width: 0;
+}
+
+.profile-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.profile-status {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.profile-blocked-note {
+  margin: 0;
+  color: var(--warn);
+  font-size: 0.9rem;
+}
+
+.profile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1.25rem;
+}
+
+.profile-rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.profile-row {
+  display: grid;
+  grid-template-columns: 9rem 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.7rem 0.9rem;
+  background: var(--panel);
+}
+
+.profile-row + .profile-row {
+  border-top: 1px solid var(--border);
+}
+
+.profile-row-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* The key is the one row that is never shortened and never omitted. It wraps
+   rather than ellipsing, because half a key is not a key. */
+.profile-row-key .profile-row-value {
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+
+.profile-row-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-row-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.profile-row-controls {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.profile-tabs {
+  display: flex;
+  gap: 0.35rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.profile-tab {
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 0.35rem 0.7rem;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.profile-tab:hover {
+  background: var(--bg-elev);
+}
+
+.profile-tab.is-active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.profile-shared-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.profile-media-row,
+.profile-link-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.profile-media-kind,
+.profile-media-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.profile-media-caption {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The host is prominent and the full URL is quiet, deliberately: the rule hands
+   them back as separate fields so `https://evil.example/?next=paypal.com`
+   cannot be presented as a PayPal link. */
+.profile-link-host {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.profile-link-url {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-empty {
+  margin: 0;
+  padding: 1rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* The conversation header's name is a button now. It must not look like one. */
+.chat-peer-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-peer-btn:hover {
+  text-decoration: underline;
+}
+
+/* ── Task list (see desktop/ui/task_list.mjs) ─────────────────────────────── */
+
+.view-tasks {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+.task-heading {
+  margin: 20px 0 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+
+.task-text {
+  font-size: 0.98rem;
+}
+
+/* A finished task reads as finished before the badge is read. */
+.task-row.is-done .task-text {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.task-sub {
+  font-size: 0.85rem;
+}
+
+.task-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.btn-small {
+  padding: 3px 10px;
+  font-size: 0.85rem;
+}
+
+.task-empty {
+  max-width: 32rem;
+  margin: 12vh auto;
+  text-align: center;
+  line-height: 1.6;
 }

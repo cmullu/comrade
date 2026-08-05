@@ -281,6 +281,134 @@ I'm a reflective companion, not a therapist or crisis service — what you're ca
 deserves a trained human. Please reach out to a crisis helpline, or to someone you \
 trust, right now. I'll still be here afterwards.";
 
+// ── The third-party gate ──────────────────────────────────────────────────────
+//
+// Tara reached the chat composer (`crate::command::ChatCommand::AskTara`), and
+// with it came a question she must not answer: *"what does @xyz think of
+// herself?"*. Two of this module's gates rule it out and they point the same way.
+//
+// **Gate 1, never diagnoses.** Inferring what a named person thinks of
+// themselves is a psychological assessment of somebody who has not consented to
+// one, is not in the room, and cannot correct it.
+//
+// **And the engine could not do it anyway.** `ReflectiveCompanion` is a cue-word
+// template matcher (see `FEELINGS`); asked about a third party it would emit a
+// fluent, confident sentence with no information in it — about a real human being
+// the reader knows. That is worse than refusing, and it is worse than a wrong
+// answer about a fact, because the reader may act on it.
+//
+// So the rule is blunt on purpose: **an aside that names another person turns
+// the question back to the person asking.** No cue list deciding which questions
+// about someone are assessments — that would be a fuzzy matcher guarding a hard
+// boundary, and its false negatives are exactly the cases that matter.
+//
+// Being blunt costs almost nothing, because the redirect is *also the right
+// reflective move*. "I'm worried about @ana" is legitimate material for this
+// space, and "what's coming up for you about ana?" is what a good listener says
+// to it. The safety property and the product behaviour are the same sentence.
+//
+// Like `detect_distress`, this gate must stay **in front of any future model**
+// (`docs/TARA.md`, OQ9). A generative backend is exactly the thing that would
+// answer the question fluently.
+
+/// The handle of a third party named in `text`, or `None`.
+///
+/// Tara herself is not a third party — someone writing "@tara" inside the body
+/// is addressing the companion, not asking about a person.
+///
+/// This deliberately does **not** call [`crate::command::mentions`], which
+/// implements the same rule. This module has no `use` statements at all, and that
+/// is not an accident of style: "on-device or not at all" is gate 2, and a module
+/// that imports nothing is a guarantee an auditor can check in one glance rather
+/// than by walking a dependency tree. The duplication is twelve lines, and
+/// `the_two_handle_scanners_agree` pins the two against each other so they cannot
+/// drift.
+pub fn mentions_third_party(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' && (i == 0 || !is_handle_byte(bytes[i - 1])) {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && is_handle_byte(bytes[end]) {
+                end += 1;
+            }
+            let handle = text[start..end].to_lowercase();
+            // 3..=24 is `normalize_handle`'s range in `comrade_ui`; anything
+            // outside it could never resolve to a contact.
+            if handle.len() >= 3 && handle.len() <= 24 && handle != "tara" {
+                return Some(handle);
+            }
+            i = end.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The charset a handle is made of: ASCII alphanumerics and `_`.
+fn is_handle_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The reply when an aside names somebody else.
+///
+/// Three things it has to do, and the wording is load-bearing for each. It
+/// **declines**, and says why in a way that is literally true of this engine
+/// ("I'd only be making it up"). It **names who it is protecting**, because
+/// "it wouldn't be fair to them" is the actual reason and hiding it would make
+/// the refusal feel arbitrary. And it **hands back the askable question**, so the
+/// boundary teaches instead of stonewalling — a reader told only "I can't" learns
+/// that Tara is useless here, which is the opposite of true.
+fn third_party_reply(handle: &str) -> String {
+    format!(
+        "I can't tell you what someone else thinks or feels — I'd only be making it up, \
+         and it wouldn't be fair to them. What I can stay with is your side of it: \
+         what's coming up for you about @{handle}?"
+    )
+}
+
+// ── Tara in the room ─────────────────────────────────────────────────────────
+//
+// `@tara …` in a conversation asks her **in front of the other person** — the
+// answer is sent to them, like `@Meta AI` in WhatsApp. `/tara …` is the private
+// aside and always was. Two spellings, two audiences, and the composer has to
+// say which one is in the box before the send button is pressed.
+//
+// A shared answer travels as an ordinary message whose text carries
+// [`TARA_CHAT_PREFIX`]. `comrade_ui::MessageDto` now reads that marker into an
+// author field and hands the frontends the answer without it, so a Tara line is
+// drawn as hers rather than as a sentence you appear to have typed.
+//
+// **The prefix stays on the wire on purpose**, and did not go away when the
+// field arrived. A NIP-17 DM opened in some other Nostr client has no author
+// field to read, and "Tara: …" is a truer fallback there than her words in the
+// sender's mouth. It also means a thread written by an older build keeps
+// meaning what it meant.
+//
+// What the marker is **not** is authentication. Anybody can type "Tara: "
+// themselves, so a Tara bubble says *the sending Comrade claims this came from
+// her* — the same standing a quoted reply has — and no frontend may present a
+// match as proof the companion spoke. `AUDIT.md` Q17 records the boundary, and
+// [`the_marker_is_a_label_and_the_test_says_so`] pins it.
+
+/// What a shared Tara line starts with, on the wire and on screen.
+pub const TARA_CHAT_PREFIX: &str = "Tara: ";
+
+/// Render `answer` as the line that goes into the conversation.
+pub fn tara_chat_line(answer: &str) -> String {
+    format!("{TARA_CHAT_PREFIX}{}", answer.trim())
+}
+
+/// The answer inside a shared Tara line, or `None` if `content` is not one.
+///
+/// For frontends that want to draw the line as hers rather than as yours. See
+/// the section note above: a match is a label, not a claim about who spoke.
+pub fn tara_chat_answer(content: &str) -> Option<&str> {
+    content.strip_prefix(TARA_CHAT_PREFIX)
+}
+
 fn contains_word(haystack_norm: &str, cue: &str) -> bool {
     format!(" {haystack_norm} ").contains(&format!(" {cue} "))
 }
@@ -362,6 +490,14 @@ impl CompanionEngine for ReflectiveCompanion {
             return CompanionReply {
                 text: CRISIS_REPLY.to_string(),
                 crisis: true,
+            };
+        }
+        // Second, and only second: someone in crisis who happens to name a
+        // friend needs the helplines, not a reframe.
+        if let Some(handle) = mentions_third_party(message) {
+            return CompanionReply {
+                text: third_party_reply(&handle),
+                crisis: false,
             };
         }
         let norm = normalise(message);
@@ -552,5 +688,142 @@ mod tests {
         };
         let s = ReflectiveCompanion.opener(&[stale.clone(), stale]);
         assert!(!s.contains("felt low"));
+    }
+
+    // ── The third-party gate ─────────────────────────────────────────────────
+
+    #[test]
+    fn asking_what_someone_thinks_of_themselves_is_turned_around() {
+        // The question the composer entry point made reachable, verbatim. If
+        // this ever answers, gate 1 is gone.
+        let r = ReflectiveCompanion.reply("what does she @xyz thinking of herself", 0);
+        assert!(!r.crisis);
+        assert!(
+            r.text.contains("what's coming up for you about @xyz"),
+            "expected the reframe, got: {}",
+            r.text
+        );
+        // It must not appear to answer.
+        for leaked in [
+            "she thinks",
+            "she feels",
+            "she probably",
+            "it sounds like she",
+        ] {
+            assert!(
+                !r.text.to_lowercase().contains(leaked),
+                "the reply characterised her: {}",
+                r.text
+            );
+        }
+    }
+
+    #[test]
+    fn naming_someone_reaches_the_reframe_whatever_the_question_is() {
+        // Deliberately not a cue list: any aside naming a person turns around,
+        // because a fuzzy matcher guarding a hard boundary fails on the cases
+        // that matter. It also happens to be the right reflective move.
+        for aside in [
+            "what does @ana think of me",
+            "is @ana angry with me",
+            "i'm worried about @ana",
+            "@ana has been distant lately",
+        ] {
+            let r = ReflectiveCompanion.reply(aside, 0);
+            assert!(
+                r.text.contains("what's coming up for you about @ana"),
+                "{aside:?} did not reframe: {}",
+                r.text
+            );
+        }
+    }
+
+    // ── Tara in the room ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_shared_line_round_trips_through_its_marker() {
+        let line = tara_chat_line("What's the smallest next step?");
+        assert_eq!(
+            tara_chat_answer(&line),
+            Some("What's the smallest next step?")
+        );
+        // An ordinary message is not a Tara line, whatever it says about her.
+        assert_eq!(tara_chat_answer("Tara said hello"), None);
+        assert_eq!(tara_chat_answer("what did tara say"), None);
+    }
+
+    #[test]
+    fn the_marker_is_a_label_and_the_test_says_so() {
+        // Anybody can type the prefix, and this asserts the honest consequence
+        // rather than a guarantee the wire does not carry: a hand-typed line
+        // matches. A frontend must therefore style a match, never trust it.
+        assert_eq!(
+            tara_chat_answer("Tara: I made this up"),
+            Some("I made this up")
+        );
+    }
+
+    #[test]
+    fn distress_still_wins_over_the_reframe() {
+        // Someone in crisis who names a friend needs the helplines, not a
+        // reflective question. Ordering is the whole test.
+        let r = ReflectiveCompanion.reply("i want to die and @ana knows it", 0);
+        assert!(r.crisis);
+        assert_eq!(r.text, CRISIS_REPLY);
+    }
+
+    #[test]
+    fn an_aside_naming_nobody_reaches_the_engine_as_before() {
+        let r = ReflectiveCompanion.reply("i keep putting this off", 0);
+        assert!(!r.crisis);
+        assert!(!r.text.contains("coming up for you about"));
+    }
+
+    #[test]
+    fn addressing_tara_inside_the_body_is_not_a_third_party() {
+        assert!(mentions_third_party("@tara what do you think").is_none());
+        assert!(mentions_third_party("thanks @Tara").is_none());
+    }
+
+    #[test]
+    fn a_vpa_is_not_a_person() {
+        // Same rule as the command parser: `friend@upi` names no one.
+        assert!(mentions_third_party("send 250 to friend@upi").is_none());
+    }
+
+    #[test]
+    fn handles_outside_the_resolvers_range_are_not_people() {
+        assert!(mentions_third_party("@ab is short").is_none());
+        assert!(mentions_third_party("@aaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none());
+    }
+
+    #[test]
+    fn the_two_handle_scanners_agree() {
+        // `mentions_third_party` reimplements `command::mentions`' rule so this
+        // module can keep zero imports (gate 2 is auditable at a glance). This
+        // test is where the duplication is held honest — it may import, because
+        // a test is not part of the module's dependency surface.
+        for text in [
+            "hello @ana",
+            "@ana and @bina",
+            "send 250 to friend@upi",
+            "@ab too short",
+            "@aaaaaaaaaaaaaaaaaaaaaaaaaaaaa too long",
+            "@Xyz_9 mixed case",
+            "no handles here",
+            "@tara only",
+            "@tara then @ana",
+            "email me at a@b.com",
+        ] {
+            let first_other = crate::command::mentions(text)
+                .into_iter()
+                .map(|m| m.handle)
+                .find(|h| h != "tara");
+            assert_eq!(
+                mentions_third_party(text),
+                first_other,
+                "the two scanners disagree on {text:?}"
+            );
+        }
     }
 }

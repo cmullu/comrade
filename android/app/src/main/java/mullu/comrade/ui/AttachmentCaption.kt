@@ -175,6 +175,29 @@ fun attachmentRejection(name: String, bytes: Long): String? {
 }
 
 /**
+ * Why this file cannot be handed **straight to the other device**, or null when
+ * it can.
+ *
+ * A second function rather than a bigger number inside [attachmentRejection],
+ * because the two roads refuse for different reasons and one of them has no
+ * ceiling at all: [MAX_ATTACHMENT_BYTES] is the *hosted* limit — what the core
+ * can encrypt in one buffer and what a Blossom operator will take — and none of
+ * that applies to bytes going device to device. What survives is the empty file,
+ * which is not a size problem: a cancelled camera hands back zero bytes, and
+ * sending them produces something the recipient cannot open either way.
+ *
+ * Callers ask `attachment_route_for_bytes` which road a file takes and then this
+ * or [attachmentRejection], rather than comparing against a local 10 MB — the
+ * threshold belongs to the core that enforces it.
+ */
+fun peerToPeerAttachmentRejection(name: String, bytes: Long): String? {
+    val trimmed = name.trim()
+    val subject = if (trimmed.isEmpty()) "That file" else "\"$trimmed\""
+    if (bytes <= 0) return "$subject is empty — there is nothing to send."
+    return null
+}
+
+/**
  * The line under the preview's heading: the file's own name and its size, or
  * just the size for a capture that has no name yet.
  *

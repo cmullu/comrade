@@ -52,3 +52,7 @@ default = []
 media-http = ["dep:reqwest"]
 # Back-compat alias; the NIP-96 uploader lives under the same reqwest stack.
 nip96-http = ["media-http"]
+# Catalogue lookups (MusicBrainz by default) for `/play <free text>`. Off by
+# default for the same reason `media-http` is: a plain `cargo test` should not
+# build a TLS stack, and nothing in the default build reaches a third party.
+catalogue-http = ["dep:reqwest"]

@@ -69,6 +69,19 @@
     })
     .catch(() => {});
 
+  // ── Profile page rules (desktop/ui/profile_view.mjs) ───────────────────────
+  // Which rows a profile shows, how a media history splits into tabs, what the
+  // action row offers, how far the avatar shrinks. Pure and tested there, and
+  // mirrored into Kotlin and Dart — see the note on `callDecisionsReady` for why
+  // this file cannot use a static `import`.
+  let profileView = null;
+  const profileViewReady = import("./profile_view.mjs")
+    .then((m) => {
+      profileView = m;
+      return m;
+    })
+    .catch(() => null);
+
   // ── Attachment rules (desktop/ui/attachment_caption.mjs) ───────────────────
   // What a new attachment is captioned with, and how one reads when something
   // quotes it. Mirrored in the Flutter app and on Android — same cases, same
@@ -93,6 +106,23 @@
   const opensFullScreen = (mime) =>
     attachmentCaption ? attachmentCaption.opensFullScreen(mime) : false;
 
+  // ── Chat thread rules (desktop/ui/chat_thread.mjs) ─────────────────────────
+  // Where tapping a reply's quote goes, and how long the arrival flashes.
+  // Mirrored in the Flutter app and on Android. Loaded the same way as the
+  // modules above; both call sites run only after a thread is on screen, so the
+  // module has long since resolved.
+  let chatThread = null;
+  import("./chat_thread.mjs")
+    .then((m) => {
+      chatThread = m;
+    })
+    .catch(() => {});
+
+  // Degraded, not wrong: before the handle resolves a quote simply is not
+  // tappable, which is exactly what it did before this existed.
+  const quoteScrollTargetId = (msgs, replyToId) =>
+    chatThread ? chatThread.quoteScrollTargetId(msgs, replyToId) : null;
+
   // ── Focus view decisions (desktop/ui/focus_view.mjs) ───────────────────────
   // Countdown formatting, which duration chip is selected, and where the
   // reader is. Loaded the same way as the modules above. Every call site here
@@ -104,6 +134,31 @@
   focusReady
     .then((m) => {
       focusView = m;
+    })
+    .catch(() => {});
+
+  // ── In-chat command decisions (desktop/ui/chat_commands.mjs) ───────────────
+  // What the composer does with a parsed command, the `/` picker's rows, and
+  // the sentences for the cases desktop cannot serve. The *grammar* is
+  // `comrade_core::command`, reached over the bridge — nothing here re-parses
+  // composer text, because a second grammar is exactly how `/pay` drifted.
+  let chatCommands = null;
+  import("./chat_commands.mjs")
+    .then((m) => {
+      chatCommands = m;
+    })
+    .catch(() => {});
+
+  /** Command specs from core, fetched once after unlock for the `/` picker. */
+  let commandCatalog = [];
+
+  // ── Task list decisions (desktop/ui/task_list.mjs) ─────────────────────────
+  // Grouping, which buttons a row offers (mirroring `karya::may_transition`),
+  // the subtitle and the empty-state copy. Loaded like the modules above.
+  let taskList = null;
+  import("./task_list.mjs")
+    .then((m) => {
+      taskList = m;
     })
     .catch(() => {});
 
@@ -228,6 +283,12 @@
     // peer pubkey -> [{ id?, content?, media?, created_at, outgoing, upi, status?, reply_to? }]
     dms: new Map(),
     activeContact: null,
+    // Profile page: the npub being looked at, or null for your own. The tab to
+    // return to is remembered because a profile is not itself a tab — it is
+    // reached from context and must go back where it came from.
+    profileTarget: null,
+    profileReturnTab: "vault",
+    profileMediaTab: "media",
     coupleRole: "sakha",
     partnerNpub: null,
     // Milestone 6: comms
@@ -238,6 +299,12 @@
     // whether they chose back) — see docs/PRESENCE.md.
     presence: new Map(),
     replyTo: null, // { id, content, outgoing } while composing a reply
+    // Which contact the user picked for an ambiguous `@handle`, by handle. Two
+    // people can answer to one name, and picking for them is how a private
+    // message reaches the wrong person — so the choice is theirs and it is
+    // remembered. `chat_commands.withChoices` refuses a pin that no longer names
+    // one of that handle's candidates, so a stale one cannot retarget anything.
+    mentionChoices: {},
     call: null, // active call session (see newCallState)
     // Watch/listen together (docs/TOGETHER.md): the local file, its object URL,
     // the live session id, and the echo suppressor that keeps a remote seek
@@ -246,6 +313,11 @@
     // A file handover in progress, when only one side has what is playing.
     // Its own RTCPeerConnection, never the call's — see newShareState.
     share: null,
+    // The large-attachment card: an offer waiting to be answered, or the live
+    // transfer's progress. Separate from `share` because a card exists before
+    // there is an engine (an offer nobody has accepted) and after there is not
+    // (a received file nobody has saved yet).
+    handoff: null,
     // Bounded memory of recently-ended call ids (see call_decisions.mjs
     // rememberEndedCall) — mirrors Android's CallManager.endedCallIds, so a
     // redelivered Offer for a call we already tore down doesn't ring again.
@@ -429,11 +501,17 @@
   // leaves nothing behind — and unlike the Android and Flutter ports, a video
   // really does play, because a blob URL is in memory and needs no file on disk
   // (AUDIT S-4).
-  async function openAttachmentPreview(file, seedCaption) {
+  // `route` is the core's answer for this size (`attachment_route_for_bytes`), and
+  // the sheet says which road it names: "encrypted and uploaded" and "straight to
+  // their device, while they are at it" are different promises, and the sender is
+  // about to make one of them. `note` is the one thing the road cannot promise —
+  // that they are online — when this device cannot tell.
+  async function openAttachmentPreview(file, seedCaption, { route = null, note = null } = {}) {
     // Awaited here rather than read off the module-level handle: this is the one
     // call site that needs *every* rule at once, and awaiting removes any
     // question of whether the handle has been assigned yet.
     const rules = await attachmentCaptionReady;
+    const { previewRouteLine } = await handoffReady;
     const { attachmentPreviewKind, attachmentPreviewDetail, normalizeCaption } = rules;
     const mime = file.type || "application/octet-stream";
     const url = URL.createObjectURL(file);
@@ -523,6 +601,15 @@
               onClick: () => finish(null),
             }),
           ),
+          // Which road this file takes, and what that road costs. Above the
+          // caption box rather than under Send: it can change the sender's mind
+          // about the file, and it should do that before they write anything.
+          el("div", {
+            class: `attach-preview-route${route === "peer_to_peer" ? " is-direct" : ""}`,
+            id: "attachment-preview-route",
+            text: previewRouteLine(route, file.size),
+          }),
+          note ? el("div", { class: "attach-preview-note", text: note }) : null,
           // Only the picture scrolls. The heading, the caption box and the two
           // buttons stay put, because on a short window they are the parts that
           // must not go looking for a scrollbar.
@@ -630,6 +717,10 @@
       // mid-session would revoke it and kill playback), so it is revoked here
       // rather than by `revokeAllMediaUrls`.
       endShare();
+      // Same rule, same reason: a received attachment nobody saved yet is
+      // plaintext this window is holding, and it belongs to the identity that
+      // was just replaced (AUDIT S-4).
+      clearHandoffCard();
       if (state.together?.objectUrl) URL.revokeObjectURL(state.together.objectUrl);
       state.together = null;
       onTogetherOver();
@@ -662,6 +753,10 @@
       // resolved (completed or lapsed) the moment the vault opens, not
       // whenever the user happens to visit the tab.
       await loadFocus();
+      // One list of commands, from core, so the `/` picker can never offer
+      // something this build does not have — or miss something it does.
+      commandCatalog =
+        (await safeInvoke("chat_command_catalog", {}, { silent: true })) || [];
     } catch {
       /* error already toasted */
     } finally {
@@ -771,6 +866,74 @@
   }
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
+  /**
+   * Draw the task list.
+   *
+   * Which buttons a row gets is `task_list.mjs`'s call, not this function's —
+   * it mirrors `karya::may_transition`, so a control core would refuse with
+   * "that is not yours to change" is never rendered.
+   */
+  async function loadTasks() {
+    const host = $("#task-list");
+    if (!host || !taskList) return;
+    const tasks = await safeInvoke("tasks", {}, { silent: true });
+    host.innerHTML = "";
+    if (!tasks) return;
+    if (!tasks.length) {
+      host.append(el("p", { class: "muted task-empty", text: taskList.emptyCopy() }));
+      return;
+    }
+    // Names, not keys — `displayName` is the same published-handle-then-short-key
+    // helper the chat list and every other surface here already uses.
+    const nameFor = displayName;
+    const { open, resolved } = taskList.groupTasks(tasks);
+    const section = (rows, heading) => {
+      if (!rows.length) return;
+      if (heading) host.append(el("h4", { class: "task-heading", text: heading }));
+      for (const t of rows) host.append(taskRow(t, nameFor));
+    };
+    section(open, null);
+    section(resolved, "Finished");
+  }
+
+  /** One task row: what it is, whose it is, and only the buttons core accepts. */
+  function taskRow(task, nameFor) {
+    const row = el("div", { class: task.state === "open" ? "task-row" : "task-row is-done" });
+    row.append(el("div", { class: "task-text", text: task.text }));
+    const badge = taskList.stateLabel(task.state);
+    row.append(
+      el("div", {
+        class: "task-sub muted",
+        text: taskList.subtitleFor(task, nameFor) + (badge ? ` · ${badge}` : ""),
+      }),
+    );
+    const actions = taskList.actionsFor(task);
+    if (actions.length) {
+      const bar = el("div", { class: "task-actions" });
+      for (const action of actions) {
+        bar.append(
+          el("button", {
+            class: "btn btn-small",
+            type: "button",
+            text: { done: "Done", decline: "Decline", withdraw: "Withdraw" }[action],
+            onclick: async () => {
+              // `wireState` and not a literal: the casing is a serde contract
+              // (`TaskState` is snake_case, so "Done" is rejected outright) and
+              // it belongs somewhere a test can hold it. Not named `state`
+              // either — that is the module-wide app state, and shadowing it
+              // here would be a trap for the next reader.
+              const next = taskList.wireState(action);
+              const moved = await safeInvoke("set_task_state", { id: task.id, taskState: next });
+              if (moved) loadTasks();
+            },
+          }),
+        );
+      }
+      row.append(bar);
+    }
+    return row;
+  }
+
   function switchTab(name) {
     for (const t of document.querySelectorAll(".tab")) {
       const on = t.dataset.tab === name;
@@ -780,6 +943,9 @@
     $("#view-sabha").hidden = name !== "sabha";
     $("#view-vault").hidden = name !== "vault";
     $("#view-focus").hidden = name !== "focus";
+    $("#view-profile").hidden = name !== "profile";
+    $("#view-tasks").hidden = name !== "tasks";
+    if (name === "tasks") loadTasks();
     // The countdown only has to tick while it is being looked at; a session
     // left running behind another tab is still authoritative in the engine,
     // which is where the remaining time comes from on the next paint.
@@ -787,13 +953,421 @@
     else stopFocusTick();
   }
 
+  // ── Profile page ──────────────────────────────────────────────────────────
+  //
+  // Every decision on this screen comes from `profile_view.mjs`; what is here is
+  // only the DOM. Nothing is fetched for a stranger: the avatar comes out of the
+  // encrypted store via `peer_avatar`, and whether a *fetch* was ever allowed was
+  // decided in the core, not here.
+
+  /** Open the profile of `npub`, or your own when null. */
+  async function openProfile(npub) {
+    // Only remember where to go back to if we are not already on the profile —
+    // otherwise following a link from one profile to another traps the user.
+    if (!document.body.dataset.profileOpen) {
+      state.profileReturnTab =
+        document.querySelector(".tab.is-active")?.dataset.tab || "vault";
+    }
+    document.body.dataset.profileOpen = "1";
+    state.profileTarget = npub || null;
+    state.profileMediaTab = "media";
+    switchTab("profile");
+    await renderProfile();
+  }
+
+  function closeProfile() {
+    delete document.body.dataset.profileOpen;
+    state.profileTarget = null;
+    switchTab(state.profileReturnTab || "vault");
+  }
+
+  /** Revoke and forget the object URL the header avatar is using, if any. */
+  let profileAvatarUrl = null;
+  function releaseProfileAvatar() {
+    if (profileAvatarUrl) {
+      URL.revokeObjectURL(profileAvatarUrl);
+      profileAvatarUrl = null;
+    }
+  }
+
+  async function renderProfile() {
+    const rules = profileView || (await profileViewReady);
+    if (!rules) return; // module still loading; the caller will paint again
+    const isSelf = !state.profileTarget;
+    const peer = state.profileTarget;
+
+    const profile = isSelf
+      ? await safeInvoke("current_profile", {}, { silent: true }).catch(() => null)
+      : await safeInvoke("peer_profile", { npub: peer }, { silent: true }).catch(() => null);
+    if (!profile) {
+      $("#profile-title").textContent = "Profile unavailable";
+      $("#profile-status").textContent = "";
+      $("#profile-rows").replaceChildren();
+      $("#profile-actions").replaceChildren();
+      $("#profile-tabs").replaceChildren();
+      $("#profile-shared-body").replaceChildren();
+      return;
+    }
+
+    // ── Header ──
+    const title = isSelf
+      ? profile.username
+        ? `@${String(profile.username).replace(/^@+/, "")}`
+        : "You"
+      : peerTitleOf(profile);
+    $("#profile-title").textContent = title;
+    $("#profile-status").textContent = isSelf
+      ? "This is you"
+      : peerStatusLine(profile);
+
+    await paintProfileAvatar(profile, isSelf, title);
+
+    // ── Action row ──
+    const actions = rules.actionRow({
+      isSelf,
+      isContact: !!profile.contact,
+      isComrade: !!profile.comrade,
+      isMuted: false,
+      isBlocked: !!profile.blocked,
+    });
+    $("#profile-actions").replaceChildren(
+      ...actions.map((a) => profileActionButton(a, profile, isSelf)),
+    );
+    // A blocked peer gets an explanation instead of a row of buttons, because
+    // `actionRow` deliberately returns nothing for them: there is no unblock
+    // command in the core, and a button that cannot work is worse than absent.
+    if (!actions.length && profile.blocked) {
+      $("#profile-actions").append(
+        el("p", {
+          class: "profile-blocked-note",
+          text: "You blocked this person. Nothing from them reaches you.",
+        }),
+      );
+    }
+
+    // ── Info rows ──
+    const rows = rules.infoRows(profile, { isSelf });
+    $("#profile-rows").replaceChildren(
+      ...rows.map((r) => profileInfoRow(r, isSelf)),
+    );
+
+    // ── Shared media ──
+    if (isSelf) {
+      $("#profile-tabs").replaceChildren();
+      $("#profile-shared-body").replaceChildren();
+      return;
+    }
+    await renderSharedMedia(rules, peer);
+  }
+
+  /** alias → published handle → shortened key, the D1 precedence. */
+  function peerTitleOf(profile) {
+    if (profile.alias) return profile.alias;
+    if (profile.name) return `@${String(profile.name).replace(/^@+/, "")}`;
+    return shortNpub(profile.npub);
+  }
+
+  /**
+   * The line under the name. Delegates to `presenceLabel`, the same function the
+   * conversation header uses, rather than spelling out a second "last seen"
+   * vocabulary — two of those on one frontend is the drift this repo keeps
+   * closing. It returns "" for a non-comrade, which is the one case a profile
+   * page has to answer for itself: on a header the blank is fine, on a page
+   * whose subject is this person it reads as missing.
+   */
+  function peerStatusLine(profile) {
+    const label = presenceLabel({
+      comrade: !!profile.comrade,
+      online: !!profile.online,
+      lastSeenAt: profile.last_seen_at || 0,
+      peerMarkedUs: !!profile.peer_marked_us,
+    });
+    if (label) return label;
+    return profile.contact ? "Contact" : "Not a contact";
+  }
+
+  /**
+   * Draw the avatar: the cached picture when there is one, otherwise the
+   * generated initial. `peer_avatar` reads the encrypted store and never the
+   * network, so this cannot disclose anything by being called.
+   */
+  async function paintProfileAvatar(profile, isSelf, title) {
+    const node = $("#profile-avatar");
+    releaseProfileAvatar();
+    node.replaceChildren();
+    node.style.background = avatarGradient(profile.npub || "");
+    node.textContent = (title || "?").replace(/^@/, "").slice(0, 1).toUpperCase();
+    if (!profile.avatar_cached) return;
+    const bytes = await safeInvoke(
+      "peer_avatar",
+      { npub: profile.npub },
+      { silent: true },
+    ).catch(() => null);
+    if (!bytes || !bytes.base64) return;
+    try {
+      const blob = base64ToBlob(bytes.base64, bytes.mime_type || "image/png");
+      profileAvatarUrl = URL.createObjectURL(blob);
+      node.replaceChildren(
+        el("img", { class: "profile-avatar-img", src: profileAvatarUrl, alt: "" }),
+      );
+    } catch {
+      // Keep the initial. A picture that will not decode is cosmetic.
+    }
+  }
+
+  /** A deterministic gradient from the key, mirroring Android's AvatarPalette. */
+  function avatarGradient(seed) {
+    let h = 0;
+    for (const ch of String(seed)) h = (h * 31 + ch.codePointAt(0)) % 360;
+    return `linear-gradient(135deg, hsl(${h} 55% 42%), hsl(${(h + 40) % 360} 55% 30%))`;
+  }
+
+  function profileInfoRow(row, isSelf) {
+    const label = {
+      bio: "Bio",
+      handle: "Handle",
+      nip05: "Nostr address",
+      lud16: "Lightning address",
+      key: "Public key",
+    }[row.kind] || row.kind;
+    const value = row.value
+      ? el("span", { class: row.kind === "key" ? "mono" : null, text: row.value })
+      : el("span", { class: "profile-row-empty", text: "Not set" });
+    const controls = [];
+    if (row.copyable && row.value) {
+      controls.push(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "Copy",
+          onclick: () => copyToClipboard(row.value, `${label} copied`),
+        }),
+      );
+    }
+    if (isSelf && row.kind === "bio") {
+      controls.push(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: row.value ? "Edit" : "Add",
+          onclick: () => editOwnBio(row.value),
+        }),
+      );
+    }
+    if (isSelf && row.kind === "handle") {
+      controls.push(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "Edit",
+          onclick: () => editOwnHandle(row.value),
+        }),
+      );
+    }
+    return el(
+      "div",
+      { class: `profile-row profile-row-${row.kind}` },
+      el("span", { class: "profile-row-label", text: label }),
+      el("span", { class: "profile-row-value" }, value),
+      el("span", { class: "profile-row-controls" }, controls),
+    );
+  }
+
+  function profileActionButton(action, profile, isSelf) {
+    const peer = profile.npub;
+    const spec = {
+      message: ["Message", () => openConversationFromProfile(peer)],
+      call: ["Call", () => startCallFromProfile(peer)],
+      mute: ["Mute", null],
+      unmute: ["Unmute", null],
+      addContact: ["Add contact", () => addContactFromProfile(peer)],
+      addComrade: ["Add comrade", () => setComradeFromProfile(peer, true)],
+      removeComrade: ["Remove comrade", () => setComradeFromProfile(peer, false)],
+      block: ["Block", () => blockFromProfile(peer)],
+      edit: ["Edit profile", () => editOwnHandle(profile.username || "")],
+      copyKey: ["Copy key", () => copyToClipboard(profile.npub, "Public key copied")],
+    }[action];
+    if (!spec) return null;
+    const [label, handler] = spec;
+    return el("button", {
+      class: `btn ${action === "block" ? "btn-danger" : "btn-ghost"} profile-action`,
+      text: label,
+      // Mute has no desktop backend yet. Rendered disabled and titled, rather
+      // than omitted, because `actionRow` says a contact has one — an absent
+      // control would make the three frontends disagree about the row.
+      disabled: handler ? null : "true",
+      title: handler ? null : "Muting a conversation is not wired up on desktop yet",
+      onclick: handler || undefined,
+    });
+  }
+
+  async function renderSharedMedia(rules, peer) {
+    const [media, messages] = await Promise.all([
+      safeInvoke("media_with", { peer }, { silent: true }).catch(() => []),
+      safeInvoke("messages_with", { peer }, { silent: true }).catch(() => []),
+    ]);
+    const buckets = rules.bucketMedia(media || []);
+    const links = rules.collectLinks(messages || []);
+    const counts = rules.mediaTabCounts(media || []);
+
+    const tabs = [
+      ["media", "Media", counts.media],
+      ["files", "Files", counts.files],
+      ["links", "Links", links.length],
+      ["voice", "Voice", counts.voice],
+    ];
+    if (!tabs.some(([k]) => k === state.profileMediaTab)) {
+      state.profileMediaTab = rules.initialMediaTab(media || []);
+    }
+    $("#profile-tabs").replaceChildren(
+      ...tabs.map(([key, label, n]) =>
+        el("button", {
+          class: `profile-tab${state.profileMediaTab === key ? " is-active" : ""}`,
+          role: "tab",
+          "aria-selected": state.profileMediaTab === key ? "true" : "false",
+          text: `${label} ${n}`,
+          onclick: async () => {
+            state.profileMediaTab = key;
+            await renderProfile();
+          },
+        }),
+      ),
+    );
+
+    const body = $("#profile-shared-body");
+    const tab = state.profileMediaTab;
+    if (tab === "links") {
+      body.replaceChildren(
+        ...(links.length
+          ? links.map((l) =>
+              el(
+                "div",
+                { class: "profile-link-row" },
+                // The host is the prominent element on purpose: the rule returns
+                // it separately so `https://evil.example/?next=paypal.com` cannot
+                // be presented as a PayPal link.
+                el("span", { class: "profile-link-host", text: l.host }),
+                el("span", { class: "profile-link-url mono", text: l.url }),
+                el("button", {
+                  class: "btn btn-ghost btn-sm",
+                  text: "Copy",
+                  onclick: () => copyToClipboard(l.url, "Link copied"),
+                }),
+              ),
+            )
+          : [emptySharedNote("No links yet.")]),
+      );
+      return;
+    }
+    const items = buckets[tab] || [];
+    body.replaceChildren(
+      ...(items.length
+        ? items.map((m) => sharedMediaRow(m))
+        : [emptySharedNote(`Nothing in ${tab} yet.`)]),
+    );
+  }
+
+  function emptySharedNote(text) {
+    return el("p", { class: "profile-empty", text });
+  }
+
+  /**
+   * One row of a shared-media tab. Deliberately not a thumbnail grid: drawing
+   * one would mean downloading and decrypting every blob on the tab, and this
+   * screen is not where someone asked for that. The bubble in the thread already
+   * loads on demand and this row links back to it.
+   */
+  function sharedMediaRow(m) {
+    const kind = m.mime_type || "";
+    const size = Number(m.size || 0);
+    return el(
+      "div",
+      { class: "profile-media-row" },
+      el("span", { class: "profile-media-kind", text: kind || "file" }),
+      el("span", {
+        class: "profile-media-caption",
+        text: m.caption || (m.outgoing ? "Sent" : "Received"),
+      }),
+      el("span", {
+        class: "profile-media-meta",
+        text: `${size ? `${Math.max(1, Math.round(size / 1024))} KB · ` : ""}${relTime(m.created_at)}`,
+      }),
+    );
+  }
+
+  async function copyToClipboard(text, note) {
+    try {
+      await navigator.clipboard.writeText(String(text));
+      showToast(note || "Copied", "success");
+    } catch {
+      showToast("Could not reach the clipboard", "error");
+    }
+  }
+
+  async function editOwnHandle(current) {
+    const next = window.prompt("Your @handle (3–24 letters, numbers or _)", current || "");
+    if (next == null) return;
+    const saved = await safeInvoke("set_username", { name: next });
+    if (saved) {
+      showToast("Handle saved", "success");
+      await renderProfile();
+    }
+  }
+
+  async function editOwnBio(current) {
+    const next = window.prompt("Your bio (leave empty to clear)", current || "");
+    if (next == null) return;
+    const saved = await safeInvoke("set_about", { about: next });
+    if (saved) {
+      showToast(next.trim() ? "Bio saved" : "Bio cleared", "success");
+      await renderProfile();
+    }
+  }
+
+  async function addContactFromProfile(peer) {
+    await safeInvoke("add_contact", { npub: peer, alias: "" });
+    await loadConversations().catch(() => {});
+    await renderProfile();
+  }
+
+  async function setComradeFromProfile(peer, on) {
+    await safeInvoke("set_comrade", { npub: peer, comrade: on });
+    await renderProfile();
+  }
+
+  async function blockFromProfile(peer) {
+    if (!window.confirm("Block this person? Nothing from them will reach you.")) return;
+    await safeInvoke("block_conversation", { peer });
+    showToast("Blocked", "success");
+    closeProfile();
+  }
+
+  function openConversationFromProfile(peer) {
+    closeProfile();
+    switchTab("vault");
+    selectContact(peer);
+  }
+
+  function startCallFromProfile(peer) {
+    closeProfile();
+    switchTab("vault");
+    selectContact(peer);
+    showToast("Use the call button in the conversation header", "info");
+  }
+
   // ── Milestone 2/3: Vault DMs ──────────────────────────────────────────────
   function onIncomingDm(p) {
     const key = p.sender || "unknown";
     const list = state.dms.get(key) || [];
+    // A live event carries the raw wire body, unlike `messages_with`, which
+    // hands back an already-split `MessageDto`. Both end up in `state.dms`, so
+    // the split has to happen here or one message would read differently before
+    // and after a reload. If the module has not loaded the marker simply stays
+    // visible — still readable, which is the point of keeping it human-legible.
+    const split = chatCommands
+      ? chatCommands.splitAuthor(p.content)
+      : { author: "human", content: p.content || "" };
     list.push({
       id: p.id,
-      content: p.content || "",
+      content: split.content,
+      author: split.author,
       created_at: p.created_at,
       outgoing: false,
       upi: p.upi_intents || [],
@@ -886,6 +1460,9 @@
     renderContacts();
     renderConversation();
     showTogetherPanel();
+    // A transfer belongs to one conversation, so its card follows the one on
+    // screen rather than floating over whoever is open.
+    renderHandoffCard();
     // Opening a conversation clears its unread state and sends read receipts.
     safeInvoke("mark_conversation_read", { peer: key }, { silent: true }).catch(() => {});
     // Pull the full persisted thread — text history plus persisted media
@@ -916,6 +1493,10 @@
         .map((m) => ({
           id: m.id,
           content: m.content,
+          // Core already split the wire marker off `content` into this — see
+          // `comrade_ui::MessageAuthor`. Only the live-event path has to mirror
+          // the split itself.
+          author: m.author || "human",
           created_at: m.created_at,
           outgoing: !!m.outgoing,
           upi: [],
@@ -931,10 +1512,209 @@
   }
 
   /** Send the composed DM to the active contact (real end-to-end send). */
+  /**
+   * Act on an in-chat command, or return false to let the text be sent.
+   *
+   * The grammar is `comrade_core::command` over the bridge; the decision about
+   * what this window does with the result is `chat_commands.mjs`. Everything
+   * here is the third thing — actually doing it.
+   */
+  async function handleChatCommand(text) {
+    if (!chatCommands) {
+      // **Fail closed.** The module is loaded with a dynamic import whose
+      // `.catch` swallows failure, so `chatCommands` can stay null for the whole
+      // session — and returning false here hands the text to `send_dm`. For
+      // `@tara i can't stand my brother` that means sending somebody their own
+      // private thought, so anything command-shaped is refused instead.
+      if (/^\s*[/@]/.test(text)) {
+        showToast("Couldn't load the command list — nothing was sent.", "warn");
+        return true;
+      }
+      return false;
+    }
+    const command = await safeInvoke("parse_chat_command", { text }, { silent: true });
+    if (!command || command.kind === "plain" || command.kind === "pay") return false;
+
+    const mentions = chatCommands.withChoices(
+      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [],
+      state.mentionChoices,
+    );
+    const plan = chatCommands.planFor(command, { mentions });
+    const input = $("#dm-input");
+
+    switch (plan.action) {
+      case chatCommands.SEND:
+        return false;
+
+      case chatCommands.INCOMPLETE:
+      case chatCommands.BLOCKED:
+        // Say why, and leave the text in the box — a command the user has to
+        // retype is a command they stop using.
+        showToast(plan.message, "warn");
+        return true;
+
+      case chatCommands.HELP:
+        showCommandHelp();
+        input.value = "";
+        clearComposerCommandUi();
+        return true;
+
+      case chatCommands.ASIDE: {
+        const reply = await safeInvoke("tara_aside", { text: plan.text });
+        if (reply) {
+          // Rendered as a toast rather than a chat bubble on purpose: this never
+          // went anywhere and putting it in the thread would make it look like
+          // it did. The desktop has no Tara surface yet
+          // (`docs/FRONTEND_STRATEGY.md`), so a toast is the honest maximum.
+          showToast(reply.text, reply.crisis ? "warn" : "info");
+          if (reply.crisis) {
+            const lines = await safeInvoke("tara_crisis_resources", {}, { silent: true });
+            for (const r of lines || []) showToast(`${r.name}: ${r.contact}`, "warn");
+          }
+          input.value = "";
+          clearComposerCommandUi();
+        }
+        return true;
+      }
+
+      case chatCommands.TARA_HERE: {
+        if (!state.activeContact) {
+          // `@tara` puts the answer in a thread, so there has to be one. The
+          // private `/tara` above deliberately needs no peer.
+          showToast("Open a conversation first — @tara answers in it.", "warn");
+          return true;
+        }
+        const turn = await safeInvoke("tara_in_chat", {
+          peer: state.activeContact,
+          text: plan.text,
+        });
+        if (turn) {
+          if (turn.kept_private) {
+            // Core refused to publish this one (the distress path). Saying so is
+            // not optional: the user asked in the open and would otherwise assume
+            // the other person had read it.
+            showToast(`${turn.reply}\n\n(Kept between us — this one wasn't sent.)`, "warn");
+            if (turn.crisis) {
+              const lines = await safeInvoke("tara_crisis_resources", {}, { silent: true });
+              for (const r of lines || []) showToast(`${r.name}: ${r.contact}`, "warn");
+            }
+          } else {
+            // Both messages are already stored on the Rust side; appending them
+            // here is what draws them, exactly as a plain send does.
+            const list = state.dms.get(state.activeContact) || [];
+            for (const m of [turn.asked, turn.answered]) {
+              if (!m) continue;
+              list.push({
+                id: m.id,
+                content: m.content,
+                author: m.author || "human",
+                created_at: m.created_at,
+                outgoing: true,
+                upi: [],
+                status: m.status || "sent",
+                reply_to: null,
+              });
+            }
+            state.dms.set(state.activeContact, list);
+            renderContacts();
+            renderConversation();
+          }
+          input.value = "";
+          clearComposerCommandUi();
+        }
+        return true;
+      }
+
+      case chatCommands.CHOOSE: {
+        // Two contacts answer to one handle. Ask, rather than the dead end this
+        // used to be — the old plan said "pick which one" and offered nothing to
+        // pick, so the command could never be completed at all.
+        renderMentionChooser(plan, text);
+        return true;
+      }
+
+      case chatCommands.TASK: {
+        const task = await safeInvoke("assign_task", {
+          peer: plan.peer,
+          text: plan.text,
+        });
+        if (task) {
+          showToast(plan.peer ? "Asked them." : "Added to your list.", "info");
+          input.value = "";
+          clearComposerCommandUi();
+          renderConversation();
+        }
+        return true;
+      }
+
+      case chatCommands.OFFER: {
+        const outcome = await safeInvoke("offer_action", {
+          action: plan.appAction,
+          peers: plan.peers,
+        });
+        if (outcome) {
+          // A deliberate command that silently did nothing reads as a bug, and
+          // *which* of the three reasons applied is the part worth saying — a
+          // bare count used to make "not your comrade" read as "throttled".
+          if (outcome.sent.length) {
+            showToast("Sent.", "info");
+            input.value = "";
+            clearComposerCommandUi();
+          } else if (outcome.not_comrades.length) {
+            showToast("Mark them a comrade first — this only goes to comrades.", "warn");
+          } else if (outcome.on_cooldown.length) {
+            showToast("They were told recently — leaving them be for now.", "info");
+          } else {
+            showToast("Couldn't reach them just now.", "warn");
+          }
+        }
+        return true;
+      }
+
+      case chatCommands.OPEN:
+        // Both the focus timer and the reader live in the Focus tab on desktop,
+        // and `planFor` has already refused every other action for this window,
+        // so there is exactly one destination to reach.
+        switchTab("focus");
+        input.value = "";
+        clearComposerCommandUi();
+        return true;
+
+      default:
+        return false;
+    }
+  }
+
+  /** Reset the picker, the hint and the aside styling after a command runs. */
+  function clearComposerCommandUi() {
+    renderCommandPicker(null);
+    const hint = $("#dm-command-hint");
+    if (hint) {
+      hint.hidden = true;
+      hint.textContent = "";
+    }
+    const note = $("#dm-aside-note");
+    if (note) note.hidden = true;
+    $("#dm-input").classList.remove("composer-aside");
+    $("#dm-input").classList.remove("composer-tara-here");
+    renderMentionChooser(null);
+  }
+
+  /** `/help` — the catalogue as a list of toasts is unreadable, so it fills the
+   * picker instead, which is already the right shape for it. */
+  function showCommandHelp() {
+    renderCommandPicker(commandCatalog);
+  }
+
   async function handleDmSend() {
     const input = $("#dm-input");
     const content = input.value.trim();
     if (!content) return;
+    // A command is handled before the "select a conversation" check, because
+    // `/breathe`, `/help` and an aside are all things you can mean with no
+    // thread open — and before the peer check, because an aside must never be
+    // able to reach `send_dm` at all.
+    if (await handleChatCommand(content)) return;
     if (!state.activeContact) {
       showToast("Select a conversation first", "warn");
       return;
@@ -957,11 +1737,16 @@
       const preview = $("#dm-upi-preview");
       preview.hidden = true;
       preview.innerHTML = "";
+      clearComposerCommandUi();
       clearReply();
       const list = state.dms.get(state.activeContact) || [];
       list.push({
         id: msg.id,
         content: msg.content,
+        // Carried rather than assumed "human": core split this DTO, and a
+        // message must not read one way when it is sent and another after a
+        // reload.
+        author: msg.author || "human",
         created_at: msg.created_at,
         outgoing: true,
         upi: [],
@@ -990,7 +1775,15 @@
     const peer = state.activeContact;
     const presence = presenceOf(peer);
     head.append(
-      el("span", { class: "chat-peer mono", text: displayName(peer) }),
+      // Tapping the name opens the profile — Telegram Desktop's own gesture, and
+      // the place the npub now lives in full since the owner call of 2026-07-30
+      // took it out of this header.
+      el("button", {
+        class: "chat-peer mono chat-peer-btn",
+        text: displayName(peer),
+        title: "View profile",
+        onClick: () => openProfile(peer),
+      }),
       el("span", {
         class: "chat-presence" + (presence.online ? " is-online" : ""),
         // Honest about the mutual model: a comrade who hasn't chosen back
@@ -1043,7 +1836,22 @@
   }
 
   function textBubble(m) {
-    const wrap = el("div", { class: "bubble " + (m.outgoing ? "out" : "in") });
+    // Tara sits on the left for *both* people, so this is not simply
+    // `m.outgoing`: her answer is carried by whichever device asked, and
+    // aligning by who sent it would put one line on opposite sides of the two
+    // screens. It also drops the ticks from her bubble — true that this device
+    // sent it, but the question right above carries the same receipt, and a
+    // tick on a third party's line reads as a claim about her. Mirrored in
+    // `ChatsScreen.kt` and `message_bubble.dart`.
+    const hers = m.author === "tara";
+    const mine = Boolean(m.outgoing) && !hers;
+    const wrap = el("div", {
+      class: "bubble " + (mine ? "out" : "in") + (hers ? " is-tara" : ""),
+    });
+    // The anchor a quote tap scrolls to. Only messages a relay has confirmed
+    // have an id, and only those can be a reply target in the first place.
+    if (m.id) wrap.dataset.msgId = m.id;
+    if (hers) wrap.append(el("span", { class: "bubble-author", text: "Tara" }));
     if (m.reply_to) wrap.append(quotePreview(m.reply_to));
     wrap.append(el("span", { class: "bubble-text", text: m.content }));
     wrap.append(
@@ -1051,7 +1859,7 @@
         "div",
         { class: "bubble-meta" },
         el("span", { class: "bubble-time", text: relTime(m.created_at) }),
-        m.outgoing && m.status ? statusTick(m.status) : null,
+        mine && m.status ? statusTick(m.status) : null,
       ),
     );
     // A reply is only addressable if we know the target message's event id.
@@ -1061,7 +1869,14 @@
 
   // ── Milestone 6: replies, receipts, requests, calls ───────────────────────
 
-  /** A quoted preview of the replied-to message, looked up in the open thread. */
+  /**
+   * A quoted preview of the replied-to message, looked up in the open thread.
+   *
+   * Tappable when the original is in the thread, so a reply can be followed back
+   * to what it answers. When it is not — history older than what is loaded — the
+   * quote still says "Original message" but is inert: offering a tap that cannot
+   * work is worse than not offering one.
+   */
   function quotePreview(replyToId) {
     const msgs = state.dms.get(state.activeContact) || [];
     const q = msgs.find((x) => x.id && x.id === replyToId);
@@ -1069,11 +1884,54 @@
       ? q.content ||
         (q.media ? mediaQuoteLabel(q.media.mime, q.media.caption) : "message")
       : "Original message";
-    return el(
-      "div",
-      { class: "bubble-quote" },
+    const targetId = quoteScrollTargetId(msgs, replyToId);
+    if (!targetId) {
+      return el(
+        "div",
+        { class: "bubble-quote" },
+        el("span", { class: "bubble-quote-text", text: text }),
+      );
+    }
+    const node = el(
+      "button",
+      {
+        class: "bubble-quote bubble-quote-link",
+        type: "button",
+        title: "Go to the quoted message",
+        "aria-label": "Go to the quoted message",
+      },
       el("span", { class: "bubble-quote-text", text: text }),
     );
+    node.addEventListener("click", (e) => {
+      // The bubble itself has handlers; a quote tap means "go there", not
+      // "act on this message".
+      e.stopPropagation();
+      goToQuoted(targetId);
+    });
+    return node;
+  }
+
+  /**
+   * Scroll the thread to the message with event id [targetId] and flash it.
+   *
+   * The flash is not decoration. The scroll lands the target somewhere in a
+   * screenful of other messages and says nothing about which one it was; without
+   * the highlight the jump reads as the thread having lost your place.
+   */
+  function goToQuoted(targetId) {
+    const log = $("#dm-log");
+    if (!log) return;
+    const target = log.querySelector(`[data-msg-id="${CSS.escape(targetId)}"]`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Clear any flash still running, so tapping through a chain of replies keeps
+    // exactly one message highlighted — the one you are actually on.
+    for (const prev of log.querySelectorAll(".bubble-jumped")) {
+      prev.classList.remove("bubble-jumped");
+    }
+    target.classList.add("bubble-jumped");
+    const ms = chatThread ? chatThread.QUOTE_HIGHLIGHT_MS : 1400;
+    setTimeout(() => target.classList.remove("bubble-jumped"), ms);
   }
 
   /** Delivery-status ticks for an outgoing bubble. */
@@ -1375,7 +2233,43 @@
   // ── TURN relay (call settings) ─────────────────────────────────────────────
   function openTurnModal() {
     $("#modal-turn").hidden = false;
+    loadSharePolicy();
     $("#turn-url").focus();
+  }
+
+  /** The 50 MB in the "small files only" option, as bytes. */
+  const SHARE_SMALL_LIMIT = 50 * 1024 * 1024;
+
+  /**
+   * Show the stored policy. Read from core rather than remembered here, so the
+   * control cannot drift from the rule actually being enforced.
+   */
+  async function loadSharePolicy() {
+    const select = $("#share-policy");
+    if (!select) return;
+    let kind = "direct_only";
+    try {
+      const raw = await safeInvoke("share_relay_policy", {}, { silent: true });
+      kind = JSON.parse(raw)?.kind ?? "direct_only";
+    } catch {
+      /* unreadable or unreachable shows as the safe one, which is also what
+         core falls back to enforcing */
+    }
+    select.value = kind;
+  }
+
+  async function handleSharePolicyChange() {
+    const kind = $("#share-policy").value;
+    const policy =
+      kind === "under_bytes" ? { kind, limit: SHARE_SMALL_LIMIT } : { kind };
+    try {
+      await safeInvoke("set_share_relay_policy", { policyJson: JSON.stringify(policy) });
+    } catch {
+      // The toast has already said why. Re-read instead of trusting the click:
+      // a save that failed must leave the control showing what is actually
+      // enforced, not what someone selected.
+      await loadSharePolicy();
+    }
   }
   function closeTurnModal() {
     $("#modal-turn").hidden = true;
@@ -2732,6 +3626,9 @@
   // reply chip, so a button there would set a reply target nothing can show.
   function mediaBubble(m, { repliable = true } = {}) {
     const wrap = el("div", { class: "bubble " + (m.outgoing ? "out" : "in") });
+    // Same anchor as a text bubble: replying to an attachment is expressible, so
+    // jumping back to one has to be too.
+    if (m.id) wrap.dataset.msgId = m.id;
     if (m.media.caption) wrap.append(el("div", { class: "media-caption", text: m.media.caption }));
 
     if (m.media.objectUrl) {
@@ -2814,32 +3711,82 @@
   // `composer` is the input whose text seeds that caption — the DM box in the
   // conversation, and nothing at all in the couple panel, which has no composer
   // of its own and must not reach across screens for the DM one's draft.
-  async function handleAttach(file, targetPubkey, { composer = null } = {}) {
+  // `surfaceSupportsHandoff` is false for the couple panel: it has no transfer
+  // card and no progress line, so a large send there would be a button with
+  // nowhere to report to.
+  async function handleAttach(
+    file,
+    targetPubkey,
+    { composer = null, surfaceSupportsHandoff = false } = {},
+  ) {
     if (!file) return;
     if (!targetPubkey) {
       showToast("No recipient selected", "warn");
       return;
     }
-    const { captionForAttachment, captionConsumesDraft, attachmentRejection } =
-      await attachmentCaptionReady;
+    const { captionForAttachment, captionConsumesDraft } = await attachmentCaptionReady;
+    const { attachmentSendPlan, handoffPresencePlan } = await handoffReady;
+    // Which road, from the core. Not a 10 MB comparison here: the threshold *is*
+    // the hosted ceiling, and a frontend holding its own copy is a frontend that
+    // disagrees the day that number moves.
+    let route = null;
+    try {
+      route = await safeInvoke(
+        "attachment_route_for_bytes",
+        { totalBytes: file.size },
+        { silent: true },
+      );
+    } catch {
+      /* no route is refused below, never guessed at */
+    }
     // Before the preview, not after the upload: composing a caption for a file
-    // that was never going to fit is the one bit of work worth not wasting.
-    const refusal = attachmentRejection(file.name, file.size);
-    if (refusal) {
-      showToast(refusal, "warn");
+    // that was never going to be sent is the one bit of work worth not wasting.
+    // Each road's refusal comes from the mirrored rule for that road — the shared
+    // 10 MB cap still governs the hosted one and only it, since over the cap the
+    // question stops being "may this be sent" and becomes "which way".
+    const plan = attachmentSendPlan({
+      bytes: file.size,
+      route,
+      name: file.name,
+      surfaceSupportsHandoff,
+    });
+    if (plan.refusal) {
+      showToast(plan.refusal, "warn");
       return;
+    }
+    // The first of the two honest failures, and the only one that can be checked
+    // before anything is sent: there is no store-and-forward on this road.
+    let routeNote = null;
+    if (plan.road === "peer_to_peer") {
+      const presence = handoffPresencePlan(presenceOf(targetPubkey));
+      if (presence.blocked) {
+        showToast(presence.warning, "warn");
+        return;
+      }
+      routeNote = presence.warning;
     }
     const mime = file.type || "application/octet-stream";
     const replyPending = !!state.replyTo;
     const draft = composer ? composer.value : "";
     const consumed = captionConsumesDraft(draft, replyPending);
-    const caption = await openAttachmentPreview(
-      file,
-      captionForAttachment(draft, replyPending),
-    );
+    const caption = await openAttachmentPreview(file, captionForAttachment(draft, replyPending), {
+      route,
+      note: routeNote,
+    });
     // Backed out. Nothing was read, nothing was encrypted, and the draft is
     // still where they left it.
     if (caption === null) return;
+
+    if (plan.road === "peer_to_peer") {
+      // No upload, no host, no third copy: the bytes go straight to their
+      // device, and the card below is where the rest of it happens.
+      const offered = await startHandoffSend(file, targetPubkey, caption, mime);
+      if (offered && consumed && composer) {
+        composer.value = "";
+        reportDraftEdit();
+      }
+      return;
+    }
 
     let base64;
     try {
@@ -2894,6 +3841,132 @@
     const msgs = state.dms.get(state.partnerNpub) || [];
     for (const m of msgs) if (m.media) box.append(mediaBubble(m, { repliable: false }));
     box.scrollTop = box.scrollHeight;
+  }
+
+  // Live command feedback in the DM composer: the `/` picker, the mention
+  // chips, and the aside styling. Debounced with the UPI preview because they
+  // all read the same keystroke.
+  const handleDmCommandInput = debounce(async () => {
+    if (!chatCommands) return;
+    const text = $("#dm-input").value;
+
+    // The audience is decided from the raw text, not a parse, so it is right from
+    // the moment `@tara ` is typed — before there is anything to parse. Two
+    // labels now, because the sigil is the whole difference: `/tara` stays here
+    // and `@tara` reaches the other person.
+    const audience = chatCommands.taraDraft(text);
+    $("#dm-input").classList.toggle("composer-aside", audience === chatCommands.TARA_PRIVATE);
+    $("#dm-input").classList.toggle("composer-tara-here", audience === chatCommands.TARA_SHARED);
+    const asideNote = $("#dm-aside-note");
+    if (asideNote) {
+      asideNote.hidden = !audience;
+      asideNote.textContent =
+        audience === chatCommands.TARA_SHARED
+          ? "Tara will answer here — you'll both see it."
+          : "Only you will see this — it goes to Tara, not to them.";
+    }
+
+    renderCommandPicker(chatCommands.pickerRows(text, commandCatalog));
+
+    // The hint line: what will happen if Enter is pressed now.
+    const hint = $("#dm-command-hint");
+    if (!hint) return;
+    if (!text.startsWith("/") && !audience) {
+      hint.hidden = true;
+      hint.textContent = "";
+      return;
+    }
+    const command = await safeInvoke("parse_chat_command", { text }, { silent: true });
+    if (!command) {
+      hint.hidden = true;
+      return;
+    }
+    const mentions = chatCommands.withChoices(
+      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [],
+      state.mentionChoices,
+    );
+    const plan = chatCommands.planFor(command, { mentions });
+    if (plan.message) {
+      hint.textContent = plan.message;
+      hint.hidden = false;
+    } else {
+      hint.hidden = true;
+      hint.textContent = "";
+    }
+  }, 200);
+
+  /**
+   * Draw (or clear) the "which @ana did you mean?" chooser.
+   *
+   * `draft` is the text that raised the question: picking a row records the
+   * choice and re-runs that same command, which is what the user already meant.
+   */
+  function renderMentionChooser(plan, draft) {
+    const box = $("#dm-mention-chooser");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!plan) {
+      box.hidden = true;
+      return;
+    }
+    box.append(el("span", { class: "chooser-question", text: plan.message }));
+    for (const candidate of plan.candidates || []) {
+      const title = candidate.alias || state.peerNames.get(candidate.npub) || shortNpub(candidate.npub);
+      box.append(
+        el(
+          "button",
+          {
+            class: "command-row",
+            type: "button",
+            onclick: async () => {
+              state.mentionChoices = {
+                ...state.mentionChoices,
+                [plan.handle]: candidate.npub,
+              };
+              renderMentionChooser(null);
+              await handleChatCommand(draft);
+            },
+          },
+          el("span", {
+            class: "command-name",
+            text: chatCommands.candidateLabel(title, candidate.npub),
+          }),
+        ),
+      );
+    }
+    box.hidden = false;
+  }
+
+  /** Draw (or clear) the `/` command picker. */
+  function renderCommandPicker(rows) {
+    const box = $("#dm-command-picker");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!rows) {
+      box.hidden = true;
+      return;
+    }
+    for (const spec of rows) {
+      box.append(
+        el(
+          "button",
+          {
+            class: "command-row",
+            type: "button",
+            onclick: () => {
+              $("#dm-input").value = chatCommands.completionFor(spec);
+              $("#dm-input").focus();
+              renderCommandPicker(null);
+              handleDmCommandInput();
+            },
+          },
+          el("span", { class: "command-name", text: `/${spec.name}` }),
+          el("span", { class: "command-arg", text: spec.argument || "" }),
+          el("span", { class: "command-help", text: spec.help || "" }),
+        ),
+      );
+    }
+    box.hidden = false;
   }
 
   // Live UPI /pay detection in the DM composer (real extract_payments command).
@@ -3470,7 +4543,7 @@
       // the handover. If we *do* have one, the person picks it themselves.
       if (!state.together?.file) {
         setShareStatus("Asking them to send it…");
-        await sendShareSignal({ share: "ask" });
+        await sendShareSignal({ step: "ask" });
       }
     } catch {
       /* toasted */
@@ -3648,12 +4721,35 @@
 
   const shareTransferReady = import("./share_transfer.mjs");
 
+  // The same pump, pointed at an attachment instead of a track. Everything that
+  // differs between the two — which envelope a step rides in, what to believe
+  // from an incoming offer, which road a file takes and what each road costs —
+  // is `handoff_transfer.mjs`, so the driving code below is the same code for
+  // both and `together` cannot regress by being read wrongly.
+  const handoffReady = import("./handoff_transfer.mjs");
+
   /** How many chunks to have in flight before asking for the next window. */
   const SHARE_REQUEST_WINDOW = 64;
+
+  /**
+   * SHA-256 of a buffer, hex. One copy: the sender fingerprints what it offers
+   * and the receiver checks what arrived, and those two must agree.
+   */
+  async function sha256Hex(buffer) {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
 
   function newShareState(base) {
     return Object.assign(
       {
+        // Which protocol carries this transfer's steps: a watch-together
+        // handover inside a session, or an attachment handoff scoped by a
+        // transfer id. The only thing the driver branches on.
+        kind: "together",
+        transferId: null,
+        // Handoff only: the name, type and caption that came with the offer.
+        attachment: null,
         role: null, // "sender" | "receiver"
         peer: null,
         sessionId: null,
@@ -3678,13 +4774,62 @@
     );
   }
 
-  async function sendShareSignal(signal) {
+  /**
+   * Put one abstract step of the negotiation on whichever wire this transfer is
+   * using.
+   *
+   * The driver below never writes `{"share":…}` or `{"handoff":…}` itself: the
+   * two encodings live side by side in `handoff_transfer.mjs`, where a step a
+   * protocol cannot express comes back as null and is dropped here rather than
+   * being sent as something the far end cannot parse.
+   */
+  async function sendShareSignal(step) {
+    const s = state.share;
+    if (!s) return;
+    const { encodeTogetherStep, encodeHandoffStep } = await handoffReady;
+    if (state.share !== s) return;
+    if (s.kind === "handoff") {
+      const signal = encodeHandoffStep(step);
+      if (!signal) return;
+      await sendHandoffSignal(s.peer, s.transferId, signal);
+      return;
+    }
+    const signal = encodeTogetherStep(step);
+    if (!signal) return;
     try {
       await safeInvoke("together_share", { signalJson: JSON.stringify(signal) }, { silent: true });
     } catch {
       // A lost negotiation step fails the transfer, not the session — the
       // watch-together part keeps working with whatever each side already has.
     }
+  }
+
+  /** One handoff signal to one peer, outside any session. */
+  async function sendHandoffSignal(peer, transferId, signal) {
+    if (!peer || !transferId) return;
+    try {
+      await safeInvoke(
+        "attachment_handoff_send",
+        { peer, transferId, signalJson: JSON.stringify(signal) },
+        { silent: true },
+      );
+    } catch {
+      // Same bargain as above: a lost step fails this transfer and nothing else.
+      // There is no store-and-forward here, so there is nothing to retry into.
+    }
+  }
+
+  /**
+   * Where the receiver's requests are anchored.
+   *
+   * A together handover asks from the playhead, so a seek costs one request
+   * rather than a re-download. A handoff has no playhead — nobody is watching an
+   * attachment arrive — so it asks from the beginning and the tracker's
+   * earliest-gap fallback does the rest.
+   */
+  function transferPositionMs(s) {
+    if (!s || s.kind !== "together") return 0;
+    return Math.round(($together.player()?.currentTime || 0) * 1000);
   }
 
   function endShare({ toast } = {}) {
@@ -3699,6 +4844,25 @@
       /* already torn down */
     }
     if (s.objectUrl) URL.revokeObjectURL(s.objectUrl);
+    // The plaintext goes now, not whenever the next transfer happens to
+    // overwrite it (AUDIT S-4). `parts` is up to a quarter of a gigabyte of
+    // received file and `file` is the sender's own pick; a reference kept on a
+    // dead transfer is a reference the tab cannot reclaim.
+    s.parts = null;
+    s.file = null;
+    // A question about a transfer that no longer exists must not stay on
+    // screen — answering it would act on a session that is already gone.
+    s.awaitingConsent = false;
+    renderShareConsent(s, "");
+    if (s.kind === "handoff" && state.handoff && state.handoff.transferId === s.transferId) {
+      // The card outlives the engine only to say what happened, and only when
+      // there is nothing left to press.
+      if (state.handoff.phase !== "done") {
+        state.handoff.phase = "failed";
+        state.handoff.status = toast || "The transfer stopped.";
+        renderHandoffCard();
+      }
+    }
     if (toast) showToast(toast, "warn");
   }
 
@@ -3716,7 +4880,7 @@
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return;
       sendShareSignal({
-        share: "transport",
+        step: "transport",
         signal: {
           kind: "ice",
           candidate: ev.candidate.candidate,
@@ -3747,6 +4911,11 @@
     const s = state.share;
     if (!s || s.judged || !s.pc || !s.offer) return;
     const { selectedPairTypes, describeVerdict } = await shareTransferReady;
+    // A handoff's refusal carries one thing a together handover's cannot: the
+    // hosted road is still there for a smaller file, and saying so is the
+    // difference between "it failed" and "here is what would work".
+    const { describeHandoffVerdict } = await handoffReady;
+    const describe = s.kind === "handoff" ? describeHandoffVerdict : describeVerdict;
     if (state.share !== s) return;
     let types = null;
     try {
@@ -3755,40 +4924,124 @@
       /* treated as unknown below */
     }
     if (state.share !== s) return;
-    const verdict = await safeInvoke(
-      "share_transfer_verdict",
-      {
-        localCandidateType: types?.local || "",
-        remoteCandidateType: types?.remote || "",
-        totalBytes: s.offer.total_bytes,
-      },
-      { silent: true },
-    );
-    const plan = describeVerdict(verdict);
+    // Caught rather than propagated: this runs from a connectionstatechange
+    // handler, where a rejection is an unhandled one and the retry below never
+    // happens — the transfer would sit at zero with nothing said. An absent
+    // verdict describes as "cannot work out how to send this", which refuses.
+    let verdict = null;
+    try {
+      verdict = await safeInvoke(
+        "share_transfer_verdict",
+        {
+          localCandidateType: types?.local || "",
+          remoteCandidateType: types?.remote || "",
+          totalBytes: s.offer.total_bytes,
+          // Only ever true after the person has answered the question below.
+          // Core treats this as an answer, not an override: it can turn
+          // needs_consent into allow and can do nothing else.
+          consentGranted: s.consentGranted === true,
+        },
+        { silent: true },
+      );
+    } catch {
+      /* handled by describeVerdict(null) below */
+    }
+    if (state.share !== s) return;
+    const plan = describe(verdict);
     if (plan.retryable) {
       // ICE has not settled. Look again shortly rather than failing a transfer
       // that was about to be fine.
       setTimeout(() => judgeSharePath(), 1000);
       return;
     }
+    if (plan.needsConsent) {
+      // The policy wants a person to agree to this specific transfer. Ask, and
+      // do nothing at all until they answer — no bytes move, and no refusal is
+      // sent, because neither has been decided yet.
+      askShareConsent(s, plan.message);
+      return;
+    }
     if (!plan.proceed) {
       // Tell them why, and tell the other side too — they are looking at a
       // progress bar that would otherwise sit at zero forever.
-      sendShareSignal({ share: "refuse", reason: verdict?.reason ?? { kind: "path_unknown" } });
+      sendShareSignal({ step: "refuse", reason: verdict?.reason ?? { kind: "path_unknown" } });
       endShare({ toast: plan.message });
       return;
     }
     s.judged = true;
-    setShareStatus(`Sending over a ${verdict.path === "host" ? "local" : "direct"} connection…`);
+    const where = verdict.path === "host" ? "local" : "direct";
+    setShareStatus(
+      s.role === "sender"
+        ? `Sending over a ${where} connection…`
+        : `Receiving over a ${where} connection…`,
+    );
     if (s.role === "sender") startShareSending();
+  }
+
+  /**
+   * Put the relay question on screen and wait. Nothing moves until it is
+   * answered — declining is a real outcome, not a timeout.
+   *
+   * The prompt is rendered rather than `confirm()`ed because a modal
+   * `confirm` blocks the event loop, and this connection is live: the data
+   * channel, the ICE trickle and the session's own heartbeat all stop while a
+   * native dialog is up.
+   */
+  function askShareConsent(s, message) {
+    s.awaitingConsent = true;
+    setShareStatus(message);
+    renderShareConsent(s, message);
+  }
+
+  function renderShareConsent(s, message) {
+    const host = document.getElementById("share-consent");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!s?.awaitingConsent) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const text = document.createElement("p");
+    text.className = "share-consent-text";
+    text.textContent = message;
+    const yes = document.createElement("button");
+    yes.className = "btn-primary";
+    yes.textContent = "Send it anyway";
+    yes.onclick = () => {
+      if (state.share !== s) return;
+      s.consentGranted = true;
+      s.awaitingConsent = false;
+      renderShareConsent(s, "");
+      // Re-ask rather than assume: the path may have changed while the
+      // question was on screen, and the answer we want is the one for the
+      // route we actually have now.
+      judgeSharePath();
+    };
+    const no = document.createElement("button");
+    no.className = "btn-ghost";
+    no.textContent = "Don't send";
+    no.onclick = () => {
+      if (state.share !== s) return;
+      s.awaitingConsent = false;
+      renderShareConsent(s, "");
+      sendShareSignal({ step: "refuse", reason: { kind: "relay_forbidden" } });
+      endShare({ toast: "Didn't send it." });
+    };
+    const row = document.createElement("div");
+    row.className = "share-consent-actions";
+    row.append(yes, no);
+    host.append(text, row);
   }
 
   /** Sender: read the requested ranges off disk and push them, with backpressure. */
   async function startShareSending() {
     const s = state.share;
     if (!s || !s.channel || s.pump) return;
-    const { CHUNK_BYTES, chunkRange, createTransferPump, frameChunk } = await shareTransferReady;
+    const { CHUNK_BYTES, chunkCount, chunkRange, createTransferPump, frameChunk } =
+      await shareTransferReady;
     if (state.share !== s || !s.channel) return;
+    const total = chunkCount(s.offer);
 
     // Reading is async and the pump is synchronous, so a small read-ahead sits
     // between them: the pump takes only what is already in hand, and a refill
@@ -3816,6 +5069,11 @@
       } finally {
         reading = false;
       }
+      // Reported here as well as from the pump: the pump stops asking once the
+      // last batch is in hand, so a progress line driven only from there is
+      // permanently one window short of finishing — it read 92% at the end of a
+      // completed 768-chunk transfer, which is a lie of exactly one window.
+      if (total > 0 && s.cursor) reportTransferProgress(s, Math.min(s.cursor.next / total, 1));
       s.pump?.kick();
     }
 
@@ -3825,6 +5083,13 @@
       nextChunks: (budget) => {
         const batch = ready.splice(0, budget);
         refill();
+        // Chunks read to satisfy what the receiver asked for. It runs ahead of
+        // true delivery by at most the send buffer's 1 MB high-water mark, which
+        // is the closest a sender can get: nothing on this channel acknowledges
+        // a chunk, and the next range request is the only evidence either way.
+        if (total > 0 && s.cursor) {
+          reportTransferProgress(s, Math.min(s.cursor.next / total, 1));
+        }
         return batch;
       },
       isDone: () => s.done,
@@ -3847,15 +5112,15 @@
     if (!s.tracker.accept(frame.index)) return;
     s.parts[frame.index] = frame.payload;
 
-    setShareStatus(`Receiving — ${Math.round(s.tracker.fraction() * 100)}%`);
+    reportTransferProgress(s, s.tracker.fraction());
     if (s.tracker.isComplete()) {
       finishShareReceive();
       return;
     }
-    // Ask for the next window as the current one drains, anchored at the
-    // playhead so a seek costs one request rather than a re-download.
-    const posMs = Math.round(($together.player()?.currentTime || 0) * 1000);
-    const req = s.tracker.nextRequest(posMs, SHARE_REQUEST_WINDOW);
+    // Ask for the next window as the current one drains, anchored where this
+    // kind of transfer reads from — a playhead for a handover, the start for an
+    // attachment.
+    const req = s.tracker.nextRequest(transferPositionMs(s), SHARE_REQUEST_WINDOW);
     if (req && s.channel?.readyState === "open") {
       s.channel.send(JSON.stringify(req));
     }
@@ -3865,14 +5130,27 @@
     const s = state.share;
     if (!s || s.done) return;
     s.done = true;
-    const blob = new Blob(s.parts.filter(Boolean), { type: "application/octet-stream" });
+    // The handoff's plaintext MIME type is the one thing the hosted path
+    // deliberately does not carry (it uploads `application/octet-stream` so the
+    // host learns nothing). Here there is no host, and the only reader is the
+    // person being sent the file, who needs it to open what arrived.
+    const mime =
+      s.kind === "handoff"
+        ? String(s.attachment?.mime_type || "application/octet-stream")
+            .trim()
+            .toLowerCase()
+        : "application/octet-stream";
+    const blob = new Blob(s.parts.filter(Boolean), { type: mime });
+    // The chunk views go now. They are the whole file a second time over, and
+    // holding them while the digest below allocates a contiguous copy is the
+    // one moment this path is at three times the file's size instead of two.
+    s.parts = null;
     // Integrity, once, at the end: SubtleCrypto has no streaming digest, so a
     // per-chunk hash is not available to a webview. This is why the framing
     // checks above exist — they catch the failures a whole-file hash would only
     // report after the whole file.
     try {
-      const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
-      const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      const hex = await sha256Hex(await blob.arrayBuffer());
       if (hex.toLowerCase() !== String(s.offer.sha256).toLowerCase()) {
         endShare({ toast: "The file that arrived isn't the one that was sent." });
         return;
@@ -3882,6 +5160,10 @@
       return;
     }
     if (state.share !== s) return;
+    if (s.kind === "handoff") {
+      finishHandoffReceive(s, blob);
+      return;
+    }
     s.objectUrl = URL.createObjectURL(blob);
     const player = $together.player();
     if (player) {
@@ -3893,8 +5175,35 @@
   }
 
   function setShareStatus(text) {
+    const s = state.share;
+    if (s && s.kind === "handoff") {
+      if (state.handoff && state.handoff.transferId === s.transferId) {
+        state.handoff.status = text;
+        renderHandoffCard();
+      }
+      return;
+    }
     const el = $together.shareStatus();
     if (el) el.textContent = text;
+  }
+
+  /**
+   * Progress, from the tracker's own fraction.
+   *
+   * Rate-limited to a change in the whole percent, because a 16 KiB chunk on a
+   * 250 MB file is sixteen thousand of these and rebuilding a card that often
+   * would cost more than the transfer.
+   */
+  async function reportTransferProgress(s, fraction) {
+    const { progressLabel } = await handoffReady;
+    if (!s || state.share !== s) return;
+    const label = progressLabel(s.role, fraction);
+    if (label === s.lastProgressLabel) return;
+    s.lastProgressLabel = label;
+    if (s.kind === "handoff" && state.handoff && state.handoff.transferId === s.transferId) {
+      state.handoff.fraction = fraction;
+    }
+    setShareStatus(label);
   }
 
   /** Sender: offer what we have, once they say they don't have it. */
@@ -3904,8 +5213,7 @@
     const { CHUNK_BYTES } = await shareTransferReady;
     let sha256 = "";
     try {
-      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-      sha256 = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      sha256 = await sha256Hex(await file.arrayBuffer());
     } catch (e) {
       endShare({ toast: `Couldn't read the file — ${errText(e)}` });
       return;
@@ -3919,7 +5227,7 @@
       duration_ms: durationMs || 0,
     };
     setShareStatus("Waiting for them to accept…");
-    await sendShareSignal({ share: "offer", offer: s.offer });
+    await sendShareSignal({ step: "offer", offer: s.offer });
   }
 
   /** Sender: they accepted, so build the connection and open the channel. */
@@ -3957,10 +5265,36 @@
         /* not a request; the sender has nothing else to read on this channel */
       }
     };
+    if (s.kind === "handoff") {
+      // The only completion signal a sender can have. Nothing on this channel
+      // acknowledges a chunk, but a receiver that has verified the file closes
+      // the channel (see finishHandoffReceive) — so a close with everything
+      // queued means it landed, and a close before that means it did not.
+      // Scoped to a handoff: a together handover's channel outlives the file,
+      // because the session is still running.
+      s.channel.onclose = () => {
+        if (state.share !== s) return;
+        const done = s.cursor && s.offer && s.cursor.next * s.offer.chunk_bytes >= s.offer.total_bytes;
+        if (done) {
+          if (state.handoff && state.handoff.transferId === s.transferId) {
+            state.handoff.phase = "done";
+            state.handoff.fraction = 1;
+            // What this device actually knows: every chunk went across. Whether
+            // the far end liked the fingerprint is theirs to say, and it does not
+            // say it — so this does not claim they have a good copy.
+            state.handoff.status = "Sent — all of it went across.";
+            renderHandoffCard();
+          }
+          endShare();
+        } else {
+          endShare({ toast: "The transfer stopped before it finished." });
+        }
+      };
+    }
     try {
       const offer = await s.pc.createOffer();
       await s.pc.setLocalDescription(offer);
-      await sendShareSignal({ share: "transport", signal: { kind: "offer", sdp: offer.sdp } });
+      await sendShareSignal({ step: "transport", signal: { kind: "offer", sdp: offer.sdp } });
     } catch (e) {
       endShare({ toast: `Couldn't start the transfer — ${errText(e)}` });
     }
@@ -3997,7 +5331,7 @@
         await flushShareIce();
         const answer = await s.pc.createAnswer();
         await s.pc.setLocalDescription(answer);
-        await sendShareSignal({ share: "transport", signal: { kind: "answer", sdp: answer.sdp } });
+        await sendShareSignal({ step: "transport", signal: { kind: "answer", sdp: answer.sdp } });
       } else if (signal.kind === "answer") {
         if (!s.pc) return;
         await s.pc.setRemoteDescription({ type: "answer", sdp: signal.sdp });
@@ -4032,15 +5366,47 @@
     }
   }
 
+  /**
+   * The three steps that mean the same thing on both wires.
+   *
+   * Returns whether the step was handled, so each protocol's own entry point can
+   * deal with the ones only it has — a together handover's `ask`, a handoff's
+   * `decline` and `withdraw` — without either of them re-implementing ICE.
+   */
+  async function onCommonTransferStep(step) {
+    switch (step.step) {
+      case "accept":
+        await beginShareNegotiation();
+        return true;
+      case "refuse": {
+        const s = state.share;
+        const { describeVerdict } = await shareTransferReady;
+        const { describeHandoffVerdict } = await handoffReady;
+        const describe = s?.kind === "handoff" ? describeHandoffVerdict : describeVerdict;
+        const plan = describe({ verdict: "refuse", reason: step.reason });
+        endShare({ toast: plan.message });
+        return true;
+      }
+      case "transport":
+        await onShareTransport(step.signal);
+        return true;
+      default:
+        return false;
+    }
+  }
+
   /** The one entry point: a share signal arrived inside the together session. */
   async function onTogetherShare(p) {
     const signal = p && p.signal;
     if (!signal) return;
-    switch (signal.share) {
+    const { decodeTogetherSignal } = await handoffReady;
+    const step = decodeTogetherSignal(signal);
+    switch (step.step) {
       case "ask": {
         // They don't have it. Offer ours if we picked a local file.
         if (!state.together?.file) return;
         state.share = newShareState({
+          kind: "together",
           role: "sender",
           peer: p.peer,
           sessionId: p.session_id,
@@ -4051,33 +5417,342 @@
       case "offer": {
         const { createTracker } = await shareTransferReady;
         state.share = newShareState({
+          kind: "together",
           role: "receiver",
           peer: p.peer,
           sessionId: p.session_id,
-          offer: signal.offer,
+          offer: step.offer,
         });
-        state.share.tracker = createTracker(signal.offer);
+        state.share.tracker = createTracker(step.offer);
         state.share.parts = new Array(state.share.tracker.chunkCount).fill(null);
-        setShareStatus(`They can send it — ${Math.round(signal.offer.total_bytes / 1048576)} MB.`);
-        await sendShareSignal({ share: "accept" });
+        setShareStatus(`They can send it — ${Math.round(step.offer.total_bytes / 1048576)} MB.`);
+        await sendShareSignal({ step: "accept" });
         break;
       }
-      case "accept":
-        await beginShareNegotiation();
-        break;
-      case "refuse": {
-        const { describeVerdict } = await shareTransferReady;
-        const plan = describeVerdict({ verdict: "refuse", reason: signal.reason });
-        endShare({ toast: plan.message });
-        break;
-      }
-      case "transport":
-        await onShareTransport(signal.signal);
-        break;
       default:
-        // An unknown step from a newer build: ignore rather than guess.
+        // Anything else is a step both protocols share, or one from a newer
+        // build — which is ignored rather than guessed at.
+        await onCommonTransferStep(step);
         break;
     }
+  }
+
+  // ── Large attachments: the same pump, no session ───────────────────────────
+  //
+  // A handoff is scoped by a transfer id rather than by a session, so this entry
+  // point does the scoping the session used to do for `together`: a signal
+  // naming a transfer this window is not running cannot steer the one it is, and
+  // a step only *our* side could legitimately send is dropped rather than obeyed.
+
+  /** One step of a large-attachment handoff arrived over the DM channel. */
+  async function onAttachmentHandoff(p) {
+    if (!p || !p.transfer_id || !p.signal) return;
+    const h = await handoffReady;
+    const step = h.decodeHandoffSignal(p.signal);
+    const s = state.share;
+
+    if (h.signalIsForTransfer(s, p.transfer_id)) {
+      if (s.peer !== p.peer) return; // the id is right and the peer is not
+      if (!h.peerStepIsPlausible(s.role, step.step)) return;
+      switch (step.step) {
+        case "decline":
+          endShare({ toast: `${displayName(p.peer)} didn't take the file.` });
+          return;
+        case "withdraw":
+          endShare({ toast: "They took the offer back." });
+          return;
+        default:
+          await onCommonTransferStep(step);
+          return;
+      }
+    }
+
+    // Not our live transfer. The only step that can start one is an offer;
+    // everything else names a transfer that does not exist here, which is what
+    // the 128-bit id exists to make un-guessable.
+    if (step.step !== "offer") {
+      // Except a withdrawal of the offer currently on screen, which has no
+      // engine behind it yet.
+      if (
+        step.step === "withdraw" &&
+        state.handoff?.transferId === p.transfer_id &&
+        state.handoff.peer === p.peer
+      ) {
+        clearHandoffCard();
+        showToast("They took the offer back.", "info");
+      }
+      return;
+    }
+    if (s || (state.handoff && state.handoff.phase !== "done" && state.handoff.phase !== "failed")) {
+      // One at a time in this window, and deliberately no automatic answer: the
+      // protocol's refusals are all about relays, and `decline` means a person
+      // said no. Neither is true here, so the sender is left waiting — which is
+      // honest — and the person is told why they are not being asked.
+      showToast(
+        `${displayName(p.peer)} wants to send you a file — finish the current transfer first.`,
+        "info",
+      );
+      return;
+    }
+    state.handoff = {
+      transferId: p.transfer_id,
+      peer: p.peer,
+      role: "receiver",
+      attachment: step.attachment,
+      plan: h.offerCardPlan(step.attachment),
+      phase: "offered",
+      status: null,
+      fraction: 0,
+      objectUrl: null,
+    };
+    renderHandoffCard();
+    if (state.activeContact !== p.peer) {
+      showToast(`${displayName(p.peer)} wants to send you a file`, "info");
+    }
+  }
+
+  /** Receiver: yes. This is what authorises the sender to build a connection. */
+  async function acceptHandoffOffer() {
+    const card = state.handoff;
+    if (!card || card.phase !== "offered" || card.role !== "receiver") return;
+    if (!card.plan.canAccept) return;
+    const { createTracker } = await shareTransferReady;
+    if (state.handoff !== card) return;
+    const offer = card.attachment.shape;
+    state.share = newShareState({
+      kind: "handoff",
+      role: "receiver",
+      peer: card.peer,
+      transferId: card.transferId,
+      attachment: card.attachment,
+      offer,
+    });
+    state.share.tracker = createTracker(offer);
+    state.share.parts = new Array(state.share.tracker.chunkCount).fill(null);
+    card.phase = "receiving";
+    card.status = "Waiting for the connection…";
+    renderHandoffCard();
+    await sendShareSignal({ step: "accept" });
+  }
+
+  /** Receiver: no. A person saying no is not a network fact, so it is a decline. */
+  async function declineHandoffOffer() {
+    const card = state.handoff;
+    if (!card || card.role !== "receiver") return;
+    const signal = (await handoffReady).encodeHandoffStep({ step: "decline" });
+    await sendHandoffSignal(card.peer, card.transferId, signal);
+    if (state.share?.transferId === card.transferId) endShare();
+    clearHandoffCard();
+  }
+
+  /** Sender: take the offer back, so their card stops being answerable. */
+  async function withdrawHandoffOffer() {
+    const card = state.handoff;
+    if (!card || card.role !== "sender") return;
+    const signal = (await handoffReady).encodeHandoffStep({ step: "withdraw" });
+    await sendHandoffSignal(card.peer, card.transferId, signal);
+    if (state.share?.transferId === card.transferId) endShare();
+    clearHandoffCard();
+  }
+
+  /**
+   * Sender: fingerprint the file, offer it, and wait to be told yes.
+   *
+   * The whole file goes through memory once here, because `crypto.subtle.digest`
+   * takes a buffer and there is no streaming digest in a webview. That is the
+   * reason `MAX_HANDOFF_BYTES` exists and the reason it is checked *before* this
+   * is called rather than inside it.
+   */
+  async function startHandoffSend(file, peer, caption, mime) {
+    const { CHUNK_BYTES } = await shareTransferReady;
+    const h = await handoffReady;
+    let sha256;
+    try {
+      sha256 = await sha256Hex(await file.arrayBuffer());
+    } catch (e) {
+      showToast(`Couldn't read the file — ${errText(e)}`, "error");
+      return false;
+    }
+    const transferId = h.newTransferId((n) => crypto.getRandomValues(new Uint8Array(n)));
+    const attachment = {
+      shape: {
+        total_bytes: file.size,
+        chunk_bytes: CHUNK_BYTES,
+        sha256,
+        // A duration nobody measured. Zero is honest — the receiver has no
+        // playhead for an attachment, so nothing reads this.
+        duration_ms: 0,
+      },
+      mime_type: mime,
+      file_name: file.name || "",
+      caption,
+    };
+    endShare();
+    clearHandoffCard();
+    state.share = newShareState({
+      kind: "handoff",
+      role: "sender",
+      peer,
+      transferId,
+      attachment,
+      offer: attachment.shape,
+      file,
+    });
+    state.handoff = {
+      transferId,
+      peer,
+      role: "sender",
+      attachment,
+      plan: h.offerCardPlan(attachment),
+      phase: "offered",
+      status: "Waiting for them to accept…",
+      fraction: 0,
+      objectUrl: null,
+    };
+    renderHandoffCard();
+    await sendShareSignal({ step: "offer", attachment });
+    return true;
+  }
+
+  /** Receiver: it arrived, it is what was offered, and it is theirs to save. */
+  function finishHandoffReceive(s, blob) {
+    const card = state.handoff;
+    s.pump?.stop();
+    // Closing is the message. There is no "got it all" step in the protocol and
+    // there does not need to be one: the receiver has nothing left to ask for,
+    // and a sender watching the channel close with everything queued has learned
+    // the only fact it wanted (see the sender's `onclose`).
+    try {
+      s.channel?.close();
+    } catch {
+      /* already gone; the sender will see that too */
+    }
+    if (!card || card.transferId !== s.transferId) return;
+    if (card.objectUrl) URL.revokeObjectURL(card.objectUrl);
+    card.objectUrl = URL.createObjectURL(blob);
+    card.phase = "done";
+    card.fraction = 1;
+    card.status = "It's here, and it's the file they sent.";
+    renderHandoffCard();
+  }
+
+  /**
+   * Drop the card and everything it was holding.
+   *
+   * The object URL is the received plaintext: revoked here rather than on the
+   * next transfer, so a file that has been saved (or dismissed unsaved) stops
+   * costing the webview anything — AUDIT S-4's rule that decrypted media must
+   * not outlive the moment it was wanted.
+   */
+  function clearHandoffCard() {
+    if (state.handoff?.objectUrl) URL.revokeObjectURL(state.handoff.objectUrl);
+    state.handoff = null;
+    renderHandoffCard();
+  }
+
+  /**
+   * The card: what is being offered, how far it has got, and the only buttons
+   * that can actually do something.
+   *
+   * Accept is absent — not disabled — for an offer this window cannot complete,
+   * because a button that cannot work is worse than no button. What it *is*
+   * cannot complete for comes from `offerCardPlan`, where it is tested.
+   */
+  function renderHandoffCard() {
+    const host = $("#handoff-card");
+    if (!host) return;
+    host.innerHTML = "";
+    const card = state.handoff;
+    if (!card || (state.activeContact && card.peer !== state.activeContact)) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const plan = card.plan;
+    const rows = [
+      el(
+        "div",
+        { class: "handoff-head" },
+        el("span", { class: "handoff-glyph", text: plan.glyph }),
+        el(
+          "div",
+          { class: "handoff-titles" },
+          el("div", {
+            class: "handoff-kind",
+            text:
+              card.role === "receiver"
+                ? `${displayName(card.peer)} is sending a ${plan.kind.toLowerCase()}`
+                : `Sending a ${plan.kind.toLowerCase()}`,
+          }),
+          el("div", { class: "handoff-detail", text: `${plan.name} · ${plan.sizeText}` }),
+        ),
+      ),
+      plan.caption ? el("div", { class: "handoff-caption", text: plan.caption }) : null,
+      plan.refusal ? el("div", { class: "handoff-refusal", text: plan.refusal }) : null,
+      card.status ? el("div", { class: "handoff-status", text: card.status }) : null,
+    ];
+    if (card.phase === "receiving" || card.phase === "sending" || card.fraction > 0) {
+      const bar = el("div", { class: "handoff-bar" });
+      const fill = el("div", { class: "handoff-bar-fill" });
+      fill.style.width = `${Math.round(Math.max(0, Math.min(1, card.fraction)) * 100)}%`;
+      bar.append(fill);
+      rows.push(bar);
+    }
+    const actions = el("div", { class: "handoff-actions" });
+    if (card.phase === "offered" && card.role === "receiver") {
+      if (plan.canAccept) {
+        actions.append(
+          el("button", {
+            class: "btn btn-primary btn-sm",
+            id: "handoff-accept",
+            text: "Accept",
+            onClick: acceptHandoffOffer,
+          }),
+        );
+      }
+      actions.append(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          id: "handoff-decline",
+          text: "Decline",
+          onClick: declineHandoffOffer,
+        }),
+      );
+    } else if (card.role === "sender" && card.phase !== "done" && card.phase !== "failed") {
+      actions.append(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          id: "handoff-withdraw",
+          text: "Cancel",
+          onClick: withdrawHandoffOffer,
+        }),
+      );
+    }
+    if (card.phase === "done" && card.objectUrl) {
+      // A real anchor with `download`: the browser writes the file, under a name
+      // this UI sanitised, to wherever that person's downloads go. Nothing in
+      // the webview ever treats the peer's name as a path.
+      const save = el("a", {
+        class: "btn btn-primary btn-sm",
+        id: "handoff-save",
+        href: card.objectUrl,
+        download: plan.name,
+        text: "Save",
+      });
+      actions.append(save);
+    }
+    if (card.phase === "done" || card.phase === "failed") {
+      actions.append(
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          id: "handoff-dismiss",
+          text: "Dismiss",
+          onClick: clearHandoffCard,
+        }),
+      );
+    }
+    rows.push(actions);
+    host.append(...rows.filter(Boolean));
   }
 
   // ── Milestone 3: real-time event wiring ───────────────────────────────────
@@ -4129,6 +5804,8 @@
           showToast(p.by_peer ? "They left the session" : "Session ended", "info");
         } else if (p.type === "together_share") {
           onTogetherShare(p);
+        } else if (p.type === "attachment_handoff") {
+          onAttachmentHandoff(p);
         }
       });
     } catch (e) {
@@ -4146,18 +5823,31 @@
       i.type = i.type === "password" ? "text" : "password";
     });
 
-    $("#identity-chip").addEventListener("click", async () => {
+    // The chip now opens your profile rather than copying. The copy affordance
+    // is not lost — it is the key row on the page it opens, which is also the
+    // only place the npub is shown in full.
+    $("#identity-chip").addEventListener("click", () => {
       if (!state.identity) return;
-      try {
-        await navigator.clipboard.writeText(state.identity.npub);
-        showToast("npub copied to clipboard", "success");
-      } catch {
-        showToast("Clipboard unavailable", "error");
-      }
+      openProfile(null);
+    });
+    $("#profile-back").addEventListener("click", closeProfile);
+    // The collapsing header. The *curve* lives in `profile_view.mjs` so all three
+    // frontends shrink identically; this only feeds it a scroll fraction and
+    // writes the result to a custom property.
+    $("#view-profile").addEventListener("scroll", () => {
+      if (!profileView) return;
+      const view = $("#view-profile");
+      const travel = 120; // px of scroll over which the header fully collapses
+      const fraction = Math.min(1, view.scrollTop / travel);
+      const size = profileView.collapsedAvatarSize(fraction, 96, 40);
+      $("#profile-avatar").style.setProperty("--profile-avatar-size", `${size}px`);
     });
 
     for (const t of document.querySelectorAll(".tab"))
-      t.addEventListener("click", () => switchTab(t.dataset.tab));
+      t.addEventListener("click", () => {
+        delete document.body.dataset.profileOpen;
+        switchTab(t.dataset.tab);
+      });
 
     $("#chitthi-input").addEventListener("input", updateCount);
     $("#broadcast-btn").addEventListener("click", handleBroadcast);
@@ -4172,7 +5862,13 @@
     $("#reader-clear").addEventListener("click", handleReaderClear);
     $("#dm-input").addEventListener("input", (e) => {
       reportDraftEdit();
+      // Withdrawn here rather than inside the debounced handler below: a question
+      // about an ambiguous handle belongs to the text that raised it, and a
+      // debounced clear could fire *after* a fast Enter had put the chooser up
+      // and wipe it. Undebounced, it can only ever run before that.
+      renderMentionChooser(null);
       handleDmInput(e);
+      handleDmCommandInput(e);
     });
     $("#dm-send").addEventListener("click", handleDmSend);
 
@@ -4203,7 +5899,10 @@
     $("#dm-attach").addEventListener("click", () => $("#dm-file").click());
     $("#dm-file").addEventListener("change", (e) => {
       const file = e.target.files && e.target.files[0];
-      handleAttach(file, state.activeContact, { composer: $("#dm-input") });
+      handleAttach(file, state.activeContact, {
+        composer: $("#dm-input"),
+        surfaceSupportsHandoff: true,
+      });
       e.target.value = "";
     });
     $("#couple-attach").addEventListener("click", () => $("#couple-file").click());
@@ -4228,6 +5927,7 @@
     $("#call-settings-btn").addEventListener("click", openTurnModal);
     $("#turn-cancel").addEventListener("click", closeTurnModal);
     $("#turn-save").addEventListener("click", handleSaveTurn);
+    $("#share-policy").addEventListener("change", handleSharePolicyChange);
 
     // Call overlays (ringing + in-call controls)
     $("#ring-accept").addEventListener("click", acceptIncoming);
@@ -4313,6 +6013,32 @@
     let ws = wsOf("Base");
     const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     const re = /\/pay\s+(\d+(?:\.\d{1,2})?)\s+to\s+([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)/gi;
+    // Two rows so the Tasks panel is previewable without a backend: one asked of
+    // you (Done/Decline) and one note to self (all three).
+    const mockTasks = [
+      {
+        id: "mock-1",
+        text: "get some work done (mock)",
+        assigner: "npub1stranger00000000000000000000000000000000000000000",
+        assignee: "npub1mockdev0identity00000000000000000000000000000000",
+        created_at: Math.floor(Date.now() / 1000) - 600,
+        updated_at: Math.floor(Date.now() / 1000) - 600,
+        state: "open",
+        assigned_by_me: false,
+        mine_to_do: true,
+      },
+      {
+        id: "mock-2",
+        text: "water the plants (mock)",
+        assigner: "npub1mockdev0identity00000000000000000000000000000000",
+        assignee: null,
+        created_at: Math.floor(Date.now() / 1000) - 1200,
+        updated_at: Math.floor(Date.now() / 1000) - 1200,
+        state: "open",
+        assigned_by_me: true,
+        mine_to_do: true,
+      },
+    ];
     const ICE_DEMO = [
       { urls: ["stun:stun.l.google.com:19302"], username: null, credential: null },
     ];
@@ -4363,6 +6089,7 @@
             id: "mockdm_" + Date.now(),
             peer: args.target,
             content: args.content,
+            author: "human",
             created_at: nowSecs(),
             outgoing: true,
           };
@@ -4379,7 +6106,47 @@
         case "announce_presence":
           return 0;
         case "current_profile":
-          return { npub: "npub1mockdev0identity00000000000000000000000000000000", username: "mockuser" };
+          return {
+            npub: "npub1mockdev0identity00000000000000000000000000000000",
+            username: "mockuser",
+            about: "Mock identity, for browser preview.",
+            picture: null,
+            avatar_cached: false,
+          };
+        // Enough of a peer for the profile page to be a real check in the
+        // browser preview rather than an empty box.
+        case "peer_profile":
+          return {
+            npub: args.npub,
+            alias: "",
+            name: "mockpeer",
+            about: "Gardener, occasionally. https://example.com/blog",
+            picture: null,
+            nip05: "mockpeer@example.com",
+            lud16: null,
+            avatar_cached: false,
+            contact: true,
+            comrade: false,
+            blocked: false,
+            online: false,
+            last_seen_at: nowSecs() - 3600,
+            peer_marked_us: false,
+            updated_at: nowSecs() - 120,
+          };
+        case "peer_avatar":
+          return null;
+        case "remote_avatars_enabled":
+          return true;
+        case "set_remote_avatars_enabled":
+          return null;
+        case "set_about":
+          return {
+            npub: "npub1mockdev0identity00000000000000000000000000000000",
+            username: "mockuser",
+            about: args.about || null,
+            picture: null,
+            avatar_cached: false,
+          };
         case "extract_payments": {
           const out = [];
           let m;
@@ -4387,6 +6154,117 @@
           while ((m = re.exec(args.text || "")) !== null)
             out.push({ amount_inr: parseFloat(m[1]), vpa: m[2], uri: `upi://pay?pa=${m[2]}&am=${m[1]}` });
           return out;
+        }
+        // The in-chat command grammar lives in Rust; these mocks stand in for
+        // it so the composer is previewable in a plain browser, exactly as the
+        // `/pay` regex above does. They are deliberately crude — the real
+        // grammar has 43 tests and this has none, so anything subtle must be
+        // checked in the Tauri shell.
+        case "chat_command_catalog":
+          return [
+            { name: "task", aliases: ["todo"], argument: "<what needs doing> [@who]", help: "Name a piece of work", takes_mention: true },
+            { name: "tara", aliases: [], argument: "<what you want to think through>", help: "A private aside — only you see it", takes_mention: false },
+            { name: "comrade-breathe", aliases: [], argument: "@who", help: "Ask a comrade to take a deep breath", takes_mention: true },
+            { name: "breathe", aliases: ["breath"], argument: "", help: "Take a deep breath", takes_mention: false },
+            { name: "help", aliases: ["commands"], argument: "", help: "List what you can type here", takes_mention: false },
+          ];
+        case "parse_chat_command": {
+          const t = (args.text || "").trim();
+          if (/^@tara(\s|$)/i.test(t))
+            return { kind: "ask_tara", text: t.replace(/^@tara\s*/i, "") };
+          if (!t.startsWith("/")) return { kind: "plain" };
+          const [head, ...rest] = t.slice(1).split(/\s+/);
+          const body = rest.join(" ");
+          const at = [...body.matchAll(/(?:^|\s)@([a-z0-9_]{3,24})/gi)].map((m) => ({
+            handle: m[1].toLowerCase(),
+            start: m.index || 0,
+            end: (m.index || 0) + m[1].length + 1,
+          }));
+          if (head === "task") return { kind: "task", text: body.replace(/(?:^|\s)@[a-z0-9_]{3,24}/gi, "").trim(), assignees: at };
+          if (head === "tara") return { kind: "ask_tara", text: body };
+          if (head === "breathe" || head === "breath") return { kind: "open", action: "breathe" };
+          if (head === "comrade-breathe") return { kind: "offer_to", action: "breathe", targets: at };
+          if (head === "help" || head === "commands") return { kind: "help" };
+          if (head === "pay") return { kind: "pay" };
+          return { kind: "unknown", name: head };
+        }
+        case "resolve_mentions":
+          return [...(args.text || "").matchAll(/(?:^|\s)@([a-z0-9_]{3,24})/gi)].map((m) => ({
+            handle: m[1].toLowerCase(),
+            start: m.index || 0,
+            end: (m.index || 0) + m[1].length + 1,
+            npub: "npub1mockcontact000000000000000000000000000000000000",
+            candidates: [],
+          }));
+        case "tasks":
+          return mockTasks;
+        case "set_task_state": {
+          const t = mockTasks.find((x) => x.id === args.id);
+          // Deliberately not lowercased: `TaskState` is snake_case on the wire,
+          // so the real backend rejects "Done". A forgiving mock here would
+          // have let exactly that bug through to a build nobody can run.
+          // `STATES` is task_list.mjs's own list, so the mock cannot drift from
+          // the contract the panel is written against. Reachable only from that
+          // panel, which does not render until the module has loaded.
+          if (!taskList.STATES.includes(args.taskState)) {
+            throw new Error(`set_task_state: unknown state ${args.taskState}`);
+          }
+          if (t) t.state = args.taskState;
+          return t || null;
+        }
+        case "assign_task":
+          return {
+            id: "mock-task",
+            text: args.text,
+            assigner: "npub1mockdev0identity00000000000000000000000000000000",
+            assignee: args.peer || null,
+            created_at: Math.floor(Date.now() / 1000),
+            updated_at: Math.floor(Date.now() / 1000),
+            state: "open",
+            assigned_by_me: true,
+            mine_to_do: !args.peer,
+          };
+        case "offer_action":
+          return {
+            sent: args.peers || [],
+            not_comrades: [],
+            on_cooldown: [],
+            failed: [],
+          };
+        case "tara_aside":
+          return {
+            id: "mock-aside",
+            text: "(mock) What's the first thing you'd want to change about it?",
+            from_tara: true,
+            crisis: false,
+            created_at: Math.floor(Date.now() / 1000),
+          };
+        case "tara_in_chat": {
+          // Shaped like the real thing, including the two messages: a mock that
+          // returned only a reply would let the composer look correct while the
+          // thread stayed empty, which is the half of this the real command does.
+          const now = Math.floor(Date.now() / 1000);
+          const line = (id, content, author) => ({
+            id,
+            peer: args.peer,
+            content,
+            // The real DTO arrives already split, so the mock must too — a mock
+            // that still carried "Tara: " in `content` would let the preview
+            // build render a prefix the real one never shows.
+            author: author || "human",
+            created_at: now,
+            outgoing: true,
+            status: "sent",
+            reply_to: null,
+          });
+          const answer = "(mock) What matters most about it to you both?";
+          return {
+            asked: line("mock-tara-q", args.text),
+            answered: line("mock-tara-a", answer, "tara"),
+            reply: answer,
+            kept_private: false,
+            crisis: false,
+          };
         }
         case "pair_sakha":
           mockSakha.paired = true;
@@ -4555,6 +6433,17 @@
           mockFocus.reading = null;
           return had;
         }
+        // Large attachments. The 10 MB here is a stand-in for
+        // `comrade_core::handoff::route_for_bytes`, which is the only place the
+        // real answer comes from — this exists so browser preview can open the
+        // sheet and read the line, not so the rule lives in two places.
+        case "attachment_route_for_bytes":
+          return Number(args.totalBytes) > 10 * 1024 * 1024 ? "peer_to_peer" : "hosted";
+        case "attachment_handoff_send":
+          // Nothing to deliver to in preview: there is no second device, and
+          // pretending one accepted would be the one lie this mock must not
+          // tell — the whole point of the card is that a real peer has to agree.
+          return null;
 
         default:
           throw `mock backend: unknown command '${cmd}'`;

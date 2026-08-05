@@ -2,7 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "env": {
     "CARGO_TERM_COLOR": "always",
-    "RUST_BACKTRACE": "1"
+    "RUST_BACKTRACE": "1",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
   "permissions": {
     "allow": [
@@ -53,6 +54,11 @@
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.sh",
             "timeout": 180,
             "statusMessage": "Priming Cargo cache and probing toolchains..."
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/seed-user-settings.sh",
+            "timeout": 15
           }
         ]
       }
@@ -68,6 +74,30 @@
           }
         ]
       }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/bridge-event-gate.sh",
+            "timeout": 30
+          }
+        ]
+      }
     ]
-  }
+  },
+  "enabledPlugins": {
+    "caveman@caveman": true
+  },
+  "extraKnownMarketplaces": {
+    "caveman": {
+      "source": {
+        "source": "github",
+        "repo": "JuliusBrussee/caveman",
+        "ref": "0d95a81d35a9f2d123a5e9430d1cfc43d55f1bb0"
+      }
+    }
+  },
+  "workflowSizeGuideline": "small"
 }

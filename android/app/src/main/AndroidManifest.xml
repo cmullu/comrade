@@ -69,6 +69,29 @@
          alongside the matching foregroundServiceType on Android 14+ (see
          together/TogetherService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Reads this device's own audio library so watch/listen together can open
+         the copy you already have — `/play kun faya kun`, and the auto-open when
+         somebody invites you (LibraryResolver, TogetherManager.onInvited). That
+         is the whole of Antra's claim that the answer to "how do we both have
+         this file" is "you already did": nothing is downloaded and no service is
+         authenticated against, so without a read of MediaStore there is nothing
+         to match against and the lookup can only ever answer "not here".
+
+         A runtime permission, so declaring it grants nothing: MediaLibraryAccess
+         decides when to ask, and it asks at the moment somebody actually names a
+         song rather than at startup. Denied is a first-class answer — the file
+         picker needs no permission at all (SAF grants per file), so every route
+         still works and the composer says Comrade was not allowed to look rather
+         than that the track is absent.
+
+         Split at Tiramisu because READ_EXTERNAL_STORAGE stopped granting media
+         access there; capped at 32 so a modern install is not asked for the
+         broad old permission it would ignore. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <!-- ProximityScreenControl (CallScreen.kt) holds a PROXIMITY_SCREEN_OFF_WAKE_LOCK
          for the duration of a call. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />

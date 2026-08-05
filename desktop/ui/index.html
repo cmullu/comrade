@@ -77,6 +77,10 @@
             <span class="tab-icon" aria-hidden="true">⏳</span>
             <span class="tab-text">Focus <span class="tab-sub">Sessions · Long read</span></span>
           </button>
+          <button class="tab" data-tab="tasks" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">🗒</span>
+            <span class="tab-text">Tasks <span class="tab-sub">Yours · asked of you</span></span>
+          </button>
         </nav>
 
         <div class="sidebar-section" aria-label="Modes">
@@ -103,7 +107,7 @@
             <span id="pill-mesh" class="pill" title="Off-grid mesh">mesh</span>
           </span>
 
-          <button id="identity-chip" class="identity-chip" title="Click to copy your npub">
+          <button id="identity-chip" class="identity-chip" title="Your profile">
             <span class="dot"></span>
             <span id="identity-npub" class="mono">npub…</span>
           </button>
@@ -185,6 +189,7 @@
               </div>
               <video id="together-player" class="together-player" controls playsinline hidden></video>
               <p id="together-share-status" class="hint sm"></p>
+              <div id="share-consent" class="share-consent" hidden></div>
               <p class="hint sm">
                 Positions travel over the relay, so you'll be within about a
                 second of each other — not frame-perfect. If you don't have the
@@ -193,6 +198,24 @@
             </section>
 
             <div class="chat-composer">
+              <!-- A large attachment on its way in or out: what it is, how far
+                   it has got, and the only buttons that can do anything about
+                   it. Built in main.js from `handoff_transfer.mjs`'s plan, which
+                   is where "may this even be accepted" is decided. -->
+              <div id="handoff-card" class="handoff-card" hidden></div>
+              <div id="dm-command-picker" class="command-picker" hidden></div>
+              <!-- Two contacts can answer to one @handle. Asking is the whole
+                   point: picking for the user is how a private message reaches
+                   the wrong person. Filled by renderMentionChooser. -->
+              <div id="dm-mention-chooser" class="mention-chooser" hidden></div>
+              <!-- Rewritten by handleDmCommandInput: `/tara` is private and
+                   `@tara` is answered in the thread, so the sentence has to say
+                   which. This is the `/tara` wording, the safe default if the
+                   script never runs. -->
+              <p id="dm-aside-note" class="aside-note sm" hidden>
+                Only you will see this — it goes to Tara, not to them.
+              </p>
+              <p id="dm-command-hint" class="command-hint sm" hidden></p>
               <div id="dm-upi-preview" class="upi-preview" hidden></div>
               <div id="dm-reply-chip" class="reply-chip" hidden>
                 <div class="reply-chip-body">
@@ -202,13 +225,19 @@
                 <button id="dm-reply-cancel" class="icon-btn" title="Cancel reply" aria-label="Cancel reply">✕</button>
               </div>
               <div class="field-row">
-                <button id="dm-attach" class="icon-btn" title="Attach encrypted media (max 10 MB)" disabled>📎</button>
-                <input id="dm-file" type="file" accept="image/*,audio/*" hidden />
+                <button id="dm-attach" class="icon-btn" title="Attach a file" disabled>📎</button>
+                <!-- No `accept` filter and no "max 10 MB" in the tooltip any
+                     more: over the hosted cap a file takes the peer-to-peer
+                     road instead of being refused, and a picker that hides
+                     videos is a picker that hides the case that road exists
+                     for. Which road a pick takes is the core's answer, shown in
+                     the preview sheet before anything is sent. -->
+                <input id="dm-file" type="file" hidden />
                 <input
                   id="dm-input"
                   class="input"
                   type="text"
-                  placeholder="Message… (try “/pay 250 to friend@upi”)"
+                  placeholder="Message… (type / for what you can do)"
                   disabled
                 />
                 <button id="dm-send" class="btn btn-primary" disabled>
@@ -217,9 +246,11 @@
                 </button>
               </div>
               <p class="hint sm">
-                Messages are end-to-end encrypted. Live UPI <code>/pay</code>
-                detection is active, and the 📎 attaches an encrypted photo/audio
-                (max 10 MB).
+                Messages are end-to-end encrypted. Type <code>/</code> for
+                in-chat actions and <code>@tara</code> for a private aside only
+                you can see. 📎 attaches a file — up to 10 MB encrypted and
+                uploaded, anything larger handed straight to their device while
+                you are both online.
               </p>
             </div>
           </div>
@@ -230,6 +261,13 @@
              no usage mirror here on purpose; it is fed by Android's usage
              stats and the store is per-device, so a desktop panel could only
              ever read zero. -->
+        <!-- Everything `/task` has produced. The rows and their buttons come
+             from `task_list.mjs`, which mirrors `karya::may_transition` so a
+             button core would refuse is never drawn. -->
+        <section id="view-tasks" class="view view-tasks" role="tabpanel" hidden>
+          <div id="task-list" class="task-list"></div>
+        </section>
+
         <section id="view-focus" class="view view-focus" role="tabpanel" hidden>
           <div class="focus-col">
             <div class="composer focus-card">
@@ -320,6 +358,34 @@
                 </div>
                 <button id="reader-clear" class="btn btn-ghost btn-block">Close this read</button>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ─────────────────────────── Profile ─────────────────────────────
+             Deliberately has no `.tab` button: a profile is reached from
+             context (the identity chip, a conversation header), never from the
+             rail. `switchTab` deselects every tab when none matches, which is
+             the behaviour that wants. Everything inside is built by
+             `renderProfile()` through `el()` — dynamic text via textContent
+             only, which is the documented mitigation for audit S6. -->
+        <section id="view-profile" class="view view-profile" role="tabpanel" hidden>
+          <div class="profile-header" id="profile-header">
+            <button id="profile-back" class="btn btn-ghost profile-back">← Back</button>
+            <div class="profile-identity">
+              <div id="profile-avatar" class="profile-avatar" aria-hidden="true"></div>
+              <div class="profile-titles">
+                <h2 id="profile-title" class="profile-title"></h2>
+                <p id="profile-status" class="profile-status"></p>
+              </div>
+            </div>
+            <div id="profile-actions" class="profile-actions"></div>
+          </div>
+          <div class="profile-body">
+            <div id="profile-rows" class="profile-rows"></div>
+            <div class="profile-shared">
+              <div id="profile-tabs" class="profile-tabs" role="tablist"></div>
+              <div id="profile-shared-body" class="profile-shared-body"></div>
             </div>
           </div>
         </section>
@@ -508,6 +574,21 @@
           <span class="btn-label">Save</span>
           <span class="spinner" hidden></span>
         </button>
+
+        <hr class="modal-rule" />
+        <label class="field-label" for="share-policy">Sending files through a relay</label>
+        <p class="muted sm">
+          A call through a relay is a few tens of kilobits. A film is not — and
+          it's someone else's bandwidth and someone else's machine in the middle.
+          This is separate from the setting above: your calls keep their relay
+          either way.
+        </p>
+        <select id="share-policy" class="input">
+          <option value="direct_only">Never — only send files over a direct connection</option>
+          <option value="under_bytes">Small files only (up to 50 MB)</option>
+          <option value="ask_each_time">Ask me each time</option>
+          <option value="always">Always, without asking</option>
+        </select>
       </div>
     </div>
 

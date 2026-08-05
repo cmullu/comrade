@@ -70,17 +70,20 @@ use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
 use comrade_core::crypto::KeyProfile;
+use comrade_core::handoff::{AttachmentRoute, HandoffSignal};
 use comrade_core::share::transport::RelayPolicy;
 use comrade_core::share::ShareSignal;
 use comrade_core::together::{MusicLink, Recording, TogetherContent};
 use comrade_state::AppWorkspace;
 use comrade_ui::{
-    AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto, ChitthiDto,
-    ComradeDto, ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
-    FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
-    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, PresenceDto, ProfileDto, ReadingDto,
-    ShareVerdictDto, TaraMessageDto, TogetherSessionDto, TurnServerStatusDto, UiError,
-    UpiIntentDto, WorkspaceDto,
+    AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
+    ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
+    CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
+    JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
+    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto,
+    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
+    ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto,
+    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -182,6 +185,30 @@ pub struct WorkspaceKeyLabel {
 
 /// Every workspace discriminant and its label — a stable, store-free list
 /// (contrast [`Comrade::workspaces`], which also reports which one is active).
+/// Which road an attachment of this size takes — hosted, or straight to the
+/// other device.
+///
+/// Exported rather than reimplemented per frontend because the two roads have
+/// different failure modes a person has to be told about, and a UI that guessed
+/// the threshold would eventually guess it differently from the core that
+/// enforces it. See `comrade_core::handoff::route_for_bytes`.
+#[uniffi::export]
+pub fn attachment_route_for_bytes(total_bytes: u64) -> AttachmentRoute {
+    comrade_core::handoff::route_for_bytes(total_bytes)
+}
+
+/// A fresh id scoping every signal of one attachment handoff.
+///
+/// Exported rather than minted per frontend because the id *is* the replay
+/// guard: 128 bits from the same CSPRNG everywhere, so no frontend can weaken it
+/// to a counter or a timestamp that a third party could predict and use to
+/// inject an `Accept` for a transfer nobody offered. See
+/// `comrade_core::handoff::new_transfer_id`.
+#[uniffi::export]
+pub fn new_attachment_transfer_id() -> String {
+    comrade_core::handoff::new_transfer_id()
+}
+
 #[uniffi::export]
 pub fn all_workspaces() -> Vec<WorkspaceKeyLabel> {
     AppWorkspace::all()
@@ -543,6 +570,31 @@ impl Comrade {
             .await
     }
 
+    /// React to a message in `peer`'s thread with `emoji` — or take an existing
+    /// reaction back by passing the same emoji again. Returns the reaction now
+    /// standing, or `None` if the tap withdrew one.
+    ///
+    /// The toggle is decided on the Rust side (see
+    /// `ComradeRuntime::toggle_reaction`) so the two frontends cannot disagree
+    /// about what tapping an already-sent emoji means.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn toggle_reaction(
+        &self,
+        peer: String,
+        target_id: String,
+        emoji: String,
+    ) -> Result<Option<ReactionDto>, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.toggle_reaction(&peer, &target_id, &emoji).await
+    }
+
+    /// Every reaction in `peer`'s conversation, oldest first, from the encrypted
+    /// store — so a thread opens with its reactions already drawn.
+    pub fn reactions(&self, peer: String) -> Result<Vec<ReactionDto>, UiError> {
+        self.inner.blocking_read().reactions(&peer)
+    }
+
     /// Retry every DM sitting in the sender outbox because no relay would take
     /// it. Returns how many a relay accepted this pass.
     ///
@@ -631,6 +683,31 @@ impl Comrade {
 
     pub async fn set_username(&self, name: String) -> Result<ProfileDto, UiError> {
         self.inner.write().await.set_username(&name).await
+    }
+
+    /// Set (or clear, with an empty string) this identity's bio, and republish.
+    pub async fn set_about(&self, about: String) -> Result<ProfileDto, UiError> {
+        self.inner.write().await.set_about(&about).await
+    }
+
+    /// Everything a profile page draws for one peer, from the local cache alone.
+    pub fn peer_profile(&self, npub: String) -> Result<PeerProfileDto, UiError> {
+        self.inner.blocking_read().peer_profile(&npub)
+    }
+
+    /// A peer's cached avatar bytes, or `None` to draw initials. Never touches
+    /// the network.
+    pub fn peer_avatar(&self, npub: String) -> Result<Option<MediaBytesDto>, UiError> {
+        self.inner.blocking_read().peer_avatar(&npub)
+    }
+
+    /// Whether peer-published pictures may be fetched at all (default on).
+    pub fn remote_avatars_enabled(&self) -> Result<bool, UiError> {
+        self.inner.blocking_read().remote_avatars_enabled()
+    }
+
+    pub fn set_remote_avatars_enabled(&self, on: bool) -> Result<(), UiError> {
+        self.inner.blocking_read().set_remote_avatars_enabled(on)
     }
 
     pub fn add_contact(&self, npub: String, alias: String) -> Result<ContactDto, UiError> {
@@ -794,6 +871,95 @@ impl Comrade {
     /// The crisis helplines Tara hands off to.
     pub fn tara_crisis_resources(&self) -> Vec<CrisisResourceDto> {
         self.inner.blocking_read().tara_crisis_resources()
+    }
+
+    // ── In-chat commands, tasks and offers ───────────────────────────────────
+
+    /// What the text in a composer means. Pure and needs no vault, so Kotlin can
+    /// call it on every keystroke — which is what the command bar does.
+    pub fn parse_chat_command(&self, text: String) -> ChatCommand {
+        self.inner.blocking_read().parse_chat_command(&text)
+    }
+
+    /// Every command the composer offers, for `/`-autocomplete and `/help`.
+    pub fn chat_command_catalog(&self) -> Vec<CommandSpec> {
+        self.inner.blocking_read().chat_command_catalog()
+    }
+
+    /// Every `@handle` in `text`, unresolved — for drawing chips while typing.
+    pub fn chat_mentions(&self, text: String) -> Vec<Mention> {
+        self.inner.blocking_read().chat_mentions(&text)
+    }
+
+    /// Every `@handle` in `text`, resolved against the saved contacts. A match
+    /// with no `npub` and a non-empty `candidates` is an ambiguity the UI must
+    /// ask about rather than resolve.
+    pub fn resolve_mentions(&self, text: String) -> Result<Vec<MentionMatchDto>, UiError> {
+        self.inner.blocking_read().resolve_mentions(&text)
+    }
+
+    /// How far a `/play` query gets without a network or a library.
+    pub fn play_query(&self, query: String, service: Option<MusicService>) -> PlayTargetDto {
+        self.inner.blocking_read().play_query(&query, service)
+    }
+
+    /// What to do about a `/play`, once the caller has searched its own library.
+    ///
+    /// `found_local_copy` is only consulted for [`PlayPlan::FindLocally`]; see
+    /// [`comrade_ui::play_route`] for why a local file does not make a DRM link
+    /// playable. Pure, so it takes no lock.
+    pub fn play_route(&self, plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+        comrade_ui::play_route(plan, found_local_copy)
+    }
+
+    /// Name a piece of work. `peer` of `None` is a note to self, which never
+    /// touches a relay.
+    pub async fn assign_task(
+        &self,
+        peer: Option<String>,
+        text: String,
+    ) -> Result<TaskDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.assign_task(peer, &text).await
+    }
+
+    /// Every task this device knows about, newest first.
+    pub fn tasks(&self) -> Result<Vec<TaskDto>, UiError> {
+        self.inner.blocking_read().tasks()
+    }
+
+    /// Move a task to `state` and tell the other party. Errors if this device
+    /// has no standing to make that change.
+    pub async fn set_task_state(&self, id: String, state: TaskState) -> Result<TaskDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.set_task_state(&id, state).await
+    }
+
+    /// Offer an in-app action to comrades. The outcome names who was told and
+    /// why the others were not — a bare count could not tell "the cooldown is
+    /// running" from "that person is not your comrade".
+    pub async fn offer_action(
+        &self,
+        action: AppAction,
+        peers: Vec<String>,
+    ) -> Result<OfferOutcomeDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.offer_action(action, peers).await
+    }
+
+    /// Say something to Tara from inside a conversation — a private aside that
+    /// never reaches the peer. See `ComradeRuntime::tara_aside`.
+    pub fn tara_aside(&self, text: String) -> Result<TaraMessageDto, UiError> {
+        self.inner.blocking_read().tara_aside(&text)
+    }
+
+    /// Ask Tara **in** the conversation — `@tara …`, which the peer sees. The
+    /// counterpart to [`Self::tara_aside`]; see `RuntimeHandles::tara_in_chat`
+    /// for the three ways this differs from a cloud assistant, and for why a
+    /// question that trips the distress detector sends nothing.
+    pub async fn tara_in_chat(&self, peer: String, text: String) -> Result<TaraChatDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.tara_in_chat(&peer, &text).await
     }
 
     // ── Attention (usage mirror · focus sessions · long read) ────────────────
@@ -1037,15 +1203,38 @@ impl Comrade {
         handles.together_share(signal).await
     }
 
+    /// Send one step of handing a **large attachment** over — the road a file
+    /// takes when it is past [`comrade_core::media::MAX_MEDIA_BYTES`] and the
+    /// hosted path cannot carry it.
+    ///
+    /// Deliberately not [`Self::together_share`]: that one refuses outside a live
+    /// watch-together session, which is right for a playhead and wrong here —
+    /// nobody starts a listening session to send a video file. The gate a handoff
+    /// gets instead is on receipt, and it is the same one a call signal clears.
+    /// See `comrade_core::handoff`.
+    pub async fn attachment_handoff_send(
+        &self,
+        peer: String,
+        transfer_id: String,
+        signal: HandoffSignal,
+    ) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .attachment_handoff_send(&peer, &transfer_id, signal)
+            .await
+    }
+
     /// What this device does when the only path a transfer could take is
     /// somebody else's relay.
     pub fn share_relay_policy(&self) -> RelayPolicy {
         self.inner.blocking_read().share_relay_policy()
     }
 
-    /// Change it. Takes effect on the next transfer connection.
-    pub fn set_share_relay_policy(&self, policy: RelayPolicy) {
-        self.inner.blocking_read().set_share_relay_policy(policy);
+    /// Change it, and remember it. Takes effect on the next transfer
+    /// connection. Errors if the vault is locked — the choice still holds for
+    /// this process, but it could not be written down.
+    pub fn set_share_relay_policy(&self, policy: RelayPolicy) -> Result<(), UiError> {
+        self.inner.blocking_read().set_share_relay_policy(policy)
     }
 
     /// Whether a transfer connection may be given TURN servers at all. Under
@@ -1067,11 +1256,13 @@ impl Comrade {
         local_candidate_type: String,
         remote_candidate_type: String,
         total_bytes: u64,
+        consent_granted: bool,
     ) -> ShareVerdictDto {
         self.inner.blocking_read().share_transfer_verdict(
             &local_candidate_type,
             &remote_candidate_type,
             total_bytes,
+            consent_granted,
         )
     }
 

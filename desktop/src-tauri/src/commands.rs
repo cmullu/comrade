@@ -15,11 +15,13 @@
 use std::sync::Arc;
 
 use comrade_ui::{
-    AttentionDayDto, AttentionSummaryDto, CallRecordDto, CallSessionDto, ChitthiDto, ComradeDto,
-    ComradeRuntime, ContactDto, ConversationDto, CrisisResourceDto, FocusSessionDto,
-    FoundProfileDto, IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
-    MessageDto, MessageRequestDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto,
-    TaraMessageDto, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    AppAction, AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto,
+    CallSessionDto, ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto,
+    ConversationDto, CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto,
+    IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
+    MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
+    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraChatDto,
+    TaraMessageDto, TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -508,6 +510,47 @@ pub async fn together_share(
         .map_err(|e| e.to_string())
 }
 
+/// Which road an attachment of `total_bytes` takes: `"hosted"` or `"peer_to_peer"`.
+///
+/// A command rather than a constant in the webview. The threshold *is* the hosted
+/// ceiling (`comrade_core::media::MAX_MEDIA_BYTES`), so a frontend keeping its own
+/// copy of 10 MB is a frontend that disagrees with the core the day that number
+/// moves — and the two roads have different failure modes a person must be told
+/// about, which makes this a question worth asking rather than assuming.
+#[tauri::command]
+pub async fn attachment_route_for_bytes(total_bytes: u64) -> Result<AttachmentRoute, String> {
+    Ok(comrade_ui::route_for_bytes(total_bytes))
+}
+
+/// Send one step of handing a large attachment to `peer`, scoped to `transfer_id`.
+///
+/// `signal_json` is a `comrade_core::handoff::HandoffSignal`. It crosses as JSON
+/// for the same reason [`together_share`]'s does: the protocol is the sort of
+/// thing that grows a step, and this layer's job is to relay one, not to have an
+/// opinion about how many there are.
+///
+/// Unlike [`together_share`] there is no session to be inside — nobody starts a
+/// watch-together session to send a video file — so the gate is the one the
+/// runtime applies on *receipt* (an accepted conversation, the same bar a call
+/// signal clears). See `comrade_ui::ComradeRuntime::attachment_handoff_send`.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn attachment_handoff_send(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    transfer_id: String,
+    signal_json: String,
+) -> Result<(), String> {
+    let signal: comrade_ui::HandoffSignal =
+        serde_json::from_str(&signal_json).map_err(|e| format!("invalid handoff signal: {e}"))?;
+    let handles = state.read().await.handles();
+    handles
+        .attachment_handoff_send(&peer, &transfer_id, signal)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Which ICE servers a *transfer* connection may be built with.
 ///
 /// Not the same list a call gets, and that is the point: a relayed call is a
@@ -541,11 +584,13 @@ pub async fn share_transfer_verdict(
     local_candidate_type: String,
     remote_candidate_type: String,
     total_bytes: u64,
+    consent_granted: bool,
 ) -> Result<comrade_ui::ShareVerdictDto, String> {
     Ok(state.read().await.share_transfer_verdict(
         &local_candidate_type,
         &remote_candidate_type,
         total_bytes,
+        consent_granted,
     ))
 }
 
@@ -566,8 +611,11 @@ pub async fn set_share_relay_policy(
 ) -> Result<(), String> {
     let policy: comrade_ui::RelayPolicy =
         serde_json::from_str(&policy_json).map_err(|e| format!("invalid relay policy: {e}"))?;
-    state.read().await.set_share_relay_policy(policy);
-    Ok(())
+    state
+        .read()
+        .await
+        .set_share_relay_policy(policy)
+        .map_err(|e| e.to_string())
 }
 
 /// Send a `Hangup` with `reason` to end/reject a call.
@@ -646,6 +694,71 @@ pub async fn set_username(
         .await
         .set_username(&name)
         .await
+        .map_err(|e| e.to_string())
+}
+
+/// Set (or clear, with an empty string) this identity's bio, and republish.
+#[tauri::command]
+pub async fn set_about(
+    state: tauri::State<'_, Runtime>,
+    about: String,
+) -> Result<ProfileDto, String> {
+    state
+        .write()
+        .await
+        .set_about(&about)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Everything a profile page draws for one peer, from the local cache alone —
+/// no relay round trip, so it answers offline and immediately.
+#[tauri::command]
+pub async fn peer_profile(
+    state: tauri::State<'_, Runtime>,
+    npub: String,
+) -> Result<PeerProfileDto, String> {
+    state
+        .read()
+        .await
+        .peer_profile(&npub)
+        .map_err(|e| e.to_string())
+}
+
+/// A peer's cached avatar bytes, base64, or `None` to draw initials. Reads the
+/// encrypted store and never the network.
+#[tauri::command]
+pub async fn peer_avatar(
+    state: tauri::State<'_, Runtime>,
+    npub: String,
+) -> Result<Option<MediaBytesDto>, String> {
+    state
+        .read()
+        .await
+        .peer_avatar(&npub)
+        .map_err(|e| e.to_string())
+}
+
+/// Whether peer-published pictures may be fetched at all (default on).
+#[tauri::command]
+pub async fn remote_avatars_enabled(state: tauri::State<'_, Runtime>) -> Result<bool, String> {
+    state
+        .read()
+        .await
+        .remote_avatars_enabled()
+        .map_err(|e| e.to_string())
+}
+
+/// Turn peer-published picture fetching on or off.
+#[tauri::command]
+pub async fn set_remote_avatars_enabled(
+    state: tauri::State<'_, Runtime>,
+    on: bool,
+) -> Result<(), String> {
+    state
+        .read()
+        .await
+        .set_remote_avatars_enabled(on)
         .map_err(|e| e.to_string())
 }
 
@@ -914,6 +1027,152 @@ pub async fn tara_crisis_resources(
     state: tauri::State<'_, Runtime>,
 ) -> Result<Vec<CrisisResourceDto>, String> {
     Ok(state.read().await.tara_crisis_resources())
+}
+
+// ── In-chat commands, tasks and offers ─────────────────────────────────────────
+
+/// What the text in a composer means. Pure — the composer calls this as the user
+/// types, which is what drives the `/` picker and the mention chips.
+#[tauri::command]
+pub async fn parse_chat_command(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<ChatCommand, String> {
+    Ok(state.read().await.parse_chat_command(&text))
+}
+
+/// Every command the composer offers, for `/`-autocomplete and `/help`.
+#[tauri::command]
+pub async fn chat_command_catalog(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Vec<CommandSpec>, String> {
+    Ok(state.read().await.chat_command_catalog())
+}
+
+/// Every `@handle` in `text`, unresolved.
+#[tauri::command]
+pub async fn chat_mentions(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<Vec<Mention>, String> {
+    Ok(state.read().await.chat_mentions(&text))
+}
+
+/// Every `@handle` in `text`, resolved against the saved contacts. A match with
+/// no `npub` but a non-empty `candidates` is an ambiguity to ask about.
+#[tauri::command]
+pub async fn resolve_mentions(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<Vec<MentionMatchDto>, String> {
+    state
+        .read()
+        .await
+        .resolve_mentions(&text)
+        .map_err(|e| e.to_string())
+}
+
+/// How far a `/play` query gets without a network or a library.
+#[tauri::command]
+pub async fn play_query(
+    state: tauri::State<'_, Runtime>,
+    query: String,
+    service: Option<MusicService>,
+) -> Result<PlayTargetDto, String> {
+    Ok(state.read().await.play_query(&query, service))
+}
+
+/// What to do about a `/play`, once the caller has searched its own library.
+///
+/// Pure, so it never touches the runtime — it is a command only so the decision
+/// stays in one place across the frontends rather than being reimplemented in JS
+/// the day desktop grows a player (`docs/TOGETHER.md` §9).
+#[tauri::command]
+pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+    comrade_ui::play_route(plan, found_local_copy)
+}
+
+/// Name a piece of work. `peer` of `None` is a note to self — no relay.
+#[tauri::command]
+pub async fn assign_task(
+    state: tauri::State<'_, Runtime>,
+    peer: Option<String>,
+    text: String,
+) -> Result<TaskDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .assign_task(peer, &text)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Every task this device knows about, newest first.
+#[tauri::command]
+pub async fn tasks(state: tauri::State<'_, Runtime>) -> Result<Vec<TaskDto>, String> {
+    state.read().await.tasks().map_err(|e| e.to_string())
+}
+
+/// Move a task to `state_name` and tell the other party.
+#[tauri::command]
+pub async fn set_task_state(
+    state: tauri::State<'_, Runtime>,
+    id: String,
+    task_state: TaskState,
+) -> Result<TaskDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .set_task_state(&id, task_state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Offer an in-app action to comrades. The outcome names who was told and why
+/// the others were not — a bare count could not tell "the cooldown is running"
+/// from "that person is not your comrade".
+#[tauri::command]
+pub async fn offer_action(
+    state: tauri::State<'_, Runtime>,
+    action: AppAction,
+    peers: Vec<String>,
+) -> Result<OfferOutcomeDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .offer_action(action, peers)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Say something to Tara from inside a conversation — a private aside that never
+/// reaches the peer.
+#[tauri::command]
+pub async fn tara_aside(
+    state: tauri::State<'_, Runtime>,
+    text: String,
+) -> Result<TaraMessageDto, String> {
+    state
+        .read()
+        .await
+        .tara_aside(&text)
+        .map_err(|e| e.to_string())
+}
+
+/// Ask Tara **in** the conversation — `@tara …`, which the peer sees, as against
+/// `/tara`'s private aside above.
+///
+/// See `RuntimeHandles::tara_in_chat`: the answer is computed on this device, the
+/// peer's messages are never handed to her, and a question that trips the
+/// distress detector is answered without sending anything at all.
+#[tauri::command]
+pub async fn tara_in_chat(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    text: String,
+) -> Result<TaraChatDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .tara_in_chat(&peer, &text)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Attention (usage mirror · focus sessions · long read) ──────────────────────

@@ -1,7 +1,9 @@
 package mullu.comrade.together
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import mullu.comrade.ComradeCore
@@ -35,6 +37,26 @@ object LibraryResolver {
 
     /** A candidate from the device's own media library. */
     data class Candidate(val uri: Uri, val recording: Recording, val durationMs: Long)
+
+    /**
+     * Whether this app may read the audio library at all.
+     *
+     * False until someone says yes — the manifest declares `READ_MEDIA_AUDIO`
+     * (API 33+) and `READ_EXTERNAL_STORAGE` below it, but both are runtime
+     * permissions, so declaring them grants nothing. [MediaLibraryAccess] owns
+     * when the question is put; this only reports the answer.
+     *
+     * It exists so callers can tell "no copy of that here" from "not allowed to
+     * look", which are different problems with different next steps — a UI that
+     * conflated them would send someone hunting for a file they already have.
+     * The file picker needs no permission (SAF grants per file), so the fallback
+     * path works either way, and a refusal costs the automatic match rather than
+     * the feature.
+     */
+    fun mayRead(context: Context): Boolean {
+        val permission = MediaLibraryAccess.permissionFor(Build.VERSION.SDK_INT)
+        return context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+    }
 
     /**
      * The best match for `want` in this device's library, or `null` if nothing

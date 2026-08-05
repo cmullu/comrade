@@ -42,6 +42,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import mullu.comrade.handoff.HandoffDecisions
 
 /**
  * One attachment that has been obtained but not yet sent, waiting on the
@@ -55,11 +56,29 @@ class PendingAttachment(
     /** The device-chosen filename, or empty for a capture that has none. */
     val name: String,
     val mime: String,
-    val bytes: ByteArray,
+    /**
+     * The bytes, for a file taking the hosted road.
+     *
+     * Null for one going straight to the other device: a 400 MB attachment is
+     * read a chunk at a time out of the provider's descriptor while it is being
+     * sent, and holding it here would be an out-of-memory kill before the sender
+     * had even pressed Send.
+     */
+    val bytes: ByteArray?,
+    /** The provider URI, for a file going straight to the other device. */
+    val uri: Uri?,
+    /** The size: [bytes]' length when there are bytes, the provider's otherwise. */
+    val sizeBytes: Long,
     /** What the caption box opens with — the composer's draft, or empty while a reply is pending. */
     val seedCaption: String,
     /** Whether [seedCaption] came from the composer, so the box must be cleared on success. */
     val consumesDraft: Boolean,
+    /**
+     * Whether this file goes straight to the other device rather than through a
+     * host. Answered by `attachment_route_for_bytes`, never by comparing against
+     * a local 10 MB — the threshold belongs to the core that enforces it.
+     */
+    val peerToPeer: Boolean,
 )
 
 /**
@@ -114,7 +133,7 @@ fun AttachmentPreviewSheet(
                         // The one place the device-chosen filename belongs: it
                         // answers "is this the file I meant", and it is
                         // deliberately not what gets sent as the caption.
-                        attachmentPreviewDetail(pending.name, pending.bytes.size.toLong()),
+                        attachmentPreviewDetail(pending.name, pending.sizeBytes),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -131,6 +150,18 @@ fun AttachmentPreviewSheet(
                     Text("✕", style = MaterialTheme.typography.titleMedium)
                 }
             }
+
+            // Which road this file takes, and what that costs — stated before
+            // Send rather than discovered afterwards as a progress bar that never
+            // moves.
+            Text(
+                HandoffDecisions.routeNote(pending.peerToPeer),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .testTag("attachment-preview-route"),
+            )
 
             AttachmentPreviewBody(pending)
 
@@ -181,8 +212,17 @@ fun AttachmentPreviewSheet(
 
 @Composable
 private fun AttachmentPreviewBody(pending: PendingAttachment) {
+    val bytes = pending.bytes
+    if (bytes == null) {
+        // Nothing to draw: the file was never read into memory, and decoding a
+        // 400 MB pick to show a thumbnail is the allocation that keeping it out of
+        // memory avoided. The name, the size and the road are the whole story for
+        // a file this size.
+        AttachmentPreviewCard(pending, note = null)
+        return
+    }
     when (attachmentPreviewKind(pending.mime)) {
-        AttachmentPreviewKind.Image -> InlinePreviewImage(pending)
+        AttachmentPreviewKind.Image -> InlinePreviewImage(pending, bytes)
         // No still frame and no player: feeding `VideoView` means a file, and an
         // unsent attachment must not put plaintext on disk (AUDIT S-4).
         AttachmentPreviewKind.Video,
@@ -193,12 +233,12 @@ private fun AttachmentPreviewBody(pending: PendingAttachment) {
 }
 
 @Composable
-private fun InlinePreviewImage(pending: PendingAttachment) {
+private fun InlinePreviewImage(pending: PendingAttachment, bytes: ByteArray) {
     var bitmap by remember(pending) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(pending) { mutableStateOf(false) }
 
     LaunchedEffect(pending) {
-        val decoded = withContext(Dispatchers.IO) { decodePreview(pending.bytes) }
+        val decoded = withContext(Dispatchers.IO) { decodePreview(bytes) }
         if (decoded == null) failed = true else bitmap = decoded
     }
 
@@ -292,6 +332,20 @@ private fun AttachmentPreviewCard(pending: PendingAttachment, note: String?) {
         }
     }
 }
+
+/**
+ * The length of a picked file when the provider reported none in
+ * [describePickedFile].
+ *
+ * `OpenableColumns.SIZE` is optional in the SAF contract, and a missing size used
+ * to mean reading the whole file to measure it — which for a 400 MB pick is the
+ * out-of-memory kill that not holding it in memory exists to avoid. The
+ * descriptor's `statSize` answers the same question for nothing, and reports -1
+ * for a stream that genuinely has no length, which reads as "still unknown".
+ */
+fun pickedFileLength(context: Context, uri: Uri): Long? = runCatching {
+    context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+}.getOrNull()?.takeIf { it >= 0 }
 
 /** What the content provider says about a picked file, before it is read. */
 class PickedFileInfo(
