@@ -183,6 +183,7 @@ pub fn run() {
             commands::set_task_state,
             commands::offer_action,
             commands::tara_aside,
+            commands::tara_in_chat,
             // Attention (usage mirror · focus sessions · long read — local only)
             commands::record_attention_day,
             commands::attention_days,

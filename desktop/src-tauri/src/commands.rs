@@ -20,8 +20,8 @@ use comrade_ui::{
     ConversationDto, CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto,
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
     MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
-    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraMessageDto,
-    TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraChatDto,
+    TaraMessageDto, TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -1153,6 +1153,25 @@ pub async fn tara_aside(
         .read()
         .await
         .tara_aside(&text)
+        .map_err(|e| e.to_string())
+}
+
+/// Ask Tara **in** the conversation — `@tara …`, which the peer sees, as against
+/// `/tara`'s private aside above.
+///
+/// See `RuntimeHandles::tara_in_chat`: the answer is computed on this device, the
+/// peer's messages are never handed to her, and a question that trips the
+/// distress detector is answered without sending anything at all.
+#[tauri::command]
+pub async fn tara_in_chat(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    text: String,
+) -> Result<TaraChatDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .tara_in_chat(&peer, &text)
+        .await
         .map_err(|e| e.to_string())
 }
 

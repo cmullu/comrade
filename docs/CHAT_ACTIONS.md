@@ -18,7 +18,8 @@ This brings four of those into the composer.
 | Type this | It does |
 |---|---|
 | `/play`, `/listen`, `/watch`, `/spotify`, `/youtube`, `/apple` | Listen or watch together |
-| `@tara …` or `/tara …` | A private aside — only you see it |
+| `/tara …` | A private aside — only you see it |
+| `@tara …` | Ask Tara in the chat — you both see her answer |
 | `/task <what> [@who]` | Name a piece of work; no `@who` is a note to self |
 | `/breathe`, `/focus`, `/journal`, `/read` | Open it here |
 | `/comrade-breathe @who` (and `-focus`, `-journal`, `-read`, `-tara`) | Offer it to a comrade |
@@ -58,16 +59,70 @@ published handle, following `ContactDto`'s documented precedence. Two rules:
   message reaches the wrong person. `MentionMatchDto::candidates` carries the
   ambiguity up for the UI to ask about.
 
-## 2. Tara in a chat — one guard and one reframe
+## 2. Tara in a chat — two audiences, one guard and one reframe
 
-`@tara <text>` opens a **private aside**: it never sends, the peer never sees it,
-and it lands in the existing `tara_companion` thread. The composer looks
-different from the moment `@tara ` is typed, before there is anything to parse —
-a private thing that looks like a message is how somebody sends one by accident.
+**The sigil is the audience.** Same companion, same engine, two different rooms:
 
-**It is seeded only with what the user typed.** Not the chat history, not the
-peer's messages. A "reflect on this conversation" feature would quietly turn the
-other person's words into input to a companion they never opted into.
+| Typed | Who sees it | Where it goes |
+|---|---|---|
+| `/tara <text>` | only you | the private `tara_companion` thread; no relay is touched |
+| `@tara <text>` | both of you | two ordinary DMs into the conversation, `@Meta AI`-style |
+
+`/tara` is the **private aside** and always was: it never sends, the peer never
+sees it. `@tara` is Tara **in the room** — the question goes to the peer as your
+own message and her answer follows it, so the other person can read both.
+
+The composer says which one is in the box from the moment the sigil is typed,
+before there is anything to parse (`ChatCommands.taraDraft` /
+`chat_commands.taraDraft`, mirrored and tested on both frontends). That label is
+load-bearing in *both* directions: one character decides whether a private
+thought gets published, or whether a question the other person was waiting for
+was ever sent at all.
+
+**One exception, and it is not the frontend's.** A question that trips
+`detect_distress` is answered and **nothing is sent** — `TaraChatDto.kept_private`
+says so, and the composer has to repeat it, because someone who asked in the open
+would otherwise assume the other person had read it. A crisis hand-off is not
+something to publish into somebody else's chat on the asker's behalf, and the
+grammar cannot tell that case from any other until the reply exists — so the
+check lives in `RuntimeHandles::tara_in_chat`, after the reply and before the
+send. The helplines go with the reply in either room (`AUDIT.md` §8's gate).
+
+**Her answer is a third participant on screen, and a marked ordinary message on
+the wire.** It carries `tara::TARA_CHAT_PREFIX` (`"Tara: "`) between devices, and
+`comrade_ui::split_author` turns that into `MessageDto.author = MessageAuthor::Tara`
+with the marker off the text — one function, called from both `MessageDto`
+construction sites, so a line cannot read one way as it is sent and another way
+after a reload. All three frontends draw her bubble from the field: left-aligned
+on *both* devices (her answer is carried by whichever phone asked, so aligning by
+`outgoing` would put one line on opposite sides of the two screens), named, in
+its own colour, and without delivery ticks — the question directly above carries
+the same receipt, and a tick on a third party's line reads as a claim about her.
+
+The prefix deliberately **stays** on the wire rather than being dropped now that
+the field exists. A NIP-17 DM opened in some other Nostr client has no author
+field to read, and "Tara: …" is a truer fallback there than her words in the
+sender's mouth.
+
+What the field does not buy is authentication. Nothing signs the marker, so a
+Tara bubble means *the sending Comrade says this came from her* — the standing a
+quoted reply has, not proof. `AUDIT.md` Q17 accepts that explicitly: nothing may
+gate on the field, and the tests on both sides assert that a hand-typed line
+parses rather than hiding it.
+
+The answer also replies to the question by event id — two messages sent in the
+same second share a `created_at`, and the receiver's thread sorts on that, so the
+`e` tag is what keeps her answer under what it answered.
+
+**She is seeded only with what the user typed**, in both rooms. Not the chat
+history, not the peer's messages. A "reflect on this conversation" feature would
+quietly turn the other person's words into input to a companion they never opted
+into — and in the shared room the peer is a *reader*, never material.
+
+**A shared ask does not touch the private thread.** It is not a turn in the
+private session, and merging them would let a shared chat reshape a
+journal-adjacent space the peer has no part in. The prompt-rotation seed
+therefore counts the Tara lines in *this* thread.
 
 **`tara::mentions_third_party` sits in front of the engine**, where
 `detect_distress` already sits, and must stay in front of any future model
@@ -78,6 +133,10 @@ characterisation of them; it gets the askable question back:
 > and it wouldn't be fair to them. What I can stay with is your side of it:
 > what's coming up for you about @xyz?
 
+This matters *more* in the shared room, not less: a characterisation of @xyz would
+now be delivered to the person you are talking to. The gate is the same one, and
+`naming_a_third_party_still_reframes_when_the_room_can_read_it` pins it there.
+
 The request's own example — *"@tara what does she @xyz thinking of herself"* — is
 a literal test vector. Two reasons, both from `docs/TARA.md`'s non-negotiable
 gates. Inferring what a real person thinks of themselves is a psychological
@@ -86,7 +145,7 @@ correct it (gate 1, "never diagnoses"). And `ReflectiveCompanion` is a cue-word
 template matcher — asked about a third party it would emit a fluent, confident
 sentence with no information in it, about a human being the reader knows.
 
-**The rule is blunt on purpose.** Any aside naming a person turns around; there
+**The rule is blunt on purpose.** Any question naming a person turns around; there
 is no cue list deciding which questions about somebody count as assessments,
 because a fuzzy matcher guarding a hard boundary fails on exactly the cases that
 matter. Bluntness costs almost nothing, because the redirect is *also* the right
@@ -95,7 +154,8 @@ reflective move: "I'm worried about @ana" is legitimate material here, and
 safety property and the product behaviour are the same sentence.
 
 `detect_distress` still runs **first**. Somebody in crisis who names a friend
-needs the helplines, not a reflective question.
+needs the helplines, not a reflective question — and in the shared room, needs
+them without the exchange being sent anywhere.
 
 ## 3. Tasks
 
@@ -296,6 +356,16 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
   Android also cannot *start* a YouTube session: core can carry the invitation,
   but this app has no player for one and cannot join its own, so `PLAY_EMBED`
   refuses rather than inviting someone to something we cannot attend.
+- ~~**`@tara` is only ever private.**~~ **Both audiences shipped 2026-08-04.**
+  `@tara` now answers in the conversation (`ChatCommand::TaraHere` →
+  `RuntimeHandles::tara_in_chat`) and `/tara` stays the private session; §2 has
+  the whole shape, including the distress case that sends nothing. Android and
+  desktop both label the audience while typing. **Closed the rest of the way
+  2026-08-05**: `MessageDto` carries `author: MessageAuthor`, the bindings were
+  regenerated rather than hand-edited, and all three frontends — Flutter
+  included — draw her line as its own participant. What remains is not a gap but
+  an accepted boundary: the marker is unsigned, so the bubble is attribution
+  rather than attestation (`AUDIT.md` Q17).
 - **`/breathe` and friends do not navigate.** `ConversationScreen` owns no nav
   state, so the composer names the tab rather than opening it. One host
   parameter away.
@@ -311,6 +381,46 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
   exercised by CI against a fixture and the parser is tested; nobody has pointed
   it at musicbrainz.org.
 
+### Three things that shipped broken, and what was wrong
+
+Reported from a device on 2026-08-04, all three in the first Android build of
+this feature. None had a test that could have caught it, which is the part worth
+recording.
+
+1. **The `/` picker could not be scrolled.** A bare `/` matches the whole
+   catalogue, each row is two lines, and Android rendered them in a plain
+   `Column` with no cap — so the list grew past the screen, the rows below the
+   fold were unreachable, and the thread was pushed out of view. Now a
+   `LazyColumn` bounded by `PICKER_MAX_HEIGHT`. `pickerRows` was right the whole
+   time and its tests still pass, which is exactly why they did not help: **the
+   defect was in how many rows fit, and nothing tested that.** Desktop was never
+   affected — `.command-picker` has had `max-height` + `overflow-y: auto` since
+   it landed.
+2. **An ambiguous `@handle` was a dead end.** Two contacts answering to one
+   handle produced *"More than one contact answers to @ana — pick which one"* —
+   an instruction with nothing to pick, so the command could never be completed.
+   The ambiguity itself was right (`MentionMatchDto::candidates` has always
+   carried it; picking one for the user is how a private message reaches the
+   wrong person). What was missing was the chooser. Now `ComposerPlan.Choose` /
+   `CHOOSE` carries the candidates, the composer lists them, and picking one
+   records the choice and **re-runs the same draft** through `withChoices`. Every
+   row shows the short key beside the name, because the usual reason a handle is
+   ambiguous is that both people chose the same name too. A pin is honoured only
+   while it still names one of that handle's own candidates — a stale choice must
+   not silently retarget a later message.
+3. **Opening Tasks from the drawer killed the app.** `TaskListScreen` used two
+   early `return@Column`s — the only ones in the whole Android source — so the
+   Column emitted a different number of composable groups before and after
+   `loaded` flipped, which is the shape that throws on the *recomposition* rather
+   than the first frame. Rewritten as a single `when`, the way every other screen
+   here branches. **This one is stated with a caveat:** no Android SDK exists in
+   the container that wrote the fix, so the diagnosis is from reading the code,
+   not from a stack trace. What is *not* a caveat is the regression cover —
+   `MainActivityUiTest` now taps `drawer-tasks` on the emulator and waits for the
+   list to finish loading, so the failing recomposition is exercised on a device
+   in CI. `TaskList`'s decisions were all unit-tested and all passed; the crash
+   was in the composition around them.
+
 ## 8. Where the code lives
 
 | Layer | What it owns |
@@ -318,13 +428,14 @@ coming back, plus the stranger gate and an offer arriving as a readable line.
 | `comrade_core::command` | The grammar, mentions, the catalogue of commands, `AppAction` and the offer wire. Pure; 44 tests. |
 | `comrade_core::karya` | Task shape, the state machine, the envelope, the rendered line. Pure; 21 tests. |
 | `comrade_core::catalogue` | `CatalogueResolver`, `choose_audio_plan`, the tier ladder, the licence gate, MusicBrainz. 15 tests, 21 under `catalogue-http`. |
-| `comrade_core::tara` | `mentions_third_party` and the reframing reply, in front of the engine. |
+| `comrade_core::tara` | `mentions_third_party` and the reframing reply, in front of the engine; `TARA_CHAT_PREFIX` / `tara_chat_line` / `tara_chat_answer` for the shared line, whose tests assert it is a *label* rather than a guarantee. |
 | `comrade_storage` | The `karya` tree; ciphertext-at-rest and panic-wipe pinned. |
-| `comrade_ui::runtime` | `parse_chat_command`, `resolve_mentions`, `play_query`, `assign_task` / `tasks` / `set_task_state`, `offer_action`, `tara_aside`, and two arms in `dispatch_incoming_dm`. |
+| `comrade_ui::runtime` | `parse_chat_command`, `resolve_mentions`, `play_query`, `assign_task` / `tasks` / `set_task_state`, `offer_action`, `tara_aside`, `tara_in_chat`, and two arms in `dispatch_incoming_dm`. Nothing was added to the dispatcher for `@tara`: her answer is an ordinary DM, so the receiving side already renders it. |
 | `comrade_jni` (uniffi), `desktop/src-tauri` | The same calls. **No `api.rs` change**, so no bridge regeneration. |
-| `desktop/ui/chat_commands.mjs` | What the composer does with a parsed command, the `/` picker, and the honest "not here yet" sentences. 28 `node --test` cases. |
-| `android/…/ui/ChatCommands.kt` | The same decisions, mirroring the desktop vectors case for case. 22 JVM cases; Compose-free. **Never compiled here** — no Android SDK in the container that wrote it. |
+| `desktop/ui/chat_commands.mjs` | What the composer does with a parsed command, the `/` picker, the honest "not here yet" sentences, and which Tara audience a draft implies, plus the mirror of `split_author` the live-DM path needs. 35 `node --test` cases. |
+| `android/…/ui/ChatCommands.kt` | The same decisions, mirroring the desktop vectors case for case. 35 JVM cases; Compose-free. **Never compiled here** — no Android SDK in the container that wrote it. |
 | `desktop/ui/task_list.mjs` · `android/…/ui/TaskList.kt` | Grouping, which buttons a row offers, the subtitle, the empty copy. Mirrored vectors — 15 `node --test` cases, 11 JVM. Note the field names differ on purpose: Tauri sends serde snake_case, uniffi generates camelCase properties — and so is the state a button sends: `wireState()` is lowercase because `TaskState` is `rename_all = "snake_case"`, while Android passes the uniffi enum and has no string to get wrong. |
 | `desktop/ui/main.js` (Tasks tab) · `android/…/ui/TaskListScreen.kt` | The rendering, and nothing else — every decision above it. |
 | `comrade_ui::play_route` | The five things a frontend may do about a `/play`, from the plan plus its own library answer. Only `StartTogether` opens a session, and only on a library hit. 3 tests. |
 | `ChatCommands.playNote` · `LibraryResolver.mayRead` | The sentence for each route, and the one distinction that is not core's to make: "no copy here" versus "not allowed to look". 6 JVM cases. |
+| `android/…/together/MediaLibraryAccess.kt` | When Comrade asks to read the music library, and which permission a release actually grants — at most one ask, because Android stops showing the dialog after a refusal. 3 JVM cases; Compose-free. **Never compiled here.** |

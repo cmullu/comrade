@@ -3445,6 +3445,7 @@ const _: fn() = || {
         let _: String = MessageDto.content;
         let _: u64 = MessageDto.created_at;
         let _: bool = MessageDto.outgoing;
+        let _: crate::api::MessageAuthor = MessageDto.author;
         let _: Option<String> = MessageDto.status;
         let _: Option<String> = MessageDto.reply_to;
     }
@@ -4568,6 +4569,18 @@ impl SseDecode for crate::api::MeshStatusDto {
     }
 }
 
+impl SseDecode for crate::api::MessageAuthor {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::MessageAuthor::Human,
+            1 => crate::api::MessageAuthor::Tara,
+            _ => unreachable!("Invalid variant for MessageAuthor: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::MessageDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4576,6 +4589,7 @@ impl SseDecode for crate::api::MessageDto {
         let mut var_content = <String>::sse_decode(deserializer);
         let mut var_createdAt = <u64>::sse_decode(deserializer);
         let mut var_outgoing = <bool>::sse_decode(deserializer);
+        let mut var_author = <crate::api::MessageAuthor>::sse_decode(deserializer);
         let mut var_status = <Option<String>>::sse_decode(deserializer);
         let mut var_replyTo = <Option<String>>::sse_decode(deserializer);
         return crate::api::MessageDto {
@@ -4584,6 +4598,7 @@ impl SseDecode for crate::api::MessageDto {
             content: var_content,
             created_at: var_createdAt,
             outgoing: var_outgoing,
+            author: var_author,
             status: var_status,
             reply_to: var_replyTo,
         };
@@ -6154,6 +6169,27 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::MeshStatusDto>>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::MessageAuthor> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::MessageAuthor::Human => 0.into_dart(),
+            crate::api::MessageAuthor::Tara => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::MessageAuthor>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::MessageAuthor>>
+    for crate::api::MessageAuthor
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::MessageAuthor> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::MessageDto> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -6162,6 +6198,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::MessageDto> {
             self.0.content.into_into_dart().into_dart(),
             self.0.created_at.into_into_dart().into_dart(),
             self.0.outgoing.into_into_dart().into_dart(),
+            self.0.author.into_into_dart().into_dart(),
             self.0.status.into_into_dart().into_dart(),
             self.0.reply_to.into_into_dart().into_dart(),
         ]
@@ -7623,6 +7660,22 @@ impl SseEncode for crate::api::MeshStatusDto {
     }
 }
 
+impl SseEncode for crate::api::MessageAuthor {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::MessageAuthor::Human => 0,
+                crate::api::MessageAuthor::Tara => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::MessageDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7631,6 +7684,7 @@ impl SseEncode for crate::api::MessageDto {
         <String>::sse_encode(self.content, serializer);
         <u64>::sse_encode(self.created_at, serializer);
         <bool>::sse_encode(self.outgoing, serializer);
+        <crate::api::MessageAuthor>::sse_encode(self.author, serializer);
         <Option<String>>::sse_encode(self.status, serializer);
         <Option<String>>::sse_encode(self.reply_to, serializer);
     }

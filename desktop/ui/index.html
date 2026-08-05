@@ -204,6 +204,14 @@
                    is where "may this even be accepted" is decided. -->
               <div id="handoff-card" class="handoff-card" hidden></div>
               <div id="dm-command-picker" class="command-picker" hidden></div>
+              <!-- Two contacts can answer to one @handle. Asking is the whole
+                   point: picking for the user is how a private message reaches
+                   the wrong person. Filled by renderMentionChooser. -->
+              <div id="dm-mention-chooser" class="mention-chooser" hidden></div>
+              <!-- Rewritten by handleDmCommandInput: `/tara` is private and
+                   `@tara` is answered in the thread, so the sentence has to say
+                   which. This is the `/tara` wording, the safe default if the
+                   script never runs. -->
               <p id="dm-aside-note" class="aside-note sm" hidden>
                 Only you will see this — it goes to Tara, not to them.
               </p>

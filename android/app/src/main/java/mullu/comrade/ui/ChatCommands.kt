@@ -37,8 +37,31 @@ sealed interface ComposerPlan {
     /** Not a command — send the text as typed. */
     data object Send : ComposerPlan
 
-    /** Route to [ComradeCore.taraAsideTyped]; never to a DM. */
+    /** Route to [ComradeCore.taraAsideTyped]; never to a DM. `/tara`. */
     data class Aside(val text: String) : ComposerPlan
+
+    /**
+     * Route to [ComradeCore.taraInChatTyped] — `@tara`, which the peer sees.
+     *
+     * Separate from [Aside] because the audience is different, and a composer
+     * that treated them the same would either publish a private thought or hide
+     * an answer the other person was waiting for.
+     */
+    data class TaraHere(val text: String) : ComposerPlan
+
+    /**
+     * Two contacts answer to one `@handle`, so the command cannot run until the
+     * user says which person they meant.
+     *
+     * Not an [Explain]: the old behaviour said "pick which one" and offered
+     * nothing to pick, which is a dead end dressed as an instruction. The
+     * composer shows [candidates] and re-runs the same draft once one is chosen
+     * (see [withChoices]).
+     */
+    data class Choose(
+        val handle: String,
+        val candidates: List<ComradeCore.ContactInfo>,
+    ) : ComposerPlan
 
     /** Route to [ComradeCore.assignTaskTyped]. [peer] null is a note to self. */
     data class Task(val text: String, val peer: String?) : ComposerPlan
@@ -112,12 +135,21 @@ object ChatCommands {
                 ComposerPlan.Aside(command.text.trim())
             }
 
+        is ChatCommand.TaraHere ->
+            if (command.text.isBlank()) {
+                ComposerPlan.Explain("Ask her something — you'll both see her answer.")
+            } else {
+                ComposerPlan.TaraHere(command.text.trim())
+            }
+
         is ChatCommand.Task -> {
             if (command.text.isBlank()) {
                 ComposerPlan.Explain("What needs doing?")
             } else {
                 when (val targets = resolve(command.assignees.map { it.handle }, mentions)) {
                     is Resolution.Problem -> ComposerPlan.Explain(targets.message)
+                    is Resolution.Ambiguous ->
+                        ComposerPlan.Choose(targets.handle, targets.candidates)
                     is Resolution.Ok ->
                         ComposerPlan.Task(command.text.trim(), targets.npubs.firstOrNull())
                 }
@@ -130,6 +162,8 @@ object ChatCommands {
             } else {
                 when (val targets = resolve(command.targets.map { it.handle }, mentions)) {
                     is Resolution.Problem -> ComposerPlan.Explain(targets.message)
+                    is Resolution.Ambiguous ->
+                        ComposerPlan.Choose(targets.handle, targets.candidates)
                     is Resolution.Ok -> ComposerPlan.Offer(command.action, targets.npubs)
                 }
             }
@@ -155,15 +189,27 @@ object ChatCommands {
 
     private sealed interface Resolution {
         data class Ok(val npubs: List<String>) : Resolution
+        data class Ambiguous(
+            val handle: String,
+            val candidates: List<ComradeCore.ContactInfo>,
+        ) : Resolution
+
         data class Problem(val message: String) : Resolution
     }
 
     /**
-     * Turn handles into npubs, or explain why not.
+     * Turn handles into npubs, or say what stopped it.
      *
      * The ambiguous case is the one that matters: a handle is a self-declared
      * alias and two contacts can answer to one, so picking the first is how a
-     * private message reaches the wrong person.
+     * private message reaches the wrong person. It comes back as
+     * [Resolution.Ambiguous] rather than an error, because the answer exists —
+     * only the user has it.
+     *
+     * One handle at a time, deliberately: `/comrade-breathe @ana @ana` would have
+     * two questions to ask, and asking them at once means a chooser that can be
+     * half-answered. The first unresolved handle is returned and the next is
+     * asked about on the re-run.
      */
     private fun resolve(
         handles: List<String>,
@@ -175,15 +221,61 @@ object ChatCommands {
             when {
                 match == null || (match.npub == null && match.candidates.isEmpty()) ->
                     return Resolution.Problem("@$handle isn't in your contacts.")
-                match.npub == null ->
-                    return Resolution.Problem(
-                        "More than one contact answers to @$handle — pick which one.",
-                    )
+                match.npub == null -> return Resolution.Ambiguous(handle, match.candidates)
                 else -> npubs.add(match.npub)
             }
         }
         return Resolution.Ok(npubs)
     }
+
+    /**
+     * Apply the choices a user has made for ambiguous handles, so re-running the
+     * same draft reaches the person they picked.
+     *
+     * A choice is honoured **only** when it names one of that handle's own
+     * candidates. Without that check, a pin left over from an earlier draft — or
+     * from before a contact was removed — would silently retarget a message,
+     * which is the exact failure the ambiguity exists to prevent.
+     */
+    fun withChoices(
+        mentions: List<ComradeCore.MentionMatchInfo>,
+        chosen: Map<String, String>,
+    ): List<ComradeCore.MentionMatchInfo> = mentions.map { match ->
+        val pick = chosen[match.handle]
+        if (match.npub == null && pick != null && match.candidates.any { it.npub == pick }) {
+            match.copy(npub = pick)
+        } else {
+            match
+        }
+    }
+
+    /**
+     * How one candidate reads in the chooser.
+     *
+     * The key is not decoration here: two contacts answering to one handle very
+     * often have the *same alias too* — that is why the handle is ambiguous — so
+     * a row showing only the name would offer two identical choices. [title] is
+     * the caller's resolved display name; the short key is what tells them apart.
+     */
+    fun candidateLabel(title: String, npub: String): String = "$title · ${shortNpub(npub)}"
+
+    /**
+     * The helplines as the composer can show them.
+     *
+     * `AUDIT.md` §8's honesty gate says the resources appear beside *any* reply
+     * that tripped the distress detector — and Tara can now be asked from a chat,
+     * where the only affordance is a single `Text`. So `TaraScreen.kt`'s
+     * `CrisisCard` gets a plain-text twin rather than the gate quietly applying to
+     * one screen. Empty in, empty out: a note must not end with a dangling
+     * heading when core returned nothing.
+     */
+    fun crisisLines(resources: List<ComradeCore.CrisisResourceInfo>): String =
+        if (resources.isEmpty()) {
+            ""
+        } else {
+            "You don't have to carry this alone:\n" +
+                resources.joinToString("\n") { "· ${it.name} — ${it.contact}" }
+        }
 
     /**
      * What to say after a `/play`, given the route core decided.
@@ -277,24 +369,42 @@ object ChatCommands {
         if (spec.argument.isNotEmpty() || spec.takesMention) "/${spec.name} " else "/${spec.name}"
 
     /**
-     * Whether the composer should look like a private aside right now.
+     * Who will read what is in the composer, when Tara is being addressed.
      *
-     * Decided from the raw text rather than a parse, so it is true from the
-     * moment `@tara ` is typed — before there is anything to parse. A private
-     * thing that looks like a message is how somebody sends one by accident, so
-     * this is deliberately eager.
+     * The sigil is the whole difference, so the composer has to show it *before*
+     * the send button is pressed — a private thought that looks like a message,
+     * or a question the other person turns out never to have seen, are both
+     * failures of this one label.
      */
-    fun isAsideDraft(text: String): Boolean {
+    enum class TaraAudience {
+        /** `/tara` — never leaves the device. */
+        Private,
+
+        /** `@tara` — the question and her answer both go to the peer. */
+        Shared,
+    }
+
+    /**
+     * Which Tara audience the raw draft implies, or null if she is not addressed.
+     *
+     * Decided from the raw text rather than a parse, so it is right from the
+     * moment `@tara ` is typed — before there is anything to parse. Deliberately
+     * eager for the same reason it always was: mislabelling this is how somebody
+     * sends a private thought by accident.
+     */
+    fun taraDraft(text: String): TaraAudience? {
         val t = text.trimStart()
         val lower = t.lowercase()
-        for (prefix in listOf("@tara", "/tara")) {
-            if (lower == prefix) return true
+        for ((prefix, audience) in
+            listOf("@tara" to TaraAudience.Shared, "/tara" to TaraAudience.Private)
+        ) {
+            if (lower == prefix) return audience
             if (lower.startsWith(prefix) && t.length > prefix.length &&
                 t[prefix.length].isWhitespace()
             ) {
-                return true
+                return audience
             }
         }
-        return false
+        return null
     }
 }

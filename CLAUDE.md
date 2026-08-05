@@ -49,6 +49,12 @@ So Dart and Android changes cannot be compiled or tested here — CI is the firs
 place they build. When you touch `app/` or `android/`, say so plainly rather
 than implying you verified it. Reason from the code and keep diffs tight.
 
+**Flutter is the one of these you can install**, and for a change to the frb
+bridge you should: `.claude/rules/flutter.md` has the commands, the pinned
+version, and the `--no-web` flag whose absence fails CI in a way that reads like
+a different bug. Budget ~10 minutes and a `cargo clean` for the disk. Nothing
+equivalent exists for the Android SDK or `maturin`.
+
 **`desktop/src-tauri` is a fourth blocked lane, and it fails in a way that looks
 like your bug.** `cargo clippy` there exits **101** before compiling a single
 crate, because the shell needs GTK/webview development headers and `gdk-3.0.pc`

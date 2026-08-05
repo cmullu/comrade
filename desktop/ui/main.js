@@ -299,6 +299,12 @@
     // whether they chose back) — see docs/PRESENCE.md.
     presence: new Map(),
     replyTo: null, // { id, content, outgoing } while composing a reply
+    // Which contact the user picked for an ambiguous `@handle`, by handle. Two
+    // people can answer to one name, and picking for them is how a private
+    // message reaches the wrong person — so the choice is theirs and it is
+    // remembered. `chat_commands.withChoices` refuses a pin that no longer names
+    // one of that handle's candidates, so a stale one cannot retarget anything.
+    mentionChoices: {},
     call: null, // active call session (see newCallState)
     // Watch/listen together (docs/TOGETHER.md): the local file, its object URL,
     // the live session id, and the echo suppressor that keeps a remote seek
@@ -1350,9 +1356,18 @@
   function onIncomingDm(p) {
     const key = p.sender || "unknown";
     const list = state.dms.get(key) || [];
+    // A live event carries the raw wire body, unlike `messages_with`, which
+    // hands back an already-split `MessageDto`. Both end up in `state.dms`, so
+    // the split has to happen here or one message would read differently before
+    // and after a reload. If the module has not loaded the marker simply stays
+    // visible — still readable, which is the point of keeping it human-legible.
+    const split = chatCommands
+      ? chatCommands.splitAuthor(p.content)
+      : { author: "human", content: p.content || "" };
     list.push({
       id: p.id,
-      content: p.content || "",
+      content: split.content,
+      author: split.author,
       created_at: p.created_at,
       outgoing: false,
       upi: p.upi_intents || [],
@@ -1478,6 +1493,10 @@
         .map((m) => ({
           id: m.id,
           content: m.content,
+          // Core already split the wire marker off `content` into this — see
+          // `comrade_ui::MessageAuthor`. Only the live-event path has to mirror
+          // the split itself.
+          author: m.author || "human",
           created_at: m.created_at,
           outgoing: !!m.outgoing,
           upi: [],
@@ -1516,8 +1535,10 @@
     const command = await safeInvoke("parse_chat_command", { text }, { silent: true });
     if (!command || command.kind === "plain" || command.kind === "pay") return false;
 
-    const mentions =
-      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [];
+    const mentions = chatCommands.withChoices(
+      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [],
+      state.mentionChoices,
+    );
     const plan = chatCommands.planFor(command, { mentions });
     const input = $("#dm-input");
 
@@ -1553,6 +1574,62 @@
           input.value = "";
           clearComposerCommandUi();
         }
+        return true;
+      }
+
+      case chatCommands.TARA_HERE: {
+        if (!state.activeContact) {
+          // `@tara` puts the answer in a thread, so there has to be one. The
+          // private `/tara` above deliberately needs no peer.
+          showToast("Open a conversation first — @tara answers in it.", "warn");
+          return true;
+        }
+        const turn = await safeInvoke("tara_in_chat", {
+          peer: state.activeContact,
+          text: plan.text,
+        });
+        if (turn) {
+          if (turn.kept_private) {
+            // Core refused to publish this one (the distress path). Saying so is
+            // not optional: the user asked in the open and would otherwise assume
+            // the other person had read it.
+            showToast(`${turn.reply}\n\n(Kept between us — this one wasn't sent.)`, "warn");
+            if (turn.crisis) {
+              const lines = await safeInvoke("tara_crisis_resources", {}, { silent: true });
+              for (const r of lines || []) showToast(`${r.name}: ${r.contact}`, "warn");
+            }
+          } else {
+            // Both messages are already stored on the Rust side; appending them
+            // here is what draws them, exactly as a plain send does.
+            const list = state.dms.get(state.activeContact) || [];
+            for (const m of [turn.asked, turn.answered]) {
+              if (!m) continue;
+              list.push({
+                id: m.id,
+                content: m.content,
+                author: m.author || "human",
+                created_at: m.created_at,
+                outgoing: true,
+                upi: [],
+                status: m.status || "sent",
+                reply_to: null,
+              });
+            }
+            state.dms.set(state.activeContact, list);
+            renderContacts();
+            renderConversation();
+          }
+          input.value = "";
+          clearComposerCommandUi();
+        }
+        return true;
+      }
+
+      case chatCommands.CHOOSE: {
+        // Two contacts answer to one handle. Ask, rather than the dead end this
+        // used to be — the old plan said "pick which one" and offered nothing to
+        // pick, so the command could never be completed at all.
+        renderMentionChooser(plan, text);
         return true;
       }
 
@@ -1619,6 +1696,8 @@
     const note = $("#dm-aside-note");
     if (note) note.hidden = true;
     $("#dm-input").classList.remove("composer-aside");
+    $("#dm-input").classList.remove("composer-tara-here");
+    renderMentionChooser(null);
   }
 
   /** `/help` — the catalogue as a list of toasts is unreadable, so it fills the
@@ -1664,6 +1743,10 @@
       list.push({
         id: msg.id,
         content: msg.content,
+        // Carried rather than assumed "human": core split this DTO, and a
+        // message must not read one way when it is sent and another after a
+        // reload.
+        author: msg.author || "human",
         created_at: msg.created_at,
         outgoing: true,
         upi: [],
@@ -1753,10 +1836,22 @@
   }
 
   function textBubble(m) {
-    const wrap = el("div", { class: "bubble " + (m.outgoing ? "out" : "in") });
+    // Tara sits on the left for *both* people, so this is not simply
+    // `m.outgoing`: her answer is carried by whichever device asked, and
+    // aligning by who sent it would put one line on opposite sides of the two
+    // screens. It also drops the ticks from her bubble — true that this device
+    // sent it, but the question right above carries the same receipt, and a
+    // tick on a third party's line reads as a claim about her. Mirrored in
+    // `ChatsScreen.kt` and `message_bubble.dart`.
+    const hers = m.author === "tara";
+    const mine = Boolean(m.outgoing) && !hers;
+    const wrap = el("div", {
+      class: "bubble " + (mine ? "out" : "in") + (hers ? " is-tara" : ""),
+    });
     // The anchor a quote tap scrolls to. Only messages a relay has confirmed
     // have an id, and only those can be a reply target in the first place.
     if (m.id) wrap.dataset.msgId = m.id;
+    if (hers) wrap.append(el("span", { class: "bubble-author", text: "Tara" }));
     if (m.reply_to) wrap.append(quotePreview(m.reply_to));
     wrap.append(el("span", { class: "bubble-text", text: m.content }));
     wrap.append(
@@ -1764,7 +1859,7 @@
         "div",
         { class: "bubble-meta" },
         el("span", { class: "bubble-time", text: relTime(m.created_at) }),
-        m.outgoing && m.status ? statusTick(m.status) : null,
+        mine && m.status ? statusTick(m.status) : null,
       ),
     );
     // A reply is only addressable if we know the target message's event id.
@@ -3755,19 +3850,28 @@
     if (!chatCommands) return;
     const text = $("#dm-input").value;
 
-    // Aside styling is decided from the raw text, not a parse, so it is true
-    // from the moment `@tara ` is typed — before there is anything to parse.
-    const aside = chatCommands.isAsideDraft(text);
-    $("#dm-input").classList.toggle("composer-aside", aside);
+    // The audience is decided from the raw text, not a parse, so it is right from
+    // the moment `@tara ` is typed — before there is anything to parse. Two
+    // labels now, because the sigil is the whole difference: `/tara` stays here
+    // and `@tara` reaches the other person.
+    const audience = chatCommands.taraDraft(text);
+    $("#dm-input").classList.toggle("composer-aside", audience === chatCommands.TARA_PRIVATE);
+    $("#dm-input").classList.toggle("composer-tara-here", audience === chatCommands.TARA_SHARED);
     const asideNote = $("#dm-aside-note");
-    if (asideNote) asideNote.hidden = !aside;
+    if (asideNote) {
+      asideNote.hidden = !audience;
+      asideNote.textContent =
+        audience === chatCommands.TARA_SHARED
+          ? "Tara will answer here — you'll both see it."
+          : "Only you will see this — it goes to Tara, not to them.";
+    }
 
     renderCommandPicker(chatCommands.pickerRows(text, commandCatalog));
 
     // The hint line: what will happen if Enter is pressed now.
     const hint = $("#dm-command-hint");
     if (!hint) return;
-    if (!text.startsWith("/") && !aside) {
+    if (!text.startsWith("/") && !audience) {
       hint.hidden = true;
       hint.textContent = "";
       return;
@@ -3777,8 +3881,10 @@
       hint.hidden = true;
       return;
     }
-    const mentions =
-      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [];
+    const mentions = chatCommands.withChoices(
+      (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [],
+      state.mentionChoices,
+    );
     const plan = chatCommands.planFor(command, { mentions });
     if (plan.message) {
       hint.textContent = plan.message;
@@ -3788,6 +3894,48 @@
       hint.textContent = "";
     }
   }, 200);
+
+  /**
+   * Draw (or clear) the "which @ana did you mean?" chooser.
+   *
+   * `draft` is the text that raised the question: picking a row records the
+   * choice and re-runs that same command, which is what the user already meant.
+   */
+  function renderMentionChooser(plan, draft) {
+    const box = $("#dm-mention-chooser");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!plan) {
+      box.hidden = true;
+      return;
+    }
+    box.append(el("span", { class: "chooser-question", text: plan.message }));
+    for (const candidate of plan.candidates || []) {
+      const title = candidate.alias || state.peerNames.get(candidate.npub) || shortNpub(candidate.npub);
+      box.append(
+        el(
+          "button",
+          {
+            class: "command-row",
+            type: "button",
+            onclick: async () => {
+              state.mentionChoices = {
+                ...state.mentionChoices,
+                [plan.handle]: candidate.npub,
+              };
+              renderMentionChooser(null);
+              await handleChatCommand(draft);
+            },
+          },
+          el("span", {
+            class: "command-name",
+            text: chatCommands.candidateLabel(title, candidate.npub),
+          }),
+        ),
+      );
+    }
+    box.hidden = false;
+  }
 
   /** Draw (or clear) the `/` command picker. */
   function renderCommandPicker(rows) {
@@ -5714,6 +5862,11 @@
     $("#reader-clear").addEventListener("click", handleReaderClear);
     $("#dm-input").addEventListener("input", (e) => {
       reportDraftEdit();
+      // Withdrawn here rather than inside the debounced handler below: a question
+      // about an ambiguous handle belongs to the text that raised it, and a
+      // debounced clear could fire *after* a fast Enter had put the chooser up
+      // and wipe it. Undebounced, it can only ever run before that.
+      renderMentionChooser(null);
       handleDmInput(e);
       handleDmCommandInput(e);
     });
@@ -5936,6 +6089,7 @@
             id: "mockdm_" + Date.now(),
             peer: args.target,
             content: args.content,
+            author: "human",
             created_at: nowSecs(),
             outgoing: true,
           };
@@ -6085,6 +6239,33 @@
             crisis: false,
             created_at: Math.floor(Date.now() / 1000),
           };
+        case "tara_in_chat": {
+          // Shaped like the real thing, including the two messages: a mock that
+          // returned only a reply would let the composer look correct while the
+          // thread stayed empty, which is the half of this the real command does.
+          const now = Math.floor(Date.now() / 1000);
+          const line = (id, content, author) => ({
+            id,
+            peer: args.peer,
+            content,
+            // The real DTO arrives already split, so the mock must too — a mock
+            // that still carried "Tara: " in `content` would let the preview
+            // build render a prefix the real one never shows.
+            author: author || "human",
+            created_at: now,
+            outgoing: true,
+            status: "sent",
+            reply_to: null,
+          });
+          const answer = "(mock) What matters most about it to you both?";
+          return {
+            asked: line("mock-tara-q", args.text),
+            answered: line("mock-tara-a", answer, "tara"),
+            reply: answer,
+            kept_private: false,
+            crisis: false,
+          };
+        }
         case "pair_sakha":
           mockSakha.paired = true;
           mockSakha.partnerNpub = args.partnerPubkey;

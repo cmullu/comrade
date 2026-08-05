@@ -126,6 +126,29 @@ object TogetherManager {
         if (found != null) join(context, found.uri)
     }
 
+    /**
+     * Look again for the invitation's recording, now that we may read the
+     * library, and join if it is here.
+     *
+     * [onInvited] runs this once on arrival, but at that moment the answer is
+     * whatever the permission happened to be — and the invitation is exactly the
+     * moment someone is most willing to grant it. Returns whether a copy was
+     * found, so the screen can say "not on this phone" rather than leaving a tap
+     * that appears to do nothing.
+     *
+     * A no-op unless we are still holding an invitation: by the time a grant
+     * comes back the session may already be live or abandoned, and re-opening a
+     * file under a running player is the one thing this must not do.
+     */
+    fun lookAgain(context: Context): Boolean {
+        if (_state.value !is UiState.Invited) return false
+        val recording = wanted ?: return false
+        val found = runCatching { LibraryResolver.resolve(context, recording, wantedMs) }.getOrNull()
+            ?: return false
+        join(context, found.uri)
+        return true
+    }
+
     fun onJoined() {
         (_state.value as? UiState.Live)?.let { _state.value = it.copy(joined = true, status = Status.OpenYourCopy) }
     }

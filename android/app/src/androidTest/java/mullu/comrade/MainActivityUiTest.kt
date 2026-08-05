@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -155,7 +156,24 @@ class MainActivityUiTest {
         // The drawer's profile header shows our @handle…
         composeRule.onNodeWithText("@$USERNAME").assertIsDisplayed()
 
-        // …and its Settings item pushes the full-screen Settings destination.
+        // …and its Tasks item opens the task list. Asserted on a device because
+        // this screen shipped in a state where opening it killed the process, and
+        // nothing in the JVM lane could see that: `TaskList`'s decisions are all
+        // unit-tested, and the crash was in the *composition* around them. The
+        // empty-state node is the proof it survived a full load — it only appears
+        // once the store has answered, which is the recomposition that failed.
+        composeRule.onNodeWithTag("drawer-tasks").performClick()
+        composeRule.waitForIdle()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            hasTag("tasks-empty") || hasTag("task-list")
+        }
+
+        // Back to the list, then into Settings — a pushed destination, unlike the
+        // Chats sub-screen above.
+        composeRule.onNodeWithContentDescription("Back").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav-drawer-button").performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag("drawer-settings").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("Your identity key").assertIsDisplayed()

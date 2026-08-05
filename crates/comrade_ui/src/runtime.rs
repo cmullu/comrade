@@ -108,7 +108,9 @@ fn relay_policy_to_prefs(policy: RelayPolicy) -> comrade_storage::SharePrefs {
         relay_limit_bytes: limit,
     }
 }
-use comrade_core::tara::{CompanionEngine, JournalSignal, ReflectiveCompanion};
+use comrade_core::tara::{
+    tara_chat_answer, tara_chat_line, CompanionEngine, JournalSignal, ReflectiveCompanion,
+};
 use comrade_core::together::{
     command_apply, describe_state_change, heartbeat_interval_ms, parse_together_envelope,
     projected_peer_pos_ms, session_is_live_at, signal_is_fresh, sync_verdict, valid_youtube_id,
@@ -1331,6 +1333,30 @@ pub struct TaraMessageDto {
     pub created_at: u64,
 }
 
+/// What happened when Tara was asked something **in a conversation** —
+/// `@tara …`, the shared spelling. See [`RuntimeHandles::tara_in_chat`].
+///
+/// Both messages come back so the composer can put them straight into the thread
+/// it is already showing, in the order they were sent, without a reload that
+/// would race the relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TaraChatDto {
+    /// The question as it now sits in the thread. `None` when nothing was sent.
+    pub asked: Option<MessageDto>,
+    /// Tara's answer as it sits in the thread. `None` when it stayed private.
+    pub answered: Option<MessageDto>,
+    /// Tara's words, always — the only field set when nothing was shared, and
+    /// what a composer shows in its own note in that case.
+    pub reply: String,
+    /// **Nothing left this device.** True when the question tripped the distress
+    /// detector: a helpline hand-off is not something to publish into somebody
+    /// else's chat on the asker's behalf, whichever sigil they typed.
+    pub kept_private: bool,
+    /// Whether the reply carries the crisis hand-off, so the frontend shows the
+    /// resources beside it exactly as the private thread does.
+    pub crisis: bool,
+}
+
 impl From<comrade_storage::TaraMessage> for TaraMessageDto {
     fn from(m: comrade_storage::TaraMessage) -> Self {
         Self {
@@ -1418,20 +1444,66 @@ pub struct CrisisResourceDto {
     pub note: String,
 }
 
+/// Who wrote a message, where `outgoing` alone cannot say.
+///
+/// `outgoing` distinguishes the two people; this distinguishes a person from the
+/// companion, so `@tara` can be drawn as a third participant rather than as a
+/// line you appear to have typed. The two are orthogonal: an outgoing
+/// [`MessageAuthor::Tara`] is her answer in a thread you started, and an
+/// incoming one is her answer in a thread they started.
+///
+/// **Attribution, not attestation.** Nothing signs this. The wire carries
+/// [`comrade_core::tara::TARA_CHAT_PREFIX`], which any client — or any person
+/// with a keyboard — can put in front of a sentence, so a Tara bubble means
+/// *the sending Comrade said this came from Tara*, in the same way a quoted
+/// reply means the sender said they were quoting you. It must not be built on
+/// as proof, and `AUDIT.md` Q17 records the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageAuthor {
+    /// One of the two people in the conversation — the ordinary case.
+    Human,
+    /// The companion, answering where both people can read it.
+    Tara,
+}
+
 /// A single direct message in a conversation, from the offline history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct MessageDto {
     pub id: String,
     /// Peer npub the thread is keyed by (sender if incoming, recipient if outgoing).
     pub peer: String,
+    /// What to draw in the bubble — already stripped of any author marker, so a
+    /// frontend never renders the wire form. See [`split_author`].
     pub content: String,
     pub created_at: u64,
     pub outgoing: bool,
+    /// Who wrote [`Self::content`]. See [`MessageAuthor`] for what this does and
+    /// does not claim.
+    pub author: MessageAuthor,
     /// Delivery status of an outgoing message: `sent` / `delivered` / `read`.
     /// `None` for incoming messages (no ticks shown on the receiver's side).
     pub status: Option<String>,
     /// Event id (hex) this message replies to, if any.
     pub reply_to: Option<String>,
+}
+
+/// Split a stored/wire message body into who wrote it and what to draw.
+///
+/// The marker stays on the wire and on disk rather than being stripped before
+/// storage, and that is deliberate on two counts. A NIP-17 DM read in some other
+/// Nostr client still says "Tara: …" instead of putting her words in the
+/// sender's mouth — the fallback rendering is the honest one. And the count in
+/// [`ComradeRuntime::tara_in_chat`] reads the stored rows directly, so the
+/// history keeps meaning the same thing after this function changes.
+///
+/// One place, called from both [`MessageDto`] construction sites, so a message
+/// cannot read one way when it is sent and another way after a reload.
+fn split_author(content: String) -> (MessageAuthor, String) {
+    match comrade_core::tara::tara_chat_answer(&content) {
+        Some(answer) => (MessageAuthor::Tara, answer.to_string()),
+        None => (MessageAuthor::Human, content),
+    }
 }
 
 /// Live connectivity status of the off-grid Saathi mesh (mDNS discovery +
@@ -2465,18 +2537,22 @@ impl ComradeRuntime {
             .messages_with(&peer)
             .map_err(|e| UiError::Storage(e.to_string()))?
             .into_iter()
-            .map(|m| MessageDto {
-                id: m.id,
-                peer: m.peer_npub,
-                content: m.content,
-                created_at: m.created_at,
-                status: if m.outgoing {
-                    Some(m.status.unwrap_or_else(|| "sent".into()))
-                } else {
-                    None
-                },
-                reply_to: m.reply_to,
-                outgoing: m.outgoing,
+            .map(|m| {
+                let (author, content) = split_author(m.content);
+                MessageDto {
+                    id: m.id,
+                    peer: m.peer_npub,
+                    content,
+                    created_at: m.created_at,
+                    author,
+                    status: if m.outgoing {
+                        Some(m.status.unwrap_or_else(|| "sent".into()))
+                    } else {
+                        None
+                    },
+                    reply_to: m.reply_to,
+                    outgoing: m.outgoing,
+                }
             })
             .collect();
         msgs.sort_by_key(|m| m.created_at);
@@ -3980,6 +4056,16 @@ impl ComradeRuntime {
         self.tara_send(text)
     }
 
+    /// Ask Tara in front of the person you are talking to — the `@tara …`
+    /// spelling, and the counterpart to [`Self::tara_aside`]'s `/tara`.
+    ///
+    /// Delegates to [`RuntimeHandles::tara_in_chat`], which is where the
+    /// reasoning is — including why a question that trips the distress detector
+    /// is answered without sending anything.
+    pub async fn tara_in_chat(&self, peer: &str, text: &str) -> Result<TaraChatDto, UiError> {
+        self.handles().tara_in_chat(peer, text).await
+    }
+
     /// This device's own npub, for deciding which side of a task we are on.
     fn my_npub(&self) -> Result<String, UiError> {
         self.ui
@@ -4891,12 +4977,14 @@ impl RuntimeHandles {
         // leave a composer that must never look like abandoning it.
         self.nudge_watch.sent(&peer_npub);
 
+        let (author, body) = split_author(content.to_string());
         let dto = MessageDto {
             id,
             peer: peer_npub.clone(),
-            content: content.to_string(),
+            content: body,
             created_at,
             outgoing: true,
+            author,
             status: Some(status.into()),
             reply_to: reply_to.map(str::to_string),
         };
@@ -4904,7 +4992,9 @@ impl RuntimeHandles {
             let row = comrade_storage::StoredMessage {
                 id: dto.id.clone(),
                 peer_npub: dto.peer.clone(),
-                content: dto.content.clone(),
+                // The wire form, not `dto.content`: the marker has to survive a
+                // reload for the bubble to be drawn the same way next time.
+                content: content.to_string(),
                 created_at: dto.created_at,
                 outgoing: true,
                 status: Some(status.into()),
@@ -5632,6 +5722,90 @@ impl RuntimeHandles {
             }
         }
         task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
+    }
+
+    /// Ask Tara **in front of the other person** — the `@tara …` spelling.
+    ///
+    /// WhatsApp's `@Meta AI`, with three differences that are the point of this
+    /// app rather than incidental to it:
+    ///
+    /// 1. **The answer is computed here.** `ReflectiveCompanion` is on-device
+    ///    template matching, so nothing about the question leaves the phone
+    ///    except the two messages the user chose to send.
+    /// 2. **The peer's messages are not passed to her.** Exactly as
+    ///    [`ComradeRuntime::tara_aside`] documents: she answers the sentence she
+    ///    was handed, not the conversation around it. The other person is a
+    ///    *reader* here, never material.
+    /// 3. **Distress never gets published.** If the question trips
+    ///    `detect_distress`, this sends nothing at all and comes back with
+    ///    `kept_private`. Someone typing the wrong sigil while in a bad place
+    ///    must not have their crisis hand-off delivered into a chat, and the
+    ///    grammar cannot tell that case from any other before the reply exists —
+    ///    so the check has to be here, after the reply and before the send.
+    ///
+    /// Both messages are ordinary DMs. The answer carries
+    /// `comrade_core::tara::TARA_CHAT_PREFIX` on the wire, and [`split_author`]
+    /// turns that into [`MessageAuthor::Tara`] with the marker off the text, so
+    /// both DTOs this returns are already in the form a bubble draws. The marker
+    /// is a claim by the sending client, not an authentication — see
+    /// [`MessageAuthor`].
+    ///
+    /// The private thread is left untouched: a question asked in front of
+    /// somebody is not a turn in the private session, and merging the two would
+    /// mean a shared chat could reshape (and be read out of) a journal-adjacent
+    /// space the peer has no part in. The rotation seed therefore counts the Tara
+    /// lines *in this thread* rather than that thread's turns.
+    pub async fn tara_in_chat(&self, peer: &str, text: &str) -> Result<TaraChatDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(UiError::Engine("nothing was asked".into()));
+        }
+        let peer_npub = to_npub(peer);
+        // Everything that reads the store happens before the first await, the
+        // discipline every send path in this impl follows.
+        let prior = store
+            .messages_with(&peer_npub)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .iter()
+            .filter(|m| tara_chat_answer(&m.content).is_some())
+            .count() as u64;
+
+        let reply = ReflectiveCompanion.reply(text, prior);
+        if reply.crisis {
+            return Ok(TaraChatDto {
+                asked: None,
+                answered: None,
+                reply: reply.text,
+                kept_private: true,
+                crisis: true,
+            });
+        }
+
+        // The question first, so the thread reads in the order it happened even
+        // if the second send is the one that fails.
+        let asked = self.send_dm(&peer_npub, text).await?;
+        // The answer *replies* to the question, which is both true and load
+        // bearing: two messages sent in the same second carry the same
+        // `created_at`, and the receiver's thread sorts on that — so arrival
+        // order alone could show her answer above what it answered. The `e` tag
+        // pairs them however they land.
+        //
+        // Only when the question actually reached a relay: an offline send comes
+        // back with a local outbox id, and tagging that would name an event no
+        // relay has ever seen.
+        let reply_to = Some(asked.id.as_str())
+            .filter(|id| !comrade_core::dak::outbox::is_local_message_id(id));
+        let answered = self
+            .send_dm_reply(&peer_npub, &tara_chat_line(&reply.text), reply_to)
+            .await?;
+        Ok(TaraChatDto {
+            asked: Some(asked),
+            answered: Some(answered),
+            reply: reply.text,
+            kept_private: false,
+            crisis: false,
+        })
     }
 
     /// Offer an in-app action to `peers`, reporting who was told and who was not.
@@ -14011,6 +14185,176 @@ mod tests {
             Err(UiError::VaultLocked)
         ));
         assert!(matches!(rt.tara_aside("hello"), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.tara_in_chat("npub1x", "hello").await,
+            Err(UiError::VaultLocked)
+        ));
+    }
+
+    // ── Tara in the room (`@tara …`) ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_shared_ask_puts_the_question_and_the_answer_in_the_thread() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt
+            .tara_in_chat(&peer, "what should i do about this deadline")
+            .await
+            .unwrap();
+        assert!(!out.kept_private);
+        assert!(!out.crisis);
+
+        // Order matters: the question, then her answer. A thread that showed
+        // the reply first would read as though she spoke unprompted.
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].content, "what should i do about this deadline");
+        assert_eq!(thread[0].author, MessageAuthor::Human);
+        // Her words, with the wire marker already off them: a frontend renders
+        // `content` as-is and reads `author` to decide whose bubble it is.
+        assert_eq!(thread[1].content, out.reply);
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
+        assert!(thread.iter().all(|m| m.outgoing), "this device sent both");
+        assert_eq!(out.asked.unwrap().content, thread[0].content);
+        assert_eq!(out.answered.unwrap().content, thread[1].content);
+    }
+
+    #[tokio::test]
+    async fn her_line_is_still_marked_as_hers_after_a_reload() {
+        // The DTO strips the marker; the store must not, or the author would be
+        // whatever the last in-memory copy happened to say and a restart would
+        // silently turn her answer into one of yours.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let out = rt
+            .tara_in_chat(&peer, "what should i say to them")
+            .await
+            .unwrap();
+
+        let stored = rt
+            .ui
+            .store_ref()
+            .unwrap()
+            .messages_with(&to_npub(&peer))
+            .unwrap();
+        assert_eq!(
+            comrade_core::tara::tara_chat_answer(&stored[1].content),
+            Some(out.reply.as_str()),
+            "the wire form has to survive on disk"
+        );
+        // And reading it back through the DTO gives the same split as the send.
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
+        assert_eq!(thread[1].content, out.reply);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_message_is_never_attributed_to_her() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        // Close enough to trip a sloppy match, and it must not: the marker is a
+        // prefix, not a substring, and "Tara" as a topic is an ordinary word.
+        let sent = rt
+            .send_dm(&peer, "Tara said something like that too")
+            .await
+            .unwrap();
+        assert_eq!(sent.author, MessageAuthor::Human);
+        assert_eq!(sent.content, "Tara said something like that too");
+    }
+
+    #[tokio::test]
+    async fn an_offline_shared_ask_does_not_tag_an_event_no_relay_has_seen() {
+        // Both messages queue with a local outbox id, and the answer must not
+        // claim to reply to one — an `e` tag naming a local id points at nothing.
+        // (Online, the tag is what keeps her answer under the question when both
+        // land in the same second; `created_at` alone cannot.)
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt.tara_in_chat(&peer, "what now").await.unwrap();
+        let answered = out.answered.unwrap();
+        assert!(comrade_core::dak::outbox::is_local_message_id(
+            &out.asked.unwrap().id
+        ));
+        assert_eq!(answered.reply_to, None);
+    }
+
+    #[tokio::test]
+    async fn a_shared_ask_does_not_touch_the_private_thread() {
+        // The private session is journal-adjacent. A question asked in front of
+        // somebody is not a turn in it, in either direction.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        rt.tara_in_chat(&peer, "help us pick a film").await.unwrap();
+        assert!(
+            rt.tara_thread().unwrap().is_empty(),
+            "the shared ask leaked into the private thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn distress_in_a_shared_ask_is_answered_but_never_sent() {
+        // The safety property of the whole feature. Someone who types `@tara`
+        // instead of `/tara` while in a bad place must not have their crisis
+        // hand-off delivered into somebody else's chat.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt.tara_in_chat(&peer, "i want to die").await.unwrap();
+        assert!(out.kept_private);
+        assert!(out.crisis);
+        assert!(out.asked.is_none() && out.answered.is_none());
+        assert!(!out.reply.is_empty(), "she still answers, only privately");
+
+        assert!(
+            rt.messages_with(&peer).unwrap().is_empty(),
+            "nothing at all may reach the thread"
+        );
+        assert_eq!(rt.outbox_pending(), 0, "nor the outbox — it is not a retry");
+    }
+
+    #[tokio::test]
+    async fn naming_a_third_party_still_reframes_when_the_room_can_read_it() {
+        // The gate that already guards the private aside has to hold here too,
+        // and it matters more: a characterisation of @ana would now be sent to
+        // the person you are talking to.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let out = rt
+            .tara_in_chat(&peer, "what does @ana think of herself")
+            .await
+            .unwrap();
+        assert!(
+            out.reply.contains("what's coming up for you about @ana"),
+            "no reframe: {}",
+            out.reply
+        );
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread[1].content, out.reply);
+        assert_eq!(thread[1].author, MessageAuthor::Tara);
+    }
+
+    #[tokio::test]
+    async fn a_bare_shared_address_asks_nothing_and_sends_nothing() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        assert!(matches!(
+            rt.tara_in_chat(&peer, "   ").await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(rt.messages_with(&peer).unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -26,8 +26,16 @@
 
 /** Nothing to do; send the text as typed. */
 export const SEND = "send";
-/** Route to `tara_aside`, never to `send_dm`. */
+/** Route to `tara_aside`, never to `send_dm`. `/tara`. */
 export const ASIDE = "aside";
+/**
+ * Route to `tara_in_chat` — `@tara`, which the peer sees.
+ *
+ * A separate action from {@link ASIDE} because the audience is different, and a
+ * composer that treated them the same would either publish a private thought or
+ * hide an answer the other person was waiting for.
+ */
+export const TARA_HERE = "tara_here";
 /** Route to `assign_task`. */
 export const TASK = "task";
 /** Route to `offer_action`. */
@@ -42,6 +50,14 @@ export const HELP = "help";
 export const BLOCKED = "blocked";
 /** Refuse, and say what is missing — the command is incomplete. */
 export const INCOMPLETE = "incomplete";
+/**
+ * Two contacts answer to one `@handle`; ask which before doing anything.
+ *
+ * Not {@link INCOMPLETE}: that said "pick which one" and offered nothing to pick,
+ * which is a dead end dressed as an instruction. This carries the candidates so
+ * the composer can show them and re-run the same draft (see {@link withChoices}).
+ */
+export const CHOOSE = "choose";
 
 /**
  * Screens this desktop build actually has.
@@ -102,6 +118,17 @@ export function planFor(command, { mentions = [] } = {}) {
         };
       }
       return { action: ASIDE, text };
+    }
+
+    case "tara_here": {
+      const text = (command.text || "").trim();
+      if (!text) {
+        return {
+          action: INCOMPLETE,
+          message: "Ask her something — you'll both see her answer.",
+        };
+      }
+      return { action: TARA_HERE, text };
     }
 
     case "task": {
@@ -185,11 +212,16 @@ function resolvedTargets(parsed, mentions) {
       };
     }
     if (!match.npub) {
+      // The answer exists; only the user has it. One handle at a time — a draft
+      // naming two ambiguous handles would otherwise raise a chooser that can be
+      // half-answered, and the next one is asked about on the re-run.
       return {
         npubs,
         problem: {
-          action: INCOMPLETE,
-          message: `More than one contact answers to @${m.handle} — pick which one.`,
+          action: CHOOSE,
+          handle: m.handle,
+          candidates: match.candidates,
+          message: `Two contacts answer to @${m.handle} — which one?`,
         },
       };
     }
@@ -259,23 +291,91 @@ export function completionFor(spec) {
   return needsArgument ? `/${spec.name} ` : `/${spec.name}`;
 }
 
+/** `/tara` — nothing leaves this device. */
+export const TARA_PRIVATE = "private";
+/** `@tara` — the question and her answer both go to the peer. */
+export const TARA_SHARED = "shared";
+
 /**
- * Whether the composer should look like a private aside right now.
+ * Which Tara audience the raw draft implies, or `null` if she is not addressed.
  *
- * Called on every keystroke, on the raw text rather than a parse, because it
- * must be true from the moment `@tara ` is typed — before there is anything to
- * parse. A private thing that looks like a message is how somebody sends one by
- * accident, so this is deliberately eager.
+ * Called on every keystroke, on the raw text rather than a parse, because it must
+ * be right from the moment `@tara ` is typed — before there is anything to parse.
+ * The sigil is the whole difference between a private thought and a message the
+ * other person reads, so the composer has to label it before Enter is pressed.
  */
-export function isAsideDraft(text) {
-  if (typeof text !== "string") return false;
+export function taraDraft(text) {
+  if (typeof text !== "string") return null;
   const t = text.trimStart();
   const lower = t.toLowerCase();
-  for (const prefix of ["@tara", "/tara"]) {
-    if (lower === prefix) return true;
-    if (lower.startsWith(prefix) && /\s/.test(t.charAt(prefix.length))) return true;
+  for (const [prefix, audience] of [
+    ["@tara", TARA_SHARED],
+    ["/tara", TARA_PRIVATE],
+  ]) {
+    if (lower === prefix) return audience;
+    if (lower.startsWith(prefix) && /\s/.test(t.charAt(prefix.length))) return audience;
   }
-  return false;
+  return null;
+}
+
+/**
+ * What a shared Tara answer carries on the wire — the mirror of
+ * `comrade_core::tara::TARA_CHAT_PREFIX`.
+ *
+ * Only needed because a live-arriving DM reaches this frontend as the raw wire
+ * body: `messages_with` already hands back `{author, content}` with the marker
+ * off, but `incoming_direct_message` does not go through that DTO. Both paths
+ * feed the same `state.dms`, so without this mirror a message would read one way
+ * as it arrived and another way after a reload.
+ */
+export const TARA_CHAT_PREFIX = "Tara: ";
+
+/**
+ * Split a raw wire body into `{author, content}`, exactly as
+ * `comrade_ui::split_author` does.
+ *
+ * **Attribution, not attestation.** Anybody can type "Tara: ", so a match means
+ * the sending Comrade says this came from her — see `AUDIT.md` Q17. Style a
+ * bubble with it; never trust it.
+ */
+export function splitAuthor(content) {
+  const text = typeof content === "string" ? content : "";
+  return text.startsWith(TARA_CHAT_PREFIX)
+    ? { author: "tara", content: text.slice(TARA_CHAT_PREFIX.length) }
+    : { author: "human", content: text };
+}
+
+/**
+ * Apply the choices a user has made for ambiguous handles, so re-running the
+ * same draft reaches the person they picked.
+ *
+ * A choice is honoured **only** when it names one of that handle's own
+ * candidates. Without that check a pin left over from an earlier draft — or from
+ * before a contact was removed — would silently retarget a message, which is the
+ * exact failure the ambiguity exists to prevent.
+ */
+export function withChoices(mentions, chosen) {
+  const picks = chosen || {};
+  return (mentions || []).map((match) => {
+    const pick = picks[match.handle];
+    const offered = (match.candidates || []).some((c) => c.npub === pick);
+    return !match.npub && pick && offered ? { ...match, npub: pick } : match;
+  });
+}
+
+/**
+ * How one candidate reads in the chooser.
+ *
+ * The key is not decoration: two contacts answering to one handle very often
+ * share an alias too — that is *why* the handle is ambiguous — so a row showing
+ * only the name would offer two identical choices. `title` is the caller's
+ * resolved display name; the shortened key is what tells them apart.
+ */
+export function candidateLabel(title, npub) {
+  const key = typeof npub === "string" && npub.length > 16
+    ? `${npub.slice(0, 10)}…${npub.slice(-4)}`
+    : npub || "";
+  return `${title} · ${key}`;
 }
 
 /**

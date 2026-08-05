@@ -99,21 +99,63 @@ class ChatCommandsTest {
     }
 
     @Test
-    fun theComposerLooksPrivateFromTheMomentAtTaraIsTyped() {
-        // Eager on purpose: a private thing that looks like a message is how
-        // somebody sends one by accident.
-        assertTrue(ChatCommands.isAsideDraft("@tara "))
-        assertTrue(ChatCommands.isAsideDraft("@tara"))
-        assertTrue(ChatCommands.isAsideDraft("@Tara what about"))
-        assertTrue(ChatCommands.isAsideDraft("/tara hello"))
-        assertTrue(ChatCommands.isAsideDraft("  @tara hello"))
+    fun theComposerKnowsTheAudienceFromTheMomentTaraIsAddressed() {
+        // Eager on purpose, and now in two directions: `/tara` never leaves the
+        // device and `@tara` reaches the other person. Either label being wrong
+        // is how somebody publishes a private thought, or asks a question the
+        // peer turns out never to have seen.
+        assertEquals(ChatCommands.TaraAudience.Shared, ChatCommands.taraDraft("@tara "))
+        assertEquals(ChatCommands.TaraAudience.Shared, ChatCommands.taraDraft("@tara"))
+        assertEquals(ChatCommands.TaraAudience.Shared, ChatCommands.taraDraft("@Tara what about"))
+        assertEquals(ChatCommands.TaraAudience.Shared, ChatCommands.taraDraft("  @tara hello"))
+        assertEquals(ChatCommands.TaraAudience.Private, ChatCommands.taraDraft("/tara hello"))
+        assertEquals(ChatCommands.TaraAudience.Private, ChatCommands.taraDraft("/tara"))
     }
 
     @Test
-    fun aPersonWhoseHandleStartsWithTaraIsNotAnAside() {
-        assertFalse(ChatCommands.isAsideDraft("@taranjeet are you around"))
-        assertFalse(ChatCommands.isAsideDraft("hello @tara"))
-        assertFalse(ChatCommands.isAsideDraft(""))
+    fun aPersonWhoseHandleStartsWithTaraIsNotTara() {
+        assertEquals(null, ChatCommands.taraDraft("@taranjeet are you around"))
+        assertEquals(null, ChatCommands.taraDraft("hello @tara"))
+        assertEquals(null, ChatCommands.taraDraft(""))
+    }
+
+    // ── Tara in the room (`@tara …`) ──────────────────────────────────────────
+
+    @Test
+    fun sharedAndPrivateTaraAreDifferentPlans() {
+        // Same words, two audiences. One plan reaches `tara_in_chat` (two
+        // messages into the thread), the other `tara_aside` (nothing sent).
+        assertEquals(
+            ComposerPlan.TaraHere("what film should we watch"),
+            ChatCommands.planFor(ChatCommand.TaraHere("what film should we watch")),
+        )
+        assertEquals(
+            ComposerPlan.Aside("what film should we watch"),
+            ChatCommands.planFor(ChatCommand.AskTara("what film should we watch")),
+        )
+    }
+
+    @Test
+    fun anEmptySharedAddressSaysTheAnswerWillBeSeenByBoth() {
+        val plan = ChatCommands.planFor(ChatCommand.TaraHere(" "))
+        assertTrue(plan is ComposerPlan.Explain)
+        assertTrue((plan as ComposerPlan.Explain).message.contains("you'll both see"))
+    }
+
+    @Test
+    fun theHelplinesAreShownAsLinesWhereThereIsNoCardToShowThem() {
+        // AUDIT §8's honesty gate: the resources go beside *any* distress reply,
+        // and the composer's note is a single Text with no card slot.
+        val lines = ChatCommands.crisisLines(
+            listOf(
+                ComradeCore.CrisisResourceInfo("Tele-MANAS (India)", "14416", "24×7"),
+                ComradeCore.CrisisResourceInfo("KIRAN", "1800-599-0019", "24×7"),
+            ),
+        )
+        assertTrue(lines.contains("14416"))
+        assertTrue(lines.contains("KIRAN"))
+        // Empty in, empty out — a note must not end on a dangling heading.
+        assertEquals("", ChatCommands.crisisLines(emptyList()))
     }
 
     // ── Tasks ────────────────────────────────────────────────────────────────
@@ -158,8 +200,62 @@ class ChatCommandsTest {
             ChatCommand.Task("do it", listOf(mention("ana"))),
             listOf(ambiguous("ana")),
         )
-        assertTrue(plan is ComposerPlan.Explain)
-        assertTrue((plan as ComposerPlan.Explain).message.contains("More than one contact"))
+        assertTrue(plan is ComposerPlan.Choose)
+        val choose = plan as ComposerPlan.Choose
+        assertEquals("ana", choose.handle)
+        assertEquals(2, choose.candidates.size)
+    }
+
+    @Test
+    fun choosingOneOfTwoLetsTheSameDraftThrough() {
+        // The fix for the dead end: the old plan said "pick which one" and gave
+        // nothing to pick, so the command could never be completed at all.
+        val mentions = ChatCommands.withChoices(
+            listOf(ambiguous("ana")),
+            mapOf("ana" to "npub1b"),
+        )
+        assertEquals(
+            ComposerPlan.Task("do it", "npub1b"),
+            ChatCommands.planFor(ChatCommand.Task("do it", listOf(mention("ana"))), mentions),
+        )
+    }
+
+    @Test
+    fun aChoiceThatNamesNobodyOnTheListIsIgnored() {
+        // A pin left over from an earlier draft, or from before a contact was
+        // removed, must not silently retarget a message — that is the exact
+        // failure the ambiguity exists to prevent, arriving by another door.
+        val stale = ChatCommands.withChoices(
+            listOf(ambiguous("ana")),
+            mapOf("ana" to "npub1someone-else"),
+        )
+        assertEquals(null, stale[0].npub)
+        assertTrue(
+            ChatCommands.planFor(
+                ChatCommand.Task("do it", listOf(mention("ana"))),
+                stale,
+            ) is ComposerPlan.Choose,
+        )
+    }
+
+    @Test
+    fun aChooserRowCarriesTheKeyBecauseBothMayShareTheName() {
+        // The usual reason a handle is ambiguous is that both people chose the
+        // same name, so a row showing only the name offers two identical
+        // choices — which is no choice at all.
+        val a = ChatCommands.candidateLabel("ana", "npub1aaaaaaaaaaaaaaaaaaaa")
+        val b = ChatCommands.candidateLabel("ana", "npub1bbbbbbbbbbbbbbbbbbbb")
+        assertFalse(a == b)
+        assertTrue(a.contains("ana"))
+    }
+
+    @Test
+    fun anAmbiguousHandleInAnOfferAsksTooRatherThanPickingOne() {
+        val plan = ChatCommands.planFor(
+            ChatCommand.OfferTo(AppAction.BREATHE, listOf(mention("ana"))),
+            listOf(ambiguous("ana")),
+        )
+        assertTrue(plan is ComposerPlan.Choose)
     }
 
     // ── Offers ───────────────────────────────────────────────────────────────

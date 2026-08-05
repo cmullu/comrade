@@ -372,6 +372,19 @@
          composer's own words. -->
     <string name="aside_only_you">Only you will see this — it goes to Tara, not to them.</string>
     <string name="aside_placeholder">Think out loud…</string>
+    <!-- `@tara` is the other half of the pair above: same companion, opposite
+         audience. Both labels have to be unmistakable, because the sigil is a
+         single character and getting it wrong either publishes a private thought
+         or hides an answer the other person was waiting for. -->
+    <string name="tara_here_both_see">Tara will answer here — you\'ll both see it.</string>
+    <string name="tara_here_placeholder">Ask Tara, out loud…</string>
+    <!-- The name over a shared Tara answer's bubble. Attribution, not proof:
+         core reads it off a wire marker any client could write, so it says who
+         the sending Comrade says spoke. See comrade_ui::MessageAuthor. -->
+    <string name="tara_author_label">Tara</string>
+    <!-- Two contacts answer to one handle. Naming the handle matters: the draft
+         may mention several, and this asks about one at a time. -->
+    <string name="mention_which_one">Two contacts answer to @%1$s — which one?</string>
 
     <string name="breathe_title">Take a deep breath</string>
     <string name="breathe_in">Breathe in</string>
@@ -500,6 +513,15 @@
     <!-- The case together otherwise assumes away: only one of you has the file.
          It comes straight from their device, never through a server of ours. -->
     <string name="together_ask_for_copy">I don\'t have it</string>
+    <!-- Shown only while Comrade may not read the audio library, which is where
+         a copy you already own would be found. Asking here rather than at
+         startup: an invitation is the moment the permission is obviously worth
+         something, and the Join button beside it needs no permission at all. -->
+    <string name="together_look_in_library">Look in my library</string>
+    <!-- "Allowed to look, and it genuinely isn't here" — deliberately not the
+         sentence shown after a refusal, which would send someone hunting for a
+         file they already have. -->
+    <string name="together_library_missed">No copy of that on this phone — pick the file.</string>
     <!-- The relay question. The message body comes from core so that all three
          frontends ask it in the same words and with the same number in it. -->
     <string name="together_relay_title">Send this through a relay?</string>

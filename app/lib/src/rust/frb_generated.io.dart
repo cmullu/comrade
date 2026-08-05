@@ -260,6 +260,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MeshStatusDto dco_decode_mesh_status_dto(dynamic raw);
 
   @protected
+  MessageAuthor dco_decode_message_author(dynamic raw);
+
+  @protected
   MessageDto dco_decode_message_dto(dynamic raw);
 
   @protected
@@ -654,6 +657,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MeshStatusDto sse_decode_mesh_status_dto(SseDeserializer deserializer);
+
+  @protected
+  MessageAuthor sse_decode_message_author(SseDeserializer deserializer);
 
   @protected
   MessageDto sse_decode_message_dto(SseDeserializer deserializer);
@@ -1086,6 +1092,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_mesh_status_dto(MeshStatusDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_author(MessageAuthor self, SseSerializer serializer);
 
   @protected
   void sse_encode_message_dto(MessageDto self, SseSerializer serializer);

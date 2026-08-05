@@ -275,11 +275,22 @@ pub enum ChatCommand {
         query: String,
         service: Option<MusicService>,
     },
-    /// A private aside to Tara. Never sent — see `comrade_ui`'s `tara_aside`.
+    /// A **private** aside to Tara — `/tara …`. Never sent to the peer; see
+    /// `comrade_ui`'s `tara_aside`.
+    ///
     /// Empty `text` means "addressed, nothing said yet", which is a prompt
     /// rather than an error: it is what lets the composer switch into aside mode
-    /// the moment `@tara ` is typed.
+    /// the moment `/tara ` is typed.
     AskTara { text: String },
+    /// Tara **in the conversation** — `@tara …`, the way `@Meta AI` works in
+    /// WhatsApp. Both people see the question and the answer; see `comrade_ui`'s
+    /// `tara_in_chat`, which is also where the one exception lives (a question
+    /// that trips the distress path is answered privately and never sent).
+    ///
+    /// Two variants rather than `AskTara { shared: bool }` on purpose: every
+    /// match site then has to name which audience it is handling, and the one
+    /// that must never reach a relay keeps the name it always had.
+    TaraHere { text: String },
     /// Name a piece of work. No `assignees` means a note to self, which is
     /// local-only and the common case.
     Task {
@@ -411,11 +422,16 @@ pub fn catalog() -> Vec<CommandSpec> {
             "Offer a comrade a talk with Tara",
             true
         ),
+        // One entry, not two, even though there are two audiences: the picker
+        // only opens on `/`, so a row for `@tara` could never be completed by
+        // the thing that showed it. The help line carries the other half
+        // instead — this is the only place a user is told the two sigils differ,
+        // so it has to say both.
         spec!(
             "tara",
             [],
             "<what you want to think through>",
-            "A private aside to Tara — only you see it",
+            "Privately, only you see it — say @tara instead to ask her in the chat",
             false
         ),
         spec!("breathe", ["breath"], "", "Take a deep breath", false),
@@ -446,10 +462,12 @@ pub fn catalog() -> Vec<CommandSpec> {
 /// The rules, in order, and each one earns its place:
 /// 1. Nothing but whitespace is [`ChatCommand::Plain`] — the composer decides
 ///    what to do with an empty box, not the grammar.
-/// 2. A leading `@tara` is an aside. Checked before the `/` rules because it is
-///    the one command with a different sigil, and before anything else because a
-///    private thought must never fall through to a send — the ordering
-///    `VoiceCommand.kt` already arrived at for the journal.
+/// 2. A leading `@tara` addresses the companion **in the conversation**
+///    ([`ChatCommand::TaraHere`]). Checked before the `/` rules because it is the
+///    one command with a different sigil. `/tara` is the private aside
+///    ([`ChatCommand::AskTara`]) — the sigil *is* the audience, which is why
+///    neither spelling can fall through to a plain send: a bare `@tara` typed
+///    into a chat must not be delivered as the literal word.
 /// 3. No leading `/` → [`ChatCommand::Plain`]. So `20/80 split` is a message.
 /// 4. A leading token containing a second `/` is a path → `Plain`. So
 ///    `see /Users/me/x` and a pasted `/usr/local/bin` are messages.
@@ -465,7 +483,7 @@ pub fn parse(text: &str) -> ChatCommand {
 
     if let Some(rest) = strip_ci_prefix(trimmed, "@tara") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return ChatCommand::AskTara {
+            return ChatCommand::TaraHere {
                 text: rest.trim().to_string(),
             };
         }
@@ -837,10 +855,15 @@ mod tests {
     // ── Tara asides ──────────────────────────────────────────────────────────
 
     #[test]
-    fn at_tara_is_an_aside_in_either_spelling() {
+    fn the_sigil_decides_who_hears_the_answer() {
+        // The whole feature in one test: same words, two audiences. `@tara` is
+        // the companion joining the conversation (WhatsApp's `@Meta AI`);
+        // `/tara` is the private aside it has always been. Getting this pair
+        // backwards would either publish a private thought or quietly swallow a
+        // question the other person was meant to see.
         assert_eq!(
             parse("@tara I keep putting this off"),
-            ChatCommand::AskTara {
+            ChatCommand::TaraHere {
                 text: "I keep putting this off".into()
             }
         );
@@ -856,18 +879,24 @@ mod tests {
     fn at_tara_is_case_insensitive() {
         assert_eq!(
             parse("@Tara hello"),
-            ChatCommand::AskTara {
+            ChatCommand::TaraHere {
                 text: "hello".into()
             }
         );
     }
 
     #[test]
-    fn a_bare_address_is_an_aside_with_nothing_said_yet() {
+    fn a_bare_address_is_addressed_with_nothing_said_yet() {
         // Not Plain: sending the literal text "@tara" to the other person is
         // the one outcome that must not happen. Empty text is a prompt.
         assert_eq!(
             parse("@tara"),
+            ChatCommand::TaraHere {
+                text: String::new()
+            }
+        );
+        assert_eq!(
+            parse("/tara"),
             ChatCommand::AskTara {
                 text: String::new()
             }

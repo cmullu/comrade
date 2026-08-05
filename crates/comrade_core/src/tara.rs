@@ -369,6 +369,46 @@ fn third_party_reply(handle: &str) -> String {
     )
 }
 
+// ── Tara in the room ─────────────────────────────────────────────────────────
+//
+// `@tara …` in a conversation asks her **in front of the other person** — the
+// answer is sent to them, like `@Meta AI` in WhatsApp. `/tara …` is the private
+// aside and always was. Two spellings, two audiences, and the composer has to
+// say which one is in the box before the send button is pressed.
+//
+// A shared answer travels as an ordinary message whose text carries
+// [`TARA_CHAT_PREFIX`]. `comrade_ui::MessageDto` now reads that marker into an
+// author field and hands the frontends the answer without it, so a Tara line is
+// drawn as hers rather than as a sentence you appear to have typed.
+//
+// **The prefix stays on the wire on purpose**, and did not go away when the
+// field arrived. A NIP-17 DM opened in some other Nostr client has no author
+// field to read, and "Tara: …" is a truer fallback there than her words in the
+// sender's mouth. It also means a thread written by an older build keeps
+// meaning what it meant.
+//
+// What the marker is **not** is authentication. Anybody can type "Tara: "
+// themselves, so a Tara bubble says *the sending Comrade claims this came from
+// her* — the same standing a quoted reply has — and no frontend may present a
+// match as proof the companion spoke. `AUDIT.md` Q17 records the boundary, and
+// [`the_marker_is_a_label_and_the_test_says_so`] pins it.
+
+/// What a shared Tara line starts with, on the wire and on screen.
+pub const TARA_CHAT_PREFIX: &str = "Tara: ";
+
+/// Render `answer` as the line that goes into the conversation.
+pub fn tara_chat_line(answer: &str) -> String {
+    format!("{TARA_CHAT_PREFIX}{}", answer.trim())
+}
+
+/// The answer inside a shared Tara line, or `None` if `content` is not one.
+///
+/// For frontends that want to draw the line as hers rather than as yours. See
+/// the section note above: a match is a label, not a claim about who spoke.
+pub fn tara_chat_answer(content: &str) -> Option<&str> {
+    content.strip_prefix(TARA_CHAT_PREFIX)
+}
+
 fn contains_word(haystack_norm: &str, cue: &str) -> bool {
     format!(" {haystack_norm} ").contains(&format!(" {cue} "))
 }
@@ -696,6 +736,31 @@ mod tests {
                 r.text
             );
         }
+    }
+
+    // ── Tara in the room ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_shared_line_round_trips_through_its_marker() {
+        let line = tara_chat_line("What's the smallest next step?");
+        assert_eq!(
+            tara_chat_answer(&line),
+            Some("What's the smallest next step?")
+        );
+        // An ordinary message is not a Tara line, whatever it says about her.
+        assert_eq!(tara_chat_answer("Tara said hello"), None);
+        assert_eq!(tara_chat_answer("what did tara say"), None);
+    }
+
+    #[test]
+    fn the_marker_is_a_label_and_the_test_says_so() {
+        // Anybody can type the prefix, and this asserts the honest consequence
+        // rather than a guarantee the wire does not carry: a hand-typed line
+        // matches. A frontend must therefore style a match, never trust it.
+        assert_eq!(
+            tara_chat_answer("Tara: I made this up"),
+            Some("I made this up")
+        );
     }
 
     #[test]

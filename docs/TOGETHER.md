@@ -419,6 +419,14 @@ already rules the whole area out. What *is* adopted is the identity half: a link
 resolves to a recording, and the recording is looked for in the library already
 on the listener's device.
 
+That lookup needs a permission, and until 2026-08-05 the app did not ask for one,
+so it never matched anything — `AUDIT.md` Q15. Android now declares
+`READ_MEDIA_AUDIO` and asks at the moment a song is actually named, at most once,
+and only when a local copy would change the answer (`MediaLibraryAccess`). A
+refusal costs the automatic match and nothing else: the file picker needs no
+permission at all, so every route below still works, and the composer says
+Comrade was not allowed to look rather than that the track is absent.
+
 **On "nanosecond" sync**, since it was asked for directly: it is not reachable by
 any software path on two phones, and the reason is three independent floors, each
 orders of magnitude above it. The transport (a relay is hundreds of milliseconds;

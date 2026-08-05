@@ -1248,12 +1248,19 @@ class MeshStatusDto {
           peerCount == other.peerCount;
 }
 
+enum MessageAuthor {
+  human,
+  tara,
+  ;
+}
+
 class MessageDto {
   final String id;
   final String peer;
   final String content;
   final BigInt createdAt;
   final bool outgoing;
+  final MessageAuthor author;
   final String? status;
   final String? replyTo;
 
@@ -1263,6 +1270,7 @@ class MessageDto {
     required this.content,
     required this.createdAt,
     required this.outgoing,
+    required this.author,
     this.status,
     this.replyTo,
   });
@@ -1274,6 +1282,7 @@ class MessageDto {
       content.hashCode ^
       createdAt.hashCode ^
       outgoing.hashCode ^
+      author.hashCode ^
       status.hashCode ^
       replyTo.hashCode;
 
@@ -1287,6 +1296,7 @@ class MessageDto {
           content == other.content &&
           createdAt == other.createdAt &&
           outgoing == other.outgoing &&
+          author == other.author &&
           status == other.status &&
           replyTo == other.replyTo;
 }

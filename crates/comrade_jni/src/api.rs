@@ -81,9 +81,10 @@ pub use comrade_ui::{
     AttachmentHandoffDto, BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto,
     ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
     IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto, ProfileDto, ReactionDto,
-    ShareVerdictDto, TaraMessageDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
-    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto,
+    ProfileDto, ReactionDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto,
+    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
+    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -156,6 +157,12 @@ pub struct _DirectMessageDto {
     pub reply_to: Option<String>,
 }
 
+#[frb(mirror(MessageAuthor))]
+pub enum _MessageAuthor {
+    Human,
+    Tara,
+}
+
 #[frb(mirror(MessageDto))]
 pub struct _MessageDto {
     pub id: String,
@@ -163,6 +170,7 @@ pub struct _MessageDto {
     pub content: String,
     pub created_at: u64,
     pub outgoing: bool,
+    pub author: MessageAuthor,
     pub status: Option<String>,
     pub reply_to: Option<String>,
 }

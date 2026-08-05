@@ -90,17 +90,52 @@ pairs interleave.
 
 ## Reaching Tara from a conversation
 
-`@tara <text>` in a chat composer opens a **private aside** — the same thread,
-the same store, the same engine, and above all the same locality: it never sends,
-and the peer never sees it. `comrade_ui`'s `tara_aside` exists as a separate name
-from `tara_send` purely so a frontend reaching it from a chat composer cannot
-also reach `send_dm` with that text. The composer looks different from the moment
-`@tara ` is typed, before there is anything to parse, because a private thing
-that looks like a message is how somebody sends one by accident.
+**Two spellings, two audiences** (owner request, 2026-08-04 — `@Meta AI` in
+WhatsApp). The sigil decides who reads the answer, and nothing else does:
 
-**It is seeded with only what the user typed** — never the chat history, never the
-peer's messages. Otherwise "reflect on this conversation" quietly makes the other
-person a participant in something they never opted into.
+| Typed | Reaches | Who sees it |
+|---|---|---|
+| `/tara <text>` | `tara_aside` → `tara_send` | only you; the private thread |
+| `@tara <text>` | `tara_in_chat` | both of you; two DMs in the conversation |
+
+`/tara <text>` is the **private aside** — the same thread, the same store, the
+same engine, and above all the same locality: it never sends, and the peer never
+sees it. `comrade_ui`'s `tara_aside` exists as a separate name from `tara_send`
+purely so a frontend reaching it from a chat composer cannot also reach `send_dm`
+with that text.
+
+`@tara <text>` is Tara **in the room**: the question goes to the peer as your own
+message and her answer follows it, carrying `TARA_CHAT_PREFIX` on the wire and
+arriving at every frontend as `MessageDto.author = MessageAuthor::Tara` with the
+marker already off the text. Both people see her line drawn as hers — left-aligned
+on both devices, since her answer is carried by whichever phone asked and
+aligning by `outgoing` would put it on opposite sides of the two screens. It is
+still computed on this device: the shared half changes *who reads the answer*,
+not where it comes from.
+
+The bubble is **attribution, not attestation**. Nothing signs the marker, so it
+says the sending Comrade claims she wrote this — the same standing a quoted reply
+has. `AUDIT.md` Q17 records the boundary; nothing gates on the field.
+
+Three things hold the shared half in place, and they are the reason this is not
+simply "Tara, but public":
+
+1. **The private thread is untouched.** A shared ask is not a turn in it. The
+   "Privacy posture" guarantee below is about that thread and remains exact.
+2. **Distress is never published.** A question tripping `detect_distress` is
+   answered and *nothing is sent* — see "Crisis hand-off behaviour".
+3. **The peer is a reader, not material.** Her input is still only what the user
+   typed.
+
+The composer says which audience is in the box from the moment the sigil is
+typed, before there is anything to parse. That label now matters in both
+directions: a private thing that looks like a message is how somebody sends one
+by accident, and a shared thing that looks private is how somebody asks a
+question the other person never sees.
+
+**She is seeded with only what the user typed** — never the chat history, never
+the peer's messages, in either room. Otherwise "reflect on this conversation"
+quietly makes the other person a participant in something they never opted into.
 
 ### The third-party gate
 
@@ -132,7 +167,10 @@ crisis who names a friend needs the helplines, not a reflective question.
 ## Privacy posture
 
 - The thread exists only inside the encrypted store (Argon2id + AES-256-GCM);
-  no relay, no network, no analytics.
+  no relay, no network, no analytics. **`@tara` does not change this**: a shared
+  ask is never written to the thread, so nothing stored here has ever been sent.
+  The two messages it *does* send are ordinary DMs in the conversation, subject
+  to the same NIP-17 sealing as anything else typed into that box.
 - The opener nudge ("two low days this week…") reads journal **mood markers
   and entry age only** — never journal text. Data minimisation is the point:
   the companion doesn't need your words to invite you to reflect.
@@ -147,6 +185,14 @@ fires, both the user turn and the reply are stored with `crisis = true`, the
 reply is a fixed hand-off message (no reflective prompt), and every frontend
 must render the crisis resources with it — the flag is part of the DTO
 contract, not a UI nicety.
+
+**In the shared room (`@tara`) it also stops the send.** `tara_in_chat` returns
+`kept_private` and delivers nothing: not the question, not the answer, not even
+to the outbox. Someone who typed `@` instead of `/` while in a bad place must not
+have their hand-off published into another person's chat, and the composer has to
+say the exchange stayed here or they will assume the peer read it. The gate
+applies to the resources too — the chat composer has no card slot, so it renders
+the same helplines as lines (`ChatCommands.crisisLines`).
 
 ## OQ9 and the LLM slot
 
