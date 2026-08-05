@@ -181,6 +181,59 @@ pub enum DakError {
     Padding(#[from] PaddingError),
 }
 
+// ── link: browser sessions signed in by QR ──────────────────────────────────
+
+/// Failures on the device-linking path ([`crate::link`]).
+///
+/// Deliberately fine-grained on the refusals, because every one of these is
+/// shown to somebody standing there with a phone in their hand wondering why the
+/// scan did nothing. "Malformed" is the only catch-all, and it carries the
+/// reason.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LinkError {
+    #[error("this link code is from a newer version of Comrade (v{0})")]
+    UnsupportedVersion(u8),
+
+    #[error("this link code has expired — show a fresh one and scan again")]
+    OfferExpired,
+
+    #[error("malformed link code: {0}")]
+    Malformed(String),
+
+    #[error("relay {0} is not wss://; a linked browser needs an encrypted relay")]
+    InsecureRelay(String),
+
+    #[error("link code names {count} relays, over the limit of {max}")]
+    TooManyRelays { count: usize, max: usize },
+
+    #[error("a linked session must be granted at least one permission")]
+    NoScopes,
+
+    #[error("session lifetime of {requested}s is not between 1s and {max}s")]
+    BadLifetime { requested: u64, max: u64 },
+
+    #[error("already linked to {max} devices — revoke one first")]
+    TooManySessions { max: usize },
+
+    #[error("too many link attempts; {max} are allowed every {window_secs}s")]
+    TooManyAttempts { max: usize, window_secs: u64 },
+
+    #[error("this device is not linked to your vault")]
+    UnknownSession,
+
+    #[error("this linked session has expired — scan again to sign back in")]
+    SessionExpired,
+
+    #[error("a linked session is not permitted to call {method}")]
+    NotPermitted { method: String },
+
+    #[error("frame is {size} bytes, over the {max}-byte link cap")]
+    FrameTooLarge { size: usize, max: usize },
+
+    #[error("too many part-received frames; {max} are held at once")]
+    TooManyPartialFrames { max: usize },
+}
+
 // ── pad: bucket length padding ───────────────────────────────────────────────
 
 #[derive(Debug, Error, PartialEq, Eq)]

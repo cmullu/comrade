@@ -9,6 +9,14 @@ comrade_state = { path = "../comrade_state" }
 
 tokio         = { workspace = true }
 nostr-sdk     = { workspace = true }
+# The *base* nostr crate that `nostr-sdk` re-exports — same version, so the key
+# types are identical and nothing is duplicated. Declared directly because
+# `link.rs` must not reach for `nostr-sdk`: the sdk pulls tokio's net stack,
+# which does not compile for `wasm32-unknown-unknown` (`mio` fails outright),
+# and `link.rs` exists precisely so a browser can one day run it. Keeping the
+# import narrow is what makes that a dependency change of zero lines instead of
+# a rewrite. See docs/FLUTTER_WEB_MIGRATION.md §4.
+nostr         = { workspace = true }
 libp2p        = { workspace = true }
 yrs           = { workspace = true }
 serde         = { workspace = true }

@@ -18,6 +18,11 @@ resolver = "2"
 [workspace.dependencies]
 tokio          = { version = "1",     features = ["full"] }
 nostr-sdk      = { version = "0.44", features = ["nip04", "nip44", "nip59"] }
+# The base crate `nostr-sdk` re-exports. Same major.minor, so cargo unifies them
+# and `nostr::PublicKey` *is* `nostr_sdk::PublicKey` — this adds a dependency
+# edge, not a second copy of the type. `default-features = false` keeps the
+# wasm-reachable subset (`comrade_core::link`) free of the sdk's tokio net stack.
+nostr          = { version = "0.44", default-features = false, features = ["std"] }
 libp2p         = { version = "0.56",  features = ["tokio", "tcp", "noise", "yamux", "mdns", "gossipsub", "macros"] }
 yrs            = "0.21"
 serde          = { version = "1",     features = ["derive"] }

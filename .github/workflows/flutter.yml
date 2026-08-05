@@ -209,6 +209,87 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # ── Web bundle ───────────────────────────────────────────────────────────
+  # Needs no Rust at all, and that is the point being checked. A browser has no
+  # Comrade core: `comrade_core` does not compile for wasm32-unknown-unknown
+  # (mio, via tokio's net stack, fails), so the web build must not reach
+  # `lib/src/rust/` even transitively. It reaches `data/rust_backend.dart`
+  # instead, whose conditional import keeps `dart:ffi` out of the compilation
+  # unit — and the *only* thing that proves that holds is compiling for web.
+  # A `dart:ffi` import that creeps back in is a build error here and nowhere
+  # else: analyze, test, the APK and the Linux bundle all target the VM and stay
+  # green. See docs/FLUTTER_WEB_MIGRATION.md §6.
+  #
+  # This lane does not prove the web app *works*. It cannot sign in until Phase
+  # W2 lands the wasm crypto crate and the link transport; today the target
+  # builds and reaches the fake repository only.
+  web:
+    name: Flutter — web bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # This step *is* the assertion. `dart:ffi` in a web compilation unit is a
+      # compile error, not a runtime one, so a regressed conditional import
+      # cannot get past here — there is nothing to grep the output for
+      # afterwards, because there would be no output.
+      #
+      # `--no-web-resources-cdn` is not optional here. By default the build bakes
+      # FLUTTER_WEB_CANVASKIT_URL=https://www.gstatic.com/flutter-canvaskit/<rev>/
+      # into the bundle, so the page fetches its renderer from a Google CDN — which
+      # contradicts index.html's "everything is served from this origin", and which
+      # that page's own CSP (`script-src 'self'`) then blocks, leaving the boot
+      # placeholder on screen forever. The flag copies CanvasKit into the bundle so
+      # the comment and the CSP are true at the same time.
+      - name: flutter build web --release
+        working-directory: app
+        run: flutter build web --release --no-web-resources-cdn
+
+      # The CSP promise, checked against the artifact rather than asserted in a
+      # comment: the renderer must be served from this origin.
+      #
+      # Asserted as the *presence of the local asset* rather than the absence of a
+      # hostname, deliberately. An absence-grep is the obvious way to write this
+      # and it is wrong twice over: `flutter.js` carries its own hardcoded CDN
+      # fallback string regardless of the flag, so the grep can fail on a string
+      # the build will never fetch; and `web/index.html` is copied into the bundle
+      # verbatim, so even a *comment* naming the host trips it. Checking that
+      # canvaskit is actually in the bundle tests the thing the CSP needs — the
+      # renderer resolves locally — and cannot be defeated by prose.
+      # Matched on "a .wasm under canvaskit/" rather than a specific filename,
+      # because which one lands (canvaskit.wasm, skwasm.wasm, a chromium/ variant)
+      # depends on the renderer Flutter picks, and pinning the name would make this
+      # fail on a renderer change that is not a regression.
+      - name: The renderer is served from this origin, not a CDN
+        working-directory: app
+        run: |
+          found=$(find build/web/canvaskit -name '*.wasm' 2>/dev/null | head -5)
+          if [ -z "$found" ]; then
+            echo "::error::no renderer .wasm under build/web/canvaskit/ — the page would fetch it from a CDN, which its own CSP blocks"
+            ls -la build/web/ 2>&1 || true
+            exit 1
+          fi
+          echo "renderer bundled locally:"
+          echo "$found"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comrade-web
+          path: app/build/web/
+          if-no-files-found: error
+          retention-days: 14
+
   # ── Android APK ──────────────────────────────────────────────────────────
   # Cross-compiles the Rust cdylib for both shipped ABIs via cargo-ndk, then
   # assembles. Mirrors android-apk.yml's ABI set (arm64-v8a for handsets,

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    Comrade on the web.
+
+    Deliberately minimal, and each omission is a decision:
+
+      * No CDN, no analytics, no font host, no service worker registration of
+        anything remote. A privacy client that phones a third party to render its
+        own login screen has already lost the argument. Everything here is served
+        from this origin or is inline — which is *not* the default: the build
+        would otherwise fetch CanvasKit from a Google CDN, so the CI lane passes
+        `--no-web-resources-cdn` and greps the artifact to keep it that way.
+
+        That grep scans this file too, since the build copies it into build/web/
+        verbatim. Hence "a Google CDN" rather than the hostname: naming the host
+        in a comment would trip the check that exists to keep the host out.
+      * No `<base href="/">` rewriting beyond the token Flutter's tooling
+        replaces, so the app can be hosted at a sub-path.
+      * `referrer` is `no-referrer`.
+
+    On `connect-src`: it is `'self' wss: blob: data:`. The remote half of that is
+    this origin and `wss:` — once Phase W3 lands, the only network this page makes
+    is a relay websocket (see docs/FLUTTER_WEB_MIGRATION.md). `blob:` and `data:`
+    are in there too, and they are not a network: they address bytes this page
+    already holds, which is how decrypted attachments get to an <img> or an
+    <audio> without a plaintext file anywhere. Worth stating plainly rather than
+    rounding down to "origin and wss: only", which is what an earlier version of
+    this comment said and the directive above did not.
+
+    The CSP allows 'wasm-unsafe-eval' because Flutter's CanvasKit renderer and
+    (from Phase W2) the wasm build of comrade_core's link/crypto subset both need
+    to compile a WebAssembly module. It is *not* 'unsafe-eval': that permits
+    WebAssembly only, not JavaScript string evaluation.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark light">
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'wasm-unsafe-eval';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob:;
+    font-src 'self' data:;
+    connect-src 'self' wss: blob: data:;
+    media-src 'self' blob: data:;
+    worker-src 'self' blob:;
+    frame-ancestors 'none';
+    base-uri 'self';
+    form-action 'none';
+  ">
+
+  <meta name="description" content="Comrade — sovereign, offline-first communication.">
+  <title>Comrade</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    /*
+      Shown before the Flutter engine has painted a frame. Dark by default and
+      light only if the machine asks, matching `ComradeTheme`; a white flash
+      before a dark app is the most-noticed bug in a web build.
+    */
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background-color: #0d1117;
+      color: #c9d1d9;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    @media (prefers-color-scheme: light) {
+      html, body {
+        background-color: #ffffff;
+        color: #24292f;
+      }
+    }
+    #boot {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      text-transform: lowercase;
+      opacity: 0.55;
+    }
+  </style>
+</head>
+<body>
+  <div id="boot">comrade</div>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

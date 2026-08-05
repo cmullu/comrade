@@ -20,6 +20,7 @@
  *   attention — attention-restoration engine (usage mirror, focus sessions, long-read chunking)
  *   relay   — NIP-65 relay-list metadata + outbox-model routing
  *   media   — NIP-94/96 encrypted media staging + pluggable uploaders
+ *   link    — sign a keyless client (a browser tab) in to a device holding the vault
  *
  * Store-and-forward, privacy, and anonymity primitives adapted from
  * permissionlesstech/bitchat (see `docs/BITCHAT_ADOPTION.md` for the full
@@ -54,6 +55,7 @@ pub mod gcs;
 pub mod geo;
 pub mod handoff;
 pub mod karya;
+pub mod link;
 pub mod media;
 pub mod metrics;
 pub mod nudge;

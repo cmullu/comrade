@@ -1,14 +1,19 @@
 /// Composition root.
 ///
-/// The only place that decides *which* backend the app talks to, and now the
-/// only place that knows the bridge exists at all — nothing under `lib/src/`
-/// outside `data/rust_comrade_repository.dart` imports `src/rust/`.
+/// The only place that decides *which* backend the app talks to — and it no
+/// longer names the bridge at all. It asks `data/rust_backend.dart` for one, and
+/// that file's conditional import decides: `dart:ffi` on the VM,
+/// a refusal in a browser. Nothing under `lib/src/` outside
+/// `data/rust_comrade_repository.dart` imports `src/rust/`, and nothing a web
+/// build compiles reaches it even transitively — which is what makes
+/// `flutter build web` possible at all. See `docs/FLUTTER_WEB_MIGRATION.md` §6.
 ///
 /// ## Choosing a backend
 ///
 /// ```sh
 /// flutter run                                   # FakeComradeRepository
 /// flutter run --dart-define=COMRADE_BACKEND=rust  # the real core
+/// flutter run -d chrome                         # web: fake only, for now
 /// ```
 ///
 /// The fake is still the default, deliberately. The real backend needs a
@@ -43,7 +48,7 @@ import 'src/app.dart';
 import 'src/data/comrade_repository.dart';
 import 'src/data/fake_comrade_repository.dart';
 import 'src/data/persistent_preferences.dart';
-import 'src/data/rust_comrade_repository.dart';
+import 'src/data/rust_backend.dart';
 import 'src/platform/platform.dart';
 import 'src/state/providers.dart';
 import 'src/state/settings_providers.dart';
@@ -58,9 +63,8 @@ Future<void> main() async {
 
   // Built here rather than inside the provider because the bridge needs an
   // `await` to load the library, and a Riverpod `Provider` body cannot.
-  final ComradeRepository repository = kBackend == 'rust'
-      ? await RustComradeRepository.connect()
-      : FakeComradeRepository();
+  final ComradeRepository repository =
+      kBackend == 'rust' ? await connectRustBackend() : FakeComradeRepository();
 
   final ComradePlatform platform = ComradePlatform();
   final List<Override> mediaOverrides = await _mediaOverrides(platform);
