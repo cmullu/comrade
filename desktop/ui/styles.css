@@ -2494,14 +2494,6 @@ code {
   border-radius: 8px;
   background: #000;
 }
-/* Audio-only: the same element, collapsed to its controls. A <video> renders a
-   black rectangle for a file with no picture, and a shared album should not get
-   a dead box the height of a film. `together_sync.mjs` decides which this is. */
-.together-player-audio {
-  height: 54px;
-  max-height: 54px;
-  background: var(--panel, #161616);
-}
 
 /* ── In-chat commands (see desktop/ui/chat_commands.mjs) ──────────────────── */
 
@@ -2926,4 +2918,213 @@ code {
   margin: 12vh auto;
   text-align: center;
   line-height: 1.6;
+}
+
+/* ── Together: the player ──────────────────────────────────────────────────
+   Music-first. The artwork block is the centrepiece and the <video> lives
+   inside it, revealed only when the recording turns out to have a picture — so
+   an album gets a record sleeve and a film gets a screen, from one element and
+   one set of wiring.
+
+   Everything animates on transform/opacity only. A session is the one screen in
+   this app where something is playing, so a layout-thrashing transition here is
+   a stutter in the thing being watched. */
+.view-together {
+  display: grid;
+  place-content: center;
+  gap: 1.25rem;
+  padding: 2rem clamp(1rem, 6vw, 4rem);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.together-empty {
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+  max-width: 30rem;
+  text-align: center;
+  margin: auto;
+}
+.together-empty-mark {
+  font-size: 3.5rem;
+  line-height: 1;
+  opacity: 0.35;
+}
+.together-empty-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.together-empty-body {
+  margin: 0;
+  color: var(--muted, #9aa7c2);
+  line-height: 1.6;
+}
+.together-empty-body code {
+  padding: 0.1em 0.4em;
+  border-radius: 6px;
+  background: var(--panel, #161616);
+  font-size: 0.95em;
+}
+
+.together-stage {
+  display: grid;
+  gap: 1rem;
+  width: min(100%, 34rem);
+  margin: auto;
+}
+
+/* Square by default — a sleeve, not a letterbox. `aspect-ratio` is overridden
+   inline by `applyTogetherPicture` once the decoder reports a real one, so a
+   film is not forced into a square and a vertical clip is not letterboxed into
+   a strip. */
+.together-art {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 16px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(120% 120% at 30% 20%, rgba(129, 140, 248, 0.28), transparent 60%),
+    radial-gradient(100% 100% at 80% 90%, rgba(52, 211, 153, 0.20), transparent 60%),
+    var(--panel, #161616);
+  box-shadow: 0 18px 50px -24px rgba(0, 0, 0, 0.75);
+}
+.together-art-mark {
+  font-size: clamp(3rem, 12vw, 5rem);
+  opacity: 0.28;
+  /* A slow breath, so a paused-looking screen still reads as alive. Purely
+     compositor work: no layout, no paint of anything else. */
+  animation: together-breathe 6s ease-in-out infinite;
+}
+@keyframes together-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.22; }
+  50% { transform: scale(1.06); opacity: 0.34; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .together-art-mark { animation: none; }
+}
+/* When there is a picture it fills the sleeve and the glyph goes behind it. */
+.together-art .together-player {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  border-radius: 0;
+  object-fit: contain;
+  background: #000;
+}
+
+.together-meta {
+  display: grid;
+  gap: 0.15rem;
+  text-align: center;
+}
+.together-title-full {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  /* A long title truncates rather than reflowing the whole stage mid-song. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.together-with {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.together-scrub {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+}
+.together-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  color: var(--muted, #9aa7c2);
+  /* Tabular figures still change width at the hour boundary; a fixed min-width
+     stops the track resizing on every tick. */
+  min-width: 3ch;
+  text-align: center;
+}
+.together-seek {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border, #2a2a2a);
+  outline-offset: 4px;
+  cursor: pointer;
+}
+.together-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg, #e6ebf5);
+  border: 0;
+  transition: transform 120ms ease;
+}
+.together-seek:hover::-webkit-slider-thumb,
+.together-seek:focus-visible::-webkit-slider-thumb {
+  transform: scale(1.25);
+}
+
+.together-transport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+}
+.together-ctl {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+.together-ctl:hover { background: var(--panel, #161616); }
+.together-ctl:active { transform: scale(0.94); }
+.together-ctl-main {
+  width: 60px;
+  height: 60px;
+  font-size: 1.5rem;
+  background: var(--fg, #e6ebf5);
+  color: var(--bg, #0a0e1a);
+}
+.together-ctl-main:hover { background: #fff; }
+
+.together-health {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  min-height: 1.75rem;
+}
+.together-chip {
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--border, #2a2a2a);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+/* Deliberately not colour-coded. "Together" and "we've lost track of them" are
+   both true statements, and painting one green and one red would make an honest
+   report of poor measurement look like a fault. */
+.together-health-num {
+  font-variant-numeric: tabular-nums;
 }

@@ -790,6 +790,22 @@ is small; the content problem is the real constraint:
 >   instead of falling back to the relay that was there all along. Stated on the
 >   method, the Tauri command and the Kotlin arm; there is no code that enforces
 >   it, and a watchdog is the honest follow-up.
+> - ~~**Together had no home of its own.**~~ **Moved 2026-08-05.** It has the
+>   bottom-nav slot Feed had on Android and the sidebar slot Sabha had on
+>   desktop; neither feed was removed — Feed is a drawer-reached pushed screen
+>   (`drawer-feed`, asserted in `MainActivityUiTest` because "off the nav, not
+>   removed" is only true if something reaches it) and Sabha is a button in the
+>   desktop sidebar's Modes section. Beyond the nav, this fixes a real Android
+>   problem: a live session was an overlay over the whole app, so an hour-long
+>   album meant an hour of being unable to read anything else without ending it.
+>   Now only an *invitation* covers the app and the session lives in its tab.
+>   Both frontends got a music-first player — one square sleeve holding the note
+>   glyph or the video surface, so an album is a record cover and a film is a
+>   screen from one layout — and desktop shows the measured drift and quality off
+>   `TogetherCorrection`, where `player_view.mjs` refuses to report a gap smaller
+>   than the measurement error. **Android does not show those two figures yet**:
+>   carrying them into `UiState.Live` is the follow-up, and until then its player
+>   reports status but not distance.
 > - **Nothing in CI renders anything.** Both bugs above were visible instantly
 >   on a device and invisible to 332 JS tests, 514 core tests and two emulator
 >   lanes, because every one of them asserts about values rather than pixels. A

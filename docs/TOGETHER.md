@@ -740,6 +740,39 @@ crossed a live `RTCPeerConnection`, and the Kotlin path additionally cannot be
 compiled in the development sandbox at all. Treat the connection handling as
 reviewed rather than exercised.
 
+## 9c. Where it lives
+
+Together has the bottom-nav slot Feed had on Android, and the sidebar slot Sabha
+had on desktop. Neither feed was removed — Feed is a pushed screen from the
+drawer (`drawer-feed`, asserted on a device, because "off the nav, not removed"
+is only true if something reaches it) and Sabha is a button in the desktop
+sidebar's Modes section. The argument for the swap is that a public feed is
+somewhere you *go*, which is what a drawer is for, while listening with someone
+is a daily surface.
+
+The tab is the **session's own screen**, which is a change on Android beyond the
+nav: a live session used to be an overlay covering the whole app, so an album
+running for an hour meant an hour of not being able to read anything else
+without ending it. Now only an *invitation* covers the app — those expire, and a
+missed one is a missed evening — and the playing itself stays in its tab.
+
+**Music-first, one block.** A square sleeve with a note in it, and the video
+surface inside that same block when the decoder reports a picture. So an album
+gets a record cover and a film gets a screen, from one layout rather than two
+kept in step, and the sleeve is the single owner of the aspect ratio (two things
+applying one is how a film ends up letterboxed inside a box already the right
+shape).
+
+**The readout is measured, not predicted.** Desktop shows the drift and the
+measurement quality off `TogetherCorrection`, and `player_view.mjs` decides what
+that is worth saying: a gap smaller than our own error is **not reported at
+all**, because printing "0.4 s apart" while the error is 0.8 s is invention
+rather than precision. The path is named beside it — `direct · ±0.05s` against
+`relayed · ±0.6s` — since that is what makes the number mean anything. Neither
+chip is colour-coded: "we've lost track of them" is an honest report, not a
+fault, and painting it red would say otherwise. Android does not show these two
+figures yet; the plumbing to carry them into `UiState.Live` is the follow-up.
+
 ## 9b. Starting one — `/play`, and why it is one gesture
 
 The protocol was finished long before the way in was. Getting a session going

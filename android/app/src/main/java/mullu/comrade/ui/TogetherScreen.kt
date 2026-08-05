@@ -16,10 +16,13 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -34,9 +37,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import mullu.comrade.R
@@ -197,6 +202,13 @@ private fun TogetherOverlay(modifier: Modifier, content: @Composable () -> Unit)
 /** Mirrors `CallBackground` in `call/CallScreen.kt`. */
 private val TogetherBackground = Color(0xFF0E1621)
 
+/** The sleeve behind the artwork — one step up from the backdrop, not black, so
+ *  an audio session reads as a record cover rather than a dead screen. */
+private val SleeveColor = Color(0xFF1A2438)
+
+/** How far the skip buttons move. Matches the desktop transport. */
+private const val SKIP_MS: Long = 10_000
+
 /**
  * Where the picture goes.
  *
@@ -212,9 +224,12 @@ private val TogetherBackground = Color(0xFF0E1621)
  */
 @Composable
 private fun VideoSurface(picture: TogetherDecisions.Picture.Video, modifier: Modifier = Modifier) {
-    val ratio = TogetherDecisions.aspectRatioOf(picture) ?: return
+    // The sleeve that contains this already carries the aspect ratio, so the
+    // surface only fills it. Two things applying a ratio is how a film ends up
+    // letterboxed inside a box that was already the right shape.
+    if (TogetherDecisions.aspectRatioOf(picture) == null) return
     AndroidView(
-        modifier = modifier.fillMaxWidth().aspectRatio(ratio),
+        modifier = modifier.fillMaxSize(),
         factory = { ctx ->
             SurfaceView(ctx).apply {
                 holder.addCallback(object : SurfaceHolder.Callback {
@@ -281,11 +296,42 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
         onDispose { view.keepScreenOn = false }
     }
 
-    Text(s.title.ifBlank { s.peerLabel }, style = MaterialTheme.typography.titleLarge)
+    // The centrepiece, and music-first: a square sleeve with a note in it, and
+    // the video surface *inside* the same block when the recording turns out to
+    // have a picture. One block, so an album gets a cover and a film gets a
+    // screen without two layouts to keep in step — the same shape the desktop
+    // player uses.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                (s.picture as? TogetherDecisions.Picture.Video)
+                    ?.let { p -> TogetherDecisions.aspectRatioOf(p)?.let { Modifier.aspectRatio(it) } }
+                    ?: Modifier.aspectRatio(1f),
+            )
+            .clip(RoundedCornerShape(16.dp))
+            .background(SleeveColor),
+        contentAlignment = Alignment.Center,
+    ) {
+        val video = s.picture as? TogetherDecisions.Picture.Video
+        if (video == null) {
+            Icon(
+                QueueMusicIcon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(72.dp),
+            )
+        } else {
+            VideoSurface(video)
+        }
+    }
 
-    // Only when there is something to show: audio-only gets the controls alone.
-    (s.picture as? TogetherDecisions.Picture.Video)?.let { VideoSurface(it) }
-
+    Text(
+        s.title.ifBlank { s.peerLabel },
+        style = MaterialTheme.typography.titleLarge,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
     Text(statusLabel(s), style = MaterialTheme.typography.bodyMedium)
 
     // While a finger is on the slider the poll must not move it — the decision
@@ -308,16 +354,30 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
         modifier = Modifier.fillMaxWidth(),
     )
 
+    // Back / play-pause / forward, centred, matching the desktop transport. The
+    // skips go through `setState` like every other command, so they are ordered
+    // by the same Lamport counter and cannot race the other side's.
     Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Button(onClick = { TogetherManager.setState(s.positionMs, !s.playing) }) {
+        val skip = { delta: Long ->
+            val target = (s.positionMs + delta).coerceIn(0L, s.durationMs.coerceAtLeast(0L))
+            TogetherManager.setState(target, s.playing)
+        }
+        TextButton(onClick = { skip(-SKIP_MS) }) { Text("−10s") }
+        Button(
+            onClick = { TogetherManager.setState(s.positionMs, !s.playing) },
+            modifier = Modifier.padding(horizontal = 8.dp),
+        ) {
             Text(if (s.playing) "Pause" else "Play")
         }
-        TextButton(onClick = { TogetherManager.leave() }) {
-            Text(stringResource(R.string.together_leave))
-        }
+        TextButton(onClick = { skip(SKIP_MS) }) { Text("+10s") }
+    }
+
+    TextButton(onClick = { TogetherManager.leave() }) {
+        Text(stringResource(R.string.together_leave))
     }
 
     // The honest limits, on screen rather than in a doc nobody reads.

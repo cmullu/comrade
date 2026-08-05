@@ -25,7 +25,7 @@ import org.junit.runner.RunWith
  * On-device journey test for the Telegram-like flow: the onboarding door
  * renders without blocking on the native core, creating an identity (username
  * + passcode) unlocks the vault through real Rust crypto, and the main shell
- * (Chats / Journal / Feed / Tara, with Settings reached from the navigation
+ * (Chats / Journal / Together / Tara, with Settings and Feed reached from the navigation
  * drawer) comes up with working bottom navigation.
  *
  * The test adapts to residual state: on a fresh emulator it walks the create
@@ -139,11 +139,9 @@ class MainActivityUiTest {
         // reach the bottom navigation.
         dismissKeyboard()
 
-        // Bottom navigation reaches the Feed section.
-        composeRule.onNodeWithText("Feed").performClick()
-        composeRule
-            .onNodeWithText("Public — anyone on the network can read this.")
-            .assertIsDisplayed()
+        // Bottom navigation reaches Together, which took the slot Feed had.
+        composeRule.onNodeWithText("Together").performClick()
+        composeRule.waitForIdle()
 
         // Settings is a pushed screen now, reached from the navigation drawer
         // (Telegram-style) rather than a bottom-nav tab. The hamburger only
@@ -155,6 +153,19 @@ class MainActivityUiTest {
 
         // The drawer's profile header shows our @handle…
         composeRule.onNodeWithText("@$USERNAME").assertIsDisplayed()
+
+        // …and Feed is still reachable from it. Asserted because "off the nav,
+        // not removed" is only true if there is a way back to it, and a feature
+        // no route reaches is a deleted feature with its code left behind.
+        composeRule.onNodeWithTag("drawer-feed").performClick()
+        composeRule.waitForIdle()
+        composeRule
+            .onNodeWithText("Public — anyone on the network can read this.")
+            .assertIsDisplayed()
+        Espresso.pressBack()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav-drawer-button").performClick()
+        composeRule.waitForIdle()
 
         // …and its Tasks item opens the task list. Asserted on a device because
         // this screen shipped in a state where opening it killed the process, and

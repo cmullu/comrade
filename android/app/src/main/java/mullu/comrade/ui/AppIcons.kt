@@ -26,6 +26,54 @@ val ChatBubbleIcon: ImageVector = materialIcon(name = "Filled.ChatBubble") {
     }
 }
 
+/**
+ * Material "queue music" (filled) — listening together.
+ *
+ * Inlined like every other icon here rather than taking
+ * `material-icons-extended` for one glyph, which is the position this repo has
+ * held since the first icon.
+ *
+ * A note over a list, not a bare note: the tab is a *shared* session, and the
+ * lines read as something laid out for two people rather than a single track
+ * playing. A speaker or a headphone glyph would both say "audio on this device",
+ * which is the one thing this feature is not.
+ */
+val QueueMusicIcon: ImageVector = materialIcon(name = "Filled.QueueMusic") {
+    materialPath {
+        // The three list lines.
+        moveTo(15.0f, 6.0f)
+        horizontalLineTo(3.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineToRelative(12.0f)
+        verticalLineTo(6.0f)
+        close()
+        moveTo(15.0f, 10.0f)
+        horizontalLineTo(3.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineToRelative(12.0f)
+        verticalLineToRelative(-2.0f)
+        close()
+        moveTo(3.0f, 16.0f)
+        horizontalLineToRelative(8.0f)
+        verticalLineToRelative(-2.0f)
+        horizontalLineTo(3.0f)
+        verticalLineToRelative(2.0f)
+        close()
+        // The note: stem, flag, and the head as a filled oval.
+        moveTo(17.0f, 6.0f)
+        verticalLineToRelative(8.18f)
+        curveToRelative(-0.31f, -0.11f, -0.65f, -0.18f, -1.0f, -0.18f)
+        curveToRelative(-1.66f, 0.0f, -3.0f, 1.34f, -3.0f, 3.0f)
+        reflectiveCurveToRelative(1.34f, 3.0f, 3.0f, 3.0f)
+        reflectiveCurveToRelative(3.0f, -1.34f, 3.0f, -3.0f)
+        verticalLineTo(8.0f)
+        horizontalLineToRelative(3.0f)
+        verticalLineTo(6.0f)
+        horizontalLineToRelative(-5.0f)
+        close()
+    }
+}
+
 /** Material "article" (filled) — the public feed. */
 val ArticleIcon: ImageVector = materialIcon(name = "Filled.Article") {
     materialPath {

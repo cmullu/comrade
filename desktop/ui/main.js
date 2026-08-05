@@ -940,11 +940,15 @@
       t.classList.toggle("is-active", on);
       t.setAttribute("aria-selected", on ? "true" : "false");
     }
+    $("#view-together").hidden = name !== "together";
     $("#view-sabha").hidden = name !== "sabha";
     $("#view-vault").hidden = name !== "vault";
     $("#view-focus").hidden = name !== "focus";
     $("#view-profile").hidden = name !== "profile";
     $("#view-tasks").hidden = name !== "tasks";
+    // Repaint on arrival: a session can have started, moved or ended while this
+    // tab was behind another one, and the engine is authoritative for all of it.
+    if (name === "together") renderTogetherStage();
     if (name === "tasks") loadTasks();
     // The countdown only has to tick while it is being looked at; a session
     // left running behind another tab is still authoritative in the engine,
@@ -4475,6 +4479,10 @@
 
   const togetherSyncReady = import("./together_sync.mjs");
   const playFlowReady = import("./play_flow.mjs");
+  const playerViewReady = import("./player_view.mjs");
+
+  /** How long after a correction the player still reads "Catching up…". */
+  const CATCHING_UP_MS = 3000;
 
   const $together = {
     panel: () => $("#together-panel"),
@@ -4505,10 +4513,13 @@
     if (!player) return;
     const { pictureOf, aspectRatioOf } = await togetherSyncReady;
     const ratio = aspectRatioOf(pictureOf(player.videoWidth || 0, player.videoHeight || 0));
-    player.classList.toggle("together-player-audio", ratio === null);
-    // Let the real ratio drive the box rather than a fixed max-height, so a
-    // vertical clip stops being letterboxed into a strip.
-    player.style.aspectRatio = ratio === null ? "" : String(ratio);
+    // The element fills the sleeve, so the *sleeve* is what takes the shape:
+    // square for audio (a record cover), the real ratio for a picture, so a film
+    // is not squashed into a square and a vertical clip is not letterboxed into
+    // a strip. Audio keeps the glyph and shows no element at all.
+    const art = document.querySelector(".together-art");
+    if (art) art.style.aspectRatio = ratio === null ? "1" : String(ratio);
+    player.hidden = ratio === null;
   }
 
   function showTogetherPanel() {
@@ -4534,7 +4545,6 @@
       suppressor: state.together?.suppressor || createEchoSuppressor({ now: () => performance.now() }),
     });
     player.src = objectUrl;
-    player.hidden = false;
     await new Promise((resolve) => {
       player.onloadedmetadata = resolve;
       setTimeout(resolve, 5000); // a file we cannot measure is still playable
@@ -4770,6 +4780,69 @@
     });
     runTogetherPlan(plan);
     setTogetherStatus("catching up…");
+    // The two measured numbers the player is entitled to show. `quality_ms` is
+    // our own error, and it is what decides whether `drift_ms` means anything —
+    // so both are kept and `player_view.mjs` decides what to say.
+    state.together.driftMs = Number(p.drift_ms);
+    state.together.qualityMs = Number(p.quality_ms);
+    // A timestamp rather than a flag: corrections arrive only when the verdict
+    // is not `hold`, and holds are silent — so a boolean set here would read
+    // "catching up" for the rest of the session. This decays on its own with no
+    // timer to cancel.
+    state.together.correctedAt = Date.now();
+    renderTogetherStage();
+  }
+
+  /**
+   * Paint the Together tab from what the session actually is.
+   *
+   * Every sentence and every number here comes from `player_view.mjs`, so the
+   * one rule that must not slip — never claim a precision we cannot measure —
+   * is tested rather than trusted to this function.
+   */
+  async function renderTogetherStage() {
+    const view = $("#view-together");
+    if (!view || view.hidden) return;
+    const pv = await playerViewReady;
+    const s = state.together;
+    const live = Boolean(s?.sessionId);
+    $("#together-empty").hidden = live;
+    $("#together-stage").hidden = !live;
+    if (!live) return;
+
+    const player = $together.player();
+    const posSecs = player ? player.currentTime : 0;
+    const durationSecs = (s.durationMs || 0) / 1000;
+    $("#together-title-full").textContent = pv.playingTitle({
+      title: s.pendingInvite?.title || s.title,
+      peerLabel: s.peerLabel,
+    });
+    $("#together-with").textContent = s.peerLabel ? `with ${s.peerLabel}` : "";
+    $("#together-elapsed").textContent = pv.formatTime(posSecs);
+    $("#together-duration").textContent = pv.formatTime(durationSecs);
+
+    const seek = $("#together-seek");
+    // Never fight a finger already on the thumb — the same rule the Android
+    // scrubber follows, and for the same reason.
+    if (seek && document.activeElement !== seek) {
+      seek.value = String(pv.seekPosition(posSecs * 1000, s.durationMs || 0));
+    }
+
+    const { glyph, label } = pv.toggle(player ? !player.paused : false);
+    const toggleBtn = $("#together-toggle");
+    if (toggleBtn) {
+      toggleBtn.textContent = glyph;
+      toggleBtn.setAttribute("aria-label", label);
+    }
+
+    $("#together-state").textContent = pv.stateLabel({
+      joined: Boolean(s.joined),
+      lostTrack: Boolean(s.lostTrack),
+      theyPaused: Boolean(s.theyPaused),
+      correcting: Date.now() - (s.correctedAt || 0) < CATCHING_UP_MS,
+    });
+    $("#together-drift").textContent = pv.driftLabel(s.driftMs, s.qualityMs) || "";
+    $("#together-path").textContent = pv.qualityLabel(s.qualityMs) || "";
   }
 
   /** Our own player moved. Send it only if the person did it, not if we did. */
@@ -5282,7 +5355,6 @@
     const player = $together.player();
     if (player) {
       player.src = s.objectUrl;
-      player.hidden = false;
     }
     setShareStatus("Ready — you both have it now.");
     s.pump?.stop();
@@ -5908,6 +5980,9 @@
           onTogetherInvited(p);
         } else if (p.type === "together_joined") {
           setTogetherStatus("Together");
+          if (state.together) state.together.joined = true;
+          // They opened their copy, so there is something to look at now.
+          switchTab("together");
         } else if (p.type === "together_command") {
           onTogetherCommand(p);
         } else if (p.type === "together_correction") {
@@ -6010,6 +6085,43 @@
     // arrives by two routes (picked here, or handed over by the other device)
     // and only one of them ever waited for metadata.
     $("#together-player").addEventListener("loadedmetadata", applyTogetherPicture);
+
+    // ── The Together tab's own transport ──────────────────────────────────
+    //
+    // Every control goes through the *player element*, never straight to core:
+    // the element's resulting event is what `classifyLocalEvent` turns into an
+    // outbound command, so a control that called core directly would send the
+    // command twice — once itself and once as its own echo.
+    $("#sabha-btn").addEventListener("click", () => switchTab("sabha"));
+    $("#together-toggle").addEventListener("click", () => {
+      const player = $together.player();
+      if (!player) return;
+      if (player.paused) player.play().catch(() => {});
+      else player.pause();
+    });
+    for (const [id, delta] of [
+      ["#together-back", -10],
+      ["#together-fwd", 10],
+    ]) {
+      $(id).addEventListener("click", () => {
+        const player = $together.player();
+        if (!player) return;
+        const max = (state.together?.durationMs || 0) / 1000 || player.duration || 0;
+        player.currentTime = Math.min(Math.max(0, player.currentTime + delta), max);
+      });
+    }
+    // `change`, not `input`: a drag emits continuously and only the release is a
+    // command. The same rule as the Android scrubber's `onValueChangeFinished`.
+    $("#together-seek").addEventListener("change", async (e) => {
+      const player = $together.player();
+      if (!player) return;
+      const pv = await playerViewReady;
+      player.currentTime = pv.seekToMs(e.target.value, state.together?.durationMs || 0) / 1000;
+    });
+    $("#together-leave-full").addEventListener("click", handleTogetherLeave);
+    // The elapsed time and the thumb come from the element, so they are painted
+    // on its own cadence rather than on a timer of our own.
+    $("#together-player").addEventListener("timeupdate", renderTogetherStage);
     // Feed the runtime our playhead on a slow timer. Not a producer on the
     // event bus: the runtime only emits when the drift verdict is not `hold`.
     setInterval(reportTogetherPosition, 1000);
