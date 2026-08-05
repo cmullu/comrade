@@ -749,6 +749,22 @@ is small; the content problem is the real constraint:
 >   draft passed while simulating **no drift at all** (integer division rounded
 >   0.8 ms/beat to zero); the fractional accumulator and the "worst drift" line
 >   in its output exist so a future inert version is visible rather than green.
+> - ~~**There was no seamless way in.**~~ **Resolved 2026-08-05.** The protocol
+>   was finished long before the way into it: starting a session meant finding
+>   the feature (a panel on desktop, a header button on the phone), then picking
+>   a file, then saying start — three acts for one intention — and on desktop
+>   `/play` answered *"there is no player here yet"*, which had stopped being
+>   true when the `<video>` element landed. `DESKTOP_CAN_PLAY` is now on, its
+>   stated exit condition having been met, and `desktop/ui/play_flow.mjs` routes
+>   all five `PlayRoute`s; `ask_for_file` opens the picker and invites on the
+>   file that comes back, so the command *is* the gesture. The phone gained the
+>   same move through `ConversationScreen`'s `onPickTogetherFile`, reusing the
+>   activity's existing launcher so a file arriving either way takes the
+>   identical path, persistable read permission included. The invitation now
+>   carries the recording that was named, so the other side reads *Kun Faya Kun*
+>   rather than a blank — desktop had been sending `recording: null` whatever
+>   was typed. Two Android sentences that named a screen to go and open were
+>   rewritten, because the screen now opens itself.
 > - **Nothing in CI renders anything.** Both bugs above were visible instantly
 >   on a device and invisible to 332 JS tests, 514 core tests and two emulator
 >   lanes, because every one of them asserts about values rather than pixels. A

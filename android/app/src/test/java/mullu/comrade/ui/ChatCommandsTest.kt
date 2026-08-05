@@ -367,9 +367,17 @@ class ChatCommandsTest {
         // someone hunting for a file that is already on the phone.
         val absent = ChatCommands.playNote(PlayRoute.ASK_FOR_FILE, null, "Kun Faya Kun")
         assertTrue(ChatCommands.LIBRARY_UNSEEN != absent)
-        assertTrue(ChatCommands.LIBRARY_UNSEEN.contains("Together"))
+        // It has to name *its* reason — being unable to look — because that is
+        // the half the other sentence cannot say.
+        assertTrue(ChatCommands.LIBRARY_UNSEEN.contains("library"))
         // And it must not claim absence, which is the thing it does not know.
         assertFalse(ChatCommands.LIBRARY_UNSEEN.contains("No copy"))
+        // Neither sentence sends anyone to a screen any more: both routes open
+        // the picker themselves (`ConversationScreen`'s `onPickTogetherFile`),
+        // so naming a destination would be naming one already arrived at.
+        for (note in listOf(ChatCommands.LIBRARY_UNSEEN, absent)) {
+            assertFalse(note, note.contains("Open Together"))
+        }
     }
 
     @Test
@@ -379,7 +387,9 @@ class ChatCommandsTest {
         // these two cases exist to prevent.
         val note = ChatCommands.playNote(PlayRoute.ASK_FOR_FILE, MusicService.SPOTIFY, "x")
         assertFalse(note.contains("Spotify"))
-        assertTrue(note.contains("Together"))
+        // Still has to say what is being asked for, now that the picker opening
+        // is the action and this sentence is only the reason it opened.
+        assertTrue(note.contains("file"))
     }
 
     // ── The / picker ─────────────────────────────────────────────────────────

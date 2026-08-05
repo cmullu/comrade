@@ -1078,6 +1078,16 @@ private fun MainShell(
                             is ChatNav.Open -> ConversationScreen(
                                 peer = nav.peer,
                                 chatTick = chatTick,
+                                // Same launcher the Together button in the chat
+                                // header uses, so a file arriving from `/play`
+                                // and one picked by hand start a session by the
+                                // identical path — including the persistable
+                                // read permission, which a second launcher
+                                // would have had to remember to take.
+                                onPickTogetherFile = { peer, label ->
+                                    togetherPeer = peer to label
+                                    togetherPicker.launch(arrayOf("video/*", "audio/*"))
+                                },
                                 modifier = content,
                             )
                         }

@@ -73,14 +73,19 @@ export const DESKTOP_SCREENS = new Set(["focus", "read"]);
 /**
  * Whether this window can *play* a together session.
  *
- * False, and deliberately a named constant rather than an inline `false`:
- * `docs/TOGETHER.md` §9 records that the commands and the decision module are in
- * place on desktop but the `<video>` element and the file picker are not, so
- * there is still no way to start a session here. When that lands, this flips and
- * `planFor` starts returning {@link PLAY} — one edit, in one place, with a test
- * already written for both sides of it.
+ * **True since 2026-08-05**, and the exit condition it was written against is
+ * the one that was met: the `<video>` element, the file picker, and the
+ * `play_query`/`play_route` commands are all in place, so `/play` can open a
+ * session here rather than answering "there is no player here yet" — which had
+ * become false while still being said. `desktop/ui/play_flow.mjs` decides what
+ * each route does with it.
+ *
+ * Kept as a named constant rather than deleted: `PlayRoute::PlayEmbed` still
+ * has nowhere to go in this window (no iframe — `docs/TOGETHER.md` §7 carries
+ * the CSP condition), so "this window can play" remains a real question with a
+ * real answer, and `planPlay` refuses that one route by name.
  */
-export const DESKTOP_CAN_PLAY = false;
+export const DESKTOP_CAN_PLAY = true;
 
 /**
  * What the composer should do with a parsed command.

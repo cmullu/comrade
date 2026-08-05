@@ -1680,6 +1680,17 @@
         clearComposerCommandUi();
         return true;
 
+      case chatCommands.PLAY: {
+        if (!state.activeContact) {
+          showToast("Open a conversation first — /play starts it with them.", "warn");
+          return true;
+        }
+        await handlePlayCommand(plan);
+        input.value = "";
+        clearComposerCommandUi();
+        return true;
+      }
+
       default:
         return false;
     }
@@ -4463,6 +4474,7 @@
   // `together_sync.mjs`. What is left here is the DOM.
 
   const togetherSyncReady = import("./together_sync.mjs");
+  const playFlowReady = import("./play_flow.mjs");
 
   const $together = {
     panel: () => $("#together-panel"),
@@ -4530,7 +4542,82 @@
     state.together.durationMs = Math.round((player.duration || 0) * 1000) || 0;
     const invite = $together.invite();
     if (invite) invite.disabled = !state.activeContact;
+
+    // The seam that made this two gestures instead of one: a file picked in
+    // answer to `/play` already carries an intention, so asking the user to
+    // find and press "Watch together" afterwards is asking them to say the
+    // same thing twice. A file picked from the panel itself has said nothing
+    // yet, so that one still waits to be invited.
+    if (state.together.pendingInvite && state.activeContact) {
+      setTogetherStatus("Starting…");
+      await handleTogetherInvite();
+      // A failed invite has already said why; what it must not do is leave the
+      // panel reading "Starting…" with nothing starting. Fall back to the
+      // manual affordance, which is now the accurate description of the state.
+      if (!state.together.sessionId) setTogetherStatus("Ready to invite");
+      return;
+    }
     setTogetherStatus("Ready to invite");
+  }
+
+  /**
+   * `/play <something>` — the one-gesture route into a session.
+   *
+   * Everything this needs has been registered the whole time; the window just
+   * never asked. `play_query` resolves the words or the link, `play_route`
+   * decides what is possible, and `play_flow.mjs` decides what *this* window
+   * does about it — separately, because desktop has no library to search and
+   * therefore cannot reach the same answers the phone does.
+   *
+   * `foundLocalCopy` is always false here, and that is a statement of fact
+   * rather than a shortcut: there is no `MediaStore` equivalent in a webview,
+   * so a query that names a recording always ends at the picker. Claiming
+   * otherwise would make core open a session against a file we do not have.
+   */
+  async function handlePlayCommand(plan) {
+    const flow = await playFlowReady;
+    // try/catch, not a falsy check: `safeInvoke` re-throws even when silent, so
+    // a `?? null` here would be dead code and the rejection would escape into
+    // the command dispatcher — which is how a `/play` would come to do nothing
+    // at all, silently, the failure mode this whole path exists to remove.
+    let target;
+    let route;
+    try {
+      target = await safeInvoke(
+        "play_query",
+        { query: plan.query, service: plan.service },
+        { silent: true },
+      );
+      route = await safeInvoke(
+        "play_route",
+        { plan: target?.plan, foundLocalCopy: false },
+        { silent: true },
+      );
+    } catch {
+      showToast("Couldn't work out what to play — nothing was sent.", "warn");
+      return;
+    }
+    if (!target || !route) {
+      showToast("Couldn't work out what to play — nothing was sent.", "warn");
+      return;
+    }
+    const outcome = flow.planPlay(route, target);
+    if (outcome.kind !== flow.PICK) {
+      // Every other route is a sentence and nothing else. Said as info rather
+      // than a warning where the thing is simply somewhere else.
+      showToast(outcome.message, outcome.kind === flow.NOTHING ? "warn" : "info");
+      return;
+    }
+    // Remember what was asked for *before* opening the picker, so the file
+    // that comes back is invited under the name they typed rather than under
+    // its filename — and so choosing a file is the last step, not the middle
+    // one. Cleared on cancel-by-replacement: a second /play overwrites it.
+    state.together = Object.assign(state.together || {}, {
+      pendingInvite: { recording: outcome.recording, title: outcome.title },
+    });
+    showTogetherPanel();
+    showToast(outcome.message, "info");
+    $("#together-file").click();
   }
 
   async function handleTogetherInvite() {
@@ -4541,11 +4628,18 @@
         contentJson: JSON.stringify({
           kind: "local_file",
           duration_ms: state.together.durationMs,
-          recording: null,
+          // What `/play` named, so the invitation reads "…wants to listen to
+          // Kun Faya Kun with you" rather than leaving a hole where the title
+          // goes. Null for a file picked straight from the panel, which named
+          // nothing — the filename is deliberately never sent (main.js's
+          // existing position on disclosing filenames).
+          recording: state.together.pendingInvite?.recording ?? null,
         }),
       });
       state.together.sessionId = session.session_id;
       state.together.weLead = true;
+      // Consumed: it named this invitation and must not name the next one.
+      state.together.pendingInvite = null;
       setTogetherStatus("Invited — waiting for them");
       $together.leave().hidden = false;
     } catch {
@@ -5897,7 +5991,14 @@
     // (it fires four times a second and says nothing anyone chose), and
     // `ratechange` is never signalled because a rate trim is a local
     // correction, not news.
-    $("#together-pick").addEventListener("click", () => $("#together-file").click());
+    $("#together-pick").addEventListener("click", () => {
+      // Reaching for the picker by hand says nothing about who to invite, so it
+      // clears any intention left by a `/play` — including one whose picker was
+      // cancelled. Without this, a file chosen from the panel minutes later
+      // would invite itself under the title of a command already abandoned.
+      if (state.together) state.together.pendingInvite = null;
+      $("#together-file").click();
+    });
     $("#together-file").addEventListener("change", (e) => handleTogetherPick(e.target.files?.[0]));
     $("#together-invite").addEventListener("click", handleTogetherInvite);
     $("#together-join").addEventListener("click", handleTogetherJoin);

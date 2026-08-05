@@ -434,9 +434,8 @@ Android specifics worth knowing:
 
 - **The transports for sharing the file** — see below.
 
-- **The desktop player surface.** The commands and the decision module are in
-  place; the `<video>` element, the file picker and the DOM wiring are not, so
-  there is still no way to *start* a session from the desktop UI.
+- ~~**The desktop player surface.**~~ Built 2026-08-05. The `<video>` element,
+  the file picker and the DOM wiring all landed, and with them `/play` — see §9b.
 - **YouTube.** The envelope and the id validation support it; no frontend embeds
   one. When it lands on desktop it must be a **bare cross-origin iframe driven by
   `postMessage`**, with the CSP widened by exactly `frame-src
@@ -690,6 +689,57 @@ two real devices: no transfer has
 crossed a live `RTCPeerConnection`, and the Kotlin path additionally cannot be
 compiled in the development sandbox at all. Treat the connection handling as
 reviewed rather than exercised.
+
+## 9b. Starting one — `/play`, and why it is one gesture
+
+The protocol was finished long before the way in was. Getting a session going
+meant *finding* the feature — a panel on desktop, a button in the chat header on
+the phone — then choosing a file, then saying start. Three deliberate acts to
+express one intention, and on desktop `/play` answered **"there is no player
+here yet"**, which had quietly stopped being true.
+
+So the way in is the command, in the conversation with the person you want to
+listen with:
+
+```
+/play kun faya kun
+/play https://open.spotify.com/track/…
+```
+
+`play_query` resolves the words or the link, `play_route` decides what is
+possible, and each frontend decides what *it* does about that — separately, and
+on purpose, because they can do different things:
+
+| Route | Phone | Desktop |
+|---|---|---|
+| `start_together` | Found it in the music library — session opens | Not reachable: a webview has no library to search |
+| `ask_for_file` | Opens the file picker, then starts | Opens the file picker, then starts |
+| `open_elsewhere` | Names the service — DRM audio no third-party client may decode | Same |
+| `play_embed` | "Comrade can't play YouTube here" | "…on the phone app, not this window yet" |
+| `nothing` | Asks for a name or a link | Same |
+
+Three things about that table are the substance rather than the layout.
+
+**The picker is an answer, not an error before one.** `ask_for_file` is the
+common route — desktop can never search, and a phone often has no copy — so it
+opens the picker itself and starts the session on the file that comes back.
+Naming a screen to go and open was asking someone to say the same thing twice.
+On the phone it opens whether or not the music library could be read: "no copy
+here" and "not allowed to look" are different sentences and the same next
+action, and the picker needs no permission either way.
+
+**The invitation says what it is.** The recording `/play` named travels with it,
+so the other person sees *Kun Faya Kun* rather than a blank — desktop used to
+send `recording: null` whatever had been typed. The **filename is still never
+sent**; on the phone the tags are read from the file itself, and a file picked
+by hand from the panel names nothing, because nothing was said about it.
+
+**Every route ends somewhere.** A command that silently does nothing is the
+failure this replaces, so `planPlay` returns an outcome for all five routes and
+for one it has never heard of — release skew, when core gains a variant before
+a frontend does. `play_flow.test.mjs` asserts that as a property over the whole
+set rather than case by case, and asserts separately that no refusal ever
+implies we are about to play something we cannot.
 
 ## 10. Deliberately out of scope
 
