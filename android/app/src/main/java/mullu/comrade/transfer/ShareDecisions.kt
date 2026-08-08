@@ -37,8 +37,8 @@ object ShareDecisions {
     const val REQUEST_WINDOW = 64
 
     /**
-     * How long the receiver waits with no chunk before it decides the sender has
-     * stopped. See [stallAction] for what it does about it.
+     * How long the receiver waits with no chunk, **once chunks have started
+     * arriving**, before it decides the sender has stopped. See [stallAction].
      *
      * Wide enough that a slow link between two 16 KiB chunks is not mistaken for
      * a dead one, and narrow enough that the whole bounded sequence finishes
@@ -46,6 +46,26 @@ object ShareDecisions {
      * rather than leaving it to survive as a coincidence.
      */
     const val STALL_AFTER_MS: Long = 8_000
+
+    /**
+     * The same, for the window *before* the first chunk — accepting an offer,
+     * exchanging SDP over a relay, gathering ICE, judging the path.
+     *
+     * Much wider, and it has to be, because a great deal that is not the peer's
+     * fault happens in it: [PATH_RETRIES] seconds of waiting for ICE to settle
+     * on this side alone, plus a gift-wrap round trip in each direction. A test
+     * asserts it outlasts the path judgement, so that loop's own sentence —
+     * which names the actual problem — is the one a person sees.
+     *
+     * **The part that cannot be made exact.** If the *sender's* relay policy
+     * asks its user to agree to this transfer, nothing on the wire says so, and
+     * this becomes a bound on how long this device will wait for a stranger to
+     * tap a button. There is no signal for "a person here is deciding", so the
+     * choice is a bound or an indefinite hang; this is the bound. The
+     * receiver's *own* dialog is exempt entirely — see [stallAction]'s
+     * `awaitingPerson`, which stops the clock rather than widening it.
+     */
+    const val SETUP_GRACE_MS: Long = 45_000
 
     /**
      * How many times a stalled receive asks again before giving up.
@@ -56,6 +76,18 @@ object ShareDecisions {
      * never move.
      */
     const val STALL_REASKS: Int = 1
+
+    /**
+     * The shape of the transfer's other bounded loop — how many one-second looks
+     * it takes at the ICE state before giving up on a route (`FileTransfer`'s
+     * `judgePath`).
+     *
+     * Here rather than beside that loop so [SETUP_GRACE_MS] can be *tested* to
+     * outlast it. Two deadlines racing over the same failure would mean the
+     * sentence a person reads depends on which timer won.
+     */
+    const val PATH_RETRIES: Int = 10
+    const val PATH_RETRY_TICK_MS: Long = 1_000
 
     /**
      * The file name an incoming transfer lands under, from the offer's hash.
@@ -113,8 +145,13 @@ object ShareDecisions {
      * Comrade replays gift-wraps on purpose — `inbox_since` widens the
      * subscription floor back to the persisted watermark on every reconnect, so
      * a device that was offline loses nothing and a device that was not sees
-     * recent envelopes twice. Nothing upstream de-duplicates a `Share`, so this
-     * is where the second copy has to stop.
+     * recent envelopes twice. Core now keys a `Share` on its wrapper event id
+     * and drops the second copy, so the **relay** path no longer reaches here
+     * twice. Two routes still do, which is why this rule is not redundant: the
+     * direct peer channel deliberately passes no id (the only key available
+     * there would be a payload hash, which would drop a second *legitimate*
+     * signal rather than a second copy of one), and an attachment handoff is a
+     * different envelope with no event-id set at all.
      *
      * **Erring restrictive, deliberately.** Anything that cannot be told apart
      * from the live transfer is treated as a redelivery and ignored, including
@@ -141,6 +178,14 @@ object ShareDecisions {
 
     /** What a receiver that has not seen a chunk for a while should do. */
     enum class StallAction {
+        /**
+         * **No deadline runs at all.** Restart the clock rather than spend it.
+         *
+         * Not the same as [WAIT], and the difference is the whole of the bug
+         * this arm exists for: waiting spends the budget, holding does not.
+         */
+        HOLD,
+
         /** Not long enough yet. */
         WAIT,
 
@@ -153,7 +198,7 @@ object ShareDecisions {
     }
 
     /**
-     * The receiver's stall policy, from the two facts a watchdog can see.
+     * The receiver's stall policy, from the four facts a watchdog can see.
      * `AUDIT.md` Q19.
      *
      * The only condition that used to end a transfer was the connection itself
@@ -162,23 +207,37 @@ object ShareDecisions {
      * with no error on either device. This is what turns that silence into a
      * sentence.
      *
-     * Each re-ask buys its own [STALL_AFTER_MS] window, so the deadline widens
-     * with `reasksSoFar` rather than the answer flipping from `REASK` to
-     * `GIVE_UP` on the very next tick, before the re-ask could possibly have
-     * been answered.
+     * Each re-ask buys its own window, so the deadline widens with
+     * `reasksSoFar` rather than the answer flipping from `REASK` to `GIVE_UP` on
+     * the very next tick, before the re-ask could possibly have been answered.
      *
      * It is **not** a claim that the sender is gone: a link slow enough to leave
      * eight seconds between chunks is indistinguishable from one that stopped,
      * from here. It is the point at which continuing to say nothing is worse
      * than being wrong.
+     *
+     * @param sinceProgressMs how long since the last thing that counted as
+     *   progress — a chunk, or the moment a [HOLD] released.
+     * @param started whether any chunk has arrived yet, which picks the window:
+     *   [STALL_AFTER_MS] between chunks, [SETUP_GRACE_MS] before the first,
+     *   because negotiating a connection is not the same wait as a link going
+     *   quiet and holding both to eight seconds ends healthy transfers.
+     * @param awaitingPerson whether this device is asking its user something
+     *   right now. A person is not a timeout: they may take a minute or leave
+     *   the room, and a deadline running underneath them would tear down a
+     *   perfectly good transfer *and* clear the very dialog they are reading.
      */
     fun stallAction(
-        idleMs: Long,
+        sinceProgressMs: Long,
+        started: Boolean,
+        awaitingPerson: Boolean,
         reasksSoFar: Int,
         maxReasks: Int = STALL_REASKS,
     ): StallAction {
+        if (awaitingPerson) return StallAction.HOLD
         val attempts = reasksSoFar.coerceAtLeast(0)
-        if (idleMs < STALL_AFTER_MS * (attempts + 1)) return StallAction.WAIT
+        val window = if (started) STALL_AFTER_MS else SETUP_GRACE_MS
+        if (sinceProgressMs < window * (attempts + 1)) return StallAction.WAIT
         return if (attempts < maxReasks) StallAction.REASK else StallAction.GIVE_UP
     }
 

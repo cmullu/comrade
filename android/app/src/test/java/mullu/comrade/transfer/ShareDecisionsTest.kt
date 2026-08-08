@@ -247,15 +247,19 @@ class ShareDecisionsTest {
 
     // ── A stalled transfer must end, not hang (Q19) ─────────────────────────
 
+    private fun stall(
+        sinceProgressMs: Long,
+        started: Boolean = true,
+        awaitingPerson: Boolean = false,
+        reasksSoFar: Int = 0,
+    ) = ShareDecisions.stallAction(sinceProgressMs, started, awaitingPerson, reasksSoFar)
+
     @Test
     fun `a transfer that is still delivering is left alone`() {
+        assertEquals(ShareDecisions.StallAction.WAIT, stall(0))
         assertEquals(
             ShareDecisions.StallAction.WAIT,
-            ShareDecisions.stallAction(idleMs = 0, reasksSoFar = 0),
-        )
-        assertEquals(
-            ShareDecisions.StallAction.WAIT,
-            ShareDecisions.stallAction(ShareDecisions.STALL_AFTER_MS - 1, reasksSoFar = 0),
+            stall(ShareDecisions.STALL_AFTER_MS - 1),
         )
     }
 
@@ -263,16 +267,16 @@ class ShareDecisionsTest {
     fun `chunks stopping asks again once, then gives up rather than hanging`() {
         assertEquals(
             ShareDecisions.StallAction.REASK,
-            ShareDecisions.stallAction(ShareDecisions.STALL_AFTER_MS, reasksSoFar = 0),
+            stall(ShareDecisions.STALL_AFTER_MS),
         )
         assertEquals(
             "the re-ask gets its own window, or it would be judged before it could be answered",
             ShareDecisions.StallAction.WAIT,
-            ShareDecisions.stallAction(ShareDecisions.STALL_AFTER_MS, reasksSoFar = 1),
+            stall(ShareDecisions.STALL_AFTER_MS, reasksSoFar = 1),
         )
         assertEquals(
             ShareDecisions.StallAction.GIVE_UP,
-            ShareDecisions.stallAction(2 * ShareDecisions.STALL_AFTER_MS, reasksSoFar = 1),
+            stall(2 * ShareDecisions.STALL_AFTER_MS, reasksSoFar = 1),
         )
     }
 
@@ -280,7 +284,83 @@ class ShareDecisionsTest {
     fun `asking again is bounded, so a dead sender is not polled forever`() {
         assertEquals(
             ShareDecisions.StallAction.GIVE_UP,
-            ShareDecisions.stallAction(idleMs = 600_000, reasksSoFar = ShareDecisions.STALL_REASKS),
+            stall(600_000, reasksSoFar = ShareDecisions.STALL_REASKS),
+        )
+    }
+
+    /**
+     * The regression this arm exists for. A person deciding whether to allow a
+     * relay is not a stalled transfer: the deadline running underneath them tore
+     * down a perfectly healthy handover **and**, when it was this device asking,
+     * cleared the dialog off the screen while they were reading it.
+     */
+    @Test
+    fun `no deadline runs at all while a person is being asked`() {
+        for (started in listOf(false, true)) {
+            for (elapsed in listOf(0L, 30_000L, 600_000L)) {
+                assertEquals(
+                    "started=$started elapsed=$elapsed",
+                    ShareDecisions.StallAction.HOLD,
+                    stall(elapsed, started = started, awaitingPerson = true),
+                )
+            }
+        }
+        assertEquals(
+            "and a person who took their time does not inherit a spent budget",
+            ShareDecisions.StallAction.HOLD,
+            stall(600_000, awaitingPerson = true, reasksSoFar = ShareDecisions.STALL_REASKS),
+        )
+    }
+
+    /**
+     * Holding is not waiting. `WAIT` spends the budget and `HOLD` restarts it,
+     * and collapsing the two is exactly how the deadline came to run under a
+     * dialog in the first place.
+     */
+    @Test
+    fun `holding and waiting are different answers to different situations`() {
+        assertNotEquals(
+            stall(ShareDecisions.STALL_AFTER_MS - 1, awaitingPerson = true),
+            stall(ShareDecisions.STALL_AFTER_MS - 1, awaitingPerson = false),
+        )
+    }
+
+    @Test
+    fun `setting a connection up gets a wider window than a link going quiet`() {
+        assertEquals(
+            "eight seconds is not long enough to negotiate in, and judging it so ends healthy transfers",
+            ShareDecisions.StallAction.WAIT,
+            stall(ShareDecisions.STALL_AFTER_MS * 2, started = false),
+        )
+        assertEquals(
+            ShareDecisions.StallAction.REASK,
+            stall(ShareDecisions.SETUP_GRACE_MS, started = false),
+        )
+        assertEquals(
+            ShareDecisions.StallAction.GIVE_UP,
+            stall(2 * ShareDecisions.SETUP_GRACE_MS, started = false, reasksSoFar = 1),
+        )
+        assertTrue(
+            "the setup window has to be the wider of the two",
+            ShareDecisions.SETUP_GRACE_MS > ShareDecisions.STALL_AFTER_MS,
+        )
+    }
+
+    /**
+     * Two deadlines over the same failure would mean the sentence a person reads
+     * depends on which timer won. `judgePath` names the actual problem ("couldn't
+     * work out a route"), so it must be the one that fires.
+     */
+    @Test
+    fun `working out a route is not spent out of the transfer's budget`() {
+        val judging = ShareDecisions.PATH_RETRIES * ShareDecisions.PATH_RETRY_TICK_MS
+        assertTrue(
+            "$judging of path judgement does not fit inside ${ShareDecisions.SETUP_GRACE_MS}",
+            ShareDecisions.SETUP_GRACE_MS > judging,
+        )
+        assertEquals(
+            ShareDecisions.StallAction.WAIT,
+            stall(judging, started = false),
         )
     }
 
@@ -292,6 +372,8 @@ class ShareDecisionsTest {
      */
     @Test
     fun `the transfer gives up before a reader waiting on it runs out of patience`() {
+        // The between-chunks budget, which is the one that matters here: a
+        // decoder only waits on bytes once bytes have started.
         val worstCaseMs = ShareDecisions.STALL_AFTER_MS * (ShareDecisions.STALL_REASKS + 1)
         assertTrue(
             "$worstCaseMs is not inside ${ShareReadPolicy.READ_PATIENCE_MS}",
