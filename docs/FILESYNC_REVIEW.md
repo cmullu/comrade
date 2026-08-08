@@ -29,9 +29,14 @@ fixed in this change), `ALREADY HAVE`, `BETTER HERE` (Comrade's shape makes the
 bug structurally impossible — do not regress toward FileSync's), or `REJECTED`
 (examined and deliberately not wanted).
 
-This change is **analysis only**. Nothing in `crates/`, `android/`, `app/` or
-`desktop/` moved; the four `ADOPT` rows became `AUDIT.md` findings so they are
-costed and scheduled rather than smuggled in behind a review.
+**Status, updated 2026-08-08.** This document was written as analysis only. Three
+of the four `ADOPT` rows have since been implemented — `AUDIT.md` Q18, P8 and Q19
+are struck there, with the citations kept current in the ledger rather than here.
+T5 is half closed: the byte-identity gate exists, the forced-ICE half does not.
+The quoted Comrade code below is therefore **the code as it was when the gap was
+found**, kept because the point of the document is the comparison that produced
+the finding. Read `AUDIT.md` for what the code does now, and §6 for what the
+implementing round itself turned up.
 
 ---
 
@@ -39,10 +44,10 @@ costed and scheduled rather than smuggled in behind a review.
 
 | FileSync mechanism | Verdict | Where it lands |
 |---|---|---|
-| Guard the transfer against a re-delivered signal (`user.js:384`, `peer.js:534`) | **ADOPT** | `AUDIT.md` Q18 |
-| One held file handle for the whole receive (`sink.js:171-187`) | **ADOPT** | `AUDIT.md` P8 |
-| Detect a stalled transfer; tell the other side you gave up (`file.js:335-352`, `:420`) | **ADOPT** | `AUDIT.md` Q19 |
-| Forced-ICE dev override + end-to-end byte-identity harness (`mode.js`, `e2e/run.mjs`) | **ADOPT** | `AUDIT.md` T5 |
+| Guard the transfer against a re-delivered signal (`user.js:384`, `peer.js:534`) | **ADOPTED** | `AUDIT.md` Q18 — struck |
+| One held file handle for the whole receive (`sink.js:171-187`) | **ADOPTED** (receiver only) | `AUDIT.md` P8 — struck; §4.6 |
+| Detect a stalled transfer; tell the other side you gave up (`file.js:335-352`, `:420`) | **ADAPTED** | `AUDIT.md` Q19 — struck; the "tell the other side" half is Q20 |
+| Forced-ICE dev override + end-to-end byte-identity harness (`mode.js`, `e2e/run.mjs`) | **HALF ADOPTED** | `AUDIT.md` T5 — byte gate landed, override did not |
 | 1 MiB / 256 KiB data-channel watermarks with hysteresis | **ALREADY HAVE** | `share/transport.rs:233-245` |
 | 16 KiB chunks, chosen for the SCTP message ceiling | **ALREADY HAVE** | `share.rs:59` |
 | Receiver-driven progress, resume, seek | **ALREADY HAVE** (better) | `share.rs:273` `next_request` |
@@ -96,7 +101,8 @@ above it claims *"Everything else about replay safety is inside
 variants and false of this one.
 
 That would be harmless if the frontend were idempotent. On the priority frontend
-it is the opposite of idempotent:
+it was the opposite of idempotent (this is the code as found; it now consults
+`ShareDecisions.decideArm` first):
 
 ```kotlin
 fun armSend(offer: ShareOffer, openSource: () -> Source) {
@@ -131,8 +137,7 @@ FileSync opens the destination once and holds the writable for the life of the
 transfer (`web/js/modules/sink.js:171-187`), and serializes writes onto a
 `_writeChain` because the handle locks (`file.js:50-51`).
 
-Comrade's Android receiver reopens and re-truncates per chunk
-(`FileTransfer.kt:514-519`):
+Comrade's Android receiver reopened and re-truncated per chunk (as found):
 
 ```kotlin
 RandomAccessFile(path, "rw").use {
@@ -142,8 +147,10 @@ RandomAccessFile(path, "rw").use {
 }
 ```
 
-At `SHARE_CHUNK_BYTES = 16 KiB` a 700 MB film is ~44,800 open/`setLength`/seek/
-write/close cycles, each `.use { }` close forcing a flush. The correctness is
+At `SHARE_CHUNK_BYTES = 16 KiB` a 700 MB film is ~44,800 open/`ftruncate`/`lseek`/
+`close` cycles. (An earlier draft of this sentence said each close forced a flush.
+That was wrong — `RandomAccessFile` has no user-space buffer and `close()` performs
+no flush and no `fsync`. The syscalls were reason enough.) The correctness is
 fine — the write-then-`accept` ordering that `:525-535` argues for at length is
 right and must survive any change here — but the per-chunk cost is pure waste on
 the one path that is by definition large.
@@ -341,19 +348,77 @@ the three parts, and the third is the one that gets forgotten.
   transfers one file per session; a zip layer would be a feature, not an
   adaptation.
 
+### 4.6 Holding the *sender's* handle open, which P8 also implies
+
+Added 2026-08-08, after implementing P8.
+
+FileSync holds one writable for the life of a receive, and the symmetric move on
+the sender looks free — `ContentUriSource`'s own doc argues for it, since one
+descriptor serving every positional read is what makes a `content://` handoff
+possible without staging a second copy.
+
+It was implemented and then reverted, because the sender has no completion event
+to release on. The transfer is receiver-driven by design (`share.rs`'s whole
+argument), so the sender never learns the receiver got the last chunk; `pump`
+simply runs out of cursor. The only teardown is `end()`, which for a `together`
+handover means the session ending and for an attachment handoff means the user
+dismissing a card. So holding meant a `ParcelFileDescriptor` on another app's
+provider — possibly a cloud or SAF provider — living for minutes after the bytes
+finished moving.
+
+The cost of not holding it is one `openFileDescriptor` per *drain event*, roughly
+one per sixteen chunks at the high-water mark, not one per chunk. That is a fair
+price. **P8 is a receiver finding and is implemented only there**, which is what
+it says.
+
+The alternative — a completion frame from receiver to sender — is a wire change,
+and a cheap one: the request channel already carries `from:count` text frames and
+an old sender parses an unknown frame as `toIntOrNull() ?: return`, so it would be
+ignored rather than fatal. Worth doing if a second reason for it ever appears; not
+worth a protocol addition on its own.
+
 ---
 
 ## 5. What this produced
 
-Four `AUDIT.md` findings, none of them fixed here:
+Four `AUDIT.md` findings. Three are now struck; the fourth is half closed.
 
-| ID | Sev | One line |
-|---|---|---|
-| Q18 | **H** | A re-delivered `ShareSignal` rebuilds the transfer session on Android, killing a live transfer and leaking its `PeerConnection`. |
-| P8 | M | The Android receiver reopens and re-truncates the destination file once per 16 KiB chunk. |
-| Q19 | M | The sender's pump has five silent abandon paths and nothing detects a stalled transfer, so both ends freeze without an error. |
-| T5 | M | Nothing tests that the bytes arrive; and three of the four `RelayPolicy` branches have no way to be exercised at all. |
+| ID | Sev | One line | State |
+|---|---|---|---|
+| Q18 | **H** | A re-delivered `ShareSignal` rebuilt the transfer session on Android, ending a live transfer and leaking its `PeerConnection`. | **fixed** — guarded in core and on Android, which have different reach |
+| P8 | M | The Android receiver reopened and re-truncated the destination file once per 16 KiB chunk. | **fixed** on the receiver; the sender half was examined and rejected (§4.6) |
+| Q19 | M | The sender's pump had five silent abandon paths and nothing detected a stalled transfer, so both ends froze. | **fixed**; the "tell the other side why" half became Q20 |
+| T5 | M | Nothing tested that the bytes arrive; three of the four `RelayPolicy` branches cannot be exercised at all. | **half** — byte gate landed, forced-ICE override deliberately deferred |
 
-Q18 is the one that should not wait. It needs no new mechanism — the guard
-patterns are already in this codebase four times over, and `end()` already does
-the teardown; what is missing is the call.
+## 6. What the implementing round turned up
+
+Worth recording separately, because none of it came from FileSync — it came from
+building the fixes and is the more useful half of the exercise.
+
+**The first stall watchdog created the bug it was added to prevent.** One budget,
+armed at data-channel open, with no notion of a transfer that has not been allowed
+to start. Under `RelayPolicy::AskEachTime` the receiver gave up while the sender's
+consent dialog was still on screen — and when it was the receiver's own policy
+asking, its watchdog called `end()`, which nulls the consent question, so the
+dialog vanished mid-decision. Waiting and holding are now different answers,
+because waiting spends the budget and holding restarts it.
+
+**P8 made a pre-existing race expensive.** Arming was check-then-act on an
+unsynchronised field, which leaked nothing until the receiver started holding a
+file handle — after which the loser of the race opened and sized a 700 MB file and
+dropped the handle with no reference.
+
+**The rebase produced a bug neither branch could see.** `docs/TOGETHER.md` §15
+routes a transport signal by whether the file engine is armed — correct on its own
+terms — and Q19's watchdog enlarged the window where it is not. A file offer
+arriving after this side gave up would have started an unexpected audio and video
+call. Fixed as a refinement of §15's rule; the mirror case, after a *successful*
+transfer, is Q22 and is not fixed.
+
+**And the honest note about the tests.** The decision layers are well covered and
+the pure rules were confirmed failing against their predecessors. But nothing in
+this repo executes `armSend`, `armReceive`, `claim`, `tearDown`, `endIfCurrent`,
+`startStallWatch`, `pump` or `ShareTransfer.onSignal` — which is where every one of
+these defects lived. Extracting the decisions into testable files is what made them
+*arguable*; it is not what makes them *right*. That distinction was blurred once in
+this work and should not be again.
