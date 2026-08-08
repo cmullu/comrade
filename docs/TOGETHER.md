@@ -1755,16 +1755,22 @@ belongs, and it stays a decision made once per session (§14).
 
 ### Built so far
 
-**The audio device module is installed**, on the owner's instruction, and the
-argument for it being safe is a property rather than a hope. `CallManager`'s
-factory now builds a `JavaAudioDeviceModule` explicitly, with every option set
-to the value the implicit one already used — `VOICE_COMMUNICATION`, hardware
-echo canceller and noise suppressor where the device has them — spelled out so a
-later edit has to *decide* to change how a call captures rather than doing it by
-omission. The one addition is [`AudioInjection`], a process-wide router that
-**returns the buffer untouched when no session has installed a capture**. A
-device that never opens a streamed session therefore records exactly what it
-recorded before.
+**The factory gains one thing: an audio processing factory** carrying
+`AudioInjection`, a process-wide router that **does nothing at all when no
+session has installed a capture**. A device that never opens a streamed session
+is processed exactly as it was.
+
+An earlier version also handed the factory a hand-built `JavaAudioDeviceModule`,
+and removing it is worth recording. It existed to reach
+`setAudioBufferCallback` — the wrong seam, as above — and became dead weight the
+moment the injection moved after the processing chain. Dead weight with a cost:
+`ensureFactory` runs *before* a call is placed, and building an audio device
+module probes the platform's echo canceller and noise suppressor, so **every
+first call paid for it**. The device test caught it as a call still sitting in
+`Ended` 2.5 s after failing, which is that latency made visible rather than a
+flaky assertion. Leaving the default module alone also means calls capture
+exactly as they always did, which is a much easier claim to defend than a
+hand-built module matching it option for option.
 
 **One consequence to state rather than let someone find.** The injected audio
 rides the *record* path, so sending the sound of what you are playing needs the

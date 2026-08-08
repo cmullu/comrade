@@ -53,7 +53,6 @@ import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.ExternalAudioProcessingFactory
-import org.webrtc.audio.JavaAudioDeviceModule
 import uniffi.comrade_core.CallMediaKind
 import uniffi.comrade_core.CallSignal
 import uniffi.comrade_core.HangupReason
@@ -2034,42 +2033,6 @@ object CallManager {
      * defensive flourish.
      */
     /**
-     * The audio device module, built explicitly so a watch-together session can
-     * send the sound of what it is playing (`docs/TOGETHER.md` §15).
-     *
-     * **This is a change to how every call captures, so it is worth being exact
-     * about what it does and does not alter.** Without it the factory builds its
-     * own `JavaAudioDeviceModule` with these same defaults; the only difference
-     * here is that ours carries [AudioInjection]. Every option below is set to
-     * the value that module already uses, spelled out rather than inherited, so
-     * that a future edit has to *decide* to change a call's capture rather than
-     * doing it by leaving something out:
-     *
-     *  * `VOICE_COMMUNICATION` as the source, which is what turns on the
-     *    platform's voice path — the one a call wants and a recorder does not.
-     *  * Hardware acoustic echo canceller and noise suppressor where the device
-     *    has them, which is the difference between a speakerphone call being
-     *    usable and being a howl.
-     *
-     * The media audio a watch-together session sends is **not** injected here —
-     * it joins after the processing chain, in [buildAudioProcessingFactory], so
-     * that a call's microphone keeps its echo canceller and noise suppressor
-     * while a film is touched by neither.
-     *
-     * **One consequence to state rather than discover:** a session still needs
-     * the capture *running* to have an audio track at all, so sending what you
-     * are playing needs the `RECORD_AUDIO` grant even with the microphone
-     * switched off. That is a permission prompt for a feature that is not about
-     * the microphone, and the UI owes the user that sentence.
-     */
-    private fun buildAudioDeviceModule(app: Context): JavaAudioDeviceModule =
-        JavaAudioDeviceModule.builder(app)
-            .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-            .setUseHardwareAcousticEchoCanceler(JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported())
-            .setUseHardwareNoiseSuppressor(JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported())
-            .createAudioDeviceModule()
-
-    /**
      * Where a watch-together session's media audio joins the outgoing stream.
      *
      * **After** the echo canceller, the noise suppressor and the gain control,
@@ -2081,6 +2044,17 @@ object CallManager {
      *
      * Inert until a streamed session installs a capture on [AudioInjection], so
      * a device that never opens one is processed exactly as it was.
+     *
+     * **This is the only thing the factory gains, and an earlier version had it
+     * carrying a hand-built `JavaAudioDeviceModule` too.** That existed to reach
+     * `setAudioBufferCallback`, and became dead weight the moment the injection
+     * moved after the processing chain — where it did not belong anyway. Worse
+     * than dead: `ensureFactory` runs *before* a call is placed, and building an
+     * audio device module probes the platform's echo canceller and noise
+     * suppressor, so every first call paid for it. A device test caught that as
+     * a call still sitting in `Ended` after 2.5 s, which is the latency being
+     * visible rather than a flaky assertion. Leaving the default module alone
+     * also means calls capture exactly as they always did.
      */
     private fun buildAudioProcessingFactory(): ExternalAudioProcessingFactory =
         ExternalAudioProcessingFactory().apply { setCapturePostProcessing(AudioInjection) }
@@ -2097,7 +2071,6 @@ object CallManager {
             val egl = EglBase.create()
             eglBase = egl
             factory = PeerConnectionFactory.builder()
-                .setAudioDeviceModule(buildAudioDeviceModule(app))
                 .setAudioProcessingFactory(buildAudioProcessingFactory())
                 .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
                 .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
