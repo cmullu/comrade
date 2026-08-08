@@ -784,12 +784,24 @@ is small; the content problem is the real constraint:
 >   takes the relay. The Kotlin arm and the Dart arm both say so rather than
 >   looking wired. A session-long peer connection (the file handover's one lives
 >   only as long as a transfer) is the next piece.
-> - **`direct_ready` has no timeout, on purpose, and that is a footgun.** A
->   frontend that reports a live channel and then loses it must report `false`,
->   or signals go to a socket nobody reads and the session dies on its TTL
->   instead of falling back to the relay that was there all along. Stated on the
->   method, the Tauri command and the Kotlin arm; there is no code that enforces
->   it, and a watchdog is the honest follow-up.
+> - ~~**`direct_ready` has no timeout, on purpose, and that is a footgun.**~~
+>   **Resolved 2026-08-08.** The case that made it a footgun is the one a
+>   frontend cannot report at all — a crashed webview, a killed process, a close
+>   handler that never ran — so a rule stated in three doc comments was never
+>   going to hold it. `together::direct_path_live`
+>   (`crates/comrade_core/src/together.rs:897`) now treats the declaration as a
+>   claim with an expiry: after `TOGETHER_DIRECT_SILENCE_MS` (two heartbeats,
+>   20 s) with no sign of life on the channel, `send_together`
+>   (`crates/comrade_ui/src/runtime.rs:6087`) goes back to the relay by itself.
+>   Three things make that shape right rather than a timer bolted on. **Silence
+>   is evidence**: a data channel is symmetric, so a peer whose end is open
+>   sends their heartbeats down it, and two passing in silence means the path is
+>   not carrying. **It fires with a heartbeat to spare** — 20 s + 10 s < the
+>   45 s TTL, a compile-time invariant beside the constant rather than a comment
+>   claiming it. And **it heals itself**: one envelope arriving on the channel
+>   earns the fast path back with no re-declaration, which matters because a
+>   frontend that never noticed the outage has nothing to re-declare. Both
+>   regression tests were confirmed to fail with the gate removed.
 > - ~~**Together had no home of its own.**~~ **Moved 2026-08-05.** It has the
 >   bottom-nav slot Feed had on Android and the sidebar slot Sabha had on
 >   desktop; neither feed was removed — Feed is a drawer-reached pushed screen
@@ -803,9 +815,25 @@ is small; the content problem is the real constraint:
 >   glyph or the video surface, so an album is a record cover and a film is a
 >   screen from one layout — and desktop shows the measured drift and quality off
 >   `TogetherCorrection`, where `player_view.mjs` refuses to report a gap smaller
->   than the measurement error. **Android does not show those two figures yet**:
->   carrying them into `UiState.Live` is the follow-up, and until then its player
->   reports status but not distance.
+>   than the measurement error. ~~**Android does not show those two figures
+>   yet.**~~ **Carried 2026-08-08** — `UiState.Live` holds `driftMs`,
+>   `qualityMs` and `correctedAtMs`
+>   (`android/app/src/main/java/mullu/comrade/together/TogetherManager.kt:78`),
+>   the bridge arm stops dropping them
+>   (`RelayConnectionService.kt:540`), and `TogetherDecisions.measurement`
+>   mirrors `player_view.mjs` against the same vectors, with
+>   `together_parity.test.mjs` gating the constants both sides read.
+> - ~~**A drift figure was left on screen after it stopped being true.**~~
+>   **Resolved 2026-08-08**, found while mirroring the readout onto Android
+>   rather than reported. A `TogetherCorrection` crosses the bridge **only** when
+>   the verdict is not `hold`, so the steady state is silent — and desktop simply
+>   kept the last pair, which means a gap that a seek had already closed stayed
+>   printed underneath the word "together" for the rest of the session. That is
+>   the exact invention `player_view.mjs` was written to refuse, arriving through
+>   the back door of time rather than of arithmetic. Both figures now age out
+>   together after two heartbeats (`READING_STALE_MS`, tied to
+>   `TOGETHER_HEARTBEAT_SECS` by the parity gate), and a session with no
+>   correction yet shows blanks rather than a reassuring pair of zeroes.
 > - **Nothing in CI renders anything.** Both bugs above were visible instantly
 >   on a device and invisible to 332 JS tests, 514 core tests and two emulator
 >   lanes, because every one of them asserts about values rather than pixels. A

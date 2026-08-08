@@ -50,6 +50,7 @@ import mullu.comrade.together.MediaLibraryAccess
 import mullu.comrade.together.ShareTransfer
 import mullu.comrade.together.TogetherDecisions
 import mullu.comrade.together.TogetherManager
+import java.util.Locale
 
 /**
  * The watch-together surface.
@@ -334,6 +335,27 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
     )
     Text(statusLabel(s), style = MaterialTheme.typography.bodyMedium)
 
+    // The measured half, which the desktop player has had since 2026-08-05 and
+    // this one did not. Recomputed on every recomposition rather than stored,
+    // because whether these may be shown at all depends on how old the reading
+    // is *now* — see `TogetherDecisions.measurement`. The position poll drives
+    // a recomposition every 250 ms while playing, which is what ages them off
+    // the screen once corrections stop arriving.
+    val measured = TogetherDecisions.measurement(
+        driftMs = s.driftMs,
+        qualityMs = s.qualityMs,
+        ageMs = System.currentTimeMillis() - s.correctedAtMs,
+    )
+    driftLabel(measured.drift)?.let {
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+    // Deliberately not colour-coded, on either frontend: "we've lost track of
+    // them" is an honest report of poor measurement, not a fault, and red would
+    // say otherwise.
+    qualityLabel(measured.quality)?.let {
+        Text(it, style = MaterialTheme.typography.bodySmall)
+    }
+
     // While a finger is on the slider the poll must not move it — the decision
     // is TogetherDecisions.pollMayMoveSlider, and the manager honours it; this
     // only has to report the drag boundaries.
@@ -384,6 +406,41 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
     Text(stringResource(R.string.together_accuracy_note), style = MaterialTheme.typography.bodySmall)
     Text(stringResource(R.string.together_background_note), style = MaterialTheme.typography.bodySmall)
 }
+
+/**
+ * The gap, or nothing. Mirrors `driftLabel` in `desktop/ui/player_view.mjs`;
+ * the decision to say anything at all is [TogetherDecisions.measurement]'s, and
+ * this only puts it into words.
+ */
+@Composable
+private fun driftLabel(drift: TogetherDecisions.Drift): String? = when (drift) {
+    is TogetherDecisions.Drift.Silent -> null
+    is TogetherDecisions.Drift.Gap -> stringResource(
+        if (drift.weAreAhead) R.string.together_drift_ahead else R.string.together_drift_behind,
+        secondsText(drift.ms, decimals = 1),
+    )
+}
+
+/** How well we can measure. Mirrors `qualityLabel` in the desktop module. */
+@Composable
+private fun qualityLabel(quality: TogetherDecisions.Quality): String? = when (quality) {
+    is TogetherDecisions.Quality.Unknown -> null
+    is TogetherDecisions.Quality.Known -> stringResource(
+        if (quality.direct) R.string.together_quality_direct else R.string.together_quality_relayed,
+        secondsText(quality.ms, quality.decimals),
+    )
+}
+
+/**
+ * Milliseconds as seconds, to a fixed number of places.
+ *
+ * Formatted in the reader's own locale rather than [Locale.ROOT] — this number
+ * sits inside a translated sentence, and "0,05" is what a decimal comma reader
+ * expects to see there. The *arithmetic* is what the JVM tests pin, in
+ * `TogetherDecisionsTest`, which is why it is not in here.
+ */
+private fun secondsText(ms: Long, decimals: Int): String =
+    String.format(Locale.getDefault(), "%.${decimals}f", ms / 1000.0)
 
 /** The status vocabulary, mirroring `sessionStatusLabel` in the desktop module. */
 @Composable

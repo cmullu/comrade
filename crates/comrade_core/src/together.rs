@@ -92,6 +92,24 @@ pub const TOGETHER_SESSION_TTL_SECS: u64 = 45;
 /// multiplication scattered over three frontends.
 pub const TOGETHER_SESSION_TTL_MS: u64 = TOGETHER_SESSION_TTL_SECS * 1000;
 
+/// How long a direct peer channel may carry nothing back before we stop
+/// believing it is carrying anything at all.
+///
+/// Two heartbeats. The frontend owns the socket and is *supposed* to report
+/// `false` the moment it closes, but a report that never comes is exactly the
+/// failure this guards: signals leave for a socket nobody reads, and the first
+/// thing that notices is the session's own TTL — which ends the evening rather
+/// than falling back to the relay that was there all along.
+///
+/// The number is derived from the cadence rather than picked, because that is
+/// what makes it correct: a live channel carries the peer's heartbeat every
+/// [`TOGETHER_HEARTBEAT_SECS`], so two of them passing in silence means at least
+/// one was lost. It has to sit comfortably under
+/// [`TOGETHER_SESSION_TTL_SECS`] as well, or the fallback would arrive after the
+/// session it was meant to save — 20 s against 45 s leaves a full heartbeat on
+/// the relay to refresh the TTL before it lapses.
+pub const TOGETHER_DIRECT_SILENCE_MS: u64 = TOGETHER_HEARTBEAT_SECS * 2 * 1000;
+
 /// A together signal older than this is meaningless and is dropped on arrival.
 ///
 /// Relays redeliver at-least-once and the vault inbox backfills up to two days
@@ -209,6 +227,11 @@ const _: () = assert!(TOGETHER_DEADBAND_COARSE_MS > TOGETHER_DEADBAND_FINE_MS);
 // quietly collapsed them into each other would otherwise cost either the first
 // minute of every session or a two-hour film's worth of persistent events.
 const _: () = assert!(TOGETHER_BURST_INTERVAL_MS * 10 < TOGETHER_HEARTBEAT_SECS * 1000);
+// The direct-channel watchdog has to fire with a whole heartbeat to spare, or
+// the relay it falls back to gets no chance to refresh the TTL before the
+// session it was meant to save has already lapsed.
+const _: () =
+    assert!(TOGETHER_DIRECT_SILENCE_MS + TOGETHER_HEARTBEAT_SECS * 1000 < TOGETHER_SESSION_TTL_MS);
 
 // ── What is being played ─────────────────────────────────────────────────────
 
@@ -848,6 +871,31 @@ pub fn new_session_id() -> String {
 /// can only observe the behaviour both rules share.
 pub fn direct_signal_admissible(signal: &TogetherSignal) -> bool {
     !matches!(signal, TogetherSignal::Start { .. })
+}
+
+/// Whether a direct peer channel the frontend declared open should still be
+/// used, given when it last produced evidence of being alive.
+///
+/// `last_evidence_ms` is the later of two things: when the frontend said the
+/// channel was up, and when an envelope last arrived over it. The first is a
+/// grace window — a channel deserves a chance to prove itself before anything
+/// is concluded from silence — and the second is the only proof available,
+/// because a send on this path is fire-and-forget by construction: the socket
+/// belongs to the frontend, so "did it arrive" is not a question core can ask.
+///
+/// Silence is read as a dead channel rather than as a quiet one, and that is
+/// sound rather than pessimistic: a data channel is symmetric, so a peer whose
+/// channel is open sends *their* heartbeats down it, every
+/// [`TOGETHER_HEARTBEAT_SECS`]. Two of those passing with nothing to show for
+/// them means the path is not carrying, whichever end broke.
+///
+/// **Self-healing, deliberately.** This is a per-send question, not a latch, so
+/// a channel that goes quiet and comes back is trusted again the moment an
+/// envelope arrives on it — no re-declaration from the frontend needed. There is
+/// no deadlock hiding in that, because the evidence is the peer's traffic and
+/// not our own: nothing we stop sending can stop them sending.
+pub fn direct_path_live(last_evidence_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_evidence_ms) < TOGETHER_DIRECT_SILENCE_MS
 }
 
 /// Whether a signal sent at `created_at` (seconds) is still worth acting on.
@@ -2409,6 +2457,61 @@ mod tests {
                 signal.kind_str(),
             );
         }
+    }
+
+    // ── When a declared channel stops being believed ────────────────────────
+
+    #[test]
+    fn a_freshly_declared_channel_is_trusted_before_it_has_proved_anything() {
+        // The grace window. A frontend that has just negotiated a channel has
+        // received nothing on it yet, and refusing it on that ground would mean
+        // the fast path could never be taken at all.
+        assert!(direct_path_live(1_000_000, 1_000_000));
+        assert!(direct_path_live(1_000_000, 1_000_000 + 9_999));
+    }
+
+    #[test]
+    fn a_channel_silent_for_two_heartbeats_is_no_longer_believed() {
+        let declared = 1_000_000;
+        // One heartbeat of silence is ordinary: a beat can be late.
+        assert!(direct_path_live(
+            declared,
+            declared + TOGETHER_HEARTBEAT_SECS * 1000
+        ));
+        // Two is not. This is the case the whole constant exists for — the
+        // frontend never reported the close, so nothing else would notice.
+        assert!(!direct_path_live(
+            declared,
+            declared + TOGETHER_DIRECT_SILENCE_MS
+        ));
+        assert!(!direct_path_live(
+            declared,
+            declared + TOGETHER_DIRECT_SILENCE_MS + 1
+        ));
+    }
+
+    // The property that makes the watchdog safe to have at all — it must fire
+    // with a full heartbeat to spare — is a compile-time invariant beside the
+    // constants rather than a test here, matching the four already there.
+
+    #[test]
+    fn traffic_on_the_channel_earns_it_back_without_the_frontend_saying_anything() {
+        let declared = 1_000_000;
+        let long_gone = declared + TOGETHER_DIRECT_SILENCE_MS + 5_000;
+        assert!(!direct_path_live(declared, long_gone));
+        // One envelope arriving over the channel is the evidence, and it is the
+        // peer's traffic rather than ours — so nothing we stopped sending can
+        // keep this from happening.
+        assert!(direct_path_live(long_gone, long_gone + 1_000));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_does_not_read_as_silence() {
+        // `now_ms` is a wall clock and can step behind a stamp taken moments
+        // ago. Saturating means that reads as "no time has passed", which keeps
+        // the channel; the alternative underflows to a huge gap and drops a
+        // perfectly good path over an NTP correction.
+        assert!(direct_path_live(1_000_000, 999_000));
     }
 
     #[test]

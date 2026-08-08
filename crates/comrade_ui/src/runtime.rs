@@ -112,11 +112,11 @@ use comrade_core::tara::{
     tara_chat_answer, tara_chat_line, CompanionEngine, JournalSignal, ReflectiveCompanion,
 };
 use comrade_core::together::{
-    command_apply, describe_state_change, direct_signal_admissible, heartbeat_interval_ms,
-    parse_together_envelope, projected_peer_pos_ms, session_is_live_at, signal_is_fresh,
-    sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandApply, CommandStamp,
-    StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope, TogetherSignal,
-    CLOCK_BURST_PROBES,
+    command_apply, describe_state_change, direct_path_live, direct_signal_admissible,
+    heartbeat_interval_ms, parse_together_envelope, projected_peer_pos_ms, session_is_live_at,
+    signal_is_fresh, sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandApply,
+    CommandStamp, StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope,
+    TogetherSignal, CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
@@ -754,7 +754,18 @@ struct TogetherSession {
     /// connection belongs to the frontend — the same division of labour
     /// [`TogetherShareDto`] describes. It is per-session and never persisted:
     /// a channel does not outlive the session it was negotiated inside.
+    ///
+    /// A claim, not a fact — see [`direct_evidence_ms`](Self::direct_evidence_ms)
+    /// for what keeps it honest.
     direct_ready: bool,
+    /// The last moment the direct channel gave any sign of being alive: the
+    /// frontend declaring it up, or an envelope arriving over it.
+    ///
+    /// `direct_ready` alone is a promise the frontend has no way to keep — a
+    /// closed socket reports nothing, and a frontend that crashes past its own
+    /// close handler reports nothing forever. `direct_path_live` reads this to
+    /// decide whether the promise is still worth acting on.
+    direct_evidence_ms: u64,
     /// The rate trim we last asked this device's player for. Tracked because a
     /// trim is sticky — see `SyncSample::local_rate`; without it the ladder can
     /// never take one back off.
@@ -3037,6 +3048,9 @@ impl ComradeRuntime {
     pub fn together_direct_ready(&self, ready: bool) {
         if let Some(session) = self.together.lock().unwrap().as_mut() {
             session.direct_ready = ready;
+            if ready {
+                session.direct_evidence_ms = now_ms();
+            }
         }
     }
 
@@ -6070,7 +6084,7 @@ impl RuntimeHandles {
                 session.peer_hex.clone(),
                 env,
                 session.id.clone(),
-                session.direct_ready,
+                session.direct_ready && direct_path_live(session.direct_evidence_ms, at_ms),
             )
         };
         let peer_pk = parse_pubkey(&peer_hex)?;
@@ -6100,9 +6114,12 @@ impl RuntimeHandles {
         // correction that can be tight and one that cannot.
         //
         // Fire-and-forget by construction: the frontend owns the socket, so
-        // "did it arrive" is not answerable here and is not asked. The peer's
-        // heartbeats and the session TTL are what notice a channel that has
-        // stopped carrying, exactly as they notice a relay that has.
+        // "did it arrive" is not answerable here and is not asked. What *is*
+        // asked is whether the channel has shown any sign of life in the last
+        // two heartbeats — `direct_path_live`, folded into `direct_ready`
+        // above. Without that, a frontend that lost its channel without
+        // reporting it would keep this branch sending into a socket nobody
+        // reads until the session died on its TTL.
         if direct_ready {
             let _ = self.events.send(BridgeEvent::TogetherOutbound {
                 session_id,
@@ -6169,6 +6186,7 @@ impl RuntimeHandles {
                 last_heard_ms: at_ms,
                 last_seek_ms: 0,
                 direct_ready: false,
+                direct_evidence_ms: 0,
                 local_rate: 1.0,
                 local_output_latency_ms: 0,
                 peer_output_latency_ms: 0,
@@ -6291,13 +6309,20 @@ impl RuntimeHandles {
     /// Idempotent and safe to call with no session — a channel that opens after
     /// one has ended is simply nothing to record.
     ///
-    /// Must be set back to `false` the moment the channel closes or fails.
-    /// There is no timeout behind it: signals would keep going out to a socket
-    /// nobody is reading, and the session would die on its TTL rather than
-    /// falling back to the relay that was there all along.
+    /// Should be set back to `false` the moment the channel closes or fails —
+    /// but the runtime does not depend on that happening, because a frontend
+    /// that has crashed past its own close handler cannot report anything. A
+    /// declaration is treated as a claim with an expiry: two heartbeats of
+    /// silence on the channel and sends go back to the relay on their own
+    /// ([`comrade_core::together::direct_path_live`]). Reporting `false`
+    /// promptly is still worth doing — it moves the fallback from twenty
+    /// seconds away to immediate.
     pub fn together_direct_ready(&self, ready: bool) {
         if let Some(session) = self.together.lock().unwrap().as_mut() {
             session.direct_ready = ready;
+            if ready {
+                session.direct_evidence_ms = now_ms();
+            }
         }
     }
 
@@ -6330,8 +6355,17 @@ impl RuntimeHandles {
             return;
         }
         let known = {
-            let guard = self.together.lock().unwrap();
-            guard.as_ref().map(|s| (s.peer.clone(), s.peer_hex.clone()))
+            let mut guard = self.together.lock().unwrap();
+            guard.as_mut().map(|s| {
+                // The channel just carried something, which is the only proof
+                // available that it is still carrying anything — see
+                // `direct_path_live`. Stamped on *our* clock rather than from
+                // `env.at_ms`, because the envelope's stamp is the sender's
+                // claim and a peer that dated it into next week would otherwise
+                // buy their channel a permanent reprieve.
+                s.direct_evidence_ms = now_ms();
+                (s.peer.clone(), s.peer_hex.clone())
+            })
         };
         let Some((peer_npub, peer_hex)) = known else {
             return;
@@ -7727,6 +7761,7 @@ fn handle_together_envelope(
             last_heard_ms: at,
             last_seek_ms: 0,
             direct_ready: false,
+            direct_evidence_ms: 0,
             local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
@@ -12314,6 +12349,8 @@ mod tests {
             .unwrap()
     }
 
+    use comrade_core::together::TOGETHER_DIRECT_SILENCE_MS;
+
     /// Plant a live session the way an invitation would, so the direct-channel
     /// tests do not need a vault or a relay to have something to be inside of.
     fn plant_session(rt: &ComradeRuntime, peer_npub: &str, peer_hex: &str) {
@@ -12455,7 +12492,7 @@ mod tests {
     }
 
     /// Declaring a channel is what routes traffic to it, and un-declaring it
-    /// must put traffic back on the relay — there is no timeout behind it.
+    /// must put traffic back on the relay.
     #[test]
     fn declaring_and_dropping_a_channel_moves_the_traffic() {
         let rt = ComradeRuntime::new();
@@ -12466,6 +12503,73 @@ mod tests {
         assert_eq!(direct(), Some(true));
         rt.together_direct_ready(false);
         assert_eq!(direct(), Some(false), "a dead channel must fall back");
+    }
+
+    /// Which rung a send took, read off the one thing that distinguishes them
+    /// on a runtime with no vault: the direct path returns `Ok` and emits a
+    /// `TogetherOutbound`, and the relay path can only reach `VaultLocked`.
+    async fn send_took_the_direct_path(rt: &ComradeRuntime) -> bool {
+        let mut rx = rt.subscribe_events();
+        let sent = rt
+            .handles()
+            .send_together(TogetherSignal::Join)
+            .await
+            .is_ok();
+        let announced = matches!(rx.try_recv(), Ok(BridgeEvent::TogetherOutbound { .. }));
+        assert_eq!(sent, announced, "a rung that returned Ok said nothing");
+        announced
+    }
+
+    /// The failure a frontend cannot report: it declares a channel, the channel
+    /// dies, and the close handler never runs — a crashed webview, a killed
+    /// process, a bug. Nothing arrives to say so, so before this the runtime
+    /// kept posting every signal into a socket nobody read until the session
+    /// died on its 45 s TTL. Two heartbeats of silence now put it back on the
+    /// relay by itself.
+    #[tokio::test]
+    async fn a_channel_that_went_quiet_without_saying_so_falls_back_to_the_relay() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        rt.together_direct_ready(true);
+        assert!(
+            send_took_the_direct_path(&rt).await,
+            "a freshly declared channel must be given its chance",
+        );
+
+        // Age the last sign of life past the watchdog. The frontend still says
+        // the channel is up — that is the whole point; its claim is the thing
+        // that stopped being true.
+        {
+            let mut guard = rt.together.lock().unwrap();
+            let session = guard.as_mut().unwrap();
+            session.direct_evidence_ms = now_ms() - TOGETHER_DIRECT_SILENCE_MS - 1;
+            assert!(session.direct_ready, "the stale claim is still standing");
+        }
+        assert!(
+            !send_took_the_direct_path(&rt).await,
+            "signals kept going into a socket nobody was reading",
+        );
+    }
+
+    /// And it heals without the frontend's help: one envelope arriving over the
+    /// channel is proof enough, which matters because a frontend that never
+    /// noticed the outage has nothing to re-declare.
+    #[tokio::test]
+    async fn traffic_arriving_on_the_channel_earns_the_fast_path_back() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        rt.together_direct_ready(true);
+        {
+            let mut guard = rt.together.lock().unwrap();
+            guard.as_mut().unwrap().direct_evidence_ms = now_ms() - TOGETHER_DIRECT_SILENCE_MS - 1;
+        }
+        assert!(!send_took_the_direct_path(&rt).await);
+
+        rt.together_receive_direct(&together_json("s-direct", 2, TogetherSignal::Join));
+        assert!(
+            send_took_the_direct_path(&rt).await,
+            "the channel proved itself alive and was not believed",
+        );
     }
 
     /// Announcing a channel with no session is a no-op rather than a panic: the
@@ -13523,6 +13627,7 @@ mod tests {
             last_heard_ms: now_ms(),
             last_seek_ms: 0,
             direct_ready: false,
+            direct_evidence_ms: 0,
             local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,

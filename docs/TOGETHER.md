@@ -351,12 +351,36 @@ honest:
 Everything past that — the age gate, session scoping, `(seq, actor)` ordering —
 is literally the same code the relay path runs, because it is the same call.
 
-**What `direct_ready` does not have is a timeout.** A frontend that reports a
-live channel and then loses it must report `false`, or signals go into a socket
-nobody reads and the session dies on its TTL rather than falling back to the
-relay that was there the whole time. That is stated on the method, on the Tauri
-command, and in the Kotlin arm, because it is the one way to make this worse than
-not having it.
+**`direct_ready` is a claim with an expiry, not a fact.** A frontend that reports
+a live channel and then loses it should report `false` — but the failure worth
+designing for is the one where it *cannot*: a crashed webview, a killed process,
+a close handler that never ran. Nothing arrives to say so, so signals would keep
+going into a socket nobody reads until the session died on its 45 s TTL, which is
+strictly worse than never having had the fast path.
+
+So the claim is checked against evidence. `direct_path_live` reads the last
+moment the channel gave any sign of life — the frontend declaring it up, or an
+envelope arriving *on* it — and after `TOGETHER_DIRECT_SILENCE_MS` (two
+heartbeats, 20 s) `send_together` goes back to the relay on its own. Three
+properties make that the right shape rather than a timer bolted on:
+
+- **Silence is real evidence, not pessimism.** A data channel is symmetric, so a
+  peer whose end is open sends *their* heartbeats down it every 10 s. Two of
+  those passing with nothing to show means the path is not carrying, whichever
+  end broke.
+- **It fires with a heartbeat to spare.** 20 s of watchdog plus one 10 s
+  heartbeat is still under the 45 s TTL, so the relay it falls back to gets a
+  beat through before the session it was meant to save would have lapsed. A unit
+  test asserts that inequality rather than trusting the arithmetic to stay true.
+- **It heals by itself.** This is a per-send question, not a latch: one envelope
+  arriving on the channel earns the fast path back with no re-declaration. That
+  matters because a frontend that never noticed the outage has nothing to
+  re-declare. There is no deadlock in it either — the evidence is the peer's
+  traffic, not ours, so nothing we stop sending can stop them sending.
+
+Reporting `false` promptly is still worth doing. It moves the fallback from
+twenty seconds away to immediate, which is the difference between two dropped
+commands and none.
 
 ## 6. Replay safety
 
@@ -411,12 +435,43 @@ And a permanent line under the stage:
 > Positions travel over the relay, so you'll be within about a second of each
 > other — not frame-perfect.
 
+### The two measured numbers, and when they may be shown
+
+Beside the state, both players now show what was actually measured: the gap
+between the playheads, and the error on that gap. Three rules govern them, and
+they hold on desktop (`player_view.mjs`) and Android
+(`TogetherDecisions.measurement`) against the same vectors, gated by
+`together_parity.test.mjs`.
+
+**A gap smaller than our own error is not reported at all.** Printing "0.4 s
+apart" while the measurement error is 0.8 s is invention dressed as precision.
+Below `max(error, 400 ms)` the line is blank — and blank covers both "genuinely
+together" and "cannot tell", which is why the error is shown beside it rather
+than instead of it: `direct · ±0.05s` and `relayed · ±0.6s` are what make the
+number above them mean anything. Neither is colour-coded. "We've lost track of
+them" is an honest report of poor measurement, not a fault, and red would say
+otherwise.
+
+**A direct path never claims to be tighter than 50 ms**, because neither player
+can report a playhead more precisely than that (§3), and a relayed figure gets
+one decimal place rather than two — the second digit is not real.
+
+**And both age out together after two heartbeats.** This is the rule that was
+missing when the readout first shipped, and it is not a detail: corrections
+cross the bridge *only* when the verdict is not `hold`, so the steady state
+emits nothing at all. A screen that simply keeps the last pair therefore prints
+a gap that was closed minutes ago, underneath the word "together", for the rest
+of the session. Twenty seconds — two heartbeats, so at least one verdict has
+since said the gap was inside the deadband — and the lines go blank. A session
+that has never been corrected shows blanks for the same reason, rather than a
+reassuring pair of zeroes.
+
 ## 8. Where the code lives
 
 | Layer | What it owns |
 |---|---|
 | `comrade_core::together` | Wire protocol, the clock filter and its NTP arithmetic, `sync_verdict`, the Lamport order, every timing constant and its compile-time invariants. Pure; 40 unit tests. |
-| `comrade_ui::runtime` | `together_start` / `together_join` / `together_set_state` / `together_end` (each a `RuntimeHandles` twin, so no bridge holds the lock across a relay round trip), `together_report_position`, `together_session`, the receive arm in `dispatch_incoming_dm`, the session loop, and five `BridgeEvent` variants. |
+| `comrade_ui::runtime` | `together_start` / `together_join` / `together_set_state` / `together_end` (each a `RuntimeHandles` twin, so no bridge holds the lock across a relay round trip), `together_report_position`, `together_session`, the receive arm in `dispatch_incoming_dm`, the session loop, and seven `BridgeEvent` variants. |
 | `comrade_jni`, `desktop/src-tauri` | The same calls over uniffi / flutter_rust_bridge / Tauri commands. `together_report_position` is the one that is **synchronous and skipped under contention**, because a player calls it several times a second from its UI thread — the trade `note_draft` already makes. |
 | `desktop/ui/together_sync.mjs` | Echo suppression, the verdict→player plan, and the status wording. Pure, 20 `node --test` cases. |
 | `android/…/together/LibraryResolver.kt` | Finds the listener's own copy via `MediaStore`, scored by the shared `match_score`; reads a picked file's tags so an invitation can name what it is. |
@@ -479,6 +534,11 @@ Android specifics worth knowing:
   adaptive streaming this feature does not use.
 - **Audio focus is honoured**: losing it pauses *and tells the peer*, so what
   they see is "they paused" rather than an unexplained drift.
+- **The measured drift and its error are on screen** as of 2026-08-08, in the
+  same words desktop uses and under the same three rules (§7). `UiState.Live`
+  carries the raw pair plus when it was taken, because whether any of it may be
+  shown depends on how old it is at the moment the screen draws — so the
+  decision is recomputed each recomposition rather than stored.
 
 **Not built**, and stated here rather than discovered:
 

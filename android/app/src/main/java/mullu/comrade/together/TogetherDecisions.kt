@@ -247,6 +247,105 @@ object TogetherDecisions {
     /** Whether a queued remote seek should now be applied (drag ended, nothing newer). */
     fun pendingRemoteToApply(state: ScrubState): Long? = if (state.scrubbing) null else state.pendingRemoteMs
 
+    // ── What the two measured numbers are allowed to say ────────────────────
+    //
+    // Mirrors `desktop/ui/player_view.mjs` — `TOGETHER_MS`, `READING_STALE_MS`,
+    // `driftLabel`, `qualityLabel`, `measurementLines` — against the same
+    // vectors, because the rule they encode is the one the whole design rests
+    // on and two frontends disagreeing about it is worse than neither showing
+    // it. What is *not* mirrored is the wording: these return decisions, and
+    // `ui/TogetherScreen.kt` turns them into localised strings, the same
+    // division `Status` already uses.
+
+    /** A gap smaller than this is not worth narrating even when we can see it. */
+    const val TOGETHER_MS: Long = 400
+
+    /**
+     * How long a measurement is worth showing after it was taken.
+     *
+     * Corrections cross the bridge **only** when the verdict is not `hold`, so
+     * the steady state emits nothing — and a screen that keeps the last pair
+     * therefore prints a gap that was closed minutes ago, underneath the word
+     * "Together". Two heartbeats, matching `READING_STALE_MS` on desktop and
+     * `together::TOGETHER_DIRECT_SILENCE_MS` in core, and derived the same way:
+     * two heartbeats of silence means at least one verdict said the gap was
+     * inside the deadband.
+     */
+    const val READING_STALE_MS: Long = 20_000
+
+    /** The floor on what a direct path may claim about itself, in ms. */
+    const val QUALITY_FLOOR_MS: Long = 50
+
+    /** Above this the path is a relay, and says so. */
+    const val QUALITY_DIRECT_MAX_MS: Long = 150
+
+    /**
+     * The gap, when it is bigger than our own ability to measure it.
+     *
+     * [Silent] is not "they are together" — it is "we have nothing honest to
+     * say", which covers both being genuinely in step and not being able to
+     * tell. [Quality] carries the difference; this must not try to.
+     */
+    sealed interface Drift {
+        data object Silent : Drift
+
+        /** Rendered to one decimal place, as `%.1f`. */
+        data class Gap(val ms: Long, val weAreAhead: Boolean) : Drift
+    }
+
+    /** How well we can measure, which is what makes a [Drift.Gap] mean anything. */
+    sealed interface Quality {
+        data object Unknown : Quality
+
+        /**
+         * @param ms floored at [QUALITY_FLOOR_MS] — under that the figure is
+         *   below what either player can report, so claiming it would be the
+         *   same invention the deadband exists to prevent.
+         * @param direct a peer channel or a mesh hop, rather than a relay.
+         * @param decimals 2 for a direct path, 1 for a relayed one — a relayed
+         *   `±0.62s` implies a precision the second digit does not have.
+         */
+        data class Known(val ms: Long, val direct: Boolean, val decimals: Int) : Quality
+    }
+
+    /** Both lines, or neither. */
+    data class Measurement(val drift: Drift, val quality: Quality)
+
+    /**
+     * What the readout may say, given a correction that arrived [ageMs] ago.
+     *
+     * One call rather than two because it is one measurement: a drift figure
+     * without its error is unreadable, and an error left on screen after the
+     * drift aged out would claim we are still measuring after we stopped
+     * hearing verdicts. So they age out as a pair.
+     *
+     * A session with no correction yet passes a large [ageMs] and gets blanks —
+     * the same answer as a stale reading, which is right: both mean there is no
+     * current number.
+     *
+     * @param driftMs signed; positive means this device is ahead.
+     */
+    fun measurement(driftMs: Long, qualityMs: Long, ageMs: Long): Measurement {
+        if (ageMs < 0 || ageMs >= READING_STALE_MS) {
+            return Measurement(Drift.Silent, Quality.Unknown)
+        }
+        return Measurement(driftOf(driftMs, qualityMs), qualityOf(qualityMs))
+    }
+
+    /** Reported only above our own error — see the desktop module's long note. */
+    private fun driftOf(driftMs: Long, qualityMs: Long): Drift {
+        val gap = kotlin.math.abs(driftMs)
+        val floor = maxOf(kotlin.math.abs(qualityMs), TOGETHER_MS)
+        return if (gap <= floor) Drift.Silent else Drift.Gap(gap, weAreAhead = driftMs > 0)
+    }
+
+    private fun qualityOf(qualityMs: Long): Quality = when {
+        qualityMs <= 0 -> Quality.Unknown
+        qualityMs <= QUALITY_FLOOR_MS -> Quality.Known(QUALITY_FLOOR_MS, direct = true, decimals = 2)
+        qualityMs <= QUALITY_DIRECT_MAX_MS -> Quality.Known(qualityMs, direct = true, decimals = 2)
+        else -> Quality.Known(qualityMs, direct = false, decimals = 1)
+    }
+
     // ── Picture ─────────────────────────────────────────────────────────────
 
     /**

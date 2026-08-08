@@ -492,9 +492,11 @@ pub async fn together_session(
 /// so they take it rather than a relay — tens of milliseconds against hundreds,
 /// which is what decides how tight the sync can be.
 ///
-/// Must be set back to `false` when the channel closes: nothing times out behind
-/// it, so a stale `true` sends signals into a socket nobody reads and the session
-/// dies on its TTL instead of falling back to the relay.
+/// Should be set back to `false` when the channel closes, and the runtime no
+/// longer depends on that happening: a declaration expires after two heartbeats
+/// of silence on the channel and sends go back to the relay by themselves
+/// (`comrade_core::together::direct_path_live`). Reporting it promptly still
+/// matters — it moves the fallback from twenty seconds away to immediate.
 #[tauri::command]
 pub async fn together_direct_ready(
     state: tauri::State<'_, Runtime>,

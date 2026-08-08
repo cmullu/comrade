@@ -292,4 +292,106 @@ class TogetherDecisionsTest {
         // holding up a screen with nothing on it.
         assertFalse("audio must never hold the screen", TogetherDecisions.keepScreenOn(audio, playing = true))
     }
+
+    // ── What the two measured numbers are allowed to say ────────────────────
+    //
+    // The same vectors as `desktop/ui/player_view.test.mjs`. These are the
+    // rules the whole design rests on — never claim a precision we cannot
+    // measure — so two frontends disagreeing about them is worse than neither
+    // showing the numbers at all.
+
+    private fun measure(driftMs: Long, qualityMs: Long, ageMs: Long = 1_000) =
+        TogetherDecisions.measurement(driftMs, qualityMs, ageMs)
+
+    @Test
+    fun aGapSmallerThanOurOwnErrorIsNotReported() {
+        // Printing "0.4 s apart" while the error is 0.8 s is invention.
+        assertEquals(TogetherDecisions.Drift.Silent, measure(400, 800).drift)
+        assertEquals(TogetherDecisions.Drift.Silent, measure(-400, 800).drift)
+        // Bigger than the error, and worth saying.
+        assertEquals(
+            TogetherDecisions.Drift.Gap(1_200, weAreAhead = true),
+            measure(1_200, 300).drift,
+        )
+        assertEquals(
+            TogetherDecisions.Drift.Gap(1_200, weAreAhead = false),
+            measure(-1_200, 300).drift,
+        )
+    }
+
+    @Test
+    fun aPerfectClockDoesNotLicenceNarratingATinyGap() {
+        // A measured error of zero is what a mesh hop approaches; it must not
+        // become permission to report a 50 ms gap nobody can hear.
+        assertEquals(TogetherDecisions.Drift.Silent, measure(50, 0).drift)
+        assertEquals(TogetherDecisions.Drift.Silent, measure(TogetherDecisions.TOGETHER_MS, 0).drift)
+    }
+
+    @Test
+    fun thePathIsNamedBecauseItDecidesWhatTheGapIsWorth() {
+        assertTrue((measure(0, 30).quality as TogetherDecisions.Quality.Known).direct)
+        assertTrue((measure(0, 120).quality as TogetherDecisions.Quality.Known).direct)
+        assertFalse((measure(0, 600).quality as TogetherDecisions.Quality.Known).direct)
+    }
+
+    @Test
+    fun anUnmeasuredPathClaimsNothing() {
+        for (bad in listOf(0L, -1L)) {
+            assertEquals("quality $bad", TogetherDecisions.Quality.Unknown, measure(0, bad).quality)
+        }
+    }
+
+    @Test
+    fun aDirectPathNeverClaimsToBeTighterThanEitherPlayerCanReport() {
+        // Desktop prints "±0.05s" for anything at or under the floor rather
+        // than the raw figure, and this is where that floor lives.
+        val tiny = measure(0, 5).quality as TogetherDecisions.Quality.Known
+        assertEquals(TogetherDecisions.QUALITY_FLOOR_MS, tiny.ms)
+        assertEquals(2, tiny.decimals)
+        // A relayed figure gets one place: the second digit is not real.
+        assertEquals(1, (measure(0, 620).quality as TogetherDecisions.Quality.Known).decimals)
+    }
+
+    @Test
+    fun aReadingOlderThanTwoHeartbeatsIsNotShownAtAll() {
+        // Corrections cross the bridge only when the verdict is not "hold", so
+        // a screen that keeps the last pair shows a gap closed minutes ago,
+        // underneath the word "together".
+        val stale = measure(3_200, 100, ageMs = TogetherDecisions.READING_STALE_MS)
+        assertEquals(TogetherDecisions.Drift.Silent, stale.drift)
+        assertEquals(TogetherDecisions.Quality.Unknown, stale.quality)
+    }
+
+    @Test
+    fun theErrorLineAgesOutWithTheGapNeverAfterIt() {
+        // "±0.05s" left on screen after the gap it qualified has gone would
+        // claim we are still measuring, which inverts the point of showing it.
+        val old = measure(9_000, 40, ageMs = 60_000)
+        assertEquals(TogetherDecisions.Drift.Silent, old.drift)
+        assertEquals(TogetherDecisions.Quality.Unknown, old.quality)
+    }
+
+    @Test
+    fun aSessionWithNoCorrectionYetShowsBlanksNotZeroes() {
+        // What the screen computes before the first correction:
+        // `System.currentTimeMillis() - 0`.
+        val never = TogetherDecisions.measurement(0, 0, ageMs = System.currentTimeMillis())
+        assertEquals(TogetherDecisions.Drift.Silent, never.drift)
+        assertEquals(TogetherDecisions.Quality.Unknown, never.quality)
+    }
+
+    @Test
+    fun aFreshReadingInsideTheDeadbandStillNamesThePath() {
+        // The gap is not worth mentioning; how well we can see it still is.
+        val m = measure(50, 40)
+        assertEquals(TogetherDecisions.Drift.Silent, m.drift)
+        assertTrue(m.quality is TogetherDecisions.Quality.Known)
+    }
+
+    @Test
+    fun aClockThatWentBackwardsShowsNothingRatherThanAFutureReading() {
+        val m = TogetherDecisions.measurement(3_200, 100, ageMs = -5_000)
+        assertEquals(TogetherDecisions.Drift.Silent, m.drift)
+        assertEquals(TogetherDecisions.Quality.Unknown, m.quality)
+    }
 }

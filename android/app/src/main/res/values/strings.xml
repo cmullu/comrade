@@ -533,6 +533,13 @@
     <string name="together_catching_up">catching up\u2026</string>
     <string name="together_lost_track">we\u2019ve lost track of them</string>
     <string name="together_they_paused">%1$s paused</string>
+    <!-- The two measured figures, in the same words the desktop player uses.
+         The gap is only ever shown when it is bigger than the error beside it;
+         naming the path is what makes that error mean anything to a reader. -->
+    <string name="together_drift_ahead">%1$ss ahead of them</string>
+    <string name="together_drift_behind">%1$ss behind them</string>
+    <string name="together_quality_direct">direct · ±%1$ss</string>
+    <string name="together_quality_relayed">relayed · ±%1$ss</string>
     <!-- The honest limit, shown permanently under the player. -->
     <string name="together_accuracy_note">Positions travel over the network, so you\u2019ll be within about a second of each other \u2014 not frame-perfect.</string>
     <string name="together_background_note">This keeps playing when you leave the app.</string>
