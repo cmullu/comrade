@@ -1,5 +1,6 @@
 package mullu.comrade.ui
 
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -23,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -39,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,7 +49,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFramePlayerOptions
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
+import org.webrtc.RendererCommon
+import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoTrack
 import mullu.comrade.R
+import mullu.comrade.call.CallManager
 import mullu.comrade.together.LibraryResolver
 import mullu.comrade.together.MediaLibraryAccess
 import mullu.comrade.together.MediaSessionAccess
@@ -77,7 +84,7 @@ fun TogetherScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by TogetherManager.state.collectAsState()
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
 
     // An invitation is the one moment reading the library is obviously worth
     // something, so it is the one place besides `/play` that asks. Two separate
@@ -95,6 +102,32 @@ fun TogetherScreen(
     // only honest way to detect the grant, since coming back from settings
     // produces no callback of any kind.
     var followRefusal by remember { mutableStateOf<TogetherManager.FollowRefusal?>(null) }
+
+    // Streaming what this device is playing (docs/TOGETHER.md §15). Two system
+    // prompts in sequence, both hoisted out of the `when` for the same reason
+    // the library launcher is: a launcher created inside a branch is created and
+    // destroyed as the session changes state.
+    //
+    // RECORD_AUDIO first, and it is worth knowing *why* a feature that is not
+    // about the microphone asks for it: the media audio joins the outgoing
+    // stream on the capture path, so there has to be a capture running at all.
+    // A refusal is not fatal — the picture still goes.
+    val askToCapture = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        // Refused is a real answer: the picture streams with no sound, rather
+        // than nothing happening and the button looking broken.
+        TogetherManager.startStreamingFromConsent(context, result.resultCode, result.data)
+    }
+    val askToRecord = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        // Granted or not, go on to the capture consent — the two failures are
+        // independent and the picture does not depend on either.
+        val manager = context.getSystemService(MediaProjectionManager::class.java)
+        val intent = manager?.createScreenCaptureIntent()
+        if (intent != null) askToCapture.launch(intent)
+    }
     val askToReadLibrary = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -187,7 +220,9 @@ fun TogetherScreen(
                     }
                 }
 
-                is TogetherManager.UiState.Live -> LiveSession(s)
+                is TogetherManager.UiState.Live -> LiveSession(s) {
+                    askToRecord.launch(android.Manifest.permission.RECORD_AUDIO)
+                }
             }
 
             // Outside the `when` on purpose: the relay question can arrive while a
@@ -305,7 +340,7 @@ private fun FollowWhatIsPlaying(
     refusal: TogetherManager.FollowRefusal?,
     onTry: () -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     // A video plays here and a file is opened here, so neither wants this. Asked
     // of the same decision the manager will apply, so the button and the action
     // cannot disagree about when it is available.
@@ -345,6 +380,40 @@ private fun FollowWhatIsPlaying(
         // anyway, so it says nothing.
         TogetherManager.FollowRefusal.NoInvitation, null -> Unit
     }
+}
+
+/**
+ * A `VideoTrack` on screen, for a streamed session (`docs/TOGETHER.md` §15).
+ *
+ * Deliberately a much plainer thing than the call screen's renderer: there is no
+ * mirroring (nobody is looking at themselves), no picture-in-picture z-order and
+ * no letterbox decision, because the sleeve around this already carries the
+ * aspect ratio. What it keeps is the part that is not optional — `release()` on
+ * disposal, and detaching the sink before that, since a renderer left attached
+ * to a live track is a native buffer nobody frees.
+ */
+@Composable
+private fun StreamRenderer(track: VideoTrack?, modifier: Modifier = Modifier) {
+    val egl = CallManager.eglBaseContext
+    if (egl == null) {
+        // No WebRTC on this device: an empty sleeve is honest, where a black
+        // rectangle would look like a picture that failed to arrive.
+        return
+    }
+    val context = LocalContext.current
+    val renderer = remember {
+        SurfaceViewRenderer(context).apply {
+            init(egl, null)
+            setEnableHardwareScaler(true)
+            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+        }
+    }
+    DisposableEffect(renderer) { onDispose { renderer.release() } }
+    DisposableEffect(track, renderer) {
+        track?.addSink(renderer)
+        onDispose { track?.removeSink(renderer) }
+    }
+    AndroidView(factory = { renderer }, modifier = modifier.fillMaxSize())
 }
 
 /**
@@ -428,7 +497,7 @@ private fun ShareRelayConsent() {
 }
 
 @Composable
-private fun LiveSession(s: TogetherManager.UiState.Live) {
+private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
     // Hold the screen awake for a playing film and nothing else — two hours of
     // music must not burn the battery lighting up a screen with nothing on it.
     // The rule is TogetherDecisions.keepScreenOn, tested there; this only
@@ -463,6 +532,20 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
     ) {
         val video = s.picture as? TogetherDecisions.Picture.Video
         when {
+            // Streaming takes the player's only output surface, so the sender
+            // cannot also watch a SurfaceView — they watch the very track the
+            // other person receives. One picture path instead of two, and the
+            // same thing the call screen does with local camera video.
+            s.streaming -> {
+                val outgoing by TogetherManager.localVideo.collectAsState()
+                val incoming by TogetherManager.remoteVideo.collectAsState()
+                // Whichever exists: the sender has an outgoing track and no
+                // incoming one, the receiver the reverse. Asked this way round
+                // rather than from `weLead` because a stream's direction is a
+                // property of which tracks are present, and those are what the
+                // renderer actually needs.
+                StreamRenderer(outgoing ?: incoming)
+            }
             // The embed draws itself, controls and all, inside the same sleeve
             // the file path uses — so a video has one owner of the aspect ratio
             // whichever player is behind it.
@@ -552,6 +635,27 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
             val target = (s.positionMs + delta).coerceIn(0L, ceiling)
             TogetherManager.setState(target, s.playing)
         }
+        // The microphone, and only where it means something: a streamed session
+        // carries one audio track that the sender's voice shares with what they
+        // are playing (docs/TOGETHER.md §15). In every other mode there is no
+        // audio of ours going anywhere, and a control that toggles nothing is
+        // worse than no control — the same rule the library button follows.
+        if (s.streaming) {
+            val micOn by TogetherManager.micEnabled.collectAsState()
+            IconButton(onClick = { TogetherManager.toggleMic() }) {
+                Icon(
+                    MicIcon,
+                    contentDescription = stringResource(
+                        if (micOn) R.string.together_mic_off else R.string.together_mic_on,
+                    ),
+                    tint = if (micOn) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
         TextButton(onClick = { skip(-SKIP_MS) }) { Text("−10s") }
         Button(
             onClick = { TogetherManager.setState(s.positionMs, !s.playing) },
@@ -560,6 +664,24 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
             Text(if (s.playing) "Pause" else "Play")
         }
         TextButton(onClick = { skip(SKIP_MS) }) { Text("+10s") }
+    }
+
+    // The third answer to §9a's question, beside "find your own copy" and "take
+    // mine": let them watch this one as it plays. Offered only by the side that
+    // holds the file and only for our own player — an embed is already on both
+    // screens, and an external session is somebody else's audio to send.
+    if (s.weLead && !s.embed && !s.external && !s.streaming) {
+        TextButton(onClick = onStream) { Text(stringResource(R.string.together_stream)) }
+        Text(stringResource(R.string.together_stream_note), style = MaterialTheme.typography.bodySmall)
+        // Before the system dialog, not after: it arrives with no explanation of
+        // its own, and a recording prompt nobody can account for is one people
+        // are right to refuse.
+        Text(stringResource(R.string.together_stream_consent), style = MaterialTheme.typography.bodySmall)
+    }
+    if (s.streaming) {
+        Text(stringResource(R.string.together_streaming), style = MaterialTheme.typography.bodyMedium)
+        // The one thing about the microphone that is not obvious from the icon.
+        Text(stringResource(R.string.together_mic_note), style = MaterialTheme.typography.bodySmall)
     }
 
     TextButton(onClick = { TogetherManager.leave() }) {

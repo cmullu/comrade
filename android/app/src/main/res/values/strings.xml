@@ -564,5 +564,24 @@
     <!-- What an external session can and cannot promise, shown while one runs.
          Deliberately not "synced": the position comes from another app on its
          own schedule, which is the coarse tier. -->
+    <!-- The microphone in a streamed session (docs/TOGETHER.md section 15). One
+         audio track carries both the sender's voice and what they are playing,
+         so this is a mix, not a swap. The headphones note is not politeness:
+         with speakers and an open mic the other person hears the film twice,
+         once cleanly and once through the room. -->
+    <!-- The third answer to "only one of us has it" (docs/TOGETHER.md section
+         15), beside "find your own copy" and "take mine". Named for what the
+         other person gets rather than for the mechanism: nobody wants to "start
+         a WebRTC media session", they want the other person to see it. -->
+    <string name="together_stream">Let them watch mine</string>
+    <string name="together_stream_note">They\u2019ll see and hear what you\u2019re playing, live. Nothing is saved on their phone, and it stops when you do.</string>
+    <!-- Shown before the system\u2019s recording-consent dialog, which arrives
+         with no explanation of its own and is one people are right to refuse
+         when they do not know what asked for it. -->
+    <string name="together_stream_consent">Android will ask to record this screen \u2014 that\u2019s how Comrade sends the sound of what you\u2019re playing. Decline and they\u2019ll still see the picture, without its audio.</string>
+    <string name="together_streaming">They\u2019re watching yours.</string>
+    <string name="together_mic_on">Turn your microphone on</string>
+    <string name="together_mic_off">Turn your microphone off</string>
+    <string name="together_mic_note">Your microphone goes out with the sound of what you\u2019re playing. Use headphones, or they\u2019ll hear it twice.</string>
     <string name="together_follow_note">Comrade is following another app on this phone. It can play, pause and place the playhead \u2014 it can\u2019t show you the picture.</string>
 </resources>

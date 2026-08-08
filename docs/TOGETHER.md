@@ -1576,3 +1576,293 @@ it — and all three say so where they narrow.
 The work list, the exact call sites and the traps are in
 [`docs/TOGETHER_PLAYERS_HANDOFF.md`](TOGETHER_PLAYERS_HANDOFF.md).
 
+
+## 15. Sending the picture and the sound, not the clock
+
+_Added 2026-08-08, from "ideally the app should just stream whatever is playing
+on one device — video/audio — with the best sync"._
+
+**The instinct is right, and it is worth saying why before saying what it
+costs.** Everything hard in §3–§11b exists for one reason: two independent
+players have to be kept in step. The drift ladder, the deadband, the coarse and
+fine tiers, `CoarsePlayhead`, the ad-break `StallWatch` — all of it is machinery
+for a problem that a stream simply does not have. Send the frames and there is
+**one** playhead; A/V sync becomes the transport's job, and it is a job WebRTC
+already does. "Best sync" is not something to tune here. It is exact by
+construction.
+
+So this section reverses §1 — but only as far as §1's actual reason goes, which
+is worth reading precisely rather than as a blanket ban.
+
+### What §1 rules out, and what it does not
+
+§1 and `AUDIT.md` §8.2 rule out **re-streaming or proxying licensed content**:
+a copyright problem, a bandwidth problem, and a technical wall on DRM'd
+platforms. Every word of that still holds.
+
+What it never ruled out is a person sending **their own file** to **one person
+they invited**, which is a thing this app already does — that is the §9a
+handover, and nobody thought it needed a different answer. Decoding that same
+file and sending the pictures instead of the bytes is the same act with a
+different codec. So:
+
+| | Streamed? | Why |
+|---|---|---|
+| A file the leader holds | **yes** | Their own file, one invited peer. §1's reason does not reach it. |
+| Comrade's YouTube embed (§11b) | no | Both sides get the real player free. Re-streaming it breaks YouTube's terms and looks worse. |
+| A service track (§11, §13) | no | Licensed audio, and the platforms block capture anyway. |
+| Anything else on the phone | **later, and honestly** | See "Screen capture" below. |
+
+### The two halves, and which one was the risk
+
+**Video** is the half that already exists in outline. `CallManager.startScreenShare`
+already pushes a `ScreenCapturerAndroid` into a `VideoSource` over a live
+`PeerConnection`, foreground-service dance and renegotiation included. A player's
+frames reach a `VideoSource` the same way a screen's do.
+
+**Audio was the real feasibility question**, and the answer is not obvious:
+libwebrtc's Android audio path captures from the *microphone*, and there is no
+supported way to hand it a buffer. Sharing a film with the machinery as it
+stands would send the picture and the sound of the room.
+
+It is possible with the build this repo already depends on, and it was checked
+against the AAR rather than assumed. **The first answer was the wrong one**, and
+it is worth keeping because the mistake is easy and the symptom is not obviously
+a bug. `io.github.webrtc-sdk:android` adds
+`JavaAudioDeviceModule.Builder.setAudioBufferCallback`, which is handed the
+record buffer and can replace the microphone with anything — but it sits in
+`WebRtcAudioRecord`'s read loop, **before** the audio processing module. A film
+injected there goes through machinery built for speech: the noise suppressor
+treats a sustained note as noise and gates it, and the automatic gain control
+pumps the dynamics, lifting quiet scenes and flattening loud ones. Nobody would
+file that as "the injection point is wrong"; they would file it as "the stream
+sounds bad".
+
+The right seam is `ExternalAudioProcessingFactory.setCapturePostProcessing`,
+also absent from upstream, which runs on the capture path **after** the whole
+chain and before the encoder. Both halves then get what they need, and they are
+genuinely different needs:
+
+- **the microphone keeps every calling feature** — echo canceller, noise
+  suppressor, gain control — because it has already been through them by the
+  time the media audio is added, and
+- **the media audio is touched by none of them**, because nothing downstream
+  processes it.
+
+That `io.github.webrtc-sdk` is the fork already in use is therefore load-bearing
+twice over, and swapping it would take this feature with it.
+
+**The format check fails to silence, never to noise.** The processed buffer is
+float and channel-major on libwebrtc's int16 scale, but the exact shape across
+that JNI boundary is a property of the fork and cannot be checked in this
+sandbox. So `AudioInjection` *derives* the sample width from the buffer's own
+size — the APM works in fixed 10 ms frames, so the only free variable is bytes
+per sample — and **leaves the buffer completely alone** when it does not
+recognise the layout. A wrong guess that writes puts full-scale noise directly
+into somebody's ear; a wrong guess that declines produces a stream with no film
+audio. Those are not equally bad outcomes and the code is not neutral between
+them.
+
+Where the PCM comes from is the second half. `AudioPlaybackCapture` (API 29+)
+with `addMatchingUid(Process.myUid())` captures **our own app's** playback, and
+an app may always capture itself — so the `MediaPlayer` in `TogetherPlayer`
+needs no replacing. The cost is that it needs a `MediaProjection`, which means
+the system's recording-consent dialog even to capture ourselves.
+
+### Screen capture, and the limits stated before anyone builds on them
+
+Streaming *whatever* is playing — Spotify, a podcast app, someone's downloads
+folder — is the same pipeline with a wider capture configuration, and it is
+worth writing down now what it will and will not do, because discovering it in
+the field reads as a bug:
+
+- **`FLAG_SECURE` surfaces come through black.** Netflix, Prime Video and
+  Disney+ set it. `MediaProjection` hands us black frames and there is nothing
+  to fix — the platform is working as designed.
+- **Apps can refuse to be recorded.** `ALLOW_CAPTURE_BY_NONE`, set by the app
+  being captured, means silence with no error. Confidence here is about the
+  mechanism, not about which specific apps use it: that needs a device, and this
+  document should not guess.
+- **The copyright question is the user's and is not made better by the code.**
+  Pointing a capture at licensed content is the thing §8.2 declines. The feature
+  may exist as *"show them your screen"* — a gesture that already ships inside a
+  call — and it must never be documented, named or marketed as a way to watch
+  somebody else's subscription. That is the same line §13 draws for patched
+  clients, and for the same reason: a neutral tool and an induced one differ in
+  what they are *for*, not in what they do.
+
+> **Owner decision, 2026-08-08: proceed with screen capture**, on the reasoning
+> that an app which does not want to be recorded already says so with
+> `FLAG_SECURE`, and Comrade honouring that is the platform's protection working
+> rather than being worked around. That is a sound reading and it settles the
+> *technical* question: nothing here circumvents anything, and the black frames
+> Netflix produces are the system doing its job.
+>
+> It does not settle the copyright one, which is separate and stays where this
+> section already put it — the marketing constraint above holds regardless, and
+> is the part to hold when somebody later suggests naming a service in a
+> feature list.
+
+### Talking over it, which is the actual point
+
+_Owner, 2026-08-08: "the feature is intended for users to do things together —
+we'd like a dedicated mic icon to enable or disable mic audio where users can
+talk."_
+
+This changes the shape of the audio path rather than adding to it, and it was
+worth catching before the pipe was built: a session carries **one** audio track,
+so the sender's voice and what they are playing have to arrive as one thing. The
+first cut of `PlaybackCapture` *replaced* the microphone buffer with the film's
+audio, which is exactly wrong for a feature whose point is that two people are
+watching together. It **mixes**.
+
+`PcmMix` is where that lives, and it is a separate tested file for one reason:
+two 16-bit samples do not fit in 16 bits. `-20000 + -20000` is `-40000`, which
+wraps to a large *positive* value — a full-scale sample where a loud one
+belonged, which is an audible crack on every peak, inaudible in a quiet test and
+obvious the moment two people talk over a loud scene. Every sum saturates.
+
+The control is `TogetherManager.micEnabled`, shaped after `CallManager.muted` so
+the two microphones behave alike, and **off by default**: a session that opened
+with a live microphone would have decided something about a room it cannot see.
+Off *overwrites* rather than attenuates, so nothing of the sender's room leaves
+the device. The icon is drawn only in a streamed session, because in every other
+mode there is no audio of ours going anywhere and a control that toggles nothing
+is worse than no control.
+
+**One limit that is not fixable here, and the UI says so rather than letting it
+be discovered.** With the microphone on and the sound coming out of speakers,
+the other person hears the film twice — once injected cleanly, once through the
+sender's room, a fraction of a second later. WebRTC's echo canceller does not
+help: it cancels what *it* played out, and the film goes through `MediaPlayer`,
+which it knows nothing about. Headphones are the answer, and
+`together_mic_note` is where that is said.
+
+### What this does not replace
+
+**The handover is still the better answer whenever it can run**, and it got
+better on 2026-08-08 (§12): a file now plays while it arrives, so the follower
+starts within about five seconds instead of after the whole transfer. Against
+that, a stream is lossy, needs both sides online for its whole length, costs
+continuous bandwidth, and leaves the follower with nothing afterwards. What it
+buys is exactness of sync the deadband already makes imperceptible, and reach
+into content the follower can never hold.
+
+So streaming is the **third** answer to §9a's question, not a replacement for
+the first two: *find your own copy*, *take mine*, and now *watch mine as I play
+it*. The session picks one and says which; `PlaybackModeDecision` is where that
+belongs, and it stays a decision made once per session (§14).
+
+### Built so far
+
+**The factory gains one thing: an audio processing factory** carrying
+`AudioInjection`, a process-wide router that **does nothing at all when no
+session has installed a capture**. A device that never opens a streamed session
+is processed exactly as it was.
+
+An earlier version also handed the factory a hand-built `JavaAudioDeviceModule`,
+and removing it is worth recording. It existed to reach
+`setAudioBufferCallback` — the wrong seam, as above — and became dead weight the
+moment the injection moved after the processing chain. Dead weight with a cost:
+`ensureFactory` runs *before* a call is placed, and building an audio device
+module probes the platform's echo canceller and noise suppressor, so **every
+first call paid for it**. The device test caught it as a call still sitting in
+`Ended` 2.5 s after failing, which is that latency made visible rather than a
+flaky assertion. Leaving the default module alone also means calls capture
+exactly as they always did, which is a much easier claim to defend than a
+hand-built module matching it option for option.
+
+**One consequence to state rather than let someone find.** The injected audio
+rides the *record* path, so sending the sound of what you are playing needs the
+`RECORD_AUDIO` grant **even with the microphone off** — a permission prompt for
+a feature that is not about the microphone. The UI owes the user that sentence.
+
+**The video path is finished up to the wire.** `PlayerVideoCapturer` is the
+joint between a `MediaPlayer`, which draws into a `Surface`, and WebRTC, which
+takes frames from a `VideoCapturer`: a `SurfaceTextureHelper` owns the texture,
+the player decodes into it, and every frame goes straight to the capturer
+observer. There is no capture loop — the decoder's own cadence *is* the frame
+rate, and a paused film simply stops producing frames. `isScreencast` is false
+on both the capturer and the source, deliberately: WebRTC degrades a screencast's
+frame rate and keeps its resolution, which for motion video is backwards and
+produces a sharp slideshow.
+
+The consequence is that **the sender cannot watch the surface any more**, since
+a `MediaPlayer` has one output. They watch the outgoing `VideoTrack` instead —
+the same one the other person receives — rendered by a `SurfaceViewRenderer`
+exactly as the call screen renders local camera video. One picture path rather
+than two, and it is why `TogetherManager.localVideo` exists.
+
+`MediaPlayer` reports its dimensions only after opening the file, so capture
+starts at 1280×720 and `onVideoSize` corrects it. Without that the whole session
+is scaled to the guess.
+
+The rest: `PcmRing` (9 tests) is the buffer between capture and encoder,
+`PcmMix` (10 tests) the mixing and the saturation, `micEnabled`/`toggleMic` and
+the icon the control.
+
+### The transport, and the wire change it did not need
+
+`StreamTransfer` is a second `PeerConnection` between the same two devices,
+alongside the handover's, negotiated over the same signals — and **the SDP is
+the intent**.
+
+There is no new signal for "stream it instead of sending it". The handover's
+exchange is `Ask` → `Offer` → `Accept` → `Transport…`, so a `Transport` **offer
+arriving with nothing armed cannot be a file**: nobody asked for one and nobody
+accepted one. That is the whole discriminator. It costs no protocol change, no
+`frb` regeneration, and no version skew — an older build drops an offer it has
+no session for, which is exactly what it already does. The offer's own m-lines
+say the rest, because `FileTransfer` opens a data channel and this adds tracks.
+
+Its **own** connection rather than the transfer's, for the reason the transfer
+does not share the call's, one level along: a film is a continuous encode with a
+deadline and a handover is a bulk push, and under one congestion controller the
+bulk push wins and the film stutters.
+
+The receiver's sink is installed **once, for the life of the process**, not per
+session — a stream offer can reach a device before it has any idea one is
+coming, which is what "the SDP is the intent" means in practice. Registering it
+per session would require having guessed first.
+
+There is no `SessionPlayer` for the receiving side and there does not need to
+be: it holds no decoder and no playhead. The frames arrive already in step,
+because there is one playhead and it is the sender's. That is §15's claim about
+sync, and `TogetherManager.remoteVideo` is the whole of its implementation.
+
+### The gesture, and the ordering trap under it
+
+*"Let them watch mine"* sits on the live screen of the side that holds the file,
+next to §9a's other two answers rather than in a menu — and only for our own
+player, since an embed is already on both screens and an external session is
+somebody else's audio to send.
+
+**Two system prompts, in an order that matters.** `RECORD_AUDIO` first, because
+the media audio joins on the *capture* path and there has to be a capture running
+at all — a permission prompt for a feature that is not about the microphone,
+which is why the screen explains it rather than letting it arrive bare. Then the
+screen-capture consent. Both refusals are survivable and neither stops the
+picture: decline the recording consent and the other person still sees it,
+without its sound. Nothing about that is a failure path, so none of it is written
+as one.
+
+**The trap is Android 14's**, and it is the same one `CallService` records:
+a `MediaProjection` may only begin while a foreground service *already*
+declaring `mediaProjection` is running. So `TogetherService` now declares
+`mediaPlayback|mediaProjection`, is re-announced before the projection is
+fetched, and `promote` keeps announcing **both** types from then on — dropping
+the projection type from a later promotion is how a capture dies mid-session.
+The whole sequence lives in `TogetherManager.startStreamingFromConsent` rather
+than in the screen, so no caller can get the order wrong: the re-announce is a
+second `startForegroundService` to a live instance, which arms a fresh promotion
+deadline, and `onStartCommand` promoting immediately is what keeps that safe.
+
+### Not built
+
+The desktop half, where receiving is a `srcObject` and sending is not.
+
+**Nothing in this section has run.** It type-checks against the real AAR, and
+`streaming` is never set true by any user-reachable path, so the renderer and
+the mic icon do not draw yet. The audio device module change, by contrast, *is*
+live for every call the moment this ships — which is the one part of §15 that
+wants a device before it is trusted.

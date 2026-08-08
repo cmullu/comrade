@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import mullu.comrade.ComradeCore
+import mullu.comrade.together.AudioInjection
 import mullu.comrade.voice.MicHolder
 import mullu.comrade.voice.WakeWordService
 import org.webrtc.AudioSource
@@ -51,6 +52,7 @@ import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import org.webrtc.ExternalAudioProcessingFactory
 import uniffi.comrade_core.CallMediaKind
 import uniffi.comrade_core.CallSignal
 import uniffi.comrade_core.HangupReason
@@ -2030,6 +2032,33 @@ object CallManager {
      * on emulators and unusual devices, so this is a real path, not a
      * defensive flourish.
      */
+    /**
+     * Where a watch-together session's media audio joins the outgoing stream.
+     *
+     * **After** the echo canceller, the noise suppressor and the gain control,
+     * which is the point: a call keeps every one of those on the microphone, and
+     * a film mixed in here is touched by none of them. Injecting *before* the
+     * processing — which the first version of this did — feeds music through
+     * machinery built for speech, and a noise suppressor gating a sustained note
+     * is not a subtle artefact.
+     *
+     * Inert until a streamed session installs a capture on [AudioInjection], so
+     * a device that never opens one is processed exactly as it was.
+     *
+     * **This is the only thing the factory gains, and an earlier version had it
+     * carrying a hand-built `JavaAudioDeviceModule` too.** That existed to reach
+     * `setAudioBufferCallback`, and became dead weight the moment the injection
+     * moved after the processing chain — where it did not belong anyway. Worse
+     * than dead: `ensureFactory` runs *before* a call is placed, and building an
+     * audio device module probes the platform's echo canceller and noise
+     * suppressor, so every first call paid for it. A device test caught that as
+     * a call still sitting in `Ended` after 2.5 s, which is the latency being
+     * visible rather than a flaky assertion. Leaving the default module alone
+     * also means calls capture exactly as they always did.
+     */
+    private fun buildAudioProcessingFactory(): ExternalAudioProcessingFactory =
+        ExternalAudioProcessingFactory().apply { setCapturePostProcessing(AudioInjection) }
+
     private fun ensureFactory(context: Context) = synchronized(factoryLock) {
         if (factory != null) return@synchronized
         val app = context.applicationContext
@@ -2042,6 +2071,7 @@ object CallManager {
             val egl = EglBase.create()
             eglBase = egl
             factory = PeerConnectionFactory.builder()
+                .setAudioProcessingFactory(buildAudioProcessingFactory())
                 .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
                 .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
                 .createPeerConnectionFactory()

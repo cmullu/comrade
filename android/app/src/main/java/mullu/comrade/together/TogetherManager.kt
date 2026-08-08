@@ -101,6 +101,18 @@ object TogetherManager {
              */
             val external: Boolean = false,
             /**
+             * Whether this device is *sending* the picture and sound of what it
+             * plays, rather than both sides playing their own copy
+             * (`docs/TOGETHER.md` §15).
+             *
+             * The screen needs it for one thing the other modes have no use
+             * for: a microphone control. A streamed session carries one audio
+             * track, so the sender's voice and the film share it — and there is
+             * nothing to switch on in a session where no audio of ours is going
+             * anywhere.
+             */
+            val streaming: Boolean = false,
+            /**
              * The last measured gap between the two playheads, signed —
              * positive means this device is ahead — with the error on it and
              * when it was taken.
@@ -153,6 +165,119 @@ object TogetherManager {
 
     /** The invitation's content kind, for [PlaybackModeDecision.ownershipFor]. */
     private var invitedKind: String = ""
+
+    /**
+     * The sound of what we are playing, on its way out (`docs/TOGETHER.md` §15).
+     * Null in every session that is not streaming, which is all of them until
+     * the stream is wired.
+     */
+    private var capture: PlaybackCapture? = null
+
+    /** The picture of what we are playing, on its way out. Null unless streaming. */
+    private var videoCapturer: PlayerVideoCapturer? = null
+    private var videoSource: org.webrtc.VideoSource? = null
+    private var surfaceHelper: org.webrtc.SurfaceTextureHelper? = null
+
+    private val _localVideo = MutableStateFlow<org.webrtc.VideoTrack?>(null)
+
+    /**
+     * The sender's own outgoing picture, for the sender to watch.
+     *
+     * A `MediaPlayer` decodes into exactly one surface, and a streamed session
+     * gives that surface to [PlayerVideoCapturer] — so the sender cannot also
+     * point it at a `SurfaceView`. They render *this* instead, the same track
+     * the other person receives, exactly as the call screen renders local camera
+     * video. One picture path rather than two.
+     */
+    val localVideo: StateFlow<org.webrtc.VideoTrack?> = _localVideo.asStateFlow()
+
+    private val _remoteVideo = MutableStateFlow<org.webrtc.VideoTrack?>(null)
+
+    /**
+     * The other person's picture, when they are streaming to us.
+     *
+     * The receiving half of [localVideo], and the receiver's whole player: there
+     * is no decoder of ours in this mode and no playhead of ours to hold — the
+     * frames arrive already in step, because there is only one playhead and it
+     * is theirs. That is §15's claim about sync, in the one field that
+     * implements it.
+     */
+    val remoteVideo: StateFlow<org.webrtc.VideoTrack?> = _remoteVideo.asStateFlow()
+
+    private var streamAudioSource: org.webrtc.AudioSource? = null
+    private var streamAudioTrack: org.webrtc.AudioTrack? = null
+
+    /**
+     * What arrives when the other side streams to us.
+     *
+     * Installed for the length of the app rather than per session: a stream
+     * offer can reach this device before it knows one is coming, which is the
+     * whole point of "the SDP is the intent".
+     */
+    private val streamSink = object : StreamTransfer.Sink {
+        override fun onRemoteVideo(track: org.webrtc.VideoTrack?) {
+            _remoteVideo.value = track
+            // Only on arrival: a null means the stream ended, and the session
+            // may be about to end with it.
+            if (track != null) refreshLive(streaming = true)
+        }
+
+        override fun onRemoteAudio(track: org.webrtc.AudioTrack?) {
+            // Nothing to hold: WebRTC plays a received audio track through the
+            // device's own output the moment it is added. Named rather than
+            // absent so the next reader does not go looking for the sink that
+            // must be missing.
+            runCatching { track?.setEnabled(true) }
+        }
+
+        override fun onLost() {
+            _remoteVideo.value = null
+            refreshLive(status = Status.LostTrack)
+        }
+    }
+
+    /**
+     * Installed once, for the life of the process, and that is the point.
+     *
+     * A stream offer can reach this device before it has any idea one is
+     * coming — "the SDP is the intent" means the *first* thing that says a
+     * stream exists is the offer itself. Registering per session would mean the
+     * receiver had to have guessed first, which is exactly what the design
+     * avoids. Placed after [streamSink] because an object's initialisers run in
+     * declaration order.
+     */
+    init {
+        StreamTransfer.setSink(streamSink)
+    }
+
+    private val _micEnabled = MutableStateFlow(false)
+
+    /**
+     * Whether the sender's voice goes out alongside what they are playing.
+     *
+     * A flow rather than a plain flag because the control is a toggle on screen
+     * and has to redraw when it changes — the same shape `CallManager.muted`
+     * uses for the in-call microphone, deliberately, so the two controls behave
+     * alike.
+     *
+     * **Off by default.** A session that opened with a live microphone would
+     * have decided something about a room it cannot see.
+     */
+    val micEnabled: StateFlow<Boolean> = _micEnabled.asStateFlow()
+
+    /**
+     * Turn the sender's microphone on or off for a streamed session.
+     *
+     * Watching something together and being unable to say anything about it is
+     * not the feature, so this is the control that makes the rest of §15 worth
+     * having. It reaches [PlaybackCapture.micEnabled], which decides whether the
+     * voice is *summed* into the track or the microphone is overwritten.
+     */
+    fun toggleMic() {
+        val next = !_micEnabled.value
+        _micEnabled.value = next
+        capture?.micEnabled = next
+    }
     private var focusRequest: AudioFocusRequest? = null
 
     /**
@@ -791,6 +916,13 @@ object TogetherManager {
 
             override fun onVideoSize(width: Int, height: Int) {
                 refreshLive(picture = TogetherDecisions.pictureOf(width, height))
+                // The capture starts at a guess, because `MediaPlayer` only
+                // knows its dimensions once the file is open. This is the
+                // correction, and without it the outgoing picture is scaled to
+                // whatever the guess was for the whole session.
+                if (width > 0 && height > 0) {
+                    videoCapturer?.changeCaptureFormat(width, height, STREAM_FPS)
+                }
             }
         })
         feed(p)
@@ -849,6 +981,146 @@ object TogetherManager {
         // before there is anywhere to draw it, exactly as a file session exists
         // before the surface arrives.
         startPolling()
+    }
+
+    /**
+     * Start sending the picture and the sound of what this device is playing.
+     *
+     * `docs/TOGETHER.md` §15. The third answer to §9a's question — after *find
+     * your own copy* and *take mine* — and the one that works when the other
+     * person will never hold the file.
+     *
+     * Two things are set up and they are independent. The **picture**:
+     * [PlayerVideoCapturer] takes the surface the player was decoding into, its
+     * frames become a `VideoTrack`, and the sender watches that track rather
+     * than the raw surface (see [localVideo]). The **sound**: [PlaybackCapture]
+     * records this app's own playback and [AudioInjection] routes it into
+     * WebRTC's record buffer in place of, or mixed with, the microphone.
+     *
+     * @param projection consent from `MediaProjectionManager.createScreenCaptureIntent`,
+     *   needed for the audio half — capturing even *our own* playback requires
+     *   one. Null starts the picture without the sound, which is a real state
+     *   rather than a failure: someone who declines the dialog should still be
+     *   able to show what they are watching.
+     * @return whether the picture started. The sound is best-effort and
+     *   [PlaybackCapture.start] says so on its own.
+     */
+    /**
+     * Begin streaming from the system's capture-consent result.
+     *
+     * The **ordering** is the reason this exists rather than the screen doing
+     * it: from Android 14 a `MediaProjection` may only begin while a foreground
+     * service already declaring `mediaProjection` is running, so the service is
+     * re-announced *before* the projection is fetched. Getting that round the
+     * wrong way throws at capture, far from the code that caused it — the same
+     * sequencing `CallManager.startScreenShare` depends on, kept in one place
+     * here so no caller can get it wrong.
+     *
+     * A refused dialog is not a failure: `resultCode` other than `RESULT_OK`
+     * streams the picture with no sound, which is a real thing to offer someone
+     * who does not want to grant a recording consent for a film they are only
+     * showing.
+     */
+    fun startStreamingFromConsent(context: Context, resultCode: Int, data: android.content.Intent?): Boolean {
+        appContext = context.applicationContext
+        val ctx = appContext ?: return false
+        val projection = if (resultCode == android.app.Activity.RESULT_OK && data != null) {
+            // Re-announce first. See above.
+            if (!disableServiceForTest) {
+                runCatching { TogetherService.startWithProjection(ctx) }
+                    .onFailure { Log.w(TAG, "could not re-announce for projection", it) }
+            }
+            val manager = ctx.getSystemService(android.media.projection.MediaProjectionManager::class.java)
+            runCatching { manager?.getMediaProjection(resultCode, data) }
+                .onFailure { Log.w(TAG, "projection refused by the system", it) }
+                .getOrNull()
+        } else {
+            null
+        }
+        return startStreaming(context, projection)
+    }
+
+    fun startStreaming(context: Context, projection: android.media.projection.MediaProjection?): Boolean {
+        appContext = context.applicationContext
+        val ctx = appContext ?: return false
+        val player = this.player as? TogetherPlayer ?: return false
+        val factory = mullu.comrade.call.CallManager.sharedFactory(ctx) ?: return false
+        val egl = mullu.comrade.call.CallManager.eglBaseContext ?: return false
+        if (videoCapturer != null) return true
+
+        val helper = org.webrtc.SurfaceTextureHelper.create("TogetherCapture", egl)
+        // `isScreencast = false` on the source as well as the capturer: this is
+        // motion video, so it must degrade resolution and hold the frame rate
+        // rather than the other way round.
+        val source = factory.createVideoSource(false)
+        val capturer = PlayerVideoCapturer()
+        capturer.initialize(helper, ctx, source.capturerObserver)
+        // A guess, corrected by `onVideoSize` as soon as the decoder reports —
+        // which is why the listener forwards it.
+        capturer.startCapture(1280, 720, STREAM_FPS)
+        val surface = capturer.outputSurface
+        if (surface == null) {
+            runCatching { capturer.dispose() }
+            runCatching { helper.dispose() }
+            runCatching { source.dispose() }
+            return false
+        }
+        // The player stops drawing to the screen and starts drawing to the
+        // encoder. The sender sees the same frames back through [localVideo].
+        player.attachSurface(surface)
+
+        surfaceHelper = helper
+        videoSource = source
+        videoCapturer = capturer
+        _localVideo.value = factory.createVideoTrack(STREAM_VIDEO_ID, source).apply { setEnabled(true) }
+
+        if (projection != null) {
+            val pc = PlaybackCapture()
+            pc.micEnabled = _micEnabled.value
+            if (pc.start(projection)) {
+                pc.injecting = true
+                capture = pc
+                AudioInjection.install(pc)
+            }
+        }
+
+        // The audio track exists whether or not the capture started: it is what
+        // carries the sender's voice, and the microphone is worth sending even
+        // when the film's sound is not going anywhere.
+        val audioSource = factory.createAudioSource(org.webrtc.MediaConstraints())
+        val audioTrack = factory.createAudioTrack(STREAM_AUDIO_ID, audioSource).apply {
+            setEnabled(true)
+        }
+        streamAudioSource = audioSource
+        streamAudioTrack = audioTrack
+
+        if (!StreamTransfer.offer(ctx, _localVideo.value, audioTrack)) {
+            Log.w(TAG, "could not offer the stream")
+        }
+        refreshLive(streaming = true)
+        return true
+    }
+
+    /** Tear the outgoing picture down. Safe to call twice, and from any thread. */
+    private fun stopVideoCapture() {
+        StreamTransfer.end()
+        _remoteVideo.value = null
+        streamAudioTrack?.let { runCatching { it.dispose() } }
+        streamAudioTrack = null
+        streamAudioSource?.let { runCatching { it.dispose() } }
+        streamAudioSource = null
+        // The player first: a decoder still drawing into a surface whose
+        // SurfaceTexture has gone is the use-after-free in the media server
+        // that `attachSurface(null)` exists to prevent.
+        (player as? TogetherPlayer)?.attachSurface(null)
+        _localVideo.value?.let { runCatching { it.dispose() } }
+        _localVideo.value = null
+        videoCapturer?.let { runCatching { it.dispose() } }
+        videoCapturer = null
+        videoSource?.let { runCatching { it.dispose() } }
+        videoSource = null
+        surfaceHelper?.let { runCatching { it.dispose() } }
+        surfaceHelper = null
     }
 
     /**
@@ -977,6 +1249,7 @@ object TogetherManager {
 
     private fun refreshLive(
         playing: Boolean? = null,
+        streaming: Boolean? = null,
         positionMs: Long? = null,
         /**
          * Only an embed passes this.
@@ -998,6 +1271,7 @@ object TogetherManager {
         val live = _state.value as? UiState.Live ?: return
         _state.value = live.copy(
             playing = playing ?: live.playing,
+            streaming = streaming ?: live.streaming,
             positionMs = positionMs ?: live.positionMs,
             durationMs = durationMs ?: live.durationMs,
             status = status ?: live.status,
@@ -1014,6 +1288,18 @@ object TogetherManager {
         player?.release()
         player = null
         suppressor.clear()
+        // The capture holds an `AudioRecord` and a thread; a session ending
+        // without releasing it leaves both running against a projection the
+        // user thinks they have finished with.
+        //
+        // Uninstalled from the process-wide module **first**: a stale capture
+        // left routed there would go on mixing a released player's audio into
+        // whatever call came next.
+        AudioInjection.install(null)
+        capture?.stop()
+        capture = null
+        _micEnabled.value = false
+        stopVideoCapture()
         wanted = null
         wantedMs = 0
         wantedVideoId = null
@@ -1090,4 +1376,20 @@ object TogetherManager {
     const val SCHEDULE_AHEAD_MS: Long = 80
 
     private const val TAG = "TogetherManager"
+
+    /** Track id for the outgoing picture of a streamed session. */
+    private const val STREAM_VIDEO_ID = "comrade_together_video"
+
+    /** Track id for its sound — the film, the sender's voice, or both. */
+    private const val STREAM_AUDIO_ID = "comrade_together_audio"
+
+    /**
+     * The frame rate the capture is *configured* at, not one it enforces.
+     *
+     * Nothing here polls: frames arrive when the decoder draws them, so a
+     * 24 fps film produces 24 fps whatever this says. It is the hint WebRTC's
+     * encoder budgets against, and 30 covers the common cases without asking
+     * for headroom a phone would spend.
+     */
+    private const val STREAM_FPS = 30
 }
