@@ -82,6 +82,57 @@ object PcmMix {
         }
     }
 
+    /**
+     * What "full scale" means in the float buffers WebRTC's audio processing
+     * hands out.
+     *
+     * libwebrtc's `AudioBuffer` keeps float samples on the **int16 scale**
+     * (±32768), not normalised to ±1. That is the assumption this whole float
+     * path rests on, and it is a single constant on purpose: if it turns out to
+     * be normalised on some build, this is the one edit, and the symptom would
+     * be unmistakable — film audio either inaudible or clipped flat.
+     */
+    const val FLOAT_FULL_SCALE = 32768.0f
+
+    /**
+     * Mix `count` 16-bit samples of `add` into a float buffer, saturating.
+     *
+     * The buffer belongs to WebRTC's capture **post**-processing stage, which is
+     * where a session's media audio joins the stream — after the echo canceller,
+     * the noise suppressor and the gain control have done their work on the
+     * microphone, and therefore without any of them touching the film. See
+     * `docs/TOGETHER.md` §15.
+     */
+    fun mixIntoFloat(dest: java.nio.ByteBuffer, add: ByteArray, count: Int, offsetSamples: Int) {
+        var i = 0
+        while (i + 1 < count) {
+            val at = (offsetSamples + i / 2) * 4
+            if (at + 3 >= dest.capacity()) return
+            val existing = dest.getFloat(at)
+            val incoming = sampleAt(add, i).toFloat()
+            dest.putFloat(at, clampFloat(existing + incoming))
+            i += 2
+        }
+    }
+
+    /** Replace `count` 16-bit samples of `src` into a float buffer. */
+    fun replaceIntoFloat(dest: java.nio.ByteBuffer, src: ByteArray, count: Int, offsetSamples: Int) {
+        var i = 0
+        while (i + 1 < count) {
+            val at = (offsetSamples + i / 2) * 4
+            if (at + 3 >= dest.capacity()) return
+            dest.putFloat(at, clampFloat(sampleAt(src, i).toFloat()))
+            i += 2
+        }
+    }
+
+    /** Saturate a float sample to the int16-scaled range. */
+    fun clampFloat(value: Float): Float = when {
+        value > FLOAT_FULL_SCALE - 1f -> FLOAT_FULL_SCALE - 1f
+        value < -FLOAT_FULL_SCALE -> -FLOAT_FULL_SCALE
+        else -> value
+    }
+
     /** Saturate to the 16-bit range. The one line this file exists for. */
     fun clamp(value: Int): Int = when {
         value > MAX_SAMPLE -> MAX_SAMPLE

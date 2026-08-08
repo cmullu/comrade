@@ -116,7 +116,20 @@ object ShareTransfer {
             is ShareSignal.Offer -> io.launch { acceptTheirCopy(context, signal.offer) }
             is ShareSignal.Accept -> io.launch { engine.beginNegotiation(context) }
             is ShareSignal.Refuse -> engine.onRefused(signal.reason)
-            is ShareSignal.Transport -> io.launch { engine.onTransport(context, signal.signal) }
+            // **The SDP is the intent** (`docs/TOGETHER.md` §15). A transport
+            // signal only reaches the file engine if a transfer was armed — and
+            // arming needs an `Offer` this side answered with `Accept`. So an
+            // offer arriving with nothing armed cannot be a file: nobody asked
+            // for one. That is what a live stream looks like on this wire, and
+            // it costs no new signal, no `frb` regeneration and no version skew
+            // — an older build drops an offer it has no session for, which is
+            // exactly what it does today.
+            is ShareSignal.Transport ->
+                if (engine.active) {
+                    io.launch { engine.onTransport(context, signal.signal) }
+                } else {
+                    io.launch { StreamTransfer.onTransport(context, signal.signal) }
+                }
         }
     }
 

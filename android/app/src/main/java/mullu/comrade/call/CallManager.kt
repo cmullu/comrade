@@ -52,6 +52,7 @@ import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import org.webrtc.ExternalAudioProcessingFactory
 import org.webrtc.audio.JavaAudioDeviceModule
 import uniffi.comrade_core.CallMediaKind
 import uniffi.comrade_core.CallSignal
@@ -2050,23 +2051,39 @@ object CallManager {
      *    has them, which is the difference between a speakerphone call being
      *    usable and being a howl.
      *
-     * [AudioInjection] is inert until a streamed session installs a capture on
-     * it, and returns the buffer untouched when nothing has — so a call on a
-     * device that never opens a session is bit-for-bit what it was.
+     * The media audio a watch-together session sends is **not** injected here —
+     * it joins after the processing chain, in [buildAudioProcessingFactory], so
+     * that a call's microphone keeps its echo canceller and noise suppressor
+     * while a film is touched by neither.
      *
-     * **One consequence to state rather than discover:** the injected audio
-     * rides the *record* path, so sending what you are playing needs the
-     * `RECORD_AUDIO` grant even with the microphone switched off. That is a
-     * permission prompt for a feature that is not about the microphone, and the
-     * UI owes the user that sentence.
+     * **One consequence to state rather than discover:** a session still needs
+     * the capture *running* to have an audio track at all, so sending what you
+     * are playing needs the `RECORD_AUDIO` grant even with the microphone
+     * switched off. That is a permission prompt for a feature that is not about
+     * the microphone, and the UI owes the user that sentence.
      */
     private fun buildAudioDeviceModule(app: Context): JavaAudioDeviceModule =
         JavaAudioDeviceModule.builder(app)
             .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             .setUseHardwareAcousticEchoCanceler(JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported())
             .setUseHardwareNoiseSuppressor(JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported())
-            .setAudioBufferCallback(AudioInjection)
             .createAudioDeviceModule()
+
+    /**
+     * Where a watch-together session's media audio joins the outgoing stream.
+     *
+     * **After** the echo canceller, the noise suppressor and the gain control,
+     * which is the point: a call keeps every one of those on the microphone, and
+     * a film mixed in here is touched by none of them. Injecting *before* the
+     * processing — which the first version of this did — feeds music through
+     * machinery built for speech, and a noise suppressor gating a sustained note
+     * is not a subtle artefact.
+     *
+     * Inert until a streamed session installs a capture on [AudioInjection], so
+     * a device that never opens one is processed exactly as it was.
+     */
+    private fun buildAudioProcessingFactory(): ExternalAudioProcessingFactory =
+        ExternalAudioProcessingFactory().apply { setCapturePostProcessing(AudioInjection) }
 
     private fun ensureFactory(context: Context) = synchronized(factoryLock) {
         if (factory != null) return@synchronized
@@ -2081,6 +2098,7 @@ object CallManager {
             eglBase = egl
             factory = PeerConnectionFactory.builder()
                 .setAudioDeviceModule(buildAudioDeviceModule(app))
+                .setAudioProcessingFactory(buildAudioProcessingFactory())
                 .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
                 .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
                 .createPeerConnectionFactory()

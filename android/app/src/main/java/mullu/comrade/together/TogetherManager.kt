@@ -191,6 +191,65 @@ object TogetherManager {
      */
     val localVideo: StateFlow<org.webrtc.VideoTrack?> = _localVideo.asStateFlow()
 
+    private val _remoteVideo = MutableStateFlow<org.webrtc.VideoTrack?>(null)
+
+    /**
+     * The other person's picture, when they are streaming to us.
+     *
+     * The receiving half of [localVideo], and the receiver's whole player: there
+     * is no decoder of ours in this mode and no playhead of ours to hold — the
+     * frames arrive already in step, because there is only one playhead and it
+     * is theirs. That is §15's claim about sync, in the one field that
+     * implements it.
+     */
+    val remoteVideo: StateFlow<org.webrtc.VideoTrack?> = _remoteVideo.asStateFlow()
+
+    private var streamAudioSource: org.webrtc.AudioSource? = null
+    private var streamAudioTrack: org.webrtc.AudioTrack? = null
+
+    /**
+     * What arrives when the other side streams to us.
+     *
+     * Installed for the length of the app rather than per session: a stream
+     * offer can reach this device before it knows one is coming, which is the
+     * whole point of "the SDP is the intent".
+     */
+    private val streamSink = object : StreamTransfer.Sink {
+        override fun onRemoteVideo(track: org.webrtc.VideoTrack?) {
+            _remoteVideo.value = track
+            // Only on arrival: a null means the stream ended, and the session
+            // may be about to end with it.
+            if (track != null) refreshLive(streaming = true)
+        }
+
+        override fun onRemoteAudio(track: org.webrtc.AudioTrack?) {
+            // Nothing to hold: WebRTC plays a received audio track through the
+            // device's own output the moment it is added. Named rather than
+            // absent so the next reader does not go looking for the sink that
+            // must be missing.
+            runCatching { track?.setEnabled(true) }
+        }
+
+        override fun onLost() {
+            _remoteVideo.value = null
+            refreshLive(status = Status.LostTrack)
+        }
+    }
+
+    /**
+     * Installed once, for the life of the process, and that is the point.
+     *
+     * A stream offer can reach this device before it has any idea one is
+     * coming — "the SDP is the intent" means the *first* thing that says a
+     * stream exists is the offer itself. Registering per session would mean the
+     * receiver had to have guessed first, which is exactly what the design
+     * avoids. Placed after [streamSink] because an object's initialisers run in
+     * declaration order.
+     */
+    init {
+        StreamTransfer.setSink(streamSink)
+    }
+
     private val _micEnabled = MutableStateFlow(false)
 
     /**
@@ -989,12 +1048,32 @@ object TogetherManager {
                 AudioInjection.install(pc)
             }
         }
+
+        // The audio track exists whether or not the capture started: it is what
+        // carries the sender's voice, and the microphone is worth sending even
+        // when the film's sound is not going anywhere.
+        val audioSource = factory.createAudioSource(org.webrtc.MediaConstraints())
+        val audioTrack = factory.createAudioTrack(STREAM_AUDIO_ID, audioSource).apply {
+            setEnabled(true)
+        }
+        streamAudioSource = audioSource
+        streamAudioTrack = audioTrack
+
+        if (!StreamTransfer.offer(ctx, _localVideo.value, audioTrack)) {
+            Log.w(TAG, "could not offer the stream")
+        }
         refreshLive(streaming = true)
         return true
     }
 
     /** Tear the outgoing picture down. Safe to call twice, and from any thread. */
     private fun stopVideoCapture() {
+        StreamTransfer.end()
+        _remoteVideo.value = null
+        streamAudioTrack?.let { runCatching { it.dispose() } }
+        streamAudioTrack = null
+        streamAudioSource?.let { runCatching { it.dispose() } }
+        streamAudioSource = null
         // The player first: a decoder still drawing into a surface whose
         // SurfaceTexture has gone is the use-after-free in the media server
         // that `attachSurface(null)` exists to prevent.
@@ -1265,6 +1344,9 @@ object TogetherManager {
 
     /** Track id for the outgoing picture of a streamed session. */
     private const val STREAM_VIDEO_ID = "comrade_together_video"
+
+    /** Track id for its sound — the film, the sender's voice, or both. */
+    private const val STREAM_AUDIO_ID = "comrade_together_audio"
 
     /**
      * The frame rate the capture is *configured* at, not one it enforces.

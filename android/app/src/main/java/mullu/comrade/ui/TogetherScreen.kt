@@ -508,7 +508,13 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
             // same thing the call screen does with local camera video.
             s.streaming -> {
                 val outgoing by TogetherManager.localVideo.collectAsState()
-                StreamRenderer(outgoing)
+                val incoming by TogetherManager.remoteVideo.collectAsState()
+                // Whichever exists: the sender has an outgoing track and no
+                // incoming one, the receiver the reverse. Asked this way round
+                // rather than from `weLead` because a stream's direction is a
+                // property of which tracks are present, and those are what the
+                // renderer actually needs.
+                StreamRenderer(outgoing ?: incoming)
             }
             // The embed draws itself, controls and all, inside the same sleeve
             // the file path uses — so a video has one owner of the aspect ratio

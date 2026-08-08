@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.Process
 import android.util.Log
 import java.nio.ByteBuffer
-import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
  * The sound of what Comrade is playing, on its way to the other person.
@@ -23,11 +22,17 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * Two things make this possible, and both were checked against the artefacts
  * rather than assumed:
  *
- * - **`JavaAudioDeviceModule.AudioBufferCallback`**, which
- *   `io.github.webrtc-sdk:android` adds and upstream libwebrtc does not. It is
- *   handed the record buffer *before* the encoder sees it, so writing into that
- *   buffer replaces the microphone. The dependency being that fork is
- *   load-bearing rather than incidental — swapping it takes this with it.
+ * - **`ExternalAudioProcessingFactory.setCapturePostProcessing`**, which
+ *   `io.github.webrtc-sdk:android` adds and upstream libwebrtc does not. It runs
+ *   on the capture path *after* the whole audio processing chain, which is what
+ *   lets the microphone keep every calling feature while the media audio is
+ *   touched by none of them. The dependency being that fork is load-bearing
+ *   rather than incidental — swapping it takes this with it.
+ *
+ *   The first cut used `JavaAudioDeviceModule.AudioBufferCallback` instead, and
+ *   it was wrong: that sits in `WebRtcAudioRecord`'s read loop, *before* the
+ *   processing, so a film would have gone through a noise suppressor that gates
+ *   sustained music and a gain control that pumps its dynamics.
  * - **`AudioPlaybackCapture` with [AudioPlaybackCaptureConfiguration.Builder.addMatchingUid]**
  *   set to our own uid. An app may always capture *itself*, whatever any other
  *   app's capture policy says, so this needs no cooperation from anybody and
@@ -71,7 +76,7 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * nothing about. Headphones are the answer, and the UI should say so rather
  * than let it be discovered.
  */
-class PlaybackCapture : JavaAudioDeviceModule.AudioBufferCallback {
+class PlaybackCapture {
 
     /**
      * WebRTC's native rate, and what the capture is configured at.
@@ -229,68 +234,42 @@ class PlaybackCapture : JavaAudioDeviceModule.AudioBufferCallback {
     }
 
     /**
-     * WebRTC is about to send `buffer`. Replace it with what we are playing.
+     * Add what we are playing into a frame the microphone has already been
+     * processed into, or replace it.
      *
-     * The return value is the capture timestamp WebRTC will stamp the frame
-     * with; handing back the one we were given is right, because the audio in
-     * the buffer is being sent *now* whatever its origin.
+     * Called from [AudioInjection] on WebRTC's capture thread, **after** the
+     * echo canceller, noise suppressor and gain control — which is the whole
+     * point: the voice keeps every calling feature and the media audio is
+     * touched by none of them (`docs/TOGETHER.md` §15).
      *
-     * **Passes through untouched** unless [injecting] is set and the format is
-     * one we actually have. A mismatch is left alone rather than approximated:
-     * writing 48 kHz mono into a buffer that wants something else produces
-     * noise, and noise is worse than the microphone.
+     * The buffer is float and channel-major: `samplesPerChannel` floats for the
+     * left, then the same again for the right. Our capture is mono, so each
+     * channel gets the same samples, which is exact — where narrowing a stereo
+     * source to mono would be a judgement.
      */
-    override fun onBuffer(
-        buffer: ByteBuffer,
-        audioFormat: Int,
-        channelCount: Int,
-        sampleRate: Int,
-        bytesRead: Int,
-        captureTimeNs: Long,
-    ): Long {
-        if (!injecting || bytesRead <= 0) return captureTimeNs
-        if (audioFormat != AudioFormat.ENCODING_PCM_16BIT || sampleRate != captureRateHz) {
-            return captureTimeNs
+    fun mixIntoProcessed(buffer: ByteBuffer, samplesPerChannel: Int, channels: Int) {
+        if (!injecting || samplesPerChannel <= 0) return
+        val wantBytes = samplesPerChannel * 2
+        val mono = ByteArray(wantBytes)
+        val got = synchronized(lock) { ring.read(mono, wantBytes) }
+        // Underrun leaves the frame as it is rather than writing part of one:
+        // with the microphone on that is a moment of pure voice, and with it off
+        // a moment of silence. Both are better than a fragment of audio followed
+        // by whatever was in the buffer.
+        if (got == 0) return
+
+        for (channel in 0 until channels) {
+            val offset = channel * samplesPerChannel
+            if (micEnabled) {
+                // Both: the processed voice, and the film added to it.
+                PcmMix.mixIntoFloat(buffer, mono, wantBytes, offset)
+            } else {
+                // The film alone. The processed microphone is overwritten, so
+                // nothing of the sender's room leaves the device.
+                PcmMix.replaceIntoFloat(buffer, mono, wantBytes, offset)
+            }
         }
-        if (channelCount != 1 && channelCount != 2) return captureTimeNs
-
-        // Mono source, so a stereo buffer takes each sample twice.
-        val wantMono = if (channelCount == 2) bytesRead / 2 else bytesRead
-        val mono = ByteArray(wantMono)
-        val got = synchronized(lock) { ring.read(mono, wantMono) }
-        // Underrun is silence, deliberately: the rest of `mono` is already zero,
-        // and a click is honest where repeated audio is a stutter that sounds
-        // like a damaged file.
-        if (got == 0) return captureTimeNs
-
-        // Widen to whatever WebRTC asked for *before* touching its buffer, so
-        // the two are the same shape and mixing is sample-against-sample.
-        val ours = if (channelCount == 2) {
-            ByteArray(bytesRead).also { PcmMix.monoToStereo(it, mono, wantMono) }
-        } else {
-            mono
-        }
-
-        // The microphone's samples are already in `buffer`; read them out
-        // before overwriting, because mixing is in place.
-        val out = ByteArray(bytesRead)
-        buffer.rewind()
-        buffer.get(out, 0, minOf(bytesRead, buffer.remaining()))
-
-        if (micEnabled) {
-            // Both, summed and saturated — the sender talking over the film.
-            PcmMix.mixInto(out, ours, bytesRead)
-        } else {
-            // The film alone. Nothing of the sender's room leaves the device.
-            PcmMix.replaceInto(out, ours, bytesRead)
-        }
-
-        buffer.clear()
-        buffer.put(out, 0, bytesRead)
-        buffer.rewind()
-        return captureTimeNs
     }
-
 
     private companion object {
         const val TAG = "PlaybackCapture"

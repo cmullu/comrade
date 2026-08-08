@@ -1626,14 +1626,42 @@ supported way to hand it a buffer. Sharing a film with the machinery as it
 stands would send the picture and the sound of the room.
 
 It is possible with the build this repo already depends on, and it was checked
-against the AAR rather than assumed. `io.github.webrtc-sdk:android` adds
-`JavaAudioDeviceModule.Builder.setAudioBufferCallback`, whose
-`onBuffer(ByteBuffer, audioFormat, channelCount, sampleRate, bytesRead, captureTimeNs)`
-is handed the record buffer **before** it reaches the encoder. Writing into that
-buffer replaces the microphone. That is the injection point the whole feature
-rests on, it is absent from upstream libwebrtc, and it is the reason
-`io.github.webrtc-sdk` being the fork already in use is load-bearing rather than
-incidental — swapping it for another would take this feature with it.
+against the AAR rather than assumed. **The first answer was the wrong one**, and
+it is worth keeping because the mistake is easy and the symptom is not obviously
+a bug. `io.github.webrtc-sdk:android` adds
+`JavaAudioDeviceModule.Builder.setAudioBufferCallback`, which is handed the
+record buffer and can replace the microphone with anything — but it sits in
+`WebRtcAudioRecord`'s read loop, **before** the audio processing module. A film
+injected there goes through machinery built for speech: the noise suppressor
+treats a sustained note as noise and gates it, and the automatic gain control
+pumps the dynamics, lifting quiet scenes and flattening loud ones. Nobody would
+file that as "the injection point is wrong"; they would file it as "the stream
+sounds bad".
+
+The right seam is `ExternalAudioProcessingFactory.setCapturePostProcessing`,
+also absent from upstream, which runs on the capture path **after** the whole
+chain and before the encoder. Both halves then get what they need, and they are
+genuinely different needs:
+
+- **the microphone keeps every calling feature** — echo canceller, noise
+  suppressor, gain control — because it has already been through them by the
+  time the media audio is added, and
+- **the media audio is touched by none of them**, because nothing downstream
+  processes it.
+
+That `io.github.webrtc-sdk` is the fork already in use is therefore load-bearing
+twice over, and swapping it would take this feature with it.
+
+**The format check fails to silence, never to noise.** The processed buffer is
+float and channel-major on libwebrtc's int16 scale, but the exact shape across
+that JNI boundary is a property of the fork and cannot be checked in this
+sandbox. So `AudioInjection` *derives* the sample width from the buffer's own
+size — the APM works in fixed 10 ms frames, so the only free variable is bytes
+per sample — and **leaves the buffer completely alone** when it does not
+recognise the layout. A wrong guess that writes puts full-scale noise directly
+into somebody's ear; a wrong guess that declines produces a stream with no film
+audio. Those are not equally bad outcomes and the code is not neutral between
+them.
 
 Where the PCM comes from is the second half. `AudioPlaybackCapture` (API 29+)
 with `addMatchingUid(Process.myUid())` captures **our own app's** playback, and
@@ -1767,22 +1795,41 @@ The rest: `PcmRing` (9 tests) is the buffer between capture and encoder,
 `PcmMix` (10 tests) the mixing and the saturation, `micEnabled`/`toggleMic` and
 the icon the control.
 
+### The transport, and the wire change it did not need
+
+`StreamTransfer` is a second `PeerConnection` between the same two devices,
+alongside the handover's, negotiated over the same signals — and **the SDP is
+the intent**.
+
+There is no new signal for "stream it instead of sending it". The handover's
+exchange is `Ask` → `Offer` → `Accept` → `Transport…`, so a `Transport` **offer
+arriving with nothing armed cannot be a file**: nobody asked for one and nobody
+accepted one. That is the whole discriminator. It costs no protocol change, no
+`frb` regeneration, and no version skew — an older build drops an offer it has
+no session for, which is exactly what it already does. The offer's own m-lines
+say the rest, because `FileTransfer` opens a data channel and this adds tracks.
+
+Its **own** connection rather than the transfer's, for the reason the transfer
+does not share the call's, one level along: a film is a continuous encode with a
+deadline and a handover is a bulk push, and under one congestion controller the
+bulk push wins and the film stutters.
+
+The receiver's sink is installed **once, for the life of the process**, not per
+session — a stream offer can reach a device before it has any idea one is
+coming, which is what "the SDP is the intent" means in practice. Registering it
+per session would require having guessed first.
+
+There is no `SessionPlayer` for the receiving side and there does not need to
+be: it holds no decoder and no playhead. The frames arrive already in step,
+because there is one playhead and it is the sender's. That is §15's claim about
+sync, and `TogetherManager.remoteVideo` is the whole of its implementation.
+
 ### Not built
 
-**The transport**, which is now the whole of what is missing on Android: a
-`PeerConnection` carrying these tracks, and the negotiation that sets it up.
-There is a neat route worth taking rather than a new wire format — **the SDP is
-the intent.** The file handover already negotiates a connection between exactly
-these two devices over the session envelope (`ShareSignal::Transport` carries
-`TransferSignal`'s offer/answer/ICE, which are generic), so a stream can ride
-the same exchange with audio and video m-lines where the data channel would have
-been, and the receiving side can tell which it got by looking. That needs
-`FileTransfer` split along a seam it does not currently have, and it needs the
-*asking* side to say which it wants — which is the one thing the wire cannot
-express today.
-
-Also not built: the follower's `SessionPlayer` over a remote track, and the
-desktop half, where receiving is a `srcObject` and sending is not.
+The desktop half, where receiving is a `srcObject` and sending is not. And the
+gesture: nothing user-reachable calls `startStreaming` yet, because it needs the
+`MediaProjection` consent flow and a place to offer the choice — which belongs
+with §9a's other two answers rather than bolted beside them.
 
 **Nothing in this section has run.** It type-checks against the real AAR, and
 `streaming` is never set true by any user-reachable path, so the renderer and
