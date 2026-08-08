@@ -82,38 +82,98 @@ select.
 
 ## Precedence
 
-`OffGridTravel` keeps its own meaning — it is now the **order** the two routes
-are tried in, and the user sets it from the app bar (two glyphs opposite the
-navigation menu: the preferred route at full size, the fallback dimmed behind
-it). Under the hood it is still a workspace switch, because that is the API the
-frontends already have.
+Which route is tried first has **two** inputs, in this order of authority.
 
-| Precedence | Workspace | First | Then |
-|---|---|---|---|
-| Internet first *(default)* | `Base` | relay | mesh, only if no relay took it |
-| This network first | `OffGridTravel` | mesh | relay, once patience runs out |
+**1. What is actually reachable.** A route that is down is not a route.
+`SendPlan::for_attempt` takes a `TransportReach` — one live probe per transport
+(`VaultEngine::has_connected_relay`, `MeshReach::can_deliver`) — and if exactly
+one route is up, that one leads no matter what the user picked. This is not a
+nicety: `send_dm_reply` waits up to `CONNECT_WAIT` (5s) for a relay before
+publishing, so leading with a relay that is not there costs five seconds before
+the local network is even tried. On a phone in airplane mode that is the whole
+difference between a message arriving and a message sitting under a clock icon.
 
-Two properties matter more than the ordering itself:
+**2. What the user asked for**, from the app bar — two glyphs opposite the
+navigation menu, the preferred route at full size and the fallback dimmed behind
+it. Stored as the `OffGridTravel` workspace, because that is the API the
+frontends already have. This decides only when *both* routes are up, which is
+the only time it is a real choice rather than a way to make the app slower.
+
+| Reachable | Leads | Then |
+|---|---|---|
+| relay only | relay | mesh, if no relay took it |
+| local network only | mesh | relay, once patience runs out |
+| both | the app-bar setting | the other one |
+| neither | the app-bar setting | (it queues; nothing is reachable anyway) |
+
+Three properties matter more than the ordering itself:
 
 - **Precedence is an order, not an exclusion.** Whichever route leads, a message
   the preferred one cannot carry still takes the other. A dead mesh under local
   precedence falls straight through to a relay, and vice versa. Nothing the user
   can pick from the app bar is able to strand a message — which is why the
   switch needs no warning copy and no confirmation.
-- **Local precedence gives up eventually.** A relay `OK` means a relay has
-  *stored* the message; a mesh publish only means *some* peer on the network
+- **Whichever route led, patience runs out on it.** A relay `OK` means a relay
+  has *stored* the message; a mesh publish only means *some* peer on the network
   took the frame, which may not be the recipient. So after
   `LOCAL_FIRST_PATIENCE` unacknowledged flush rounds (2, at roughly a minute
   each) a local-first message goes out over a relay as well, instead of waiting
-  forever for someone to walk back into WiFi range. `SendPlan::for_attempt` is
-  that whole policy, and `runtime::tests::precedence_orders_the_transports_and_stops_waiting_after_two_rounds`
-  is the table.
+  forever for someone to walk back into WiFi range. Note this arms off the route
+  that *actually* led, not off the setting — otherwise a relay-preferring user
+  whose relays are down would sit on the mesh indefinitely.
+- **An attempt is a delivery that failed, not a minute that passed.** A flush
+  that finds no route at all returns without spending one. `MAX_ATTEMPTS` is 8
+  and the cadence is a minute, so before this an off-grid message was marked
+  failed after about eight minutes — silently overriding the 24-hour `TTL_SECS`
+  that is supposed to decide how long off-grid mail waits.
 
-The ordering itself is duplicated in the two frontends
+`runtime::tests::precedence_orders_the_transports_and_stops_waiting_after_two_rounds`,
+`…::a_route_that_is_down_never_goes_first_whatever_the_user_picked`,
+`…::patience_runs_out_on_whichever_route_led` and
+`…::mail_with_nowhere_to_go_waits_for_the_ttl_instead_of_burning_the_attempt_cap`
+are that policy as a table.
+
+The user-facing ordering is duplicated in the two frontends
 (`android/…/ui/TransportPrecedence.kt` and
 `app/lib/src/util/transport_precedence.dart`) with matching tests on both sides,
 so an inverted order fails a build rather than quietly routing a message down
 the wrong radio.
+
+## Why two phones on one WiFi did not work
+
+Reported from hardware, and none of it was visible to the in-process test —
+which is the lesson worth keeping. Four separate causes, each sufficient on its
+own:
+
+1. **No WiFi multicast lock on Android.** The manifest had carried
+   `CHANGE_WIFI_MULTICAST_STATE` since the mesh landed and nothing ever took the
+   lock it grants. Android's WiFi driver silently drops multicast frames not
+   addressed to the device unless a `MulticastLock` is held — so mDNS announced
+   outwards and *never heard anyone announce back*. A Linux CI host has no such
+   filter, which is exactly why this survived a green build. `MeshRadio` now
+   holds the lock while the mesh runs (and only while it runs — a held lock
+   wakes the WiFi chip for every multicast frame on the network).
+2. **The indicator counted sightings, not reachability.** `peer_count` was the
+   set of mDNS-discovered peers, while sending depended on peers *subscribed to
+   the sealed-mail topic*. Between those two moments — a dial, a Noise
+   handshake, a subscription exchange — `gossipsub::publish` fails with
+   `InsufficientPeers`. So the app could truthfully say "1 device nearby" and
+   refuse every send, which is precisely what was reported. `MeshReach` now
+   keeps `discovered` and `deliverable` apart, and the badge shows the second.
+3. **mDNS re-queried every 5 minutes.** libp2p's default. A phone that joined
+   the network a moment after the other one, or whose single startup
+   announcement was dropped (ordinary for multicast), stayed invisible for up to
+   five minutes. Now 20 seconds.
+4. **Gossipsub's heartbeat was 10 seconds.** The heartbeat is what grafts a
+   newly-subscribed peer into the mesh, so it was the floor on "the other phone
+   appeared" → "a message will send". Now 1 second.
+
+Two things also changed so the recovery is not something the user has to wait
+out: the outbox is woken the instant the local network becomes deliverable
+(rather than up to a minute later on the next tick), and presence beacons a
+relay will not take are sealed onto the mesh — so the green dot means "reachable
+now" rather than "was reachable within the last eight minutes", which is what
+made the network look alive while nothing could be sent.
 
 ## Cross-transport duplicates
 
@@ -171,10 +231,29 @@ even though only one radio uses it today.
   `one_message_delivered_by_both_routes_appears_once`, and
   `the_same_text_sent_twice_over_one_route_is_two_messages`.
 
-**Not covered by automated tests:** two physical devices on one WiFi. The
-in-process test exercises the real protocol stack over the loopback/LAN
-interface, but it cannot prove that Android's multicast behaviour, doze mode, or
-a given router's client isolation will cooperate. Client isolation (common on
-guest and hotel WiFi) blocks peer-to-peer traffic outright and will defeat route
-2 — the message stays queued, which is the correct behaviour, but the user sees
-no delivery. That needs a real two-phone test.
+- `saathi::tests::being_seen_on_the_network_is_not_the_same_as_being_reachable`
+  — the `discovered` / `deliverable` table, which is the distinction the send
+  path lives or dies on.
+- `MeshRadioTest` (Android JVM) — the multicast lock must be a no-op rather than
+  a crash when there is no context, because it hangs off the same path that
+  carries every peer-count update the UI draws.
+
+**Not covered by automated tests, and this is where the hardware bugs lived:**
+two physical devices on one WiFi. The in-process test exercises the real
+protocol stack over the loopback/LAN interface, and it passed happily through
+every one of the four causes listed above — a Linux host does not filter
+multicast, so the missing `MulticastLock` was invisible, and the test's own
+retry loop rode out the `InsufficientPeers` window that on a phone showed up as
+"it just doesn't send". A green mesh test is evidence about the protocol, not
+about the platform.
+
+Still unproven here: Android doze behaviour, and a given router's client
+isolation. Client isolation (common on guest and hotel WiFi) blocks
+peer-to-peer traffic outright and will defeat route 2 — the message stays
+queued, which is the correct behaviour, but the user sees no delivery.
+
+One deliberate limitation worth naming: **airplane mode with WiFi off is not a
+network.** Route 2 needs a shared IP network, so two phones in airplane mode
+must have WiFi (or a hotspot) re-enabled — which airplane mode allows, and which
+Android does not do for you. With no IP network at all there is nothing for mDNS
+to multicast onto, and mail correctly waits in the outbox.

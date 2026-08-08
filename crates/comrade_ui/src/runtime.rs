@@ -1706,6 +1706,12 @@ pub struct ComradeRuntime {
     /// engines above, it is started and stopped on the fly rather than built
     /// once at unlock, since mDNS/Gossipsub only make sense while off-grid.
     saathi: Option<Arc<SaathiEngine>>,
+    /// Woken when a transport that was down comes up, so queued mail goes out
+    /// then instead of waiting up to [`OUTBOX_FLUSH_INTERVAL_SECS`] for the
+    /// next tick. "The other phone just joined the WiFi" is precisely the
+    /// moment a queued message becomes sendable, and a minute of clock icon
+    /// after that moment reads as the feature not working.
+    transport_wake: Arc<tokio::sync::Notify>,
     events: broadcast::Sender<BridgeEvent>,
     /// The separate, small-capacity, deliberately-lossy bus for
     /// `IncomingChitthi` only — see [`FEED_EVENT_BUS_CAPACITY`] and
@@ -1823,6 +1829,7 @@ impl ComradeRuntime {
             vault: None,
             sakha: None,
             saathi: None,
+            transport_wake: Arc::new(tokio::sync::Notify::new()),
             events,
             feed_events,
             loops_spawned: false,
@@ -2181,6 +2188,7 @@ impl ComradeRuntime {
         // queued is one lock acquisition.
         if self.vault.is_some() {
             let handles = self.handles();
+            let wake = self.transport_wake.clone();
             self.outbox_task = Some(tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
                     OUTBOX_FLUSH_INTERVAL_SECS,
@@ -2188,7 +2196,15 @@ impl ComradeRuntime {
                 // The first tick fires immediately: a launch is exactly when
                 // mail queued in a previous session should go out.
                 loop {
-                    ticker.tick().await;
+                    // Either the cadence, or a transport that just came up.
+                    // The cadence alone meant a peer joining the WiFi a second
+                    // after you hit send left the message under a clock icon
+                    // for the rest of the minute — long enough to conclude
+                    // local delivery does not work.
+                    tokio::select! {
+                        _ = ticker.tick() => {}
+                        _ = wake.notified() => {}
+                    }
                     match handles.flush_outbox().await {
                         Ok(0) => {}
                         Ok(sent) => tracing::info!(sent, "outbox flushed"),
@@ -4730,22 +4746,41 @@ impl ComradeRuntime {
             }));
     }
 
-    /// Forward the engine's peer-count stream onto the bridge event bus as
+    /// Forward the engine's reach stream onto the bridge event bus as
     /// [`BridgeEvent::MeshStatusChanged`] — once immediately (the starting
-    /// snapshot) and again every time a peer joins or leaves.
+    /// snapshot) and again every time reach changes — and wake the outbox the
+    /// moment the local network becomes a route that works.
+    ///
+    /// `peer_count` on the wire is the **deliverable** count, not the
+    /// discovered one. That is the number the indicator is implicitly promising
+    /// ("you can reach these people"), and reporting sightings there is what let
+    /// the app show a peer badge while every send failed with
+    /// `InsufficientPeers`.
     fn spawn_mesh_status_forwarder(&self, engine: Arc<SaathiEngine>) {
-        let mut peer_count_rx = engine.peer_count_stream();
+        let mut reach_rx = engine.reach_stream();
         let tx = self.events.clone();
+        let wake = self.transport_wake.clone();
         tokio::spawn(async move {
+            let mut could_deliver = reach_rx.borrow().can_deliver();
             let _ = tx.send(BridgeEvent::MeshStatusChanged(MeshStatusDto {
                 active: true,
-                peer_count: *peer_count_rx.borrow() as u64,
+                peer_count: reach_rx.borrow().deliverable as u64,
             }));
-            while peer_count_rx.changed().await.is_ok() {
+            while reach_rx.changed().await.is_ok() {
+                let reach = *reach_rx.borrow();
                 let _ = tx.send(BridgeEvent::MeshStatusChanged(MeshStatusDto {
                     active: true,
-                    peer_count: *peer_count_rx.borrow() as u64,
+                    peer_count: reach.deliverable as u64,
                 }));
+                // Only the *transition* into deliverable wakes the outbox. A
+                // second peer arriving changes nothing about whether queued mail
+                // can go, and waking on every change would turn a busy café
+                // network into a flush loop.
+                if reach.can_deliver() && !could_deliver {
+                    tracing::info!("local network is now deliverable — flushing queued mail");
+                    wake.notify_one();
+                }
+                could_deliver = reach.can_deliver();
             }
         });
     }
@@ -5032,8 +5067,9 @@ impl RuntimeHandles {
         let peer_npub = to_npub(target);
         let created_at = now_secs();
 
-        // Which radio goes first is the user's call, made from the app bar.
-        let plan = SendPlan::for_attempt(self.prefer_local, 0);
+        // Which radio goes first: whatever is actually up, with the app-bar
+        // setting deciding when both are.
+        let plan = SendPlan::for_attempt(self.prefer_local, self.reach(&vault).await, 0);
         let local_id = local_message_id(&peer_npub, content, created_at);
 
         // Local-first: seal it onto this WiFi before spending the internet. A
@@ -5119,6 +5155,21 @@ impl RuntimeHandles {
             );
         }
         Ok(dto)
+    }
+
+    /// Which routes are usable right now — the input [`SendPlan`] orders on.
+    ///
+    /// Both probes are local reads (a relay-status scan and a `watch` borrow),
+    /// so this is cheap enough to ask on every send rather than caching a
+    /// snapshot that could be minutes stale by the time somebody hits enter.
+    async fn reach(&self, vault: &Arc<VaultEngine>) -> TransportReach {
+        TransportReach {
+            relay: vault.has_connected_relay().await,
+            mesh: self
+                .mesh
+                .as_ref()
+                .is_some_and(|mesh| mesh.engine.reach().can_deliver()),
+        }
     }
 
     /// Seal a message onto the local network, if the mesh is up at all.
@@ -5220,7 +5271,7 @@ impl RuntimeHandles {
         // Same transport precedence a message gets: the local mesh first when the
         // user has asked for it, a relay otherwise — a reaction sent across the
         // room should not need the internet either.
-        let plan = SendPlan::for_attempt(self.prefer_local, 0);
+        let plan = SendPlan::for_attempt(self.prefer_local, self.reach(&vault).await, 0);
         let local_id = local_message_id(&peer_npub, &json, created_at);
         let on_mesh = plan.local_first
             && self
@@ -5326,6 +5377,33 @@ impl RuntimeHandles {
             return Ok(0);
         }
 
+        // Probed once for the whole flush, not per message: a batch of queued
+        // mail goes out over the same network conditions, and asking per item
+        // would scan the relay pool once per message for no new information.
+        let reach = self.reach(&vault).await;
+
+        // With no route at all, there is nothing to attempt — so do not spend
+        // an attempt. [`comrade_core::dak::outbox::MAX_ATTEMPTS`] is 8 and the
+        // flush cadence is a minute, so a flush that burned an attempt against
+        // a network that was not there marked an offline message **failed
+        // after eight minutes**, silently overriding the 24-hour
+        // [`comrade_core::dak::outbox::TTL_SECS`] that is supposed to govern
+        // how long off-grid mail waits. Two phones out of range for a coffee
+        // break came back to a screen of red.
+        //
+        // Attempts now count delivery failures, which is what the cap is for.
+        // The TTL above still runs — `prune` happened before this — so mail
+        // genuinely too old to matter is still reaped, and the wake in
+        // [`ComradeRuntime::spawn_mesh_status_forwarder`] brings the queue
+        // straight back the moment a route reappears.
+        if !reach.relay && !reach.mesh {
+            tracing::debug!(
+                queued = due.len(),
+                "no transport reachable — holding queued mail rather than spending an attempt"
+            );
+            return Ok(0);
+        }
+
         let mut sent = 0usize;
         for queued in due {
             let Ok(peer_pk) = parse_pubkey(&queued.peer_npub) else {
@@ -5336,7 +5414,7 @@ impl RuntimeHandles {
                 continue;
             };
 
-            let plan = SendPlan::for_attempt(self.prefer_local, queued.attempts);
+            let plan = SendPlan::for_attempt(self.prefer_local, reach, queued.attempts);
             // Under local precedence, retry the WiFi first every round — a peer
             // may have joined the network since the last flush, and reaching
             // them there costs nothing. `force_both` is what stops that from
@@ -5592,11 +5670,32 @@ impl RuntimeHandles {
         let Ok(json) = beacon.to_json() else {
             return 0;
         };
+        let created_at = now_secs();
         let mut sent = 0u64;
         for peer in peers {
             match vault.send_dm(&peer, &json).await {
                 Ok(_) => sent += 1,
-                Err(e) => tracing::debug!(%peer, "presence beacon not sent: {e}"),
+                Err(e) => {
+                    tracing::debug!(%peer, "presence beacon not sent by relay: {e}");
+                    // A beacon no relay will take is exactly the case the dot
+                    // is worst at: with the internet gone it keeps showing the
+                    // last claim until the TTL runs out, so a comrade sitting
+                    // next to you reads as online for eight minutes after they
+                    // stop being, and someone who just arrived on this WiFi
+                    // reads as offline. Sealing it onto the local network makes
+                    // the dot mean "reachable" rather than "was reachable".
+                    //
+                    // Nothing is needed on the receiving side: an opened mesh
+                    // frame runs through the same ingress as a relay DM, and
+                    // that ingress already parses presence beacons.
+                    let local_id = local_message_id(&peer.to_hex(), &json, created_at);
+                    if self
+                        .try_mesh(&peer, &local_id, &json, None, created_at)
+                        .await
+                    {
+                        sent += 1;
+                    }
+                }
             }
         }
         sent
@@ -8118,15 +8217,39 @@ impl MeshLink {
     }
 }
 
+/// Which routes are usable at this instant.
+///
+/// Availability, not preference — the answer to "would trying this cost
+/// anything but time?". Both fields are cheap live probes:
+/// `VaultEngine::has_connected_relay` and `MeshReach::can_deliver`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TransportReach {
+    /// At least one relay is connected.
+    relay: bool,
+    /// At least one peer on this network is subscribed to sealed mail — i.e.
+    /// a publish would actually reach somebody. Deliberately the *deliverable*
+    /// count and not the discovered one: see [`comrade_core::saathi::MeshReach`].
+    mesh: bool,
+}
+
 /// Which transport a send should try first, and whether the other is still
 /// worth trying afterwards.
 ///
-/// The user picks the *precedence* from the app bar (it is the `OffGridTravel`
-/// workspace under the hood, whose documented meaning has always been "the mesh
-/// replaces relays"); this turns that choice into routing. Precedence is an
-/// order, not an exclusion — a message that the preferred route cannot carry
-/// still takes the other one, because the product's promise is that the message
-/// arrives, not that it arrives by a particular radio.
+/// Two inputs decide this, in that order of authority:
+///
+/// 1. **What is actually reachable.** A route that is down is not a route. With
+///    no relay connected, trying one first costs a five-second
+///    `wait_for_any_relay` before the local network is even attempted — on a
+///    phone in airplane mode that is the whole difference between a message
+///    arriving and a message sitting under a clock icon. With nobody on the
+///    local network, the mesh is equally pointless to lead with.
+/// 2. **What the user asked for**, from the app bar. This decides when *both*
+///    routes are up, which is the only time it is a real choice rather than a
+///    way to make the app slower.
+///
+/// Precedence is an order, not an exclusion — a message that the preferred
+/// route cannot carry still takes the other one, because the product's promise
+/// is that the message arrives, not that it arrives by a particular radio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SendPlan {
     /// Try this first.
@@ -8148,10 +8271,22 @@ struct SendPlan {
 const LOCAL_FIRST_PATIENCE: u8 = 2;
 
 impl SendPlan {
-    fn for_attempt(prefer_local: bool, attempts: u8) -> Self {
+    fn for_attempt(prefer_local: bool, reach: TransportReach, attempts: u8) -> Self {
+        // Availability first: with exactly one route up, the preference is not
+        // a choice between two things, and honouring it would only add the dead
+        // route's timeout to every send.
+        let local_first = match (reach.relay, reach.mesh) {
+            (false, true) => true,
+            (true, false) => false,
+            // Both up, or neither. With both, the user's setting is the real
+            // tie-break it was designed to be. With neither, the message is
+            // going to the outbox whatever we do, so keep the order stable and
+            // predictable rather than flapping.
+            _ => prefer_local,
+        };
         Self {
-            local_first: prefer_local,
-            force_both: prefer_local && attempts >= LOCAL_FIRST_PATIENCE,
+            local_first,
+            force_both: local_first && attempts >= LOCAL_FIRST_PATIENCE,
         }
     }
 }
@@ -14146,7 +14281,7 @@ mod tests {
         rt.outbox
             .queue(QueuedMessage::new("m1", &peer, &envelope, None, now_secs()));
 
-        // No relay will take it: attempted, kept, counted — same as text.
+        // No relay will take it: kept and retried, same as text.
         assert_eq!(rt.flush_outbox().await.unwrap(), 0);
         assert_eq!(
             rt.outbox_pending(),
@@ -14197,6 +14332,50 @@ mod tests {
             }
             other => panic!("expected a failed MessageStatus, got {other:?}"),
         }
+    }
+
+    /// The other half of the off-grid report: mail queued with no network at
+    /// all was marked failed after about eight minutes.
+    ///
+    /// [`comrade_core::dak::outbox::MAX_ATTEMPTS`] is 8 and the flush cadence
+    /// is a minute, so eight ticks against a network that was not there
+    /// exhausted the cap and turned the thread red — silently overriding the
+    /// 24-hour [`comrade_core::dak::outbox::TTL_SECS`] that is supposed to
+    /// decide how long off-grid mail waits. Two people out of range for a
+    /// coffee break came back to failed messages.
+    ///
+    /// An attempt has to mean "a delivery that failed", not "a minute passed".
+    #[tokio::test]
+    async fn mail_with_nowhere_to_go_waits_for_the_ttl_instead_of_burning_the_attempt_cap() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        rt.outbox.queue(QueuedMessage::new(
+            "q1",
+            &peer,
+            "still here?",
+            None,
+            now_secs(),
+        ));
+
+        // Comfortably more rounds than the cap. No relay is configured and
+        // nobody is on the local network, so every one of them has nothing to
+        // try.
+        for _ in 0..(comrade_core::dak::outbox::MAX_ATTEMPTS + 3) {
+            assert_eq!(rt.flush_outbox().await.unwrap(), 0);
+        }
+
+        assert_eq!(
+            rt.outbox_pending(),
+            1,
+            "mail with no route must still be queued after more flushes than \
+             the attempt cap allows"
+        );
+        assert_eq!(
+            rt.outbox.pending_for(&peer)[0].attempts,
+            0,
+            "and none of those rounds should have counted as a failed delivery"
+        );
     }
 
     #[tokio::test]
@@ -14261,6 +14440,23 @@ mod tests {
         );
     }
 
+    const BOTH_UP: TransportReach = TransportReach {
+        relay: true,
+        mesh: true,
+    };
+    const ONLY_RELAY: TransportReach = TransportReach {
+        relay: true,
+        mesh: false,
+    };
+    const ONLY_MESH: TransportReach = TransportReach {
+        relay: false,
+        mesh: true,
+    };
+    const NOTHING_UP: TransportReach = TransportReach {
+        relay: false,
+        mesh: false,
+    };
+
     /// The precedence policy behind the app-bar switch, as a table.
     #[test]
     fn precedence_orders_the_transports_and_stops_waiting_after_two_rounds() {
@@ -14268,17 +14464,17 @@ mod tests {
         // worth also flooding onto the WiFi — so relay precedence never sends
         // twice, however many rounds it takes.
         assert_eq!(
-            SendPlan::for_attempt(false, 0),
+            SendPlan::for_attempt(false, BOTH_UP, 0),
             SendPlan {
                 local_first: false,
                 force_both: false
             }
         );
-        assert!(!SendPlan::for_attempt(false, LOCAL_FIRST_PATIENCE + 5).force_both);
+        assert!(!SendPlan::for_attempt(false, BOTH_UP, LOCAL_FIRST_PATIENCE + 5).force_both);
 
         // Local precedence: the mesh goes first, alone at first…
         assert_eq!(
-            SendPlan::for_attempt(true, 0),
+            SendPlan::for_attempt(true, BOTH_UP, 0),
             SendPlan {
                 local_first: true,
                 force_both: false
@@ -14287,8 +14483,60 @@ mod tests {
         // …but a mesh publish only means *someone* took the frame, so a message
         // still unacknowledged after a couple of rounds stops waiting for the
         // recipient to walk into range and goes out over a relay too.
-        assert!(SendPlan::for_attempt(true, LOCAL_FIRST_PATIENCE).force_both);
-        assert!(SendPlan::for_attempt(true, LOCAL_FIRST_PATIENCE + 1).force_both);
+        assert!(SendPlan::for_attempt(true, BOTH_UP, LOCAL_FIRST_PATIENCE).force_both);
+        assert!(SendPlan::for_attempt(true, BOTH_UP, LOCAL_FIRST_PATIENCE + 1).force_both);
+    }
+
+    /// Availability outranks the setting, because a route that is down is not
+    /// a route — leading with it only buys the dead transport's timeout.
+    #[test]
+    fn a_route_that_is_down_never_goes_first_whatever_the_user_picked() {
+        for prefer_local in [true, false] {
+            assert!(
+                SendPlan::for_attempt(prefer_local, ONLY_MESH, 0).local_first,
+                "with no relay connected, the local network must lead \
+                 (prefer_local={prefer_local}) — this is the airplane-mode case, \
+                 where leading with a relay costs a five-second connect wait \
+                 before the WiFi is even tried"
+            );
+            assert!(
+                !SendPlan::for_attempt(prefer_local, ONLY_RELAY, 0).local_first,
+                "with nobody on this network, a relay must lead \
+                 (prefer_local={prefer_local})"
+            );
+        }
+    }
+
+    /// The setting is a tie-break, and it only has ties to break when both
+    /// routes are actually up.
+    #[test]
+    fn the_app_bar_setting_decides_only_when_both_routes_work() {
+        assert!(SendPlan::for_attempt(true, BOTH_UP, 0).local_first);
+        assert!(!SendPlan::for_attempt(false, BOTH_UP, 0).local_first);
+    }
+
+    /// With neither route up the message is going to the outbox regardless, so
+    /// the order must stay stable rather than flapping on a probe that means
+    /// nothing.
+    #[test]
+    fn with_nothing_reachable_the_order_is_whatever_was_asked_for() {
+        assert!(SendPlan::for_attempt(true, NOTHING_UP, 0).local_first);
+        assert!(!SendPlan::for_attempt(false, NOTHING_UP, 0).local_first);
+    }
+
+    /// `force_both` follows the route that actually led, not the setting.
+    /// Otherwise a relay-preferring user whose relays are down would sit on the
+    /// mesh forever, never escalating — the exact stall the patience counter
+    /// exists to prevent.
+    #[test]
+    fn patience_runs_out_on_whichever_route_led() {
+        let plan = SendPlan::for_attempt(false, ONLY_MESH, LOCAL_FIRST_PATIENCE);
+        assert!(plan.local_first, "availability put the mesh first");
+        assert!(
+            plan.force_both,
+            "so the escalation to a relay must arm too, even though the user \
+             never asked for local precedence"
+        );
     }
 
     /// The switch has to reach the router, or the app-bar icons are decoration.

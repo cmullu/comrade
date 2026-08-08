@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::error::VaultError;
-use crate::sabha::{wait_for_any_relay, CONNECT_WAIT};
+use crate::sabha::{any_relay_connected, wait_for_any_relay, CONNECT_WAIT};
 
 // ── UPI payment intent ───────────────────────────────────────────────────────
 
@@ -236,6 +236,21 @@ impl VaultEngine {
 
     pub async fn disconnect(&self) {
         self.client.disconnect().await;
+    }
+
+    /// Whether at least one relay is connected right now.
+    ///
+    /// The router asks this before choosing which transport to try first: with
+    /// no relay up, spending the first attempt on one costs a publish timeout
+    /// before the local network is even tried, and on a phone in airplane mode
+    /// that is the entire difference between a message arriving and a message
+    /// sitting under a clock icon.
+    ///
+    /// A *connected* relay is not a promise that a publish will be accepted —
+    /// the relay can still reject or drop it — so this is an availability
+    /// signal for ordering, never a substitute for the send result.
+    pub async fn has_connected_relay(&self) -> bool {
+        any_relay_connected(&self.client).await
     }
 
     /// Send an E2E encrypted direct message (NIP-44, gift-wrapped per NIP-17)

@@ -118,12 +118,7 @@ pub(crate) const CONNECT_WAIT: std::time::Duration = std::time::Duration::from_s
 pub(crate) async fn wait_for_any_relay(client: &Client, timeout: std::time::Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if client
-            .relays()
-            .await
-            .values()
-            .any(|r| r.status() == RelayStatus::Connected)
-        {
+        if any_relay_connected(client).await {
             return true;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -131,6 +126,20 @@ pub(crate) async fn wait_for_any_relay(client: &Client, timeout: std::time::Dura
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+}
+
+/// Whether any relay in the pool is connected **right now**, without waiting.
+///
+/// The one definition of "the internet route is available", shared by
+/// [`wait_for_any_relay`] and by the transport router's availability probe
+/// (`VaultEngine::has_connected_relay`) so the thing a send waits for and the
+/// thing the router reasons about can never drift apart.
+pub(crate) async fn any_relay_connected(client: &Client) -> bool {
+    client
+        .relays()
+        .await
+        .values()
+        .any(|r| r.status() == RelayStatus::Connected)
 }
 
 // ── NIP-10 thread-tree structures ────────────────────────────────────────────

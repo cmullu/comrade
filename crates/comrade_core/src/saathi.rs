@@ -22,7 +22,10 @@ use libp2p::{
     futures::StreamExt,
     gossipsub::{self, IdentTopic, MessageId},
     mdns,
-    swarm::{NetworkBehaviour, SwarmEvent},
+    swarm::{
+        dial_opts::{DialOpts, PeerCondition},
+        NetworkBehaviour, SwarmEvent,
+    },
     PeerId, Swarm,
 };
 use serde::{Deserialize, Serialize};
@@ -76,16 +79,68 @@ struct ComradeBehaviour {
 
 // ── Saathi engine ────────────────────────────────────────────────────────────
 
+/// How far along the local network actually is, in the two numbers that mean
+/// different things to a person waiting for a message to send.
+///
+/// The distinction is not pedantry — it is the difference between a message
+/// going out and a message sitting under a clock icon. mDNS announces a peer
+/// the moment it hears the multicast packet, but a sealed frame cannot be
+/// published until that peer has been dialled, completed a Noise handshake, and
+/// told us it subscribes to [`DAK_TOPIC_NAME`]. Between those two moments
+/// `gossipsub::publish` fails with `InsufficientPeers`.
+///
+/// The indicator used to be driven by [`Self::discovered`] while sending
+/// depended on [`Self::deliverable`], so the app could truthfully say "1 device
+/// nearby" and still refuse to send. Keeping both, and being explicit about
+/// which one a caller wants, is how that class of lie is prevented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MeshReach {
+    /// Peers mDNS has announced on this network. Someone is *there*.
+    pub discovered: usize,
+    /// Peers that have subscribed to the sealed-mail topic — i.e. peers a
+    /// [`SaathiEngine::publish_sealed`] would actually reach. This is the
+    /// number that decides whether a send can succeed.
+    pub deliverable: usize,
+}
+
+impl MeshReach {
+    /// Whether sealed mail can go out right now.
+    pub fn can_deliver(&self) -> bool {
+        self.deliverable > 0
+    }
+
+    /// Somebody is on this network but the mesh has not finished forming.
+    /// A transient state, and the one worth showing as "connecting" rather
+    /// than as either "nobody here" or a green light.
+    pub fn is_connecting(&self) -> bool {
+        self.deliverable == 0 && self.discovered > 0
+    }
+}
+
 /// Shared state accessed from both the swarm driver task and callers.
 struct SaathiShared {
     #[allow(dead_code)]
     peer_id: PeerId,
     outbox_cache: VecDeque<MeshMessage>,
     received: Vec<MeshMessage>,
-    /// Peers currently reachable via mDNS (inserted on `Discovered`, removed on
+    /// Peers mDNS currently announces (inserted on `Discovered`, removed on
     /// `Expired`). A set, not a running counter, so a peer mDNS reports more
     /// than once (it advertises once per address) never inflates the count.
-    connected_peers: HashSet<PeerId>,
+    discovered_peers: HashSet<PeerId>,
+    /// Peers subscribed to [`DAK_TOPIC_NAME`] — the ones a sealed publish
+    /// reaches. Driven by gossipsub's own subscription events and by
+    /// connections closing, never by mDNS: a peer whose mDNS record lapses
+    /// while the TCP connection is still up is still deliverable.
+    deliverable_peers: HashSet<PeerId>,
+}
+
+impl SaathiShared {
+    fn reach(&self) -> MeshReach {
+        MeshReach {
+            discovered: self.discovered_peers.len(),
+            deliverable: self.deliverable_peers.len(),
+        }
+    }
 }
 
 pub struct SaathiEngine {
@@ -98,9 +153,9 @@ pub struct SaathiEngine {
     shared: Arc<Mutex<SaathiShared>>,
     local_id: String,
     local_peer_id: PeerId,
-    /// Live count of currently-reachable mDNS peers — the local-mesh
-    /// discovery signal a connectivity indicator subscribes to.
-    peer_count_rx: watch::Receiver<usize>,
+    /// Live local-network reach — the signal a connectivity indicator watches,
+    /// and the one a sender checks before deciding a route is available.
+    reach_rx: watch::Receiver<MeshReach>,
 }
 
 enum SaathiCmd {
@@ -130,7 +185,13 @@ impl SaathiEngine {
         };
 
         let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(10))
+            // One second, not the ten this used to run. The heartbeat is what
+            // grafts a newly-subscribed peer into the mesh, so on a two-phone
+            // WiFi it is the whole latency between "the other phone appeared"
+            // and "a message will actually send". Ten seconds of that gap is
+            // long enough for a person to conclude the feature is broken, and
+            // the cost at this scale — a handful of LAN peers — is negligible.
+            .heartbeat_interval(Duration::from_secs(1))
             .validation_mode(gossipsub::ValidationMode::Strict)
             .message_id_fn(message_id_fn)
             .build()
@@ -151,10 +212,23 @@ impl SaathiEngine {
                 )
                 .map_err(std::io::Error::other)?;
 
-                let mdns = mdns::tokio::Behaviour::new(
-                    mdns::Config::default(),
-                    key.public().to_peer_id(),
-                )?;
+                // Twenty seconds, not the default five minutes. mDNS announces
+                // once on startup and then only re-queries on this interval, so
+                // with the default a phone that joined the WiFi a moment after
+                // the other one — or whose single announcement was dropped, which
+                // is ordinary for multicast — stays invisible for up to five
+                // minutes. Nobody testing "can I message you across the room"
+                // waits that long before concluding it does not work.
+                //
+                // The cost is one small multicast query per interval per device,
+                // which is nothing next to being undiscoverable. `ttl` stays at
+                // its default: it governs how long a *seen* peer is remembered,
+                // and shortening it would expire peers that are still there.
+                let mdns_config = mdns::Config {
+                    query_interval: Duration::from_secs(20),
+                    ..Default::default()
+                };
+                let mdns = mdns::tokio::Behaviour::new(mdns_config, key.public().to_peer_id())?;
 
                 Ok(ComradeBehaviour { gossipsub, mdns })
             })
@@ -190,10 +264,12 @@ impl SaathiEngine {
             peer_id: local_peer_id,
             outbox_cache: VecDeque::new(),
             received: Vec::new(),
-            connected_peers: HashSet::new(),
+            discovered_peers: HashSet::new(),
+            deliverable_peers: HashSet::new(),
         }));
 
-        let (peer_count_tx, peer_count_rx) = watch::channel(0usize);
+        let (reach_tx, reach_rx) = watch::channel(MeshReach::default());
+        let dak_topic_hash = IdentTopic::new(DAK_TOPIC_NAME).hash();
 
         let shared_clone = shared.clone();
         let _label_clone = sender_label.clone();
@@ -253,34 +329,35 @@ impl SaathiEngine {
                             SwarmEvent::Behaviour(ComradeBehaviourEvent::Mdns(
                                 mdns::Event::Discovered(peers)
                             )) => {
-                                for (peer_id, _) in peers {
-                                    info!(peer = %peer_id, "Saathi: peer discovered via mDNS");
+                                for (peer_id, addr) in peers {
+                                    info!(peer = %peer_id, %addr, "Saathi: peer discovered via mDNS");
                                     swarm.behaviour_mut()
                                          .gossipsub
                                          .add_explicit_peer(&peer_id);
 
-                                    let mut guard = shared_clone.lock().await;
-                                    guard.connected_peers.insert(peer_id);
-                                    let count = guard.connected_peers.len();
-
-                                    // Drain the outbox cache now that we have a peer
-                                    while let Some(cached_msg) = guard.outbox_cache.pop_front() {
-                                        let bytes = match serde_json::to_vec(&cached_msg) {
-                                            Ok(b)  => b,
-                                            Err(e) => {
-                                                warn!("Saathi: cache drain serialise fail: {e}");
-                                                continue;
-                                            }
-                                        };
-                                        let topic = IdentTopic::new(TOPIC_NAME);
-                                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, bytes) {
-                                            warn!("Saathi: cache drain publish fail: {e}");
-                                        } else {
-                                            debug!("Saathi: cached message drained to network");
-                                        }
+                                    // Dial with the address mDNS just handed us
+                                    // rather than leaving it to gossipsub's
+                                    // implicit peer-id dial. That path depends
+                                    // on the mDNS behaviour still holding an
+                                    // address for the peer when the swarm asks
+                                    // for one; dialling the announced address
+                                    // directly does not. `DisconnectedAndNotDialing`
+                                    // makes a repeat announcement — mDNS
+                                    // re-advertises, and once per address —
+                                    // free rather than a redundant dial.
+                                    let opts = DialOpts::peer_id(peer_id)
+                                        .addresses(vec![addr])
+                                        .condition(PeerCondition::DisconnectedAndNotDialing)
+                                        .build();
+                                    if let Err(e) = swarm.dial(opts) {
+                                        debug!(peer = %peer_id, "Saathi: dial not started: {e}");
                                     }
+
+                                    let mut guard = shared_clone.lock().await;
+                                    guard.discovered_peers.insert(peer_id);
+                                    let reach = guard.reach();
                                     drop(guard);
-                                    let _ = peer_count_tx.send(count);
+                                    let _ = reach_tx.send(reach);
                                 }
                             }
 
@@ -293,12 +370,75 @@ impl SaathiEngine {
                                          .gossipsub
                                          .remove_explicit_peer(&peer_id);
 
+                                    // Only the *sighting* lapses here. A peer
+                                    // whose mDNS record expired while the TCP
+                                    // connection is still up is still somewhere
+                                    // to send to, and dropping it from
+                                    // `deliverable` would report a route as
+                                    // gone while it still works.
                                     let mut guard = shared_clone.lock().await;
-                                    guard.connected_peers.remove(&peer_id);
-                                    let count = guard.connected_peers.len();
+                                    guard.discovered_peers.remove(&peer_id);
+                                    let reach = guard.reach();
                                     drop(guard);
-                                    let _ = peer_count_tx.send(count);
+                                    let _ = reach_tx.send(reach);
                                 }
+                            }
+
+                            // A peer telling us it subscribes to the sealed-mail
+                            // topic is the *only* event that means "a message
+                            // can go out now" — gossipsub publishes to peers it
+                            // knows are subscribed, and to nobody else.
+                            SwarmEvent::Behaviour(ComradeBehaviourEvent::Gossipsub(
+                                gossipsub::Event::Subscribed { peer_id, topic }
+                            )) if topic == dak_topic_hash => {
+                                info!(peer = %peer_id, "Saathi: peer can now receive sealed mail");
+                                let mut guard = shared_clone.lock().await;
+                                guard.deliverable_peers.insert(peer_id);
+                                // Public chatter cached while nobody was around
+                                // goes out now, for the same reason: this is the
+                                // first moment it can land.
+                                while let Some(cached_msg) = guard.outbox_cache.pop_front() {
+                                    let bytes = match serde_json::to_vec(&cached_msg) {
+                                        Ok(b)  => b,
+                                        Err(e) => {
+                                            warn!("Saathi: cache drain serialise fail: {e}");
+                                            continue;
+                                        }
+                                    };
+                                    let topic = IdentTopic::new(TOPIC_NAME);
+                                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, bytes) {
+                                        warn!("Saathi: cache drain publish fail: {e}");
+                                    } else {
+                                        debug!("Saathi: cached message drained to network");
+                                    }
+                                }
+                                let reach = guard.reach();
+                                drop(guard);
+                                let _ = reach_tx.send(reach);
+                            }
+
+                            SwarmEvent::Behaviour(ComradeBehaviourEvent::Gossipsub(
+                                gossipsub::Event::Unsubscribed { peer_id, topic }
+                            )) if topic == dak_topic_hash => {
+                                debug!(peer = %peer_id, "Saathi: peer stopped taking sealed mail");
+                                let mut guard = shared_clone.lock().await;
+                                guard.deliverable_peers.remove(&peer_id);
+                                let reach = guard.reach();
+                                drop(guard);
+                                let _ = reach_tx.send(reach);
+                            }
+
+                            // The connection going is the one thing gossipsub
+                            // will not send an Unsubscribed for, so without this
+                            // a peer that walked out of range would stay counted
+                            // as deliverable until it came back.
+                            SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
+                                debug!(peer = %peer_id, "Saathi: peer connection closed");
+                                let mut guard = shared_clone.lock().await;
+                                guard.deliverable_peers.remove(&peer_id);
+                                let reach = guard.reach();
+                                drop(guard);
+                                let _ = reach_tx.send(reach);
                             }
 
                             SwarmEvent::Behaviour(ComradeBehaviourEvent::Gossipsub(
@@ -363,7 +503,7 @@ impl SaathiEngine {
             shared,
             local_id: sender_label,
             local_peer_id,
-            peer_count_rx,
+            reach_rx,
         })
     }
 
@@ -443,18 +583,32 @@ impl SaathiEngine {
         self.local_peer_id
     }
 
-    /// Current count of mDNS-reachable peers — a cheap, non-blocking snapshot.
-    /// Use [`Self::peer_count_stream`] to react to changes instead of polling.
+    /// How many peers a sealed publish would actually reach right now — a
+    /// cheap, non-blocking snapshot. Use [`Self::reach_stream`] to react to
+    /// changes instead of polling.
+    ///
+    /// This counts peers subscribed to the sealed-mail topic, **not** peers
+    /// mDNS has merely announced. The two differ for the seconds it takes to
+    /// dial and handshake, and a UI that shows the larger number promises a
+    /// delivery the transport cannot yet make — see [`MeshReach`].
     pub fn peer_count(&self) -> usize {
-        *self.peer_count_rx.borrow()
+        self.reach_rx.borrow().deliverable
     }
 
-    /// Subscribe to the live count of mDNS-reachable peers. The returned
-    /// receiver immediately yields the current count, then the new value each
-    /// time a peer joins or leaves — the local-mesh discovery stream a
-    /// connectivity indicator watches.
-    pub fn peer_count_stream(&self) -> watch::Receiver<usize> {
-        self.peer_count_rx.clone()
+    /// The full local-network picture: who has been seen, and who can be
+    /// delivered to. [`Self::peer_count`] is the second of those.
+    pub fn reach(&self) -> MeshReach {
+        *self.reach_rx.borrow()
+    }
+
+    /// Subscribe to live changes in local-network reach. The returned receiver
+    /// immediately yields the current state, then the new one each time a peer
+    /// is discovered, becomes deliverable, or drops off.
+    ///
+    /// Watch this rather than polling: a rise in `deliverable` is the moment
+    /// queued mail becomes sendable, which is what the outbox flush hangs off.
+    pub fn reach_stream(&self) -> watch::Receiver<MeshReach> {
+        self.reach_rx.clone()
     }
 }
 
@@ -470,8 +624,50 @@ mod tests {
             .await
             .expect("engine should initialise");
         assert_eq!(engine.peer_count(), 0);
-        assert_eq!(*engine.peer_count_stream().borrow(), 0);
+        assert_eq!(engine.reach(), MeshReach::default());
+        assert!(!engine.reach_stream().borrow().can_deliver());
         engine.shutdown().await;
+    }
+
+    /// The distinction the send path depends on, as a table.
+    ///
+    /// This is the shape of the bug two phones on one WiFi actually hit: mDNS
+    /// announced the other device, the indicator lit up, and every send still
+    /// failed with `InsufficientPeers` because the gossipsub subscription had
+    /// not landed yet. "Seen" and "can be sent to" are different questions and
+    /// the type refuses to conflate them.
+    #[test]
+    fn being_seen_on_the_network_is_not_the_same_as_being_reachable() {
+        let nobody = MeshReach::default();
+        assert!(!nobody.can_deliver());
+        assert!(
+            !nobody.is_connecting(),
+            "an empty network is not connecting"
+        );
+
+        let mid_handshake = MeshReach {
+            discovered: 1,
+            deliverable: 0,
+        };
+        assert!(!mid_handshake.can_deliver(), "a send here would fail");
+        assert!(mid_handshake.is_connecting(), "and this is why — say so");
+
+        let ready = MeshReach {
+            discovered: 1,
+            deliverable: 1,
+        };
+        assert!(ready.can_deliver());
+        assert!(!ready.is_connecting());
+
+        // A peer whose mDNS record lapsed while the connection stayed up is
+        // still somewhere to send to, so this is a legitimate state, not a
+        // contradiction to assert against.
+        let stale_record = MeshReach {
+            discovered: 0,
+            deliverable: 1,
+        };
+        assert!(stale_record.can_deliver());
+        assert!(!stale_record.is_connecting());
     }
 
     /// Two engines started in-process must discover each other over real mDNS
@@ -489,8 +685,8 @@ mod tests {
             .await
             .expect("engine b should initialise");
 
-        async fn wait_until_connected(mut rx: watch::Receiver<usize>) {
-            while *rx.borrow() < 1 {
+        async fn wait_until_deliverable(mut rx: watch::Receiver<MeshReach>) {
+            while !rx.borrow().can_deliver() {
                 rx.changed()
                     .await
                     .expect("swarm driver task should stay alive");
@@ -499,22 +695,27 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(20), async {
             tokio::join!(
-                wait_until_connected(a.peer_count_stream()),
-                wait_until_connected(b.peer_count_stream()),
+                wait_until_deliverable(a.reach_stream()),
+                wait_until_deliverable(b.reach_stream()),
             )
         })
         .await
-        .expect("engines should discover each other via mDNS within 20s");
+        .expect("engines should reach each other over mDNS + gossipsub within 20s");
 
         // `>= 1`, not `== 1`: mDNS discovery is machine-wide, so any other
         // engine alive on this host — another test running concurrently, a real
         // Comrade on the same laptop — is a legitimate extra peer. The exact
         // form used to pass only because this was the process's only mesh
         // test; it asserted a property of the test harness, not of the code
-        // under test. What matters here is that the Discovered handler drives
-        // `peer_count` off zero at all.
-        assert!(a.peer_count() >= 1, "a discovered nobody");
-        assert!(b.peer_count() >= 1, "b discovered nobody");
+        // under test.
+        //
+        // What matters is that this is now the *deliverable* count: reaching it
+        // means the dial, the Noise handshake and the topic subscription all
+        // completed, so a send would succeed. Waiting on the old discovery
+        // count proved only that a multicast packet arrived.
+        assert!(a.peer_count() >= 1, "a cannot deliver to anyone");
+        assert!(b.peer_count() >= 1, "b cannot deliver to anyone");
+        assert!(a.reach().discovered >= a.reach().deliverable);
 
         a.shutdown().await;
         b.shutdown().await;
@@ -545,8 +746,8 @@ mod tests {
         // is genuinely asynchronous; publishing before a peer is subscribed
         // fails with InsufficientPeers, which is what the retry below rides out.
         async fn wait_for_peers(engine: &SaathiEngine, want: usize) {
-            let mut rx = engine.peer_count_stream();
-            while *rx.borrow() < want {
+            let mut rx = engine.reach_stream();
+            while rx.borrow().deliverable < want {
                 rx.changed().await.expect("driver alive");
             }
         }
