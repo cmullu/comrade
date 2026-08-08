@@ -978,6 +978,17 @@ object TogetherManager {
     private fun refreshLive(
         playing: Boolean? = null,
         positionMs: Long? = null,
+        /**
+         * Only an embed passes this.
+         *
+         * A file session knows its length the moment the decoder prepares, and
+         * sets it when the [UiState.Live] is built — so this parameter did not
+         * exist until a player turned up whose length arrives *after* the
+         * session opens. A YouTube duration is the player's to report and
+         * `TogetherContent::duration_ms` returns `None` for one, so the scrubber
+         * starts at zero and grows when the embed says.
+         */
+        durationMs: Long? = null,
         status: Status? = null,
         picture: TogetherDecisions.Picture? = null,
         driftMs: Long? = null,
@@ -988,6 +999,7 @@ object TogetherManager {
         _state.value = live.copy(
             playing = playing ?: live.playing,
             positionMs = positionMs ?: live.positionMs,
+            durationMs = durationMs ?: live.durationMs,
             status = status ?: live.status,
             picture = picture ?: live.picture,
             driftMs = driftMs ?: live.driftMs,
