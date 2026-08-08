@@ -15005,7 +15005,7 @@ mod tests {
         // Long enough to be certain it spans several fragments at any MTU the
         // radio might negotiate — the single-fragment case cannot show the bug.
         let (_hex, peer) = stranger();
-        let dm = MeshDm::new("x", &"a horse walked in ".repeat(200), None, now_secs());
+        let dm = MeshDm::new("x", "a horse walked in ".repeat(200), None, now_secs());
         let sealed = seal_dm(
             &parse_pubkey(&peer).unwrap(),
             &rt.ui.identity_keys().unwrap(),
