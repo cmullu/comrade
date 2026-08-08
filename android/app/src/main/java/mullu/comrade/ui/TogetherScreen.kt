@@ -47,7 +47,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFramePlayerOptions
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
+import org.webrtc.RendererCommon
+import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoTrack
 import mullu.comrade.R
+import mullu.comrade.call.CallManager
 import mullu.comrade.together.LibraryResolver
 import mullu.comrade.together.MediaLibraryAccess
 import mullu.comrade.together.MediaSessionAccess
@@ -349,6 +353,40 @@ private fun FollowWhatIsPlaying(
 }
 
 /**
+ * A `VideoTrack` on screen, for a streamed session (`docs/TOGETHER.md` §15).
+ *
+ * Deliberately a much plainer thing than the call screen's renderer: there is no
+ * mirroring (nobody is looking at themselves), no picture-in-picture z-order and
+ * no letterbox decision, because the sleeve around this already carries the
+ * aspect ratio. What it keeps is the part that is not optional — `release()` on
+ * disposal, and detaching the sink before that, since a renderer left attached
+ * to a live track is a native buffer nobody frees.
+ */
+@Composable
+private fun StreamRenderer(track: VideoTrack?, modifier: Modifier = Modifier) {
+    val egl = CallManager.eglBaseContext
+    if (egl == null) {
+        // No WebRTC on this device: an empty sleeve is honest, where a black
+        // rectangle would look like a picture that failed to arrive.
+        return
+    }
+    val context = LocalContext.current
+    val renderer = remember {
+        SurfaceViewRenderer(context).apply {
+            init(egl, null)
+            setEnableHardwareScaler(true)
+            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+        }
+    }
+    DisposableEffect(renderer) { onDispose { renderer.release() } }
+    DisposableEffect(track, renderer) {
+        track?.addSink(renderer)
+        onDispose { track?.removeSink(renderer) }
+    }
+    AndroidView(factory = { renderer }, modifier = modifier.fillMaxSize())
+}
+
+/**
  * The YouTube embed, hosted in our own window.
  *
  * **The standard player, with its controls and its ads, and that is a term of
@@ -464,6 +502,14 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
     ) {
         val video = s.picture as? TogetherDecisions.Picture.Video
         when {
+            // Streaming takes the player's only output surface, so the sender
+            // cannot also watch a SurfaceView — they watch the very track the
+            // other person receives. One picture path instead of two, and the
+            // same thing the call screen does with local camera video.
+            s.streaming -> {
+                val outgoing by TogetherManager.localVideo.collectAsState()
+                StreamRenderer(outgoing)
+            }
             // The embed draws itself, controls and all, inside the same sleeve
             // the file path uses — so a video has one owner of the aspect ratio
             // whichever player is behind it.

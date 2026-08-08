@@ -1727,24 +1727,65 @@ belongs, and it stays a decision made once per session (§14).
 
 ### Built so far
 
-The audio path, and nothing that carries it yet. `PlaybackCapture` captures this
-app's own playback and injects it into WebRTC's record buffer; `PcmRing` (9
-tests) is the buffer between the two threads; `PcmMix` (10 tests) is the mixing
-and the saturation; `TogetherManager.micEnabled` / `toggleMic` and the icon in
-`TogetherScreen` are the control. All of it type-checks against the real AAR and
-none of it has run.
+**The audio device module is installed**, on the owner's instruction, and the
+argument for it being safe is a property rather than a hope. `CallManager`'s
+factory now builds a `JavaAudioDeviceModule` explicitly, with every option set
+to the value the implicit one already used — `VOICE_COMMUNICATION`, hardware
+echo canceller and noise suppressor where the device has them — spelled out so a
+later edit has to *decide* to change how a call captures rather than doing it by
+omission. The one addition is [`AudioInjection`], a process-wide router that
+**returns the buffer untouched when no session has installed a capture**. A
+device that never opens a streamed session therefore records exactly what it
+recorded before.
 
-**Deliberately not wired**: the `JavaAudioDeviceModule` has to be installed on
-`PeerConnectionFactory`, which is **shared with calls**, so it changes how every
-call captures — echo canceller, noise suppressor, source, sample rate. That is
-the area `.claude/rules/android.md` names as the most bug-prone in the repo, and
-it is a change to make deliberately rather than as a side effect. Until then the
-component is complete and inert, and `streaming` is never true, so the mic icon
-never draws.
+**One consequence to state rather than let someone find.** The injected audio
+rides the *record* path, so sending the sound of what you are playing needs the
+`RECORD_AUDIO` grant **even with the microphone off** — a permission prompt for
+a feature that is not about the microphone. The UI owes the user that sentence.
+
+**The video path is finished up to the wire.** `PlayerVideoCapturer` is the
+joint between a `MediaPlayer`, which draws into a `Surface`, and WebRTC, which
+takes frames from a `VideoCapturer`: a `SurfaceTextureHelper` owns the texture,
+the player decodes into it, and every frame goes straight to the capturer
+observer. There is no capture loop — the decoder's own cadence *is* the frame
+rate, and a paused film simply stops producing frames. `isScreencast` is false
+on both the capturer and the source, deliberately: WebRTC degrades a screencast's
+frame rate and keeps its resolution, which for motion video is backwards and
+produces a sharp slideshow.
+
+The consequence is that **the sender cannot watch the surface any more**, since
+a `MediaPlayer` has one output. They watch the outgoing `VideoTrack` instead —
+the same one the other person receives — rendered by a `SurfaceViewRenderer`
+exactly as the call screen renders local camera video. One picture path rather
+than two, and it is why `TogetherManager.localVideo` exists.
+
+`MediaPlayer` reports its dimensions only after opening the file, so capture
+starts at 1280×720 and `onVideoSize` corrects it. Without that the whole session
+is scaled to the guess.
+
+The rest: `PcmRing` (9 tests) is the buffer between capture and encoder,
+`PcmMix` (10 tests) the mixing and the saturation, `micEnabled`/`toggleMic` and
+the icon the control.
 
 ### Not built
 
-The leader's video path, a media `PeerConnection` alongside the transfer's data
-one, the follower's `SessionPlayer` over a remote track, the factory wiring
-above, and the desktop half — where receiving is a `srcObject` and sending is
-not.
+**The transport**, which is now the whole of what is missing on Android: a
+`PeerConnection` carrying these tracks, and the negotiation that sets it up.
+There is a neat route worth taking rather than a new wire format — **the SDP is
+the intent.** The file handover already negotiates a connection between exactly
+these two devices over the session envelope (`ShareSignal::Transport` carries
+`TransferSignal`'s offer/answer/ICE, which are generic), so a stream can ride
+the same exchange with audio and video m-lines where the data channel would have
+been, and the receiving side can tell which it got by looking. That needs
+`FileTransfer` split along a seam it does not currently have, and it needs the
+*asking* side to say which it wants — which is the one thing the wire cannot
+express today.
+
+Also not built: the follower's `SessionPlayer` over a remote track, and the
+desktop half, where receiving is a `srcObject` and sending is not.
+
+**Nothing in this section has run.** It type-checks against the real AAR, and
+`streaming` is never set true by any user-reachable path, so the renderer and
+the mic icon do not draw yet. The audio device module change, by contrast, *is*
+live for every call the moment this ships — which is the one part of §15 that
+wants a device before it is trusted.

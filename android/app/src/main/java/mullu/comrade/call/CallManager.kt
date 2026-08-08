@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import mullu.comrade.ComradeCore
+import mullu.comrade.together.AudioInjection
 import mullu.comrade.voice.MicHolder
 import mullu.comrade.voice.WakeWordService
 import org.webrtc.AudioSource
@@ -51,6 +52,7 @@ import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import org.webrtc.audio.JavaAudioDeviceModule
 import uniffi.comrade_core.CallMediaKind
 import uniffi.comrade_core.CallSignal
 import uniffi.comrade_core.HangupReason
@@ -2030,6 +2032,42 @@ object CallManager {
      * on emulators and unusual devices, so this is a real path, not a
      * defensive flourish.
      */
+    /**
+     * The audio device module, built explicitly so a watch-together session can
+     * send the sound of what it is playing (`docs/TOGETHER.md` §15).
+     *
+     * **This is a change to how every call captures, so it is worth being exact
+     * about what it does and does not alter.** Without it the factory builds its
+     * own `JavaAudioDeviceModule` with these same defaults; the only difference
+     * here is that ours carries [AudioInjection]. Every option below is set to
+     * the value that module already uses, spelled out rather than inherited, so
+     * that a future edit has to *decide* to change a call's capture rather than
+     * doing it by leaving something out:
+     *
+     *  * `VOICE_COMMUNICATION` as the source, which is what turns on the
+     *    platform's voice path — the one a call wants and a recorder does not.
+     *  * Hardware acoustic echo canceller and noise suppressor where the device
+     *    has them, which is the difference between a speakerphone call being
+     *    usable and being a howl.
+     *
+     * [AudioInjection] is inert until a streamed session installs a capture on
+     * it, and returns the buffer untouched when nothing has — so a call on a
+     * device that never opens a session is bit-for-bit what it was.
+     *
+     * **One consequence to state rather than discover:** the injected audio
+     * rides the *record* path, so sending what you are playing needs the
+     * `RECORD_AUDIO` grant even with the microphone switched off. That is a
+     * permission prompt for a feature that is not about the microphone, and the
+     * UI owes the user that sentence.
+     */
+    private fun buildAudioDeviceModule(app: Context): JavaAudioDeviceModule =
+        JavaAudioDeviceModule.builder(app)
+            .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+            .setUseHardwareAcousticEchoCanceler(JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported())
+            .setUseHardwareNoiseSuppressor(JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported())
+            .setAudioBufferCallback(AudioInjection)
+            .createAudioDeviceModule()
+
     private fun ensureFactory(context: Context) = synchronized(factoryLock) {
         if (factory != null) return@synchronized
         val app = context.applicationContext
@@ -2042,6 +2080,7 @@ object CallManager {
             val egl = EglBase.create()
             eglBase = egl
             factory = PeerConnectionFactory.builder()
+                .setAudioDeviceModule(buildAudioDeviceModule(app))
                 .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
                 .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
                 .createPeerConnectionFactory()

@@ -173,6 +173,24 @@ object TogetherManager {
      */
     private var capture: PlaybackCapture? = null
 
+    /** The picture of what we are playing, on its way out. Null unless streaming. */
+    private var videoCapturer: PlayerVideoCapturer? = null
+    private var videoSource: org.webrtc.VideoSource? = null
+    private var surfaceHelper: org.webrtc.SurfaceTextureHelper? = null
+
+    private val _localVideo = MutableStateFlow<org.webrtc.VideoTrack?>(null)
+
+    /**
+     * The sender's own outgoing picture, for the sender to watch.
+     *
+     * A `MediaPlayer` decodes into exactly one surface, and a streamed session
+     * gives that surface to [PlayerVideoCapturer] — so the sender cannot also
+     * point it at a `SurfaceView`. They render *this* instead, the same track
+     * the other person receives, exactly as the call screen renders local camera
+     * video. One picture path rather than two.
+     */
+    val localVideo: StateFlow<org.webrtc.VideoTrack?> = _localVideo.asStateFlow()
+
     private val _micEnabled = MutableStateFlow(false)
 
     /**
@@ -839,6 +857,13 @@ object TogetherManager {
 
             override fun onVideoSize(width: Int, height: Int) {
                 refreshLive(picture = TogetherDecisions.pictureOf(width, height))
+                // The capture starts at a guess, because `MediaPlayer` only
+                // knows its dimensions once the file is open. This is the
+                // correction, and without it the outgoing picture is scaled to
+                // whatever the guess was for the whole session.
+                if (width > 0 && height > 0) {
+                    videoCapturer?.changeCaptureFormat(width, height, STREAM_FPS)
+                }
             }
         })
         feed(p)
@@ -897,6 +922,91 @@ object TogetherManager {
         // before there is anywhere to draw it, exactly as a file session exists
         // before the surface arrives.
         startPolling()
+    }
+
+    /**
+     * Start sending the picture and the sound of what this device is playing.
+     *
+     * `docs/TOGETHER.md` §15. The third answer to §9a's question — after *find
+     * your own copy* and *take mine* — and the one that works when the other
+     * person will never hold the file.
+     *
+     * Two things are set up and they are independent. The **picture**:
+     * [PlayerVideoCapturer] takes the surface the player was decoding into, its
+     * frames become a `VideoTrack`, and the sender watches that track rather
+     * than the raw surface (see [localVideo]). The **sound**: [PlaybackCapture]
+     * records this app's own playback and [AudioInjection] routes it into
+     * WebRTC's record buffer in place of, or mixed with, the microphone.
+     *
+     * @param projection consent from `MediaProjectionManager.createScreenCaptureIntent`,
+     *   needed for the audio half — capturing even *our own* playback requires
+     *   one. Null starts the picture without the sound, which is a real state
+     *   rather than a failure: someone who declines the dialog should still be
+     *   able to show what they are watching.
+     * @return whether the picture started. The sound is best-effort and
+     *   [PlaybackCapture.start] says so on its own.
+     */
+    fun startStreaming(context: Context, projection: android.media.projection.MediaProjection?): Boolean {
+        appContext = context.applicationContext
+        val ctx = appContext ?: return false
+        val player = this.player as? TogetherPlayer ?: return false
+        val factory = mullu.comrade.call.CallManager.sharedFactory(ctx) ?: return false
+        val egl = mullu.comrade.call.CallManager.eglBaseContext ?: return false
+        if (videoCapturer != null) return true
+
+        val helper = org.webrtc.SurfaceTextureHelper.create("TogetherCapture", egl)
+        // `isScreencast = false` on the source as well as the capturer: this is
+        // motion video, so it must degrade resolution and hold the frame rate
+        // rather than the other way round.
+        val source = factory.createVideoSource(false)
+        val capturer = PlayerVideoCapturer()
+        capturer.initialize(helper, ctx, source.capturerObserver)
+        // A guess, corrected by `onVideoSize` as soon as the decoder reports —
+        // which is why the listener forwards it.
+        capturer.startCapture(1280, 720, STREAM_FPS)
+        val surface = capturer.outputSurface
+        if (surface == null) {
+            runCatching { capturer.dispose() }
+            runCatching { helper.dispose() }
+            runCatching { source.dispose() }
+            return false
+        }
+        // The player stops drawing to the screen and starts drawing to the
+        // encoder. The sender sees the same frames back through [localVideo].
+        player.attachSurface(surface)
+
+        surfaceHelper = helper
+        videoSource = source
+        videoCapturer = capturer
+        _localVideo.value = factory.createVideoTrack(STREAM_VIDEO_ID, source).apply { setEnabled(true) }
+
+        if (projection != null) {
+            val pc = PlaybackCapture()
+            pc.micEnabled = _micEnabled.value
+            if (pc.start(projection)) {
+                pc.injecting = true
+                capture = pc
+                AudioInjection.install(pc)
+            }
+        }
+        refreshLive(streaming = true)
+        return true
+    }
+
+    /** Tear the outgoing picture down. Safe to call twice, and from any thread. */
+    private fun stopVideoCapture() {
+        // The player first: a decoder still drawing into a surface whose
+        // SurfaceTexture has gone is the use-after-free in the media server
+        // that `attachSurface(null)` exists to prevent.
+        (player as? TogetherPlayer)?.attachSurface(null)
+        _localVideo.value?.let { runCatching { it.dispose() } }
+        _localVideo.value = null
+        videoCapturer?.let { runCatching { it.dispose() } }
+        videoCapturer = null
+        videoSource?.let { runCatching { it.dispose() } }
+        videoSource = null
+        surfaceHelper?.let { runCatching { it.dispose() } }
+        surfaceHelper = null
     }
 
     /**
@@ -1025,6 +1135,7 @@ object TogetherManager {
 
     private fun refreshLive(
         playing: Boolean? = null,
+        streaming: Boolean? = null,
         positionMs: Long? = null,
         /**
          * Only an embed passes this.
@@ -1046,6 +1157,7 @@ object TogetherManager {
         val live = _state.value as? UiState.Live ?: return
         _state.value = live.copy(
             playing = playing ?: live.playing,
+            streaming = streaming ?: live.streaming,
             positionMs = positionMs ?: live.positionMs,
             durationMs = durationMs ?: live.durationMs,
             status = status ?: live.status,
@@ -1065,9 +1177,15 @@ object TogetherManager {
         // The capture holds an `AudioRecord` and a thread; a session ending
         // without releasing it leaves both running against a projection the
         // user thinks they have finished with.
+        //
+        // Uninstalled from the process-wide module **first**: a stale capture
+        // left routed there would go on mixing a released player's audio into
+        // whatever call came next.
+        AudioInjection.install(null)
         capture?.stop()
         capture = null
         _micEnabled.value = false
+        stopVideoCapture()
         wanted = null
         wantedMs = 0
         wantedVideoId = null
@@ -1144,4 +1262,17 @@ object TogetherManager {
     const val SCHEDULE_AHEAD_MS: Long = 80
 
     private const val TAG = "TogetherManager"
+
+    /** Track id for the outgoing picture of a streamed session. */
+    private const val STREAM_VIDEO_ID = "comrade_together_video"
+
+    /**
+     * The frame rate the capture is *configured* at, not one it enforces.
+     *
+     * Nothing here polls: frames arrive when the decoder draws them, so a
+     * 24 fps film produces 24 fps whatever this says. It is the hint WebRTC's
+     * encoder budgets against, and 30 covers the common cases without asking
+     * for headroom a phone would spend.
+     */
+    private const val STREAM_FPS = 30
 }
