@@ -181,12 +181,23 @@ class YoutubeSessionPlayer(
             listener?.onStateChanged(playhead.estimateMs(now), isPlaying)
         }
 
+        /**
+         * Reported as a *kind* rather than a sentence.
+         *
+         * It used to hand up prose, which meant the manager had nothing to
+         * branch on and the screen had nothing to offer — so a video its owner
+         * simply does not allow outside YouTube (the overwhelmingly common
+         * case, and the one whose panel reads "This video is unavailable") got
+         * the same silence as a genuine playback fault. The words are
+         * `res/values/strings.xml`'s, chosen from
+         * [TogetherDecisions.embedFailure], the same division [stateName] makes.
+         */
         override fun onError(
             youTubePlayer: YouTubePlayer,
             error: PlayerConstants.PlayerError,
         ) {
             Log.w(TAG, "embed error: $error")
-            listener?.onError("YouTube couldn't play this here.")
+            listener?.onError(errorName(error))
         }
     }
 
@@ -308,6 +319,23 @@ class YoutubeSessionPlayer(
          * function takes text: `TogetherDecisions` has no third-party imports,
          * and that is what lets the JVM lane run it with no SDK.
          */
+        /**
+         * The library's error enum, flattened to the strings
+         * [TogetherDecisions.embedFailure] takes.
+         *
+         * `VIDEO_NOT_PLAYABLE_IN_EMBEDDED_PLAYER` is the one that matters: it
+         * is what the IFrame player's own 101/150 becomes, and it is what is
+         * behind the "This video is unavailable" panel almost every time — the
+         * video plays perfectly well, just not here. Everything else is folded
+         * together on purpose, because the next step for all of it is the same
+         * and inventing distinctions the person cannot act on is noise.
+         */
+        fun errorName(error: PlayerConstants.PlayerError): String = when (error) {
+            PlayerConstants.PlayerError.VIDEO_NOT_PLAYABLE_IN_EMBEDDED_PLAYER -> "not_embeddable"
+            PlayerConstants.PlayerError.VIDEO_NOT_FOUND -> "video_not_found"
+            else -> "unknown"
+        }
+
         fun stateName(state: PlayerConstants.PlayerState): String = when (state) {
             PlayerConstants.PlayerState.PLAYING -> "playing"
             PlayerConstants.PlayerState.PAUSED -> "paused"

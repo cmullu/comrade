@@ -1085,6 +1085,56 @@ is small; the content problem is the real constraint:
 >   The library *list* has both keys and draws covers on every version; only the
 >   player's sleeve is affected.
 
+> **Together, 2026-08-08 (later the same day) — the pair became the session.**
+> `docs/TOGETHER.md` §16. Six things, and the first is a plain bug rather than a
+> design change: tapping **Join** on an invitation to a local file opened the
+> document picker and asked the person to find their own copy of the thing the
+> invitation exists because they do not have. `TogetherDecisions.joinAction`
+> (`android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt`) now
+> answers that with their copy over the session's own connection, playing as it
+> lands (§12), and demotes the picker to "I have my own copy".
+>
+> The rest: the who-with sheet is asked once per session rather than once per
+> track (`TogetherManager.pairing`, `TogetherDecisions.startStep` /
+> `continuesSession`); either side may put something on, with a confirmation
+> naming the other person when it interrupts theirs; previous and next over the
+> list a track was picked out of (`TogetherDecisions.Queue`); a microphone in
+> every mode rather than only a streamed one, over a voice-only
+> `StreamTransfer` connection whose track is attached at negotiation time on
+> both sides; and the tab now uses `colorScheme` instead of its own gradient.
+> `TogetherDecisions` is 91 JVM tests, up from 75.
+>
+> Five gaps this leaves:
+>
+> - **Replacing content is an `End` and a `Start` on the wire, and core drops an
+>   inbound `Start` while a session exists** (`runtime.rs`,
+>   `dispatch_together`). If the `End` is lost or overtaken, the follower is left
+>   idle until invited again. That is `together_start`'s existing single-session
+>   rule rather than something this introduced, and closing it properly means a
+>   core signal that replaces content in place — not attempted here.
+> - **The self-end latch is a counter, not a ledger.** `TogetherManager`
+>   swallows the `TogetherEnded { by_peer: false }` its own `together_end`
+>   raises, bounded by `SELF_END_WINDOW_MS` so a `together_end` that emitted
+>   nothing (the session had already expired) cannot leave it armed. A session-id
+>   guard would be exact; it is unnecessary because core already filters an `End`
+>   for a session it is not in, and that is the only thing making the counter
+>   sufficient. If that filter ever moves, this needs to move with it.
+> - **The microphone cannot join a connection that is already carrying a
+>   picture.** Nothing renegotiates — deliberately, since a renegotiation over
+>   relayed signalling is a stall mid-film — so a permission granted after a
+>   stream is flowing leaves the voice off until the next thing is played. The
+>   screen says so (`together_mic_unavailable`) rather than offering a dead
+>   button.
+> - **A voice-only connection is negotiated by whoever presses the microphone
+>   first.** Both pressing within the same round trip is glare, and there is no
+>   tiebreak: `StreamTransfer.offer` ends its own session on the way in, so the
+>   two offers cross. Unlikely rather than impossible, and untested — there is
+>   still no test in this repo that runs a `PeerConnection` between two devices.
+> - **None of §16 exists on desktop or in `app/`.** The pairing, the queue, the
+>   transport row and the embed-refusal copy are Android's alone; `desktop/ui`
+>   still starts a session per thing played. Recorded rather than implied,
+>   because the shared-decision convention makes silence read as agreement.
+
 ---
 
 ## Appendix — Review coverage

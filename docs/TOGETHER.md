@@ -1983,3 +1983,130 @@ the real Material3, which is what caught this screen's API mistakes before a
 push. It checks types and nothing else — **how it looks is still unverified by
 anything but a device**, and the 🫂 glyph in particular is hand-authored path
 data that no lane here can render.
+
+## 16. The pair is the session, not the track
+
+Built on Android, 2026-08-08. Desktop does not have it.
+
+Until this, the unit of the whole feature was *one thing, played with one
+person*. Choosing a track and choosing a friend were one gesture, so every next
+song asked again and sent the other side a fresh invitation — a shape that is
+exactly right for "watch this film with me" and exactly wrong for the thing the
+Together tab mostly is, which is a music player. Nobody picks a friend once per
+song.
+
+So the **pairing** is now the session and the content is what passes through it.
+`TogetherManager.pairing` holds it, `TogetherDecisions.startStep` reads it, and
+the who-with sheet appears when there is nobody yet and not again.
+
+**None of this is a protocol change, and the reason is worth stating because it
+looks like one.** `together_start` refuses while a session exists
+(`runtime.rs`), so putting a second track on genuinely is an `End` and a `Start`
+on the wire, exactly as before. What makes it one evening rather than two is
+that both sides keep the pairing across it:
+
+- the side changing content keeps it because it never left
+  (`beginSession`), and swallows the `TogetherEnded { by_peer: false }` its own
+  `together_end` raises — that event reaches the frontend through the event
+  channel and therefore lands *after* the `together_start` that replaced it, so
+  acting on it would tear down the session that is already running;
+- the receiving side keeps it for `PAIRING_GRACE_MS` and treats the next
+  invitation from the same person as a continuation
+  (`TogetherDecisions.continuesSession`), which is what stops the follower being
+  asked once per track.
+
+Two things make that safe rather than merely convenient. Core drops an inbound
+`Start` while a session exists and ignores an `End` whose session id is not the
+one it is in, so a *stale peer* end cannot reach the frontend at all and only
+our own can — which is why one counter, and not a session-id ledger, is enough
+in `TogetherManager`. And `continuesSession` excludes `stream` content on
+purpose: joining a stream fetches from a host the other person named, which §11a
+already refuses to do unasked, and a pairing is agreement to listen together
+rather than agreement to fetch from wherever they point next.
+
+**The known cost**, recorded rather than discovered: if the `End` is lost or
+overtaken, core drops the `Start` that follows it and the follower is left idle
+until they are invited again. That is `together_start`'s existing single-session
+rule, not something this added, and closing it properly means a core signal that
+replaces content in place.
+
+### Either of you may put something on
+
+The follower's transport was never read-only — commands are ordered by a Lamport
+counter and neither side is privileged — but *choosing what plays* used to be the
+leader's alone, because it was the same gesture as choosing a person. Now both
+can, and the one that interrupts somebody gets asked first:
+`StartStep.ConfirmTakeover` carries the other person's name into the dialog. The
+leader replacing their own track is deliberately not a question, because a dialog
+on every press of next is what would make a queue unusable.
+
+### Previous and next
+
+`TogetherDecisions.Queue` is the list a track was picked out of — the library as
+the search field had narrowed it, which is what the person was looking at when
+they chose. Sources that are not a list get none, and the next button is drawn
+and disabled rather than absent: a control that appears and disappears under the
+thumb is worse than one that is visibly unavailable. Previous is never disabled,
+because `backStep` restarts the current track when there is nothing behind it —
+and restarting goes through `setState`, so the other person follows it, while
+moving to the previous track replaces the content like any other change.
+
+### Talking over it
+
+The microphone is now offered in **every** mode rather than only in a streamed
+one. The old argument — that in the other modes no audio of ours goes anywhere —
+was a fact about the wire and beside the point for the person: listening to an
+album together with no way to say "this bit" is a worse version of listening
+alone.
+
+What differs is only what the voice rides on. A streamed session already carries
+the film's own sound on its outgoing track and `PlaybackCapture.micEnabled`
+decides whether the voice is summed into it (§15, unchanged). Everything else
+opens a voice-only `PeerConnection` through `StreamTransfer` — no new wire type,
+because "the SDP is the intent" already covers an offer with no armed transfer,
+and its m-lines say the rest.
+
+**The track goes on at negotiation time and never afterwards, on both sides.**
+`StreamTransfer.localAudio` is what the *answering* side adds before it answers,
+so once a connection exists both microphones are on it and muting is
+`setEnabled` — the same arrangement a call uses. Nothing here renegotiates, and
+this is why it does not have to: a mid-session renegotiation over a relayed
+signalling path is a stall in the middle of a film.
+
+That leaves one honest gap, and the screen says so rather than offering a button
+that does nothing: if the permission is granted only *after* a picture is already
+arriving on that connection, the microphone cannot join it, because renegotiating
+would take the picture away to add a microphone.
+
+Off by default in every mode. A session that opened with a live microphone would
+have decided something about a room it cannot see.
+
+### Joining no longer opens a file picker
+
+The bug this replaced was the plainest one in the feature: tapping **Join** on an
+invitation to a local file opened the document picker and asked the person to
+find their own copy — of the thing the invitation exists *because* they do not
+have. `TogetherDecisions.joinAction` is the rule now, and for a local file the
+answer is their copy over the session's own connection, playing as it lands
+(§12). The picker is the second answer, offered as "I have my own copy" to
+whoever does have the file and would rather not spend the bytes.
+
+### The tab stopped looking like a different app
+
+It painted its own dark-blue gradient and its own five colours, on the argument
+that a picture wants a dark chrome around it whatever the system theme says.
+True of a film — and this is a bottom-nav tab sitting next to four screens that
+do follow the theme, so it read as a different app and ignored Material You.
+Every colour on it is a `colorScheme` token now.
+
+### When YouTube refuses
+
+The IFrame player's error reached logcat and nowhere else, so a video its owner
+does not allow outside YouTube left the session sitting under YouTube's own
+"This video is unavailable" panel, still saying it was waiting for the other
+person to open something that was never going to open. The panel is theirs and
+§11a is why it may not be replaced or hidden — but the session's answer
+underneath it is ours: `TogetherDecisions.embedFailure` picks the sentence, and
+`watchUrl` offers the way over there for the common case. That URL is built only
+from something that is actually an id, because the string arrived over the wire
+and ends up in an `Intent`.
