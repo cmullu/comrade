@@ -23,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -551,6 +552,27 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
             val ceiling = if (s.durationMs > 0) s.durationMs else Long.MAX_VALUE
             val target = (s.positionMs + delta).coerceIn(0L, ceiling)
             TogetherManager.setState(target, s.playing)
+        }
+        // The microphone, and only where it means something: a streamed session
+        // carries one audio track that the sender's voice shares with what they
+        // are playing (docs/TOGETHER.md §15). In every other mode there is no
+        // audio of ours going anywhere, and a control that toggles nothing is
+        // worse than no control — the same rule the library button follows.
+        if (s.streaming) {
+            val micOn by TogetherManager.micEnabled.collectAsState()
+            IconButton(onClick = { TogetherManager.toggleMic() }) {
+                Icon(
+                    MicIcon,
+                    contentDescription = stringResource(
+                        if (micOn) R.string.together_mic_off else R.string.together_mic_on,
+                    ),
+                    tint = if (micOn) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         }
         TextButton(onClick = { skip(-SKIP_MS) }) { Text("−10s") }
         Button(

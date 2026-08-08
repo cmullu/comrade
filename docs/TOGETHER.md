@@ -1663,6 +1663,53 @@ the field reads as a bug:
   clients, and for the same reason: a neutral tool and an induced one differ in
   what they are *for*, not in what they do.
 
+> **Owner decision, 2026-08-08: proceed with screen capture**, on the reasoning
+> that an app which does not want to be recorded already says so with
+> `FLAG_SECURE`, and Comrade honouring that is the platform's protection working
+> rather than being worked around. That is a sound reading and it settles the
+> *technical* question: nothing here circumvents anything, and the black frames
+> Netflix produces are the system doing its job.
+>
+> It does not settle the copyright one, which is separate and stays where this
+> section already put it — the marketing constraint above holds regardless, and
+> is the part to hold when somebody later suggests naming a service in a
+> feature list.
+
+### Talking over it, which is the actual point
+
+_Owner, 2026-08-08: "the feature is intended for users to do things together —
+we'd like a dedicated mic icon to enable or disable mic audio where users can
+talk."_
+
+This changes the shape of the audio path rather than adding to it, and it was
+worth catching before the pipe was built: a session carries **one** audio track,
+so the sender's voice and what they are playing have to arrive as one thing. The
+first cut of `PlaybackCapture` *replaced* the microphone buffer with the film's
+audio, which is exactly wrong for a feature whose point is that two people are
+watching together. It **mixes**.
+
+`PcmMix` is where that lives, and it is a separate tested file for one reason:
+two 16-bit samples do not fit in 16 bits. `-20000 + -20000` is `-40000`, which
+wraps to a large *positive* value — a full-scale sample where a loud one
+belonged, which is an audible crack on every peak, inaudible in a quiet test and
+obvious the moment two people talk over a loud scene. Every sum saturates.
+
+The control is `TogetherManager.micEnabled`, shaped after `CallManager.muted` so
+the two microphones behave alike, and **off by default**: a session that opened
+with a live microphone would have decided something about a room it cannot see.
+Off *overwrites* rather than attenuates, so nothing of the sender's room leaves
+the device. The icon is drawn only in a streamed session, because in every other
+mode there is no audio of ours going anywhere and a control that toggles nothing
+is worse than no control.
+
+**One limit that is not fixable here, and the UI says so rather than letting it
+be discovered.** With the microphone on and the sound coming out of speakers,
+the other person hears the film twice — once injected cleanly, once through the
+sender's room, a fraction of a second later. WebRTC's echo canceller does not
+help: it cancels what *it* played out, and the film goes through `MediaPlayer`,
+which it knows nothing about. Headphones are the answer, and
+`together_mic_note` is where that is said.
+
 ### What this does not replace
 
 **The handover is still the better answer whenever it can run**, and it got
@@ -1678,11 +1725,26 @@ the first two: *find your own copy*, *take mine*, and now *watch mine as I play
 it*. The session picks one and says which; `PlaybackModeDecision` is where that
 belongs, and it stays a decision made once per session (§14).
 
+### Built so far
+
+The audio path, and nothing that carries it yet. `PlaybackCapture` captures this
+app's own playback and injects it into WebRTC's record buffer; `PcmRing` (9
+tests) is the buffer between the two threads; `PcmMix` (10 tests) is the mixing
+and the saturation; `TogetherManager.micEnabled` / `toggleMic` and the icon in
+`TogetherScreen` are the control. All of it type-checks against the real AAR and
+none of it has run.
+
+**Deliberately not wired**: the `JavaAudioDeviceModule` has to be installed on
+`PeerConnectionFactory`, which is **shared with calls**, so it changes how every
+call captures — echo canceller, noise suppressor, source, sample rate. That is
+the area `.claude/rules/android.md` names as the most bug-prone in the repo, and
+it is a change to make deliberately rather than as a side effect. Until then the
+component is complete and inert, and `streaming` is never true, so the mic icon
+never draws.
+
 ### Not built
 
-All of it, beyond the feasibility check above. What is settled is the design,
-the legal boundary, and the one piece that was genuinely in doubt — the audio
-injection point exists in the dependency already pinned. What remains is the
-leader's capture, a media `PeerConnection` alongside the transfer's data one,
-the follower's `SessionPlayer` over a remote track, and the desktop half, where
-receiving is a `srcObject` and sending is not.
+The leader's video path, a media `PeerConnection` alongside the transfer's data
+one, the follower's `SessionPlayer` over a remote track, the factory wiring
+above, and the desktop half — where receiving is a `srcObject` and sending is
+not.

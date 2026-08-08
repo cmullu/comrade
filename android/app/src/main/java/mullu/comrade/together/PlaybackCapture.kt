@@ -54,6 +54,22 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * an array copy, and an underrun writes **silence** rather than blocking or
  * repeating — a late buffer is a click, a repeated one is a stutter that sounds
  * like a fault in the file.
+ *
+ * ## Talking over it
+ *
+ * A session has **one** audio track, so the sender's voice and what they are
+ * playing arrive as one thing: [micEnabled] decides whether the microphone is
+ * summed in ([PcmMix]) or overwritten. Mixing is the default shape rather than
+ * an addition, because watching something together and not being able to say
+ * anything about it is not the feature.
+ *
+ * **One honest limit, and it is not fixable in software here.** If the sender
+ * has the microphone on and is listening on speakers, the other person hears
+ * the film twice — once injected cleanly, once through the sender's room, a
+ * fraction of a second apart. WebRTC's echo canceller does not help: it cancels
+ * what *it* played out, and the film goes through `MediaPlayer`, which it knows
+ * nothing about. Headphones are the answer, and the UI should say so rather
+ * than let it be discovered.
  */
 class PlaybackCapture : JavaAudioDeviceModule.AudioBufferCallback {
 
@@ -82,13 +98,28 @@ class PlaybackCapture : JavaAudioDeviceModule.AudioBufferCallback {
     private var ring = PcmRing(0)
 
     /**
-     * Whether captured audio should replace the microphone right now.
+     * Whether what we are playing should reach the other person at all.
      *
      * Separate from [running] so a session can hold the capture open across a
      * pause without tearing down an `AudioRecord` and asking for consent again.
      */
     @Volatile
     var injecting: Boolean = false
+
+    /**
+     * Whether the sender's voice goes out **alongside** what they are playing.
+     *
+     * This is the point of the whole feature — people watch things together to
+     * talk about them — and it is why [onBuffer] mixes rather than replaces.
+     * Off means the microphone's samples are overwritten and nothing of the
+     * sender's room is sent; on means the two are summed, with saturation, into
+     * the one audio track a session has.
+     *
+     * **Off by default**, because a session that starts with an open microphone
+     * is one that has decided something about a room it cannot see.
+     */
+    @Volatile
+    var micEnabled: Boolean = false
 
     /**
      * Begin capturing this app's own playback.
@@ -232,18 +263,30 @@ class PlaybackCapture : JavaAudioDeviceModule.AudioBufferCallback {
         // like a damaged file.
         if (got == 0) return captureTimeNs
 
-        buffer.clear()
-        if (channelCount == 2) {
-            var i = 0
-            while (i + 1 < wantMono) {
-                val lo = mono[i]
-                val hi = mono[i + 1]
-                buffer.put(lo).put(hi).put(lo).put(hi)
-                i += 2
-            }
+        // Widen to whatever WebRTC asked for *before* touching its buffer, so
+        // the two are the same shape and mixing is sample-against-sample.
+        val ours = if (channelCount == 2) {
+            ByteArray(bytesRead).also { PcmMix.monoToStereo(it, mono, wantMono) }
         } else {
-            buffer.put(mono, 0, wantMono)
+            mono
         }
+
+        // The microphone's samples are already in `buffer`; read them out
+        // before overwriting, because mixing is in place.
+        val out = ByteArray(bytesRead)
+        buffer.rewind()
+        buffer.get(out, 0, minOf(bytesRead, buffer.remaining()))
+
+        if (micEnabled) {
+            // Both, summed and saturated — the sender talking over the film.
+            PcmMix.mixInto(out, ours, bytesRead)
+        } else {
+            // The film alone. Nothing of the sender's room leaves the device.
+            PcmMix.replaceInto(out, ours, bytesRead)
+        }
+
+        buffer.clear()
+        buffer.put(out, 0, bytesRead)
         buffer.rewind()
         return captureTimeNs
     }

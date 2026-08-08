@@ -101,6 +101,18 @@ object TogetherManager {
              */
             val external: Boolean = false,
             /**
+             * Whether this device is *sending* the picture and sound of what it
+             * plays, rather than both sides playing their own copy
+             * (`docs/TOGETHER.md` §15).
+             *
+             * The screen needs it for one thing the other modes have no use
+             * for: a microphone control. A streamed session carries one audio
+             * track, so the sender's voice and the film share it — and there is
+             * nothing to switch on in a session where no audio of ours is going
+             * anywhere.
+             */
+            val streaming: Boolean = false,
+            /**
              * The last measured gap between the two playheads, signed —
              * positive means this device is ahead — with the error on it and
              * when it was taken.
@@ -153,6 +165,42 @@ object TogetherManager {
 
     /** The invitation's content kind, for [PlaybackModeDecision.ownershipFor]. */
     private var invitedKind: String = ""
+
+    /**
+     * The sound of what we are playing, on its way out (`docs/TOGETHER.md` §15).
+     * Null in every session that is not streaming, which is all of them until
+     * the stream is wired.
+     */
+    private var capture: PlaybackCapture? = null
+
+    private val _micEnabled = MutableStateFlow(false)
+
+    /**
+     * Whether the sender's voice goes out alongside what they are playing.
+     *
+     * A flow rather than a plain flag because the control is a toggle on screen
+     * and has to redraw when it changes — the same shape `CallManager.muted`
+     * uses for the in-call microphone, deliberately, so the two controls behave
+     * alike.
+     *
+     * **Off by default.** A session that opened with a live microphone would
+     * have decided something about a room it cannot see.
+     */
+    val micEnabled: StateFlow<Boolean> = _micEnabled.asStateFlow()
+
+    /**
+     * Turn the sender's microphone on or off for a streamed session.
+     *
+     * Watching something together and being unable to say anything about it is
+     * not the feature, so this is the control that makes the rest of §15 worth
+     * having. It reaches [PlaybackCapture.micEnabled], which decides whether the
+     * voice is *summed* into the track or the microphone is overwritten.
+     */
+    fun toggleMic() {
+        val next = !_micEnabled.value
+        _micEnabled.value = next
+        capture?.micEnabled = next
+    }
     private var focusRequest: AudioFocusRequest? = null
 
     /**
@@ -1014,6 +1062,12 @@ object TogetherManager {
         player?.release()
         player = null
         suppressor.clear()
+        // The capture holds an `AudioRecord` and a thread; a session ending
+        // without releasing it leaves both running against a projection the
+        // user thinks they have finished with.
+        capture?.stop()
+        capture = null
+        _micEnabled.value = false
         wanted = null
         wantedMs = 0
         wantedVideoId = null
