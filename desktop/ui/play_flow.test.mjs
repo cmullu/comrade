@@ -105,10 +105,14 @@ test("a link we could not parse still gets a usable sentence", () => {
   assert.doesNotMatch(plan.message, /null|undefined/);
 });
 
-test("YouTube says it is elsewhere in the product, not impossible", () => {
+test("YouTube says it is not built yet, not that it is impossible", () => {
+  // This assertion used to require the words "phone app", which is how the
+  // wrong sentence survived: the test pinned the claim rather than checking it.
+  // "Not yet" is still the right register — core carries the invitation and the
+  // embed is a designed, unbuilt feature (§7) — but it must not name a device.
   const plan = planPlay("play_embed", { ...song, service: "youtube" });
   assert.equal(plan.kind, UNAVAILABLE);
-  assert.match(plan.message, /phone app/);
+  assert.match(plan.message, /yet/);
 });
 
 test("nothing usable asks for something usable", () => {
@@ -165,4 +169,14 @@ test("a refusal names the missing account, not a DRM lecture", () => {
   // connection, and that is fixable — so the sentence must not imply otherwise.
   const m = planPlay("open_elsewhere", { ...song, service: "spotify" }).message;
   assert.doesNotMatch(m, /won't play|can't play|DRM/i);
+});
+
+test("a refusal never sends someone to a device that cannot do it either", () => {
+  // This is the bug the assertion exists for. Desktop said "YouTube together is
+  // on the phone app, not this window yet" while Android's own sentence was
+  // "Comrade can't play YouTube here" — so the message sent people to a phone
+  // that refuses the same thing. Neither frontend has a YouTube player; core
+  // carries the invitation and nothing renders it.
+  const m = planPlay("play_embed", { ...song, service: "youtube" }).message;
+  assert.doesNotMatch(m, /phone|android|mobile|the app\b/i);
 });

@@ -127,7 +127,12 @@ export function planPlay(route, target) {
       return {
         kind: UNAVAILABLE,
         title,
-        message: "YouTube together is on the phone app, not this window yet.",
+        // Corrected 2026-08-08: this used to say "on the phone app, not this
+        // window yet", which sent people to a phone that cannot do it either —
+        // `ChatCommands.playNote` there says "Comrade can't play YouTube here".
+        // Core carries a YouTube invitation and *neither* frontend has a player
+        // for one, so the honest sentence names no device.
+        message: "Comrade can't play YouTube yet — /play a file you both have.",
       };
 
     case "nothing":
