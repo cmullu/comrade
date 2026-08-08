@@ -8378,16 +8378,38 @@ struct LocalRadios {
 }
 
 impl LocalRadios {
-    /// Seal a message once and offer it to both radios, nearest-first.
+    /// Seal a message once and put it on **both** radios.
     ///
-    /// WiFi leads when it is up: higher bandwidth, lower latency, and it
-    /// reaches everyone on the network rather than everyone in radio range.
-    /// Bluetooth is what still works with no router at all, so it is the
-    /// fallback rather than the alternative.
+    /// Not "WiFi first, Bluetooth if that fails" — that was this function's
+    /// original shape and it was wrong in the way that matters, because
+    /// [`MeshLink::publish`] returning `true` does not mean the message
+    /// arrived. It means gossipsub accepted the frame, which requires only that
+    /// *somebody* subscribes to the sealed topic — not the recipient. So a
+    /// phone with any mesh peer at all would return early and never touch
+    /// Bluetooth, and the message was gone if that peer was not the person
+    /// being written to.
     ///
-    /// One seal, two radios. Sealing per-radio would put two different
-    /// ciphertexts for one message on the air and defeat the receiver's
-    /// cross-transport dedup, so the envelope is built once here.
+    /// Two real cases made that fatal rather than theoretical. A hotspot with
+    /// client isolation lets mDNS through the AP while blocking phone-to-phone
+    /// traffic, so peers are discovered, a publish is accepted, and nothing is
+    /// carried. And any third device on the network — another Comrade, an
+    /// earlier test runtime — is enough to make the publish succeed while the
+    /// recipient is not there at all. In both, Bluetooth would have worked and
+    /// was never asked.
+    ///
+    /// This is the same error the `peer_count` indicator made: treating an
+    /// intermediate success as delivery. The rule this file now follows is that
+    /// **only a receipt proves arrival**, so both radios carry every frame and
+    /// the message stays queued until the recipient says otherwise.
+    ///
+    /// Sending twice is cheap and safe by construction: one seal means one
+    /// ciphertext, so a device hearing the frame on both radios dedups it on
+    /// envelope id and opens it once. Sealing per-radio would have produced two
+    /// ciphertexts for one message and defeated exactly that.
+    ///
+    /// Returns whether *any* radio took it — the caller uses this only to
+    /// decide whether the local path was worth trying, never as proof of
+    /// delivery.
     async fn send(
         &self,
         peer: &PublicKey,
@@ -8406,12 +8428,14 @@ impl LocalRadios {
                 return false;
             }
         };
-        if let Some(mesh) = &self.mesh {
-            if mesh.publish(&envelope, peer).await {
-                return true;
-            }
-        }
-        self.ble.enqueue(&envelope)
+        // Both, always. No `?`, no early return: a radio that cannot take the
+        // frame must not stop the other one from trying.
+        let on_mesh = match &self.mesh {
+            Some(mesh) => mesh.publish(&envelope, peer).await,
+            None => false,
+        };
+        let on_ble = self.ble.enqueue(&envelope);
+        on_mesh || on_ble
     }
 }
 
@@ -8588,10 +8612,23 @@ impl BleRouter {
             }
         };
 
-        // Relay before reassembly, and only once per packet id. A frame for
-        // someone two hops away has to move on even though we can never open
-        // it — that forwarding *is* the mesh.
-        if !self.seen.already_seen(&fragment.packet_id.to_string()) {
+        // Relay before reassembly: a frame for someone two hops away has to
+        // move on even though we can never open it — that forwarding *is* the
+        // mesh.
+        //
+        // Deduped per **fragment**, not per packet. `packet_id` is shared by
+        // every fragment of one envelope (it is also the reassembly key), so
+        // keying the flood filter on it alone meant a relay forwarded fragment
+        // 0 and then discarded 1..n as echoes of it. One-hop delivery was
+        // unaffected and looked fine; anything that had to cross a middle
+        // device arrived permanently incomplete, and only for messages too big
+        // for a single fragment — which is most of them.
+        //
+        // Still bounded: each distinct fragment is forwarded at most once per
+        // device, which is all a flood filter has to guarantee, and the TTL
+        // bounds the rest.
+        let relay_key = format!("{}:{}", fragment.packet_id, fragment.index);
+        if !self.seen.already_seen(&relay_key) {
             if let Some(onward) = fragment.relayed() {
                 self.push_outbound(std::iter::once(onward.encode()));
                 core_metrics::record(CoreMetric::BleRelayed);
@@ -14950,6 +14987,63 @@ mod tests {
         ble.set_active(true);
         assert!(ble.enqueue(&sealed), "now there is somewhere for it to go");
         assert!(!ble.drain_outbound().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_relay_forwards_every_fragment_of_a_packet_not_just_the_first() {
+        // Regression test. The flood filter was keyed on `packet_id`, which
+        // every fragment of one envelope shares — so a relay forwarded fragment
+        // 0 and then dropped 1..n as echoes of it. One-hop delivery was
+        // unaffected, which is why it looked fine; a message crossing a middle
+        // device arrived permanently incomplete, and only when it was too big
+        // for a single fragment, which is most messages.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let ble = rt.ble_router();
+        ble.set_active(true);
+
+        // Long enough to be certain it spans several fragments at any MTU the
+        // radio might negotiate — the single-fragment case cannot show the bug.
+        let (_hex, peer) = stranger();
+        let dm = MeshDm::new("x", &"a horse walked in ".repeat(200), None, now_secs());
+        let sealed = seal_dm(
+            &parse_pubkey(&peer).unwrap(),
+            &rt.ui.identity_keys().unwrap(),
+            &dm,
+            now_secs(),
+        )
+        .unwrap();
+
+        // Fragments as they would arrive at a device that is not the addressee.
+        assert!(ble.enqueue(&sealed));
+        let inbound = ble.drain_outbound();
+        assert!(
+            inbound.len() > 1,
+            "this test is meaningless unless the envelope actually fragments"
+        );
+
+        let now = now_secs();
+        for packet in &inbound {
+            ble.deliver(packet, now);
+        }
+
+        let forwarded = ble.drain_outbound();
+        assert_eq!(
+            forwarded.len(),
+            inbound.len(),
+            "every fragment must be forwarded, not just the first — the \
+             recipient cannot reassemble from one piece"
+        );
+
+        // And the filter still does its job: a second copy of the same
+        // fragments is an echo and must not go round again.
+        for packet in &inbound {
+            ble.deliver(packet, now);
+        }
+        assert!(
+            ble.drain_outbound().is_empty(),
+            "re-hearing the same fragments must not re-flood them"
+        );
     }
 
     #[tokio::test]

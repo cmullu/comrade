@@ -357,6 +357,48 @@ jobs:
       - name: cargo test -- --ignored (saathi mesh)
         run: cargo test -p comrade_core --lib saathi --locked -- --ignored --nocapture
 
+      # The same environment dependency, one layer up: two whole runtimes with
+      # no relay configured, talking over real mDNS. Lives here rather than in
+      # the gate below because it needs multicast; the Bluetooth half of that
+      # file needs nothing and does gate.
+      - name: cargo test -- --ignored (offline delivery over real mDNS)
+        run: cargo test -p comrade_ui --test offline_delivery --locked -- --ignored --nocapture
+
+  # Offline delivery: does a message actually reach the other person with no
+  # internet at all. Its own gate, not a line in the general `cargo test` job,
+  # because this is a shipped promise (README's Saathi row,
+  # docs/OFFLINE_DELIVERY.md) that has already been reported broken by a user
+  # while every other lane was green — a failure here should name itself rather
+  # than read as "some Rust test broke".
+  #
+  # Required, unlike `saathi-mesh`: nothing in these tests touches a radio, a
+  # socket or multicast. `Air` hands packets between two runtimes in-process, so
+  # a red build here is a real regression in the send path, the sealed ingress
+  # or the outbox — never the runner's network.
+  offline-delivery:
+    name: Offline delivery — no relay, no internet
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-offline-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-offline-
+
+      - name: cargo test (offline delivery, deterministic)
+        run: cargo test -p comrade_ui --test offline_delivery --locked
+
   # Supply-chain gate: RUSTSEC advisories, duplicate/banned crates, and
   # dependency license allowlist (see deny.toml).
   deny:

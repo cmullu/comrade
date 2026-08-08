@@ -256,11 +256,28 @@ it is genuine, exactly as on WiFi.
 
 It is a *local* route, alongside the WiFi mesh — the user's app-bar choice is
 "nearby before the internet", and that stays true whether nearby means this WiFi
-or Bluetooth range. `LocalRadios::send` seals once and offers the same envelope
-to WiFi first (higher bandwidth, reaches the whole network rather than the
-room) and Bluetooth second. One seal, two radios: sealing per-radio would put
-two different ciphertexts for one message on the air and defeat the receiver's
-cross-transport dedup.
+or Bluetooth range. `LocalRadios::send` seals once and puts the same envelope on
+**both** radios. One seal, two radios: sealing per-radio would put two different
+ciphertexts for one message on the air and defeat the receiver's cross-transport
+dedup.
+
+Both, not WiFi-then-Bluetooth-if-that-fails. That was the original shape and it
+was wrong in the way that matters, because `MeshLink::publish` returning `true`
+does not mean the message arrived — it means gossipsub accepted the frame, which
+requires only that *somebody* subscribes to the sealed topic, not the recipient.
+So a phone with any mesh peer at all returned early and never touched Bluetooth.
+
+Two ordinary situations made that fatal. **A hotspot with client isolation** —
+the default on many Android hotspots — lets mDNS cross the access point while
+blocking phone-to-phone traffic: peers are discovered, a publish is accepted, and
+nothing is carried. And **any unrelated third device** on the network is enough
+to make the publish succeed while the recipient is not there at all. In both,
+Bluetooth would have worked and was never asked.
+
+This is the same error the `peer_count` indicator made — treating an intermediate
+success as delivery. The rule is: **only a receipt proves arrival.** Both radios
+carry every frame, and the message stays queued until the recipient says
+otherwise.
 
 ### Not done
 
@@ -283,6 +300,44 @@ service with its own notification — deliberately not added here.
   `a_dm_with_no_relay_is_sealed_onto_the_mesh_and_stays_queued`,
   `one_message_delivered_by_both_routes_appears_once`, and
   `the_same_text_sent_twice_over_one_route_is_two_messages`.
+
+### The gate that matters: `tests/offline_delivery.rs`
+
+Everything above tests an *end* — the protocol, or the wire format. This file
+tests the **feature**: two whole `ComradeRuntime`s with no relay configured at
+all, and a message that has to arrive. It exists because every test above was
+green while a user reported that off-grid delivery did not work at all, twice
+over, and it reproduced both failures on its first run.
+
+Its own required CI job (**Offline delivery — no relay, no internet**) rather
+than a line in the general `cargo test` lane, so a regression in a shipped
+promise names itself instead of reading as "some Rust test broke".
+
+- `a_message_reaches_the_other_phone_over_bluetooth_with_no_network` — the field
+  report, start to finish: routing decision, seal, fragment, reassemble, ingress,
+  stranger gate, event.
+- `nothing_arrives_when_both_radios_are_off` — the negative control, and the
+  reason the rest is worth anything. Without it, a harness that delivered by some
+  other path would make every test above pass while the radio did nothing.
+- `a_mesh_peer_who_is_not_the_recipient_does_not_swallow_the_message` — the
+  regression test for the WiFi-first bug described under *Where BLE sits in
+  precedence*.
+- `a_message_written_out_of_range_arrives_once_the_radios_meet` — the outbox's
+  actual job, and the case where a flush with no route used to spend one of eight
+  attempts.
+- `a_phone_in_the_middle_forwards_what_it_cannot_read` — relaying, which is what
+  makes a mesh out of two links. This one found a second bug: the flood filter
+  was keyed on `packet_id`, which every fragment of one envelope shares, so a
+  relay forwarded fragment 0 and dropped the rest as echoes. One-hop delivery was
+  unaffected — which is exactly why it survived — while anything crossing a
+  middle device arrived permanently incomplete.
+- `a_message_reaches_the_other_device_on_one_wifi_with_no_relay` — `#[ignore]`d,
+  real mDNS, runs in the environment-dependent Saathi mesh job.
+
+The Bluetooth tests need no radio, no socket and no multicast: an `Air` harness
+hands packets between runtimes in-process, modelled as a graph because one BLE
+write goes out on every link at once. So they gate, and a red build there is a
+real regression rather than the runner's network.
 
 - `saathi::tests::being_seen_on_the_network_is_not_the_same_as_being_reachable`
   — the `discovered` / `deliverable` table, which is the distinction the send
