@@ -54,7 +54,14 @@ pub fn extract_upi_intents(content: &str, re: &Regex) -> Vec<UpiPaymentIntent> {
         .collect()
 }
 
-pub fn build_pay_regex() -> Result<Regex, VaultError> {
+/// The compiled `/pay` matcher.
+///
+/// Aliased so a caller can hold one — the sealed-frame ingress does, to detect
+/// payment intents in a message that arrived over a radio rather than a relay —
+/// without taking a direct dependency on `regex` just to name the type.
+pub type PayRegex = Regex;
+
+pub fn build_pay_regex() -> Result<PayRegex, VaultError> {
     Regex::new(
         r"(?i)/pay\s+(?P<amount>\d+(?:\.\d{1,2})?)\s+to\s+(?P<vpa>[a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)",
     )

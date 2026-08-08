@@ -87,6 +87,7 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import mullu.comrade.ble.BleMeshService
 import mullu.comrade.ui.ArticleIcon
 import mullu.comrade.ui.BookIcon
 import mullu.comrade.ui.BreathingScreen
@@ -551,6 +552,35 @@ private fun MainShell(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !Notifier.hasPermission(context)) {
             notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    // Bluetooth mesh: the transport that reaches somebody across the room with
+    // no router, no relay and no internet at all.
+    //
+    // Asked for once, on the way in, rather than at the moment a message needs
+    // it — unlike the media-library permission, which is asked when somebody
+    // names a song. The difference is that a granted BLE permission is what
+    // makes the radio *discoverable in advance*; asking at send time would mean
+    // the first off-grid message is the one that cannot go, since the mesh has
+    // to have been advertising and scanning for a while by then.
+    //
+    // Denied is a first-class answer: `BleMeshService.start` no-ops without the
+    // grant, the core simply never offers Bluetooth as a route, and every other
+    // transport is unaffected. Nothing here retries — Android stops showing the
+    // dialog after a refusal, so a second ask would be a prompt that silently
+    // does nothing.
+    val blePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        // Whatever the answer, re-evaluate: granted brings the radio up now
+        // rather than at the next unlock, and denied leaves it down.
+        MeshRadio.setActive(MeshStatusMonitor.status.value.active)
+    }
+    LaunchedEffect(Unit) {
+        val needed = BleMeshService.requiredPermissions().filter {
+            context.checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (needed.isNotEmpty()) blePermission.launch(needed.toTypedArray())
     }
 
     // ── Calls ─────────────────────────────────────────────────────────────────

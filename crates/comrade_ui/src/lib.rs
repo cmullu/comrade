@@ -59,15 +59,15 @@ pub use comrade_core::karya::TaskState;
 pub use runtime::play_route;
 
 pub use runtime::{
-    AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto,
-    CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime, ContactDto,
-    ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto, FoundProfileDto,
-    IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
-    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
-    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
-    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
-    TogetherShareDto, TurnServerStatusDto,
+    AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BleRouter, BridgeEvent,
+    CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime,
+    ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto,
+    FoundProfileDto, IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
+    MentionMatchDto, MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto, MetricDto,
+    OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto,
+    ReactionDto, ReadingDto, RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto,
+    TaraMessageDto, TaskDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

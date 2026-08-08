@@ -239,6 +239,29 @@ object ComradeCore {
     fun meshStatusTyped(): MeshStatus =
         ffi.meshStatus().let { MeshStatus(active = it.active, peerCount = it.peerCount.toInt()) }
 
+    // ── Bluetooth mesh (mullu.comrade.ble.BleMeshService) ────────────────────
+    //
+    // The whole seam between the radio and the core. The radio owns GATT,
+    // advertising, scanning and MTU negotiation; the core owns framing,
+    // fragmentation, reassembly, dedup, TTL and relaying. Nothing here
+    // interprets a packet — that is the point of the split.
+
+    /** Tell the core whether a BLE radio is scanning and advertising. */
+    fun bleSetActive(active: Boolean) = ffi.bleSetActive(active)
+
+    /** Report the negotiated MTU as usable payload bytes, ATT overhead removed. */
+    fun bleSetMtu(mtu: Int) = ffi.bleSetMtu(mtu.toUInt())
+
+    /**
+     * Hand one packet heard over BLE to the core. Never throws for a malformed
+     * packet: a stranger in radio range sending rubbish is an ordinary event.
+     */
+    fun bleDeliver(packet: ByteArray) = ffi.bleDeliver(packet.toList())
+
+    /** Packets the core wants transmitted, oldest first. Drains the queue. */
+    fun bleDrainOutbound(): List<ByteArray> =
+        ffi.bleDrainOutbound().map { it.toByteArray() }
+
     data class UpiIntent(val amountInr: Double, val vpa: String, val uri: String)
 
     fun extractPaymentsTyped(text: String): List<UpiIntent> = rethrowing("Extract payments") {

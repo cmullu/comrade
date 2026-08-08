@@ -2,15 +2,16 @@
 
 _Written 2026-07-29, when local-network delivery landed._
 
-Comrade has three ways to get a DM to someone:
+Comrade has four ways to get a DM to someone:
 
 | # | Route | Reaches | Needs |
 |---|---|---|---|
 | 1 | **Nostr relay** (NIP-17/59 gift wrap) | anyone, anywhere | internet |
 | 2 | **Local mesh** (`saathi` + sealed `dak` frame) | someone on the same WiFi | a shared network, no internet |
-| 3 | **Sender outbox** (`dak::outbox`) | later, by route 1 or 2 | nothing — it waits |
+| 2b | **Bluetooth mesh** (`dak::ble` + the same sealed frame) | someone in radio range | nothing at all |
+| 3 | **Sender outbox** (`dak::outbox`) | later, by any route above | nothing — it waits |
 
-Routes 1 and 2 are tried in the order the user chose — see
+Routes 1 and 2/2b are tried in the order the user chose — see
 [Precedence](#precedence) below; the default is relay first. Route 1 was all
 there was until the outbox landed, and route 2 is what this document is about.
 Route 3 is not a transport: it is the reason a message survives long enough for
@@ -192,28 +193,80 @@ That distinction matters, because "ok" typed twice in a minute is two messages,
 and both copies of it come over the same route. A transport-blind content cache
 would eat the repeat. The window is deliberately short for the same reason.
 
-## What this is not: Bluetooth
+## Route 2b: Bluetooth, with no router at all
 
-bitchat's actual mesh is **BLE** — phone-to-phone with no infrastructure at
-all, which is the case that matters at a protest, in a blackout, or on a
-mountain. This change does **not** provide that. It needs a shared IP network:
-a WiFi access point, a hotspot, or an ad-hoc network. Two phones in a field with
-no router cannot use it.
+bitchat's actual mesh is **BLE** — phone-to-phone with no infrastructure of any
+kind, which is the case that matters at a protest, in a blackout, or on a
+mountain. Route 2 above cannot do that: it needs a shared IP network, so two
+phones in a field are out of luck. Route 2b is BLE, and it is the reason the
+sealed-frame abstraction was kept transport-agnostic while only one radio used
+it.
 
-Building the BLE path means, roughly:
+Nothing in the `dak` layer changed to add it. `seal_dm`/`open_dm`, the envelope
+and the outbox never knew what carried a frame, so BLE slotted in underneath
+them exactly as designed.
 
-1. a Kotlin/Android BLE layer where each device is simultaneously GATT central
-   and peripheral (bitchat's `BLEService.swift` is ~8k lines for the iOS side),
-2. a framed binary packet format with fragmentation to ~500-byte MTUs,
-3. controlled flooding — TTL, deduplication, relay jitter, fanout subsetting —
-   which is exactly the part `docs/BITCHAT_ADOPTION.md` declined on the grounds
-   that Gossipsub already did it *for the LAN case*, and
-4. platform permission and background-execution work on both Android and iOS.
+### The split
 
-The `dak` layer above it would not change: `seal_dm`/`open_dm` and the outbox
-are transport-agnostic on purpose, so BLE would be a new route 2b rather than a
-new messaging stack. That is the reason to keep the sealed-frame abstraction
-even though only one radio uses it today.
+| | owns | tested |
+|---|---|---|
+| `comrade_core::dak::ble` | framing, fragmentation, reassembly | yes, no radio needed |
+| `comrade_ui`'s `BleRouter` | dedup, TTL, relaying, the two queues | yes |
+| `android/…/ble/BleMeshService.kt` | GATT roles, advertising, scanning, MTU | **no — needs hardware** |
+
+The seam between them is four calls (`ble_set_active`, `ble_set_mtu`,
+`ble_deliver`, `ble_drain_outbound`). Everything that decides what goes on the
+wire, what is forwarded, and what a stranger in radio range can make the process
+allocate is on the Rust side, where it runs under `cargo test`. The radio half
+is the part no CI can reach, so it is kept as thin as it can be.
+
+### Fragmentation
+
+A negotiated BLE ATT MTU gives roughly 180–500 usable bytes per write; a sealed
+envelope runs to 16 KiB. Every envelope is therefore split across numbered
+packets with a 14-byte header — `version ‖ packet_id ‖ ttl ‖ index ‖ count` —
+and rebuilt on arrival. Gossipsub did this for us on WiFi; BLE has no such
+layer.
+
+The header carries **no identity**: a listener with a radio learns that *a*
+device sent *some* frame in *n* pieces. Everything else is inside the sealed
+envelope.
+
+### Controlled flooding
+
+Every device relays what it hears — that forwarding *is* the mesh, and a device
+relays frames it can never open. Unmanaged, it is also a broadcast storm. Three
+bounds, all bitchat's:
+
+- **TTL** (7 hops), decremented on relay, dropped at zero.
+- **Dedup** on `packet_id`, so a cycle in the peer graph cannot echo.
+- **Duty-cycled scanning** rather than continuous, because a mesh that flattens
+  the battery is a mesh nobody leaves on.
+
+### Reassembly is the attack surface
+
+It is the one place anybody in radio range can make this process allocate: send
+a first fragment claiming a large `count` and never send the rest. So
+`Reassembler` is bounded in both directions — concurrent partial packets, and
+fragments per packet — and evicts by age. A rebuilt envelope is still
+unauthenticated at that layer; the MAC inside `open_dm` is what decides whether
+it is genuine, exactly as on WiFi.
+
+### Where BLE sits in precedence
+
+It is a *local* route, alongside the WiFi mesh — the user's app-bar choice is
+"nearby before the internet", and that stays true whether nearby means this WiFi
+or Bluetooth range. `LocalRadios::send` seals once and offers the same envelope
+to WiFi first (higher bandwidth, reaches the whole network rather than the
+room) and Bluetooth second. One seal, two radios: sealing per-radio would put
+two different ciphertexts for one message on the air and defeat the receiver's
+cross-transport dedup.
+
+### Not done
+
+iOS, and background execution beyond an unlocked foreground app. Android
+throttles background BLE scans hard, and going further means a foreground
+service with its own notification — deliberately not added here.
 
 ## Testing
 
@@ -237,6 +290,14 @@ even though only one radio uses it today.
 - `MeshRadioTest` (Android JVM) — the multicast lock must be a no-op rather than
   a crash when there is no context, because it hangs off the same path that
   carries every peer-count update the UI draws.
+- `dak::ble::tests` — the packet wire format, fragmentation at every MTU,
+  out-of-order and duplicate arrival, TTL exhaustion, and the hostile cases: a
+  packet claiming more fragments than the cap, an index outside its count, and
+  an attacker opening reassemblies faster than they finish.
+- `runtime::tests::a_sealed_envelope_survives_fragmentation_and_reassembly`,
+  `…::a_frame_for_someone_else_is_relayed_but_never_relayed_twice`,
+  `…::with_only_bluetooth_a_dm_still_goes_out_and_stays_queued`, and
+  `…::bluetooth_alone_makes_the_local_route_available`.
 
 **Not covered by automated tests, and this is where the hardware bugs lived:**
 two physical devices on one WiFi. The in-process test exercises the real

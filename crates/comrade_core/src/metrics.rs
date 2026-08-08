@@ -61,6 +61,19 @@ pub enum Metric {
     /// A sealed mesh frame turned out to be addressed to us and opened.
     MeshReceived,
 
+    // ── Bluetooth transport (no router at all) ──────────────────────────────
+    /// A sealed envelope was fragmented and handed to the BLE radio.
+    BleSent,
+    /// Fragments rebuilt into a complete envelope.
+    BleReassembled,
+    /// A fragment was refused or evicted — malformed, contradictory, or a
+    /// reassembly abandoned. Expected to be non-zero on a busy or hostile
+    /// radio; a climbing count next to a flat [`Self::BleReassembled`] is the
+    /// signal that something in range is misbehaving.
+    BleFragmentDropped,
+    /// A packet heard from one peer was forwarded on to others.
+    BleRelayed,
+
     // ── Ingress dedup ───────────────────────────────────────────────────────
     /// A redelivered event was dropped by a [`crate::seen::SeenSet`].
     DuplicateDropped,
@@ -89,6 +102,10 @@ impl Metric {
             Self::CourierExpired => "courier.expired",
             Self::MeshSent => "mesh.sent",
             Self::MeshReceived => "mesh.received",
+            Self::BleSent => "ble.sent",
+            Self::BleReassembled => "ble.reassembled",
+            Self::BleFragmentDropped => "ble.fragment_dropped",
+            Self::BleRelayed => "ble.relayed",
             Self::DuplicateDropped => "dedup.dropped",
             Self::SyncServed => "sync.served",
             Self::SyncReceived => "sync.received",
@@ -96,7 +113,7 @@ impl Metric {
     }
 
     /// Every metric, for exhaustive snapshots and tests.
-    pub const ALL: [Metric; 16] = [
+    pub const ALL: [Metric; 20] = [
         Self::OutboxQueued,
         Self::OutboxResent,
         Self::OutboxDelivered,
@@ -110,6 +127,10 @@ impl Metric {
         Self::CourierExpired,
         Self::MeshSent,
         Self::MeshReceived,
+        Self::BleSent,
+        Self::BleReassembled,
+        Self::BleFragmentDropped,
+        Self::BleRelayed,
         Self::DuplicateDropped,
         Self::SyncServed,
         Self::SyncReceived,

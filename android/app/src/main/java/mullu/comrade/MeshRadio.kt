@@ -3,9 +3,11 @@ package mullu.comrade
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.util.Log
+import mullu.comrade.ble.BleMeshService
 
 /**
- * Holds the WiFi multicast lock for as long as the Saathi mesh is running.
+ * Owns the platform lifecycle of both local radios: the WiFi multicast lock and
+ * the Bluetooth mesh.
  *
  * **This is what makes same-WiFi delivery work on a real phone at all.**
  * Android's WiFi driver drops multicast and broadcast frames that are not
@@ -54,15 +56,29 @@ object MeshRadio {
     val isHeld: Boolean get() = lock?.isHeld == true
 
     /**
-     * Take the lock while the mesh is running, drop it when it stops.
+     * Bring both local radios up while the mesh is running, and down when it
+     * stops.
      *
-     * Failures are logged and swallowed: no multicast lock means local
-     * discovery is degraded, which is worth a log line, but it must never take
-     * down the event pump that reports the rest of the app's connectivity.
+     * One entry point for two radios on purpose. They have the same lifetime —
+     * "there is a local route worth having" — and splitting them would mean two
+     * places to remember, of which one would eventually be forgotten.
+     *
+     * Failures are logged and swallowed: a missing multicast lock or an
+     * unavailable Bluetooth radio degrades local delivery, which is worth a log
+     * line, but it must never take down the event pump that reports the rest of
+     * the app's connectivity.
      */
     @Synchronized
     fun setActive(active: Boolean) {
         if (active) acquire() else release()
+
+        val context = appContext ?: return
+        runCatching {
+            // A no-op when Bluetooth is off, absent, or unpermitted — the core
+            // treats "no BLE route" as an ordinary state, so there is nothing
+            // to escalate here.
+            if (active) BleMeshService.start(context) else BleMeshService.stop()
+        }.onFailure { Log.w(TAG, "Bluetooth mesh lifecycle: ${it.message}") }
     }
 
     private fun acquire() {

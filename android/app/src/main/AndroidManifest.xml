@@ -8,6 +8,35 @@
     <!-- Local network access for Saathi mDNS peer discovery -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- Bluetooth mesh: the transport that needs no router at all (a protest,
+         a blackout, a mountain). Every device is simultaneously GATT peripheral
+         and central, so both ADVERTISE and SCAN are required.
+
+         `neverForLocation` is load-bearing, not boilerplate: without it Android
+         treats a BLE scan as a location request and demands ACCESS_FINE_LOCATION,
+         which for a privacy-first messenger would mean asking for the user's
+         physical location in order to send a message to somebody in the same
+         room. Comrade never derives location from a scan result, so it asserts
+         that and asks for neither location permission.
+
+         BLUETOOTH/BLUETOOTH_ADMIN are the pre-31 spellings, capped so they are
+         not requested on newer releases that replaced them. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADVERTISE"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="false" />
+
     <!-- "Hey Comrade" voice assistant: microphone + always-listening service -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

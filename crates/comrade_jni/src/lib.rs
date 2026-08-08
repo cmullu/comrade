@@ -507,6 +507,54 @@ impl Comrade {
         self.inner.blocking_read().mesh_status()
     }
 
+    // ── Bluetooth transport ─────────────────────────────────────────────────
+    //
+    // The platform owns the radio (GATT roles, advertising, scanning, MTU
+    // negotiation); the core owns everything that decides what goes on the
+    // wire. These four calls are the whole seam between them, and they are
+    // deliberately shaped so the radio never waits on the core: each takes the
+    // runtime's *read* guard only long enough to clone an `Arc`, then works on
+    // that. A scan callback blocking behind a relay round trip would stall the
+    // BLE stack itself.
+
+    /// Tell the core whether a platform BLE service is scanning and
+    /// advertising. Until this is true, Bluetooth is not offered as a route.
+    pub fn ble_set_active(&self, active: bool) {
+        self.inner.blocking_read().ble_router().set_active(active);
+    }
+
+    /// Report the negotiated MTU as **usable application payload bytes** per
+    /// write — the platform subtracts its own ATT overhead first. Fragment
+    /// sizing follows this.
+    pub fn ble_set_mtu(&self, mtu: u32) {
+        self.inner
+            .blocking_read()
+            .ble_router()
+            .set_mtu(mtu as usize);
+    }
+
+    /// Hand in one packet heard from a BLE peer.
+    ///
+    /// The core dedups it, decides whether to relay it onward (the relayed copy
+    /// appears in the next [`Comrade::ble_drain_outbound`]), and reassembles.
+    /// A completed envelope goes through the same ingress a WiFi-mesh frame
+    /// does. Infallible on purpose: a malformed packet from a stranger in radio
+    /// range is an ordinary event, not an error the radio should handle.
+    pub fn ble_deliver(&self, packet: Vec<u8>) {
+        let router = self.inner.blocking_read().ble_router();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        router.deliver(&packet, now);
+    }
+
+    /// Collect packets the core wants transmitted, oldest first, draining the
+    /// queue. Called by the radio on its own cadence.
+    pub fn ble_drain_outbound(&self) -> Vec<Vec<u8>> {
+        self.inner.blocking_read().ble_router().drain_outbound()
+    }
+
     // ── Sabha (public feed) ─────────────────────────────────────────────────
 
     pub fn fetch_sabha_timeline(&self) -> Result<Vec<ChitthiDto>, UiError> {

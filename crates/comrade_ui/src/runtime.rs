@@ -45,7 +45,7 @@ use comrade_core::command::{
 };
 use comrade_core::crypto::derive_media_key;
 use comrade_core::dak::outbox::local_message_id;
-use comrade_core::dak::{open_dm, seal_dm, MeshDm};
+use comrade_core::dak::{ble, open_dm, seal_dm, Envelope, MeshDm, Reassembler};
 use comrade_core::dak::{AttemptOutcome, Outbox, OutboxSnapshot, QueueOutcome, QueuedMessage};
 use comrade_core::dm::{
     parse_profile_share, parse_reaction, parse_receipt, ProfileShare, ReactionEnvelope, Receipt,
@@ -119,11 +119,11 @@ use comrade_core::together::{
     TogetherSignal, CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
-    build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
+    build_pay_regex, extract_upi_intents, PayRegex, VaultCallback, VaultEngine, VaultMessage,
 };
 use nostr_sdk::{EventId, Metadata, PublicKey, ToBech32};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
 use crate::{IdentityDto, UiError, UiService, UpiIntentDto, WorkspaceDto};
@@ -1712,6 +1712,11 @@ pub struct ComradeRuntime {
     /// moment a queued message becomes sendable, and a minute of clock icon
     /// after that moment reads as the feature not working.
     transport_wake: Arc<tokio::sync::Notify>,
+    /// The Bluetooth transport's policy half — always present, but inert until
+    /// a platform BLE service marks it active. Constructed unconditionally so
+    /// the FFI has something to hand packets to whether or not this build has
+    /// a radio behind it.
+    ble: Arc<BleRouter>,
     events: broadcast::Sender<BridgeEvent>,
     /// The separate, small-capacity, deliberately-lossy bus for
     /// `IncomingChitthi` only — see [`FEED_EVENT_BUS_CAPACITY`] and
@@ -1776,6 +1781,9 @@ pub struct ComradeRuntime {
     /// The task that opens sealed frames seen on the local mesh and feeds the
     /// ones addressed to us through the normal DM ingress.
     mesh_dm_task: Option<tokio::task::JoinHandle<()>>,
+    /// The same, for frames rebuilt from Bluetooth fragments. A separate task
+    /// because the two radios have independent streams, feeding one ingress.
+    ble_dm_task: Option<tokio::task::JoinHandle<()>>,
     /// Which composers hold unsent text, for the "your comrade might need you"
     /// nudge ([`comrade_core::nudge`]). Behind an `Arc` so the presence sweep —
     /// which runs on a detached [`RuntimeHandles`], not on `&self` — watches
@@ -1830,6 +1838,7 @@ impl ComradeRuntime {
             sakha: None,
             saathi: None,
             transport_wake: Arc::new(tokio::sync::Notify::new()),
+            ble: Arc::new(BleRouter::new()),
             events,
             feed_events,
             loops_spawned: false,
@@ -1852,6 +1861,7 @@ impl ComradeRuntime {
                 std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
             )),
             mesh_dm_task: None,
+            ble_dm_task: None,
             nudge_watch: Arc::new(NudgeWatch::new()),
             together: Arc::new(Mutex::new(None)),
             together_starts_seen: Arc::new(SeenSet::new(TOGETHER_START_DEDUP_CAPACITY)),
@@ -2068,6 +2078,7 @@ impl ComradeRuntime {
             self.outbox_task.take(),
             self.presence_task.take(),
             self.mesh_dm_task.take(),
+            self.ble_dm_task.take(),
         ]
         .into_iter()
         .flatten()
@@ -2220,6 +2231,7 @@ impl ComradeRuntime {
         // itself is started by `unlock_vault` (this method is sync); with no
         // engine running this is a no-op.
         self.spawn_mesh_dm_loop();
+        self.spawn_ble_dm_loop();
 
         // A pairing restored from a previous launch (see `restore_sakha_pairing`,
         // called from `unlock_vault`) should start syncing immediately too —
@@ -2297,66 +2309,71 @@ impl ComradeRuntime {
             return;
         };
 
-        let store = self.ui.store_arc();
-        let tx = self.events.clone();
-        let call_dedup = self.call_signal_dedup.clone();
-        let transport_dedup = self.transport_dedup.clone();
-        let outbox = self.outbox.clone();
-        let mesh = MeshLink {
-            engine: engine.clone(),
-            keys: keys.clone(),
+        let radios = self.mesh_link();
+        let Some(ingress) = self.sealed_ingress(vault, keys, radios) else {
+            return;
         };
-        let together_link = TogetherLink {
-            session: self.together.clone(),
-            starts_seen: self.together_starts_seen.clone(),
-        };
-        let pay_regex = build_pay_regex().ok();
 
         self.mesh_dm_task = Some(tokio::spawn(async move {
             while let Some(envelope) = engine.recv_sealed().await {
-                let now = now_secs();
-                let opened = match open_dm(&keys, &envelope, now) {
-                    // Someone else's mail — the overwhelmingly common case.
-                    Ok(None) => continue,
-                    Ok(Some(opened)) => opened,
-                    Err(e) => {
-                        tracing::debug!("mesh: a frame addressed to us failed to open: {e}");
-                        continue;
-                    }
-                };
-
-                let sender_hex = opened.sender.to_hex();
-                let content = opened.dm.content;
-                let upi_intents = pay_regex
-                    .as_ref()
-                    .map(|re| extract_upi_intents(&content, re))
-                    .unwrap_or_default();
-                let msg = VaultMessage {
-                    event_id: opened.dm.id,
-                    sender_pubkey: sender_hex,
-                    content,
-                    created_at: opened.dm.created_at,
-                    upi_intents,
-                    reply_to: opened.dm.reply_to,
-                };
-                let route = DmRoute {
-                    label: TRANSPORT_MESH,
-                    dedup: &transport_dedup,
-                    mesh: Some(&mesh),
-                    together: Some(&together_link),
-                };
-                dispatch_incoming_dm(
-                    &vault,
-                    store.as_ref(),
-                    &tx,
-                    &call_dedup,
-                    &outbox,
-                    &route,
-                    msg,
-                );
+                ingress.accept(&envelope, now_secs());
             }
             tracing::debug!("mesh: sealed-frame stream ended");
         }));
+    }
+
+    /// Consume sealed envelopes rebuilt from BLE fragments, through the same
+    /// ingress the WiFi mesh uses.
+    ///
+    /// Two radios, one door. A frame that arrived over Bluetooth is opened,
+    /// authenticated and dispatched by exactly the code that handles a frame
+    /// off the local network — which is what keeps message-request gating,
+    /// receipts, dedup and `/pay` detection from needing a third implementation
+    /// that could drift from the other two.
+    fn spawn_ble_dm_loop(&mut self) {
+        if self.ble_dm_task.is_some() {
+            return;
+        }
+        let (Some(vault), Some(keys)) = (self.vault.clone(), self.ui.identity_keys()) else {
+            return;
+        };
+        let mesh = self.mesh_link();
+        let Some(ingress) = self.sealed_ingress(vault, keys, mesh) else {
+            return;
+        };
+        let mut inbound = self.ble.subscribe_inbound();
+
+        self.ble_dm_task = Some(tokio::spawn(async move {
+            while let Some(envelope) = inbound.recv().await {
+                ingress.accept(&envelope, now_secs());
+            }
+            tracing::debug!("ble: sealed-frame stream ended");
+        }));
+    }
+
+    /// Assemble the shared sealed-frame ingress — everything an opened frame
+    /// needs, independent of which radio carried it.
+    fn sealed_ingress(
+        &self,
+        vault: Arc<VaultEngine>,
+        keys: nostr_sdk::Keys,
+        mesh: Option<LocalRadios>,
+    ) -> Option<SealedIngress> {
+        Some(SealedIngress {
+            vault,
+            keys,
+            store: self.ui.store_arc(),
+            tx: self.events.clone(),
+            call_dedup: self.call_signal_dedup.clone(),
+            transport_dedup: self.transport_dedup.clone(),
+            outbox: self.outbox.clone(),
+            mesh,
+            together: TogetherLink {
+                session: self.together.clone(),
+                starts_seen: self.together_starts_seen.clone(),
+            },
+            pay_regex: build_pay_regex().ok(),
+        })
     }
 
     /// The public-feed subscription policy (AUDIT.md COMMS-04): self plus
@@ -4665,6 +4682,18 @@ impl ComradeRuntime {
         dto
     }
 
+    /// The Bluetooth transport's policy half, for a platform BLE service to
+    /// drive.
+    ///
+    /// Handed out as an `Arc` rather than proxied method-by-method because the
+    /// radio's callbacks run on their own threads at their own cadence and must
+    /// never contend on the runtime's `RwLock` — a scanning callback blocking
+    /// behind a relay round trip would stall the radio (AUDIT P2, the same
+    /// discipline [`Self::handles`] exists for).
+    pub fn ble_router(&self) -> Arc<BleRouter> {
+        self.ble.clone()
+    }
+
     /// Snapshot of the off-grid mesh's live status — for seeding a UI's
     /// connectivity indicator before any [`BridgeEvent::MeshStatusChanged`]
     /// has arrived (e.g. right after a cold start or an activity recreation).
@@ -4992,9 +5021,12 @@ impl ComradeRuntime {
 
     /// A sealed-mail sender for the running mesh, if there is one and we have
     /// keys to seal with.
-    fn mesh_link(&self) -> Option<MeshLink> {
-        Some(MeshLink {
-            engine: self.saathi.clone()?,
+    fn mesh_link(&self) -> Option<LocalRadios> {
+        Some(LocalRadios {
+            // `None` when the Saathi engine is not up. Bluetooth alone is still
+            // a local route, so this is not a reason to have no radios at all.
+            mesh: self.saathi.clone().map(|engine| MeshLink { engine }),
+            ble: self.ble.clone(),
             keys: self.ui.identity_keys()?,
         })
     }
@@ -5029,9 +5061,9 @@ pub struct RuntimeHandles {
     /// Event bus, so a flush can report status changes (`sent` / `failed`)
     /// without going back through `ComradeRuntime`.
     events: broadcast::Sender<BridgeEvent>,
-    /// The local-network mesh, when it is running — the transport that carries
+    /// The local radios — WiFi mesh and Bluetooth — the transports that carry
     /// a DM when no relay will.
-    mesh: Option<MeshLink>,
+    mesh: Option<LocalRadios>,
     /// Whether the user has put the local network ahead of relays (the
     /// `OffGridTravel` workspace, switched from the app bar).
     prefer_local: bool,
@@ -5165,10 +5197,17 @@ impl RuntimeHandles {
     async fn reach(&self, vault: &Arc<VaultEngine>) -> TransportReach {
         TransportReach {
             relay: vault.has_connected_relay().await,
-            mesh: self
-                .mesh
-                .as_ref()
-                .is_some_and(|mesh| mesh.engine.reach().can_deliver()),
+            // Either local radio counts. "Local" is a route class, not a
+            // specific technology, and the precedence the user sets is
+            // "nearby before the internet" — which stays true whether nearby
+            // means this WiFi or Bluetooth range.
+            mesh: self.mesh.as_ref().is_some_and(|radios| {
+                radios
+                    .mesh
+                    .as_ref()
+                    .is_some_and(|mesh| mesh.engine.reach().can_deliver())
+                    || radios.ble.is_active()
+            }),
         }
     }
 
@@ -5185,17 +5224,18 @@ impl RuntimeHandles {
         reply_to: Option<&str>,
         created_at: u64,
     ) -> bool {
-        let Some(mesh) = &self.mesh else {
+        let Some(radios) = &self.mesh else {
             return false;
         };
-        mesh.send(
-            peer,
-            message_id,
-            content,
-            reply_to.map(str::to_string),
-            created_at,
-        )
-        .await
+        radios
+            .send(
+                peer,
+                message_id,
+                content,
+                reply_to.map(str::to_string),
+                created_at,
+            )
+            .await
     }
 
     /// React to one of `peer`'s messages, or take an existing reaction back.
@@ -8101,7 +8141,7 @@ fn handle_together_envelope(
 /// only ever called for accepted conversations).
 fn send_delivered_receipt(
     vault: &Arc<VaultEngine>,
-    mesh: Option<&MeshLink>,
+    mesh: Option<&LocalRadios>,
     sender_hex: &str,
     message_id: &str,
 ) {
@@ -8168,6 +8208,79 @@ fn load_or_create_device_seed(
     Ok(seed)
 }
 
+// ── The sealed-frame ingress, shared by every radio ──────────────────────────
+
+/// Everything an incoming sealed frame needs, independent of what carried it.
+///
+/// Two radios feed this — [`ComradeRuntime::spawn_mesh_dm_loop`] off WiFi and
+/// [`ComradeRuntime::spawn_ble_dm_loop`] off Bluetooth — and both hand every
+/// frame to [`Self::accept`]. That is the single most important structural
+/// decision in the offline stack, and it predates BLE: a second ingress would
+/// have meant a second copy of the message-request gating, the persistence, the
+/// receipt logic and the dedup rules, and two copies of privacy rules drift.
+struct SealedIngress {
+    vault: Arc<VaultEngine>,
+    keys: nostr_sdk::Keys,
+    store: Option<Arc<comrade_storage::EncryptedStore>>,
+    tx: broadcast::Sender<BridgeEvent>,
+    call_dedup: Arc<SeenSet>,
+    transport_dedup: Arc<SeenSet>,
+    outbox: Arc<Outbox>,
+    /// Both local radios — how a receipt answers a frame that arrived with no
+    /// internet at all. `None` leaves the receipt to a relay.
+    mesh: Option<LocalRadios>,
+    together: TogetherLink,
+    pay_regex: Option<PayRegex>,
+}
+
+impl SealedIngress {
+    /// Open a frame if it is ours, and dispatch it exactly as a relay DM.
+    ///
+    /// The overwhelmingly common outcome is "someone else's mail": every device
+    /// in range sees every frame, and one HMAC comparison against our rotating
+    /// tags rejects it. That is the design working, not an error.
+    fn accept(&self, envelope: &Envelope, now: u64) {
+        let opened = match open_dm(&self.keys, envelope, now) {
+            Ok(None) => return,
+            Ok(Some(opened)) => opened,
+            Err(e) => {
+                tracing::debug!("a frame addressed to us failed to open: {e}");
+                return;
+            }
+        };
+
+        let content = opened.dm.content;
+        let upi_intents = self
+            .pay_regex
+            .as_ref()
+            .map(|re| extract_upi_intents(&content, re))
+            .unwrap_or_default();
+        let msg = VaultMessage {
+            event_id: opened.dm.id,
+            sender_pubkey: opened.sender.to_hex(),
+            content,
+            created_at: opened.dm.created_at,
+            upi_intents,
+            reply_to: opened.dm.reply_to,
+        };
+        let route = DmRoute {
+            label: TRANSPORT_MESH,
+            dedup: &self.transport_dedup,
+            mesh: self.mesh.as_ref(),
+            together: Some(&self.together),
+        };
+        dispatch_incoming_dm(
+            &self.vault,
+            self.store.as_ref(),
+            &self.tx,
+            &self.call_dedup,
+            &self.outbox,
+            &route,
+            msg,
+        );
+    }
+}
+
 // ── Local-network delivery (see docs/OFFLINE_DELIVERY.md) ────────────────────
 
 /// A handle for putting sealed mail onto the local network.
@@ -8178,14 +8291,60 @@ fn load_or_create_device_seed(
 #[derive(Clone)]
 struct MeshLink {
     engine: Arc<SaathiEngine>,
-    keys: nostr_sdk::Keys,
 }
 
 impl MeshLink {
-    /// Seal a DM for `peer` and publish it to the local mesh. Returns whether
+    /// Publish an already-sealed envelope to the local mesh. Returns whether
     /// the mesh accepted the frame — `false` when nobody else is on the network
     /// (gossipsub has no peer to publish to), which is not an error: the
-    /// message stays queued in the outbox exactly as before.
+    /// message stays queued in the outbox exactly as before, and the caller
+    /// falls through to the next radio.
+    ///
+    /// Takes a sealed envelope rather than the message, because both radios
+    /// carry the *same* one: sealing twice would produce two different
+    /// ciphertexts for one message and defeat the receiver's dedup.
+    async fn publish(&self, envelope: &Envelope, peer: &PublicKey) -> bool {
+        match self.engine.publish_sealed(envelope).await {
+            Ok(()) => {
+                tracing::info!(peer = %peer, "DM sealed onto the local mesh");
+                true
+            }
+            Err(e) => {
+                tracing::debug!("mesh: nobody to deliver to: {e}");
+                false
+            }
+        }
+    }
+}
+
+/// Both local radios behind one handle, plus the keys to seal with.
+///
+/// Every place that falls back to "no internet, but they might be near" holds
+/// one of these rather than a specific transport — the sending path, the
+/// delivered receipt, a together signal. That is deliberate: when Bluetooth was
+/// added, a handle per radio would have meant finding every one of those sites
+/// and remembering to try the second one, and the site that got missed would be
+/// the receipt, whose absence makes the sender retry to its attempt cap.
+#[derive(Clone)]
+struct LocalRadios {
+    /// The WiFi mesh, when the Saathi engine is running.
+    mesh: Option<MeshLink>,
+    /// Bluetooth. Always present, inert until a platform radio marks it active.
+    ble: Arc<BleRouter>,
+    keys: nostr_sdk::Keys,
+}
+
+impl LocalRadios {
+    /// Seal a message once and offer it to both radios, nearest-first.
+    ///
+    /// WiFi leads when it is up: higher bandwidth, lower latency, and it
+    /// reaches everyone on the network rather than everyone in radio range.
+    /// Bluetooth is what still works with no router at all, so it is the
+    /// fallback rather than the alternative.
+    ///
+    /// One seal, two radios. Sealing per-radio would put two different
+    /// ciphertexts for one message on the air and defeat the receiver's
+    /// cross-transport dedup, so the envelope is built once here.
     async fn send(
         &self,
         peer: &PublicKey,
@@ -8198,22 +8357,269 @@ impl MeshLink {
         let envelope = match seal_dm(peer, &self.keys, &dm, created_at) {
             Ok(envelope) => envelope,
             Err(e) => {
-                // Oversize is the realistic case: couriered/mesh mail is capped
-                // at 16 KiB, and a long message simply waits for a relay.
-                tracing::debug!("mesh: could not seal a DM: {e}");
+                // Oversize is the realistic case: sealed mail is capped at
+                // 16 KiB and a long message simply waits for a relay.
+                tracing::debug!("could not seal a DM for the local radios: {e}");
                 return false;
             }
         };
-        match self.engine.publish_sealed(&envelope).await {
-            Ok(()) => {
-                tracing::info!(peer = %peer, "DM sealed onto the local mesh");
-                true
-            }
-            Err(e) => {
-                tracing::debug!("mesh: nobody to deliver to: {e}");
-                false
+        if let Some(mesh) = &self.mesh {
+            if mesh.publish(&envelope, peer).await {
+                return true;
             }
         }
+        self.ble.enqueue(&envelope)
+    }
+}
+
+// ── Bluetooth delivery: no router, no relay, no infrastructure ───────────────
+
+/// Flood-dedup capacity: packet ids we remember in order to not relay the same
+/// packet twice.
+///
+/// Sized for a crowd, not a living room — a march or a venue where a few dozen
+/// devices are each relaying — because the failure mode of forgetting too early
+/// is a packet that circulates again, which is exactly what the dedup exists to
+/// stop.
+const BLE_SEEN_CAPACITY: usize = 2048;
+
+/// How long a packet id is remembered for flood dedup.
+///
+/// Comfortably longer than a packet can plausibly still be in flight across
+/// [`comrade_core::dak::ble::DEFAULT_TTL`] hops, so the last echo of a packet
+/// dies before we would forget it and start relaying it again.
+const BLE_SEEN_TTL_SECS: u64 = 300;
+
+/// Conservative usable payload per BLE write, until the radio negotiates up.
+///
+/// The default ATT MTU is 23 bytes; every modern stack requests more, and
+/// Android commonly settles around 247. Starting here rather than at the
+/// pessimistic floor means the first message out does not get shredded into
+/// dozens of packets while the negotiation lands, and
+/// [`BleRouter::set_mtu`] corrects it the moment the platform reports a real
+/// number.
+const BLE_DEFAULT_MTU: usize = 185;
+
+/// Outbound packets held for the radio to collect.
+///
+/// The radio drains this on its own cadence, so it needs a ceiling: a phone
+/// with Bluetooth off, or out of range of everything, must not accumulate
+/// packets until the process dies. Past this the oldest go — the outbox is
+/// still holding the *message*, so a dropped packet costs a retry, not a
+/// message.
+const BLE_OUTBOUND_CAPACITY: usize = 512;
+
+/// The policy half of the Bluetooth transport: fragmentation, reassembly,
+/// controlled flooding, and the two queues the radio talks to.
+///
+/// **This is not the radio.** GATT roles, advertising, scanning and MTU
+/// negotiation live in `android/…/ble/BleMeshService.kt`; the platform calls
+/// [`Self::deliver`] with what it heard and [`Self::drain_outbound`] for what
+/// to send. Everything that decides what goes on the wire, what gets forwarded,
+/// and what a stranger with a radio can make this process allocate is here,
+/// where it can be tested without a radio at all.
+///
+/// Shared behind an `Arc` by the runtime, the send path and the FFI, so its
+/// interior is locked rather than `&mut` — the same posture
+/// [`comrade_core::dak::Outbox`] takes.
+pub struct BleRouter {
+    /// `false` until a platform BLE layer says it is scanning and advertising.
+    /// Feeds [`TransportReach`], so a build with no BLE service — desktop, the
+    /// CLI, a test — simply never routes over Bluetooth.
+    active: std::sync::atomic::AtomicBool,
+    mtu: std::sync::atomic::AtomicUsize,
+    /// Monotonic source of packet ids. Only uniqueness matters, and only
+    /// against *our own* recent packets: the id is a dedup and reassembly key,
+    /// never an identifier, and it is paired with random-per-process entropy so
+    /// two devices restarting together do not collide on `1`.
+    next_packet_id: std::sync::atomic::AtomicU64,
+    inbound: mpsc::Sender<Envelope>,
+    inbound_rx: Mutex<Option<mpsc::Receiver<Envelope>>>,
+    outbound: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    reassembler: Mutex<Reassembler>,
+    /// Packet ids already relayed. The thing that turns a set of pairwise links
+    /// into a mesh instead of a broadcast storm.
+    seen: SeenSet,
+}
+
+impl BleRouter {
+    fn new() -> Self {
+        let (inbound, inbound_rx) = mpsc::channel(128);
+        Self {
+            active: std::sync::atomic::AtomicBool::new(false),
+            mtu: std::sync::atomic::AtomicUsize::new(BLE_DEFAULT_MTU),
+            // Seeded from the process's own randomness rather than zero, so two
+            // phones that start at the same moment do not both mint packet id 1
+            // and dedup each other's first message out of existence.
+            next_packet_id: std::sync::atomic::AtomicU64::new(random_packet_seed()),
+            inbound,
+            inbound_rx: Mutex::new(Some(inbound_rx)),
+            outbound: Mutex::new(std::collections::VecDeque::new()),
+            reassembler: Mutex::new(Reassembler::new()),
+            seen: SeenSet::with_ttl(
+                BLE_SEEN_CAPACITY,
+                std::time::Duration::from_secs(BLE_SEEN_TTL_SECS),
+            ),
+        }
+    }
+
+    /// Whether Bluetooth is a route worth trying right now.
+    pub fn is_active(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Told by the platform when its BLE service starts and stops.
+    pub fn set_active(&self, active: bool) {
+        self.active
+            .store(active, std::sync::atomic::Ordering::Relaxed);
+        if !active {
+            // Nothing queued is deliverable over a radio that is off, and the
+            // outbox still holds every message, so dropping the packets keeps
+            // memory honest rather than replaying a stale burst on the next
+            // connection.
+            self.lock_outbound().clear();
+        }
+    }
+
+    /// Told by the platform after MTU negotiation, as **usable payload bytes**
+    /// per write (the platform subtracts its own ATT overhead first).
+    pub fn set_mtu(&self, mtu: usize) {
+        self.mtu.store(
+            mtu.max(ble::MIN_USABLE_MTU),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Fragment a sealed envelope and queue it for transmission.
+    ///
+    /// Returns whether it was queued: `false` means BLE is not a live route, or
+    /// the envelope is too large to fragment at the current MTU. Never blocks
+    /// on a radio — the caller's outbox is the retry mechanism, exactly as on
+    /// the WiFi path.
+    pub fn enqueue(&self, envelope: &Envelope) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        let packet_id = self
+            .next_packet_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mtu = self.mtu.load(std::sync::atomic::Ordering::Relaxed);
+        let fragments = match ble::fragment(&envelope.encode(), packet_id, ble::DEFAULT_TTL, mtu) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!("ble: could not fragment an envelope: {e}");
+                return false;
+            }
+        };
+        // Ours, so it must never come back to us as something to relay.
+        self.seen.already_seen(&packet_id.to_string());
+        self.push_outbound(fragments.iter().map(ble::Fragment::encode));
+        core_metrics::record(CoreMetric::BleSent);
+        true
+    }
+
+    /// Hand in a packet heard from a BLE peer.
+    ///
+    /// Does three things, in this order, because each bounds the next: dedup
+    /// (have we handled this packet already?), relay (pass it on, one hop
+    /// spent), and reassemble (is this the fragment that completes an
+    /// envelope?). A completed envelope goes to the shared sealed-frame
+    /// ingress — addressed to us or not, since deciding that needs keys this
+    /// layer deliberately does not have.
+    pub fn deliver(&self, packet: &[u8], now: u64) {
+        let fragment = match ble::Fragment::decode(packet) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!("ble: undecodable packet: {e}");
+                core_metrics::record(CoreMetric::BleFragmentDropped);
+                return;
+            }
+        };
+
+        // Relay before reassembly, and only once per packet id. A frame for
+        // someone two hops away has to move on even though we can never open
+        // it — that forwarding *is* the mesh.
+        if !self.seen.already_seen(&fragment.packet_id.to_string()) {
+            if let Some(onward) = fragment.relayed() {
+                self.push_outbound(std::iter::once(onward.encode()));
+                core_metrics::record(CoreMetric::BleRelayed);
+            }
+        }
+
+        let Some(bytes) = self
+            .reassembler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .accept(fragment, now)
+        else {
+            return;
+        };
+        match Envelope::decode(&bytes) {
+            Ok(envelope) => {
+                // `try_send`, not `send`: this runs on the platform's callback
+                // thread and must never block the radio. A full channel means
+                // the ingress is wedged, which is worth a log line and a
+                // dropped frame rather than a stalled BLE stack.
+                if self.inbound.try_send(envelope).is_err() {
+                    tracing::warn!("ble: ingress is full, dropping a rebuilt envelope");
+                    core_metrics::record(CoreMetric::BleFragmentDropped);
+                }
+            }
+            Err(e) => {
+                tracing::debug!("ble: rebuilt bytes were not an envelope: {e}");
+                core_metrics::record(CoreMetric::BleFragmentDropped);
+            }
+        }
+    }
+
+    /// Packets the radio should transmit, oldest first. Drains the queue.
+    pub fn drain_outbound(&self) -> Vec<Vec<u8>> {
+        self.lock_outbound().drain(..).collect()
+    }
+
+    /// The rebuilt-envelope stream, taken once by the runtime's BLE loop.
+    fn subscribe_inbound(&self) -> mpsc::Receiver<Envelope> {
+        self.inbound_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or_else(|| mpsc::channel(1).1)
+    }
+
+    /// Poison-tolerant, for [`comrade_core::dak::Outbox::lock`]'s reason: a
+    /// panic while holding this leaves a plain `VecDeque` behind, and
+    /// recovering beats turning one panic into two on a delivery path.
+    fn lock_outbound(&self) -> std::sync::MutexGuard<'_, std::collections::VecDeque<Vec<u8>>> {
+        self.outbound.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn push_outbound(&self, packets: impl Iterator<Item = Vec<u8>>) {
+        let mut queue = self.lock_outbound();
+        for packet in packets {
+            if queue.len() >= BLE_OUTBOUND_CAPACITY {
+                queue.pop_front();
+                core_metrics::record(CoreMetric::BleFragmentDropped);
+            }
+            queue.push_back(packet);
+        }
+    }
+}
+
+/// A random starting point for packet ids.
+///
+/// Only uniqueness against our own recent packets matters — the id is a dedup
+/// and reassembly key, never an identifier — but starting every device at zero
+/// would have two phones booting together mint the same first id and dedup each
+/// other's opening message out of existence. Derived from a throwaway keypair
+/// because that is the entropy source the crate already has.
+fn random_packet_seed() -> u64 {
+    let bytes = nostr_sdk::Keys::generate().public_key().to_bytes();
+    u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
+}
+
+impl Default for BleRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -8298,8 +8704,9 @@ struct DmRoute<'a> {
     label: &'static str,
     /// Cross-transport dedup set — see [`CROSS_TRANSPORT_DEDUP_SECS`].
     dedup: &'a SeenSet,
-    /// The local mesh, when one is running.
-    mesh: Option<&'a MeshLink>,
+    /// The local radios — WiFi mesh and Bluetooth — when the caller has them.
+    /// How a receipt answers a frame that arrived with no internet at all.
+    mesh: Option<&'a LocalRadios>,
     /// The live watch-together session, when the caller has one to offer.
     ///
     /// It rides here rather than as a ninth positional parameter because it is
@@ -14375,6 +14782,196 @@ mod tests {
             rt.outbox.pending_for(&peer)[0].attempts,
             0,
             "and none of those rounds should have counted as a failed delivery"
+        );
+    }
+
+    // ── Bluetooth transport ─────────────────────────────────────────────────
+
+    /// Envelopes must survive the BLE round trip byte-for-byte, because what
+    /// comes out the far end is fed to `open_dm` — and a single flipped byte
+    /// fails the AEAD rather than degrading gracefully.
+    #[test]
+    fn a_sealed_envelope_survives_fragmentation_and_reassembly() {
+        use comrade_core::crypto::KeyProfile;
+
+        let alice = KeyProfile::generate().unwrap().keys;
+        let bob = KeyProfile::generate().unwrap().keys;
+        let now = 1_700_000_000;
+        let dm = MeshDm::new("queued:ble", "no router out here", None, now);
+        let sealed = seal_dm(&bob.public_key(), &alice, &dm, now).expect("seal");
+
+        let packets = ble::fragment(&sealed.encode(), 1, ble::DEFAULT_TTL, 185).expect("fragment");
+        let mut r = Reassembler::new();
+        let mut rebuilt = None;
+        for p in packets {
+            let decoded = ble::Fragment::decode(&p.encode()).expect("our own packet");
+            rebuilt = r.accept(decoded, now).or(rebuilt);
+        }
+        let envelope = Envelope::decode(&rebuilt.expect("reassembled")).expect("an envelope");
+
+        let opened = open_dm(&bob, &envelope, now)
+            .expect("well-formed")
+            .expect("addressed to bob");
+        assert_eq!(opened.dm.content, "no router out here");
+        assert_eq!(
+            opened.sender,
+            alice.public_key(),
+            "the inner MAC must still identify the real sender after a trip \
+             through the fragmenter"
+        );
+    }
+
+    #[tokio::test]
+    async fn bluetooth_is_not_a_route_until_a_radio_says_it_is() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let ble = rt.ble_router();
+
+        assert!(!ble.is_active(), "no platform radio has reported in");
+        let (_hex, peer) = stranger();
+        let dm = MeshDm::new("x", "hello", None, now_secs());
+        let sealed = seal_dm(
+            &parse_pubkey(&peer).unwrap(),
+            &rt.ui.identity_keys().unwrap(),
+            &dm,
+            now_secs(),
+        )
+        .unwrap();
+        assert!(
+            !ble.enqueue(&sealed),
+            "queueing packets for a radio that is not there would grow forever"
+        );
+        assert!(ble.drain_outbound().is_empty());
+
+        ble.set_active(true);
+        assert!(ble.enqueue(&sealed), "now there is somewhere for it to go");
+        assert!(!ble.drain_outbound().is_empty());
+    }
+
+    #[tokio::test]
+    async fn turning_the_radio_off_drops_what_it_never_sent() {
+        // The outbox still holds every message, so keeping stale packets would
+        // only replay an old burst on the next connection.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let ble = rt.ble_router();
+        ble.set_active(true);
+
+        let (_hex, peer) = stranger();
+        let dm = MeshDm::new("x", "hello", None, now_secs());
+        let sealed = seal_dm(
+            &parse_pubkey(&peer).unwrap(),
+            &rt.ui.identity_keys().unwrap(),
+            &dm,
+            now_secs(),
+        )
+        .unwrap();
+        ble.enqueue(&sealed);
+
+        ble.set_active(false);
+        assert!(ble.drain_outbound().is_empty());
+    }
+
+    /// Forwarding what we cannot read *is* the mesh: a frame for someone two
+    /// hops away only gets there because the device in the middle passes it on.
+    #[tokio::test]
+    async fn a_frame_for_someone_else_is_relayed_but_never_relayed_twice() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let ble = rt.ble_router();
+        ble.set_active(true);
+
+        // Sealed between two strangers — we cannot open it, and must still
+        // carry it.
+        let a = comrade_core::crypto::KeyProfile::generate().unwrap().keys;
+        let b = comrade_core::crypto::KeyProfile::generate().unwrap().keys;
+        let now = now_secs();
+        let dm = MeshDm::new("q:1", "not for you", None, now);
+        let sealed = seal_dm(&b.public_key(), &a, &dm, now).unwrap();
+        let packet =
+            ble::fragment(&sealed.encode(), 99, ble::DEFAULT_TTL, 185).unwrap()[0].encode();
+
+        ble.deliver(&packet, now);
+        let relayed = ble.drain_outbound();
+        assert_eq!(relayed.len(), 1, "we should have passed it on");
+        let onward = ble::Fragment::decode(&relayed[0]).unwrap();
+        assert_eq!(
+            onward.ttl,
+            ble::DEFAULT_TTL - 1,
+            "one hop spent, so it cannot circulate forever"
+        );
+
+        // The same packet again — from another neighbour who also heard it.
+        ble.deliver(&packet, now);
+        assert!(
+            ble.drain_outbound().is_empty(),
+            "relaying a packet we already relayed is how a broadcast storm starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spent_packet_is_delivered_but_not_forwarded() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let ble = rt.ble_router();
+        ble.set_active(true);
+
+        let a = comrade_core::crypto::KeyProfile::generate().unwrap().keys;
+        let b = comrade_core::crypto::KeyProfile::generate().unwrap().keys;
+        let now = now_secs();
+        let dm = MeshDm::new("q:2", "last hop", None, now);
+        let sealed = seal_dm(&b.public_key(), &a, &dm, now).unwrap();
+        // TTL 1: this device is the end of the line.
+        let packet = ble::fragment(&sealed.encode(), 7, 1, 185).unwrap()[0].encode();
+
+        ble.deliver(&packet, now);
+        assert!(
+            ble.drain_outbound().is_empty(),
+            "a packet with no hops left must stop here"
+        );
+    }
+
+    /// The whole point: with no relay and no WiFi mesh, a message still leaves
+    /// the device — over Bluetooth — and stays queued until a receipt clears it.
+    #[tokio::test]
+    async fn with_only_bluetooth_a_dm_still_goes_out_and_stays_queued() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        rt.ble_router().set_active(true);
+        let (_hex, peer) = stranger();
+
+        let dto = rt.send_dm(&peer, "no router for miles").await.unwrap();
+
+        assert_eq!(
+            dto.status.as_deref(),
+            Some("queued"),
+            "a BLE publish reaching *a* device is not proof the recipient got \
+             it — only their receipt clears the outbox"
+        );
+        assert_eq!(rt.outbox_pending(), 1);
+        assert!(
+            !rt.ble_router().drain_outbound().is_empty(),
+            "and the packets must actually be waiting for the radio"
+        );
+    }
+
+    /// Bluetooth alone has to count as a local route, or precedence would keep
+    /// leading with a relay that is not there.
+    #[tokio::test]
+    async fn bluetooth_alone_makes_the_local_route_available() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let handles = rt.handles();
+        let vault = rt.vault.clone().unwrap();
+
+        assert!(
+            !handles.reach(&vault).await.mesh,
+            "no radio, no local route"
+        );
+        rt.ble_router().set_active(true);
+        assert!(
+            handles.reach(&vault).await.mesh,
+            "with Bluetooth up, 'nearby' is reachable even with no WiFi at all"
         );
     }
 
