@@ -543,4 +543,26 @@
     <!-- The honest limit, shown permanently under the player. -->
     <string name="together_accuracy_note">Positions travel over the network, so you\u2019ll be within about a second of each other \u2014 not frame-perfect.</string>
     <string name="together_background_note">This keeps playing when you leave the app.</string>
+    <!-- An embed session, and the sentence above is not true of it: YouTube
+         pauses a backgrounded embed, and background playback is a feature of
+         their own client rather than something this app may switch on for them
+         (docs/TOGETHER.md section 11b). Saying so beats leaving someone to
+         discover it by locking their phone. -->
+    <string name="together_embed_background_note">YouTube pauses when you leave the app \u2014 keep it open to keep watching.</string>
+    <!-- A YouTube invitation: there is nothing to look for and nothing to ask
+         for, so the join is unconditional and the button says what it does. -->
+    <string name="together_join_video">Watch it</string>
+    <!-- Following a player Comrade does not own (docs/TOGETHER.md section 13).
+         Source-agnostic by construction and in the copy: this names no service
+         and no client, because the feature drives whatever published a media
+         session and naming one would turn a neutral tool into a funnel. -->
+    <string name="together_follow_service_label">Watch together</string>
+    <string name="together_follow">Follow what\u2019s playing here</string>
+    <string name="together_follow_explainer">To follow along in the app you already use, Comrade needs notification access \u2014 that\u2019s how Android lets it read and control what\u2019s playing. It reads no notifications and keeps nothing.</string>
+    <string name="together_follow_grant">Open settings</string>
+    <string name="together_follow_nothing_playing">Nothing is playing on this phone yet \u2014 start it in your own app, then tap again.</string>
+    <!-- What an external session can and cannot promise, shown while one runs.
+         Deliberately not "synced": the position comes from another app on its
+         own schedule, which is the coarse tier. -->
+    <string name="together_follow_note">Comrade is following another app on this phone. It can play, pause and place the playhead \u2014 it can\u2019t show you the picture.</string>
 </resources>

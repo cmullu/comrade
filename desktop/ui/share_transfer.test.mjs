@@ -15,8 +15,11 @@ import {
   frameChunk,
   iceServersFor,
   parseChunkFrame,
+  PLAYABLE_RUNWAY_MS,
+  readVerdict,
   selectedPairTypes,
   shouldPause,
+  STALL_FLOOR_MS,
 } from "./share_transfer.mjs";
 
 /**
@@ -378,6 +381,113 @@ test("a tail that is entirely here is playable even below the runway", () => {
   const t = createTracker(offer(2000, 1000, 2000));
   t.accept(1);
   assert.ok(t.playableAt(1000), "a track with two seconds left is playable");
+});
+
+// ── Starving mid-playback ────────────────────────────────────────────────────
+//
+// The vectors below are ported from `comrade_core::share`'s own tests, name for
+// name, because this is policy the two must agree on rather than a JS detail —
+// the same reason `chunksToSend`'s vectors are ported. Core owns the
+// thresholds; this file owns the bitmap.
+
+/** Ten one-second chunks, the shape every case below is built on. */
+const tenSeconds = () => createTracker(offer(10_000, 1000, 10_000));
+
+test("a reader starts on a full runway and carries on over a shorter one", () => {
+  const t = tenSeconds();
+  for (const i of [0, 1]) t.accept(i);
+  assert.equal(t.readVerdictAt(0, false), "hold", "two seconds is not enough to start on");
+  assert.equal(
+    t.readVerdictAt(0, true),
+    "continue",
+    "but a player already running rides those two seconds out",
+  );
+  for (const i of [2, 3, 4]) t.accept(i);
+  assert.equal(t.readVerdictAt(0, false), "start");
+  assert.equal(t.readVerdictAt(0, true), "continue");
+});
+
+test("a starved reader holds rather than stuttering into a gap", () => {
+  const t = tenSeconds();
+  for (const i of [0, 1, 2, 3, 4, 6, 7, 8, 9]) t.accept(i);
+  // Playing into the hole at chunk 5: the chunk under the playhead is not here
+  // at all, so there is nothing to decode however much lies beyond.
+  assert.equal(t.runwayMs(5000), 0);
+  assert.equal(t.readVerdictAt(5000, true), "hold");
+  // And past the hole there is a whole tail, so the same tracker says play.
+  assert.equal(t.readVerdictAt(6000, false), "start");
+});
+
+test("a reader that held needs the full runway again, not a scrap", () => {
+  const t = tenSeconds();
+  t.accept(0);
+  assert.equal(t.readVerdictAt(0, false), "hold");
+  for (const i of [1, 2]) t.accept(i);
+  assert.equal(
+    t.readVerdictAt(0, false),
+    "hold",
+    "three seconds would start a player that stops again immediately",
+  );
+  for (const i of [3, 4]) t.accept(i);
+  assert.equal(t.readVerdictAt(0, false), "start");
+});
+
+test("the last seconds of a file play even though the runway is short", () => {
+  const t = tenSeconds();
+  t.accept(8);
+  t.accept(9);
+  assert.ok(t.runwayMs(8000) < PLAYABLE_RUNWAY_MS);
+  assert.ok(t.tailCompleteAt(8000));
+  assert.equal(
+    t.readVerdictAt(8000, false),
+    "start",
+    "nothing more is coming; holding here would hold forever",
+  );
+  assert.equal(t.readVerdictAt(8000, true), "continue");
+});
+
+test("the verdict never disagrees with playableAt, over every arrangement", () => {
+  // `playableAt` is the older answer to the same question, and the two drifting
+  // apart is the failure this pair of functions exists to prevent. Core walks
+  // all 1024 arrangements of a ten-chunk file; so does this.
+  for (let mask = 0; mask < 1024; mask += 1) {
+    const t = tenSeconds();
+    for (let i = 0; i < 10; i += 1) if (mask & (1 << i)) t.accept(i);
+    for (let chunk = 0; chunk < 10; chunk += 1) {
+      const posMs = chunk * 1000;
+      const playable = t.playableAt(posMs);
+      assert.equal(
+        t.readVerdictAt(posMs, false),
+        playable ? "start" : "hold",
+        `mask ${mask} at ${posMs}ms: a stopped reader starts exactly when playback may start`,
+      );
+      if (playable) {
+        assert.equal(t.readVerdictAt(posMs, true), "continue", `mask ${mask} at ${posMs}ms`);
+      }
+    }
+  }
+});
+
+test("the floor is below the start threshold, or the hysteresis is not one", () => {
+  // Not decoration: equal numbers collapse the two thresholds into one and the
+  // reader chatters — hold, one chunk lands, start, stop. Core asserts this at
+  // compile time (`const _: () = assert!(..)`); this is the same guard.
+  assert.ok(STALL_FLOOR_MS > 0);
+  assert.ok(STALL_FLOOR_MS * 2 < PLAYABLE_RUNWAY_MS);
+});
+
+test("a hold is not reported as a pause, and the verdict has no arm for one", () => {
+  // §10's rule, kept by construction: three arms, none of which means "tell the
+  // peer". A frontend that grew a fourth would have to argue for it here first.
+  const arms = new Set();
+  for (const playing of [false, true]) {
+    for (const tailComplete of [false, true]) {
+      for (const runwayMs of [0, 500, 1000, 4999, 5000, 60_000]) {
+        arms.add(readVerdict({ playing, runwayMs, tailComplete }));
+      }
+    }
+  }
+  assert.deepEqual([...arms].sort(), ["continue", "hold", "start"]);
 });
 
 // ── Refusals say something a person can act on ───────────────────────────────

@@ -67,6 +67,23 @@ interface SessionPlayer {
     fun release()
 
     /**
+     * The session's poll is about to read this player. Nothing, for a player
+     * that always knows where it is.
+     *
+     * It exists for the implementations that are *told* where they are on
+     * somebody else's schedule — an embed reporting once a second, an external
+     * app reporting on state changes. Those need a clock that keeps running when
+     * the reports stop, because "the reports stopped" is itself the thing worth
+     * noticing: a frozen player that is never sampled goes on claiming to play
+     * against the last position it happened to mention.
+     *
+     * A default rather than an abstract member deliberately — [TogetherPlayer]
+     * reads a real decoder and has nothing to do here, and making it write an
+     * empty override would say otherwise.
+     */
+    fun onPoll(nowMs: Long) = Unit
+
+    /**
      * How far behind [positionMs] the sound actually leaves this device, in ms.
      *
      * Zero is honest and means "unmeasured", which is what every implementation

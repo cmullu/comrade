@@ -41,6 +41,11 @@ pub use comrade_core::share::{
     ReadSample, ReadVerdict, ShareOffer, ShareSignal, TransferSignal, SHARE_PLAYABLE_RUNWAY_MS,
     SHARE_STALL_FLOOR_MS,
 };
+// The starve policy as a free function, not only as a `ComradeRuntime` method.
+// A bridge answering from inside a `MediaDataSource.readAt` has a decoder thread
+// and no runtime handle worth taking a lock on — and there is nothing in the
+// answer that needs one, since every input comes from the caller's own bitmap.
+pub use comrade_core::share::read_verdict as share_read_verdict;
 pub use comrade_core::together::{
     MusicLink, PlayheadControl, Recording, ServiceAccess, StateChange, SyncVerdict, TogetherContent,
 };

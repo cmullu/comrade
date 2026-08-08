@@ -522,7 +522,23 @@ object ChatEventRouter {
                     peerLabel = peerLabel(invite.peer),
                     recording = (content as? TogetherContent.LocalFile)?.recording,
                     durationMs = (content as? TogetherContent.LocalFile)?.durationMs?.toLong() ?: 0L,
-                    youtube = content is TogetherContent.Youtube,
+                    // `PlaybackModeDecision.ownershipFor`'s vocabulary, flattened
+                    // here because this is where the typed variant is in hand.
+                    // `is` rather than an exhaustive `when`: a content variant
+                    // this build has not learned must reach the manager as an
+                    // unrecognised kind — which that function refuses — rather
+                    // than failing to compile a lane `ci.yml` does not run.
+                    contentKind = when (content) {
+                        is TogetherContent.LocalFile -> "local_file"
+                        is TogetherContent.Youtube -> "youtube"
+                        is TogetherContent.Service -> "service"
+                        is TogetherContent.Stream -> "stream"
+                        else -> ""
+                    },
+                    // The id rather than a boolean: the invitation is the only
+                    // place it arrives, and the manager needs it again when the
+                    // person actually says yes.
+                    videoId = (content as? TogetherContent.Youtube)?.videoId,
                 )
             }
 

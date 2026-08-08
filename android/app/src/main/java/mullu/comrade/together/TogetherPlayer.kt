@@ -98,7 +98,24 @@ class TogetherPlayer(private val context: Context) : SessionPlayer {
     override val isPlaying: Boolean
         get() = runCatching { player?.isPlaying == true }.getOrDefault(false)
 
-    fun open(uri: Uri) {
+    /**
+     * Open a file that is **still arriving**, so a session can start on the head
+     * of it rather than waiting for the whole thing.
+     *
+     * `docs/TOGETHER.md` §12. Everything about the player is identical to
+     * [open]; the only difference is where the bytes come from, and
+     * `setDataSource(MediaDataSource)` is genuinely the one-line change §12
+     * predicted it would be. What is *not* one line is the source itself —
+     * `PartialFileDataSource` blocks the decoder's thread on bytes that have not
+     * landed, and the session holds the playhead alongside it.
+     *
+     * API 23+, and `minSdk` is 26, so the overload is simply available.
+     */
+    fun open(source: android.media.MediaDataSource) = openWith { it.setDataSource(source) }
+
+    fun open(uri: Uri) = openWith { it.setDataSource(context, uri) }
+
+    private fun openWith(feed: (MediaPlayer) -> Unit) {
         release()
         prepared = false
         val mp = MediaPlayer().apply {
@@ -132,9 +149,12 @@ class TogetherPlayer(private val context: Context) : SessionPlayer {
         runCatching { mp.setSurface(surface) }
             .onFailure { Log.w(TAG, "could not attach surface", it) }
         runCatching {
-            mp.setDataSource(context, uri)
+            feed(mp)
             // Asynchronous: prepare() blocks, and a large local file on slow
-            // storage would block whatever thread opened it.
+            // storage would block whatever thread opened it. For a partial file
+            // it is not merely slow but *unbounded* — preparing reads the header
+            // and may wait for chunks that have not arrived — so this is the
+            // difference between a session that starts late and a frozen UI.
             mp.prepareAsync()
         }.onFailure {
             Log.w(TAG, "could not open media", it)

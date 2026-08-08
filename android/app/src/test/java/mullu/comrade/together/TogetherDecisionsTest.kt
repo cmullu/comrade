@@ -508,4 +508,113 @@ class TogetherDecisionsTest {
             assertFalse(s, TogetherDecisions.embedStateIsWorthSending(TogetherDecisions.embedState(s)))
         }
     }
+
+    // ── A playhead that stands still while the player claims to play ────────
+
+    private fun watch() = TogetherDecisions.StallWatch()
+
+    @Test
+    fun aPlayheadAdvancingNormallyIsNeverAStall() {
+        val w = watch()
+        var t = 1_000L
+        for (second in 0 until 30) {
+            assertFalse(
+                "second $second",
+                w.onSample(posMs = second * 1_000L, playing = true, nowMs = t),
+            )
+            t += 1_000
+        }
+    }
+
+    @Test
+    fun aPlayerStuckOnOneSecondStopsBeingCalledPlaying() {
+        // The ad-break signature, docs/TOGETHER.md §9a: the embed says it is
+        // playing, and what it is playing is not our video.
+        val w = watch()
+        assertFalse(w.onSample(12_000, playing = true, nowMs = 1_000))
+        assertFalse(w.onSample(12_000, playing = true, nowMs = 2_000))
+        assertFalse(
+            "two ticks is a late tick, not a stall",
+            w.onSample(12_000, playing = true, nowMs = 3_999),
+        )
+        assertTrue(w.onSample(12_000, playing = true, nowMs = 4_000))
+        assertTrue(w.isStalled)
+    }
+
+    @Test
+    fun theBreakEndingClearsItOnTheFirstTickThatMoves() {
+        // The whole value is in the recovery being immediate: one advancing tick
+        // and this device is claiming to play again, so the peer's next verdict
+        // closes the gap the break opened instead of the session staying held.
+        val w = watch()
+        w.onSample(12_000, playing = true, nowMs = 1_000)
+        assertTrue(w.onSample(12_000, playing = true, nowMs = 5_000))
+        assertFalse(w.onSample(13_000, playing = true, nowMs = 6_000))
+        assertFalse(w.isStalled)
+    }
+
+    @Test
+    fun aPausedPlayerIsNotAStall() {
+        // It is a pause, and the peer is being told about that through the
+        // ordinary path. Calling it a stall as well would hold a session the
+        // user deliberately stopped.
+        val w = watch()
+        for (t in listOf(1_000L, 5_000L, 60_000L)) {
+            assertFalse(w.onSample(12_000, playing = false, nowMs = t))
+        }
+        assertFalse(w.isStalled)
+    }
+
+    @Test
+    fun aPauseInTheMiddleOfAStallEndsIt() {
+        val w = watch()
+        w.onSample(12_000, playing = true, nowMs = 1_000)
+        assertTrue(w.onSample(12_000, playing = true, nowMs = 5_000))
+        assertFalse(w.onSample(12_000, playing = false, nowMs = 5_500))
+        // And the pause must not leave the clock armed: resuming starts over.
+        assertFalse(w.onSample(12_000, playing = true, nowMs = 6_000))
+    }
+
+    @Test
+    fun jitterUnderTheEpsilonIsStillAStall() {
+        // A coarse player re-reporting the same second as 12_000 then 12_100 has
+        // not moved; treating that as movement would make an ad break invisible.
+        val w = watch()
+        w.onSample(12_000, playing = true, nowMs = 1_000)
+        w.onSample(12_100, playing = true, nowMs = 2_000)
+        assertTrue(w.onSample(12_050, playing = true, nowMs = 5_000))
+    }
+
+    @Test
+    fun aClockThatSteppedBackwardsDoesNotInstantlyStall() {
+        val w = watch()
+        w.onSample(12_000, playing = true, nowMs = 10_000)
+        assertFalse(w.onSample(12_000, playing = true, nowMs = 4_000))
+    }
+
+    @Test
+    fun theFirstSampleIsNeverAStallHoweverLateItIs() {
+        // Zero is a real position on a fresh video, so "no sample yet" cannot be
+        // spelled as a position — the first tick would otherwise look like a
+        // playhead that had been sitting at 0 since the epoch.
+        val w = watch()
+        assertFalse(w.onSample(0, playing = true, nowMs = 1_700_000_000_000))
+    }
+
+    @Test
+    fun resetForgetsAStallInProgress() {
+        val w = watch()
+        w.onSample(12_000, playing = true, nowMs = 1_000)
+        assertTrue(w.onSample(12_000, playing = true, nowMs = 5_000))
+        w.reset()
+        assertFalse(w.isStalled)
+        assertFalse(w.onSample(12_000, playing = true, nowMs = 5_100))
+    }
+
+    @Test
+    fun theStallWindowIsWiderThanTheExtrapolationCap() {
+        // Not a coincidence to preserve by luck: the estimate must have gone
+        // flat, and been seen to go flat, before anything is called a stall.
+        assertTrue(TogetherDecisions.STALL_AFTER_MS > TogetherDecisions.COARSE_EXTRAPOLATE_MAX_MS)
+    }
 }
