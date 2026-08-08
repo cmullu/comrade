@@ -37,6 +37,59 @@ object ShareDecisions {
     const val REQUEST_WINDOW = 64
 
     /**
+     * How long the receiver waits with no chunk, **once chunks have started
+     * arriving**, before it decides the sender has stopped. See [stallAction].
+     *
+     * Wide enough that a slow link between two 16 KiB chunks is not mistaken for
+     * a dead one, and narrow enough that the whole bounded sequence finishes
+     * inside [ShareReadPolicy.READ_PATIENCE_MS] — a test asserts that inequality
+     * rather than leaving it to survive as a coincidence.
+     */
+    const val STALL_AFTER_MS: Long = 8_000
+
+    /**
+     * The same, for the window *before* the first chunk — accepting an offer,
+     * exchanging SDP over a relay, gathering ICE, judging the path.
+     *
+     * Much wider, and it has to be, because a great deal that is not the peer's
+     * fault happens in it: [PATH_RETRIES] seconds of waiting for ICE to settle
+     * on this side alone, plus a gift-wrap round trip in each direction. A test
+     * asserts it outlasts the path judgement, so that loop's own sentence —
+     * which names the actual problem — is the one a person sees.
+     *
+     * **The part that cannot be made exact.** If the *sender's* relay policy
+     * asks its user to agree to this transfer, nothing on the wire says so, and
+     * this becomes a bound on how long this device will wait for a stranger to
+     * tap a button. There is no signal for "a person here is deciding", so the
+     * choice is a bound or an indefinite hang; this is the bound. The
+     * receiver's *own* dialog is exempt entirely — see [stallAction]'s
+     * `awaitingPerson`, which stops the clock rather than widening it.
+     */
+    const val SETUP_GRACE_MS: Long = 45_000
+
+    /**
+     * How many times a stalled receive asks again before giving up.
+     *
+     * One. A request is two integers on an open channel: if the first re-ask
+     * does not produce a chunk, the sender is not busy, it is gone — and more
+     * attempts only lengthen the time a person spends watching a bar that will
+     * never move.
+     */
+    const val STALL_REASKS: Int = 1
+
+    /**
+     * The shape of the transfer's other bounded loop — how many one-second looks
+     * it takes at the ICE state before giving up on a route (`FileTransfer`'s
+     * `judgePath`).
+     *
+     * Here rather than beside that loop so [SETUP_GRACE_MS] can be *tested* to
+     * outlast it. Two deadlines racing over the same failure would mean the
+     * sentence a person reads depends on which timer won.
+     */
+    const val PATH_RETRIES: Int = 10
+    const val PATH_RETRY_TICK_MS: Long = 1_000
+
+    /**
      * The file name an incoming transfer lands under, from the offer's hash.
      *
      * Pure and here rather than beside the file I/O so it can be tested, because
@@ -52,6 +105,204 @@ object ShareDecisions {
             .filter { it.isDigit() || it in 'a'..'f' }
             .take(64)
         return if (safe.isEmpty()) "incoming.bin" else "$safe.bin"
+    }
+
+    // ── Telling a re-delivered signal from a new transfer ───────────────────
+
+    /**
+     * What identifies one transfer: what is being moved, in what shape, and
+     * which end of it this device is.
+     *
+     * The hash is the strong half — two offers of the same file agree on it by
+     * construction, since it is a SHA-256 of the bytes. The two sizes come along
+     * because a hash that did not survive sanitising (see [incomingFileName])
+     * would otherwise match anything, and [sending] because the same file moving
+     * the other way is a different transfer, not the same one seen twice.
+     */
+    data class TransferIdentity(
+        val sending: Boolean,
+        val sha256: String,
+        val totalBytes: Long,
+        val chunkBytes: Int,
+    )
+
+    /** What arming should do to the transfer that is already live, if any. */
+    enum class ArmDecision {
+        /** Nothing was running. Build it. */
+        START,
+
+        /** Something else was running. Tear that down first, then build. */
+        REPLACE,
+
+        /** This exact transfer is already running. Leave it alone. */
+        REDELIVERY,
+    }
+
+    /**
+     * Whether an arriving offer starts a transfer, replaces one, or is a signal
+     * this device has already acted on. `AUDIT.md` Q18.
+     *
+     * Comrade replays gift-wraps on purpose — `inbox_since` widens the
+     * subscription floor back to the persisted watermark on every reconnect, so
+     * a device that was offline loses nothing and a device that was not sees
+     * recent envelopes twice. Core now keys a `Share` on its wrapper event id
+     * and drops the second copy, so the **relay** path no longer reaches here
+     * twice. Two routes still do, which is why this rule is not redundant: the
+     * direct peer channel deliberately passes no id (the only key available
+     * there would be a payload hash, which would drop a second *legitimate*
+     * signal rather than a second copy of one), and an attachment handoff is a
+     * different envelope with no event-id set at all.
+     *
+     * **Erring restrictive, deliberately.** Anything that cannot be told apart
+     * from the live transfer is treated as a redelivery and ignored, including
+     * the two offers that agree on an unusable hash and a size. The two mistakes
+     * are not symmetric: ignoring a genuine retry costs a wait that the stall
+     * watchdog ([stallAction]) already ends — once a transfer is actually dead
+     * the session is gone, so the very same offer arms fresh — while acting on a
+     * duplicate ends a transfer that was working and leaks the `PeerConnection`,
+     * `DataChannel` and open file behind it, which nothing recovers.
+     */
+    fun decideArm(live: TransferIdentity?, incoming: TransferIdentity): ArmDecision {
+        if (live == null) return ArmDecision.START
+        return if (isSameTransfer(live, incoming)) ArmDecision.REDELIVERY else ArmDecision.REPLACE
+    }
+
+    private fun isSameTransfer(a: TransferIdentity, b: TransferIdentity): Boolean =
+        a.sending == b.sending &&
+            a.totalBytes == b.totalBytes &&
+            a.chunkBytes == b.chunkBytes &&
+            // Hex from a peer, so case is theirs to choose and not a difference.
+            a.sha256.trim().equals(b.sha256.trim(), ignoreCase = true)
+
+    // ── Whose negotiation is this? ──────────────────────────────────────────
+
+    /** Where a `ShareSignal.Transport` belongs. */
+    enum class TransportRoute {
+        /** The file engine, which has a session for it. */
+        FILE,
+
+        /** A live stream (`docs/TOGETHER.md` §15). The SDP is the intent. */
+        STREAM,
+
+        /** Nobody's. The transfer it was answering is already over. */
+        DROP,
+    }
+
+    /** Where to send a transport signal, and whether an expectation survives it. */
+    data class TransportPlan(
+        val route: TransportRoute,
+        /** Whether this side is still owed a late file offer after this signal. */
+        val stillExpecting: Boolean,
+    )
+
+    /**
+     * Route one `Transport` signal, refining §15's rule rather than contradicting
+     * it.
+     *
+     * §15 reads: a transport offer arriving with no armed transfer cannot be a
+     * file, because nothing asked for one — so it is a stream. **That inference
+     * is exactly right when nothing was ever armed**, and it is the reason
+     * streaming needs no new wire type. There is one case it does not cover:
+     * this side *did* ask for a file, accepted it, and then gave up. The
+     * sender's `Accept` may have sat at a relay for hours; when it lands, the
+     * sender negotiates in good faith and sends an offer that **is** a file
+     * offer, to a device that is no longer armed. Handing that to the stream
+     * receiver opens an unasked-for live audio and video connection on a device
+     * whose user was told their file did not arrive.
+     *
+     * So the missing state is "we accepted a file and are no longer armed", and
+     * in it a transport belongs to nobody.
+     *
+     * The expectation is discharged rather than sticky, and that is the part
+     * worth getting right: exactly one offer is owed per `Accept`, so consuming
+     * it means a host who reacts to a failed handover by streaming instead is
+     * still heard. Holding it for the rest of the session would trade one
+     * surprise for one silently broken feature.
+     *
+     * @param fileEngineArmed whether a file transfer has a session right now.
+     * @param expectingLateFileOffer whether this side sent an `Accept` whose
+     *   negotiation never arrived, and has since torn the transfer down.
+     * @param isOffer whether this signal is the offer itself — the only one that
+     *   would start a session on the far side of a mis-route, and the one that
+     *   settles what was owed.
+     */
+    fun transportPlan(
+        fileEngineArmed: Boolean,
+        expectingLateFileOffer: Boolean,
+        isOffer: Boolean,
+    ): TransportPlan = when {
+        // The engine owns the negotiation, so nothing is owed any more.
+        fileEngineArmed -> TransportPlan(TransportRoute.FILE, stillExpecting = false)
+        expectingLateFileOffer ->
+            TransportPlan(TransportRoute.DROP, stillExpecting = !isOffer)
+        else -> TransportPlan(TransportRoute.STREAM, stillExpecting = false)
+    }
+
+    // ── Noticing that the chunks stopped ────────────────────────────────────
+
+    /** What a receiver that has not seen a chunk for a while should do. */
+    enum class StallAction {
+        /**
+         * **No deadline runs at all.** Restart the clock rather than spend it.
+         *
+         * Not the same as [WAIT], and the difference is the whole of the bug
+         * this arm exists for: waiting spends the budget, holding does not.
+         */
+        HOLD,
+
+        /** Not long enough yet. */
+        WAIT,
+
+        /** Ask again — a request or a chunk can be lost without the connection
+         *  noticing, and one more request is cheap. */
+        REASK,
+
+        /** Asking again did not help. End it, and say so. */
+        GIVE_UP,
+    }
+
+    /**
+     * The receiver's stall policy, from the four facts a watchdog can see.
+     * `AUDIT.md` Q19.
+     *
+     * The only condition that used to end a transfer was the connection itself
+     * failing, so a sender that quietly stopped reading its file — a revoked
+     * `content://` grant, removable storage pulled — froze both progress bars
+     * with no error on either device. This is what turns that silence into a
+     * sentence.
+     *
+     * Each re-ask buys its own window, so the deadline widens with
+     * `reasksSoFar` rather than the answer flipping from `REASK` to `GIVE_UP` on
+     * the very next tick, before the re-ask could possibly have been answered.
+     *
+     * It is **not** a claim that the sender is gone: a link slow enough to leave
+     * eight seconds between chunks is indistinguishable from one that stopped,
+     * from here. It is the point at which continuing to say nothing is worse
+     * than being wrong.
+     *
+     * @param sinceProgressMs how long since the last thing that counted as
+     *   progress — a chunk, or the moment a [HOLD] released.
+     * @param started whether any chunk has arrived yet, which picks the window:
+     *   [STALL_AFTER_MS] between chunks, [SETUP_GRACE_MS] before the first,
+     *   because negotiating a connection is not the same wait as a link going
+     *   quiet and holding both to eight seconds ends healthy transfers.
+     * @param awaitingPerson whether this device is asking its user something
+     *   right now. A person is not a timeout: they may take a minute or leave
+     *   the room, and a deadline running underneath them would tear down a
+     *   perfectly good transfer *and* clear the very dialog they are reading.
+     */
+    fun stallAction(
+        sinceProgressMs: Long,
+        started: Boolean,
+        awaitingPerson: Boolean,
+        reasksSoFar: Int,
+        maxReasks: Int = STALL_REASKS,
+    ): StallAction {
+        if (awaitingPerson) return StallAction.HOLD
+        val attempts = reasksSoFar.coerceAtLeast(0)
+        val window = if (started) STALL_AFTER_MS else SETUP_GRACE_MS
+        if (sinceProgressMs < window * (attempts + 1)) return StallAction.WAIT
+        return if (attempts < maxReasks) StallAction.REASK else StallAction.GIVE_UP
     }
 
     /** Prefix `bytes` with its big-endian chunk index. */

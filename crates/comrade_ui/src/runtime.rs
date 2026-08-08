@@ -247,14 +247,28 @@ const OUTBOX_FLUSH_INTERVAL_SECS: u64 = 60;
 /// must not be re-applied downstream.
 const CALL_SIGNAL_DEDUP_CAPACITY: usize = 512;
 
-/// Capacity of the together *invite* dedup set.
+/// Capacity of the together *invite* dedup set, keyed by session id.
 ///
-/// Only [`TogetherSignal::Start`] needs one. Every other signal is ordered by
-/// its own Lamport counter (an exact, unbounded dedup that cannot be evicted)
-/// or is idempotent, so a two-hour session adds nothing here — which is the
-/// point: sharing [`CALL_SIGNAL_DEDUP_CAPACITY`]'s set would let one film evict
-/// a live call's signals.
+/// [`TogetherSignal::Start`] is the only signal keyed this way. `Join` is
+/// idempotent and `State` is ordered by its own Lamport counter (an exact,
+/// unbounded dedup that cannot be evicted), so a two-hour session adds nothing
+/// here — which is the point: sharing [`CALL_SIGNAL_DEDUP_CAPACITY`]'s set would
+/// let one film evict a live call's signals. `Share` has neither of those
+/// defences and gets its own set, [`TOGETHER_SHARE_DEDUP_CAPACITY`].
 const TOGETHER_START_DEDUP_CAPACITY: usize = 64;
+
+/// Capacity of the together *share* dedup set: wrapper event ids of transfer
+/// signals already handed to a frontend (AUDIT.md Q18).
+///
+/// Sized for the negotiation, because that is the burst — ask/offer/accept is
+/// three events and the ICE trickle behind them is tens more per attempt — so a
+/// handful of transfers fit and an `Ask` redelivered by the backfill is still
+/// recognised while the transfer it would have restarted is running.
+///
+/// Its own set rather than a second key space in [`TOGETHER_START_DEDUP_CAPACITY`]'s:
+/// that one is keyed by session id and this one by event id, and one bounded set
+/// holding both would make an eviction mean two different things.
+const TOGETHER_SHARE_DEDUP_CAPACITY: usize = 256;
 
 /// How long a message stays eligible for **cross-transport** dedup.
 ///
@@ -1801,6 +1815,9 @@ pub struct ComradeRuntime {
     together: Arc<Mutex<Option<TogetherSession>>>,
     /// Invitation ids already seen — see [`TOGETHER_START_DEDUP_CAPACITY`].
     together_starts_seen: Arc<SeenSet>,
+    /// Wrapper event ids of transfer signals already forwarded — see
+    /// [`TOGETHER_SHARE_DEDUP_CAPACITY`].
+    together_shares_seen: Arc<SeenSet>,
     /// What this device is willing to do when the only path a file transfer can
     /// take is somebody else's relay.
     ///
@@ -1867,6 +1884,7 @@ impl ComradeRuntime {
             nudge_watch: Arc::new(NudgeWatch::new()),
             together: Arc::new(Mutex::new(None)),
             together_starts_seen: Arc::new(SeenSet::new(TOGETHER_START_DEDUP_CAPACITY)),
+            together_shares_seen: Arc::new(SeenSet::new(TOGETHER_SHARE_DEDUP_CAPACITY)),
             share_policy: Arc::new(Mutex::new(RelayPolicy::default())),
         }
     }
@@ -2165,6 +2183,7 @@ impl ComradeRuntime {
             let together_link = TogetherLink {
                 session: self.together.clone(),
                 starts_seen: self.together_starts_seen.clone(),
+                shares_seen: self.together_shares_seen.clone(),
             };
             // Widen the backfill window past the standard gift-wrap skew when
             // this device was last seen longer ago than that (see
@@ -2373,6 +2392,7 @@ impl ComradeRuntime {
             together: TogetherLink {
                 session: self.together.clone(),
                 starts_seen: self.together_starts_seen.clone(),
+                shares_seen: self.together_shares_seen.clone(),
             },
             pay_regex: build_pay_regex().ok(),
         })
@@ -2558,6 +2578,12 @@ impl ComradeRuntime {
 
         self.outbox.clear();
         self.call_signal_dedup.clear();
+        // Same argument as the call set: these are peer event ids, and the
+        // promise above is that nothing survives. Nothing is reopened by
+        // clearing them either — `lock_vault` below drops the live session, and
+        // a replayed share signal with no session to name is dropped by the
+        // session lookup regardless.
+        self.together_shares_seen.clear();
         core_metrics::reset();
         self.lock_vault().await;
         tracing::warn!("panic wipe complete: local state destroyed and vault locked");
@@ -5059,6 +5085,7 @@ impl ComradeRuntime {
             presence_active: self.presence_active.clone(),
             together: self.together.clone(),
             together_starts_seen: self.together_starts_seen.clone(),
+            together_shares_seen: self.together_shares_seen.clone(),
         }
     }
 
@@ -5121,6 +5148,17 @@ pub struct RuntimeHandles {
     /// deduped on one path is deduped on the other. Carried here because
     /// [`Self::together_receive_direct`] rebuilds that link.
     together_starts_seen: Arc<SeenSet>,
+    /// Carried because [`Self::together_receive_direct`] has to build a whole
+    /// [`TogetherLink`] and that struct has this field — **not** for the reason
+    /// above it. The direct path passes `None` for the event id, having no
+    /// wrapper to key on, so it neither reads nor writes this set; unlike
+    /// `together_starts_seen`, nothing is actually shared through it today.
+    ///
+    /// It is the runtime's own set rather than a fresh one all the same, because
+    /// a fresh one would be a second share set with nothing to reveal that it
+    /// had diverged, and this is where an event id would first appear if that
+    /// channel ever grew one.
+    together_shares_seen: Arc<SeenSet>,
 }
 
 impl RuntimeHandles {
@@ -6590,17 +6628,26 @@ impl RuntimeHandles {
         let link = TogetherLink {
             session: self.together.clone(),
             starts_seen: self.together_starts_seen.clone(),
+            shares_seen: self.together_shares_seen.clone(),
         };
         // The envelope's own stamp stands in for the gift wrap's `created_at`:
         // there is no wrap here, and `at_ms` is the sender's claim about when
         // they sent it — which is exactly what the relay path's `created_at`
         // is too, in the same units once divided down.
+        //
+        // And `None` for the event id for the same reason there is no wrap:
+        // this arrived on a live channel, which nothing replays. The redelivery
+        // the share guard exists for is the relay backfill, and the only id
+        // available here would be one derived from the payload — which would
+        // drop a *second* legitimate signal with the same bytes rather than a
+        // second copy of one.
         handle_together_envelope(
             &self.events,
             &link,
             &peer_npub,
             &peer_hex,
             env.at_ms / 1000,
+            None,
             env,
         );
     }
@@ -7916,15 +7963,21 @@ fn handle_nudge(
 /// which is the only thing standing between a two-day-old backfilled invitation
 /// and a fresh one; the **session lookup**, which drops every other signal that
 /// does not name a session this process is actually in (and after a relaunch it
-/// is in none, so the whole backfill is inert); and the **Lamport order**, which
+/// is in none, so the whole backfill is inert); the **Lamport order**, which
 /// makes a redelivered command an exact no-op without needing a dedup set that
-/// could be evicted.
+/// could be evicted; and, for [`TogetherSignal::Share`] alone, an **event-id
+/// set**, because a transfer negotiation has neither a Lamport counter nor an
+/// idempotent effect on the frontend holding the connection (AUDIT.md Q18).
+///
+/// `event_id` is the gift wrap that carried this, when there was one. `None`
+/// from the direct peer channel, which has no wrapper and is not replayed.
 fn handle_together_envelope(
     tx: &broadcast::Sender<BridgeEvent>,
     link: &TogetherLink,
     peer_npub: &str,
     sender_hex: &str,
     created_at: u64,
+    event_id: Option<&str>,
     env: TogetherEnvelope,
 ) {
     if !signal_is_fresh(created_at, now_secs()) {
@@ -8034,11 +8087,45 @@ fn handle_together_envelope(
             });
         }
         TogetherSignal::Share { signal } => {
-            // Straight through to the frontend, which owns the peer connection
-            // this is negotiating. It has already passed the acceptance gate,
-            // the age gate and the session-id check above — which is the entire
-            // argument for putting it inside this envelope rather than giving
-            // it one of its own.
+            // The one signal here with no ordering of its own to make a
+            // redelivery harmless: no Lamport stamp to lose against, and no
+            // idempotent effect to fall back on. Comrade replays gift-wraps
+            // deliberately — `inbox_since` widens the subscription floor back to
+            // the watermark on every reconnect — so a second copy is a routine
+            // arrival and not a hostile one (AUDIT.md Q18).
+            //
+            // The frontends guard themselves as well, and the two are not
+            // redundant, because they reach different distances. Android's
+            // `ShareDecisions.decideArm` is the precise one: it refuses only
+            // while a *matching* transfer is live, so a redelivery arriving
+            // after the first copy achieved nothing still works. But it is
+            // consulted at the two arming points only — `FileTransfer.onTransport`
+            // has no redelivery guard of its own — and by then `offerOurCopy`
+            // has already hashed the whole file. This one is coarser, stops the
+            // copy earlier, and holds for every frontend rather than the one
+            // that implemented it.
+            //
+            // What the coarseness can cost is bounded by the age gate at the top
+            // of this function: nothing older than
+            // `TOGETHER_SIGNAL_MAX_AGE_SECS` reaches here at all, so this can
+            // only suppress a retry inside the same minute in which a retry was
+            // possible in the first place.
+            //
+            // Keyed by the wrapper's event id and nothing else, which is what
+            // makes it safe over a negotiation: a second ICE candidate is a
+            // different event with a different id and still gets through. Only
+            // a literal second copy of one event is dropped.
+            if let Some(event_id) = event_id {
+                if link.shares_seen.already_seen(event_id) {
+                    tracing::debug!(event_id, "dropping duplicate together share signal");
+                    return;
+                }
+            }
+            // Otherwise straight through to the frontend, which owns the peer
+            // connection this is negotiating. It has already passed the
+            // acceptance gate, the age gate and the session-id check above —
+            // which is the entire argument for putting it inside this envelope
+            // rather than giving it one of its own.
             let (session_id, peer) = (session.id.clone(), session.peer.clone());
             drop(guard);
             let _ = tx.send(BridgeEvent::TogetherShare(TogetherShareDto {
@@ -8807,10 +8894,12 @@ struct DmRoute<'a> {
 }
 
 /// The together state one ingress path may touch: the single live session, and
-/// the small set of invitation ids already seen.
+/// the two small sets of ids already handled — invitations by session id,
+/// transfer signals by the event id of the wrapper that carried them.
 struct TogetherLink {
     session: Arc<Mutex<Option<TogetherSession>>>,
     starts_seen: Arc<SeenSet>,
+    shares_seen: Arc<SeenSet>,
 }
 
 impl DmRoute<'_> {
@@ -9024,6 +9113,7 @@ fn dispatch_incoming_dm(
                     &peer_npub,
                     &msg.sender_pubkey,
                     msg.created_at,
+                    Some(&msg.event_id),
                     env,
                 );
             }
@@ -13006,6 +13096,7 @@ mod tests {
         TogetherLink {
             session: Arc::new(Mutex::new(None)),
             starts_seen: Arc::new(SeenSet::new(TOGETHER_START_DEDUP_CAPACITY)),
+            shares_seen: Arc::new(SeenSet::new(TOGETHER_SHARE_DEDUP_CAPACITY)),
         }
     }
 
@@ -13023,6 +13114,7 @@ mod tests {
         let link = TogetherLink {
             session: rt.together.clone(),
             starts_seen: rt.together_starts_seen.clone(),
+            shares_seen: rt.together_shares_seen.clone(),
         };
         let (tx, _rx) = broadcast::channel(16);
         let start = TogetherEnvelope::new(
@@ -13036,7 +13128,15 @@ mod tests {
                 playing: false,
             },
         );
-        handle_together_envelope(&tx, &link, peer_npub, peer_hex, now_secs(), start);
+        handle_together_envelope(
+            &tx,
+            &link,
+            peer_npub,
+            peer_hex,
+            now_secs(),
+            Some("e-plant"),
+            start,
+        );
         assert!(rt.together.lock().unwrap().is_some(), "no session planted");
     }
 
@@ -14004,6 +14104,114 @@ mod tests {
                     assert_eq!(dto.session_id, "s-share");
                     assert_eq!(dto.signal, signal, "the signal must arrive as it was sent");
                 }
+                other => panic!("expected a share signal, got {other:?}"),
+            }
+        }
+    }
+
+    /// AUDIT.md Q18. Relays deliver at least once and `inbox_since` widens the
+    /// backfill floor back to the watermark on every reconnect, so the same
+    /// wrapper genuinely arrives twice — and the frontend on the other end of
+    /// this event re-arms its transfer when it does, dropping a live
+    /// `PeerConnection` on the floor.
+    ///
+    /// The second half is the half that could be got wrong: the guard is by
+    /// **event id**, so two different signals — which is what an ICE trickle
+    /// is — both still get through. A guard keyed by anything coarser would
+    /// silence a live negotiation.
+    #[tokio::test]
+    async fn a_redelivered_share_signal_reaches_the_frontend_once() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let link = together_link();
+        let route = together_route(&transport_dedup, &link);
+        let (hex, peer) = stranger();
+        accepted_peer(&store, &peer, false);
+
+        let invite = together_json(
+            "s-replay",
+            1,
+            TogetherSignal::Start {
+                content: a_film(),
+                pos_ms: 0,
+                playing: false,
+            },
+        );
+        let mut msg = incoming(&hex, "s1", &invite);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            BridgeEvent::TogetherInvited(_)
+        ));
+
+        let ask = together_json(
+            "s-replay",
+            2,
+            TogetherSignal::Share {
+                signal: ShareSignal::Ask,
+            },
+        );
+        let deliver = |event_id: &str, body: &str| {
+            let mut msg = incoming(&hex, event_id, body);
+            msg.created_at = now_secs();
+            dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        };
+
+        deliver("t-ask", &ask);
+        assert!(matches!(
+            rx.try_recv().expect("the first copy must arrive"),
+            BridgeEvent::TogetherShare(_)
+        ));
+        deliver("t-ask", &ask);
+        assert!(
+            rx.try_recv().is_err(),
+            "the backfilled copy would have re-armed a running transfer"
+        );
+
+        // Two candidates from one trickle: same session, same kind, different
+        // events. Both are live signals and both have to land.
+        for (event_id, candidate) in [
+            ("t-ice-1", "candidate:1 1 udp 2 10.0.0.1 5 typ host"),
+            ("t-ice-2", "candidate:2 1 udp 2 10.0.0.2 6 typ host"),
+        ] {
+            let body = together_json(
+                "s-replay",
+                3,
+                TogetherSignal::Share {
+                    signal: ShareSignal::Transport {
+                        signal: comrade_core::share::TransferSignal::Ice {
+                            candidate: candidate.into(),
+                            sdp_mid: Some("0".into()),
+                            sdp_m_line_index: Some(0),
+                        },
+                    },
+                },
+            );
+            deliver(event_id, &body);
+            match rx
+                .try_recv()
+                .expect("a distinct signal must not be deduped")
+            {
+                BridgeEvent::TogetherShare(dto) => assert_eq!(
+                    dto.signal,
+                    ShareSignal::Transport {
+                        signal: comrade_core::share::TransferSignal::Ice {
+                            candidate: candidate.into(),
+                            sdp_mid: Some("0".into()),
+                            sdp_m_line_index: Some(0),
+                        },
+                    },
+                    "the signal must arrive as it was sent"
+                ),
                 other => panic!("expected a share signal, got {other:?}"),
             }
         }
