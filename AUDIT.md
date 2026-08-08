@@ -939,6 +939,23 @@ is small; the content problem is the real constraint:
 >   minute, no Gradle involved. Commands in `CLAUDE.md`. This turns "keep
 >   decisions in framework-free files" from a style preference into the thing
 >   that decides whether a change is checkable at all.
+> - **Following the device's own media session may replace every vendor
+>   integration above.** Asked whether an installed ReVanced/Morphe could be
+>   used, the literal answer is no — an intent hands playback away with no seek
+>   and no position — but the general mechanism behind it is
+>   `MediaSessionManager` + `MediaController`, which drives *any* app's
+>   published session with notification-listener access. That reaches Spotify,
+>   YouTube Music, podcast apps and local players through one implementation,
+>   deleting the client id, the OAuth flow, the App Remote `.aar` question and
+>   the desktop `script-src` widening in a single stroke. Notification listener
+>   is confirmed **not** on Play's restricted-permissions list (unlike
+>   Accessibility, which is gated) — no declaration form, which is not the same
+>   as approved. `MediaSessionDecisions` landed with 19 JVM tests run locally;
+>   the `NotificationListenerService` and the `TogetherManager` refactor did
+>   not. The trap worth knowing: `pick` must exclude Comrade's own package or
+>   the session syncs to the foreground service's own `MediaSession` and feeds
+>   corrections back into the player that produced them, which from a bug report
+>   reads as "it randomly jumps". `docs/TOGETHER.md` §13.
 > - **A handed-over file still plays only once it is whole**, and core has been
 >   ready for it since the transfer landed. `ShareTracker::playable_at` and
 >   `runway_ms` are unit-tested and remain dead code — the gap is per-frontend and

@@ -1215,3 +1215,96 @@ available here. So a starved reader pauses locally, and the next drift verdict i
 what closes the gap. Writing that down is the prerequisite for either frontend,
 because a stall handled two different ways on two devices is a session that
 argues with itself.
+
+## 13. Following what the device is already playing
+
+_Added 2026-08-08, from "if users already have Morphe or ReVanced installed,
+can we use it somehow?"_
+
+The literal question has a dull answer and a much better one behind it.
+
+**Launching their patched client does nothing for a session.** An intent at a
+YouTube URL resolves to whatever app handles it, which may well be a patched
+one — and that hands playback away entirely. No seek, no position, no callbacks.
+A video opens and the session is left behind.
+
+**But Android publishes every app's media session system-wide**, and that is a
+different proposition. With notification-listener access, Comrade can enumerate
+active sessions and drive them — `seekTo`, `play`, `pause` — and read position
+from `PlaybackState`. It is what a car head unit and a watch companion do.
+
+### Why this is better than every integration §11 was reaching for
+
+| | Per-vendor | Media session |
+|---|---|---|
+| Spotify | OAuth + Premium API, or a hand-vendored `.aar` | **their app, as installed** |
+| YouTube / YT Music | embed + a CSP argument | **their app, as installed** |
+| Podcast apps, VLC, local players | nothing | works |
+| Implementations to maintain | one per service | **one** |
+
+It removes the client id, the OAuth flow, the App Remote distribution problem
+and the `script-src` widening, all at once. Comrade never learns what the other
+app is or where its bytes came from — which is the posture, not a loophole.
+
+**On patched clients specifically.** The feature is source-agnostic by
+construction: it drives a published media session and touches no vendor's API.
+That is defensible in a way that InnerTube extraction (§11a) is not. What would
+*not* be defensible is documenting or marketing it as a route to ad-free
+playback — that is inducement, and it would convert a neutral tool into a
+targeted one regardless of what the code does. Build the neutral feature; do not
+build the funnel. Nothing technical is lost by holding that line.
+
+### What it costs, stated before anyone builds on it
+
+- **Notification-listener access.** Confirmed *not* on Play's restricted-
+  permissions list (unlike the Accessibility API, which is gated and would have
+  been a blocker), so there is no declaration form in the way. That is not the
+  same as approved — general policy still applies and this permission is
+  scrutinised. Worth confirming against a real submission before it ships.
+- **Playback lives in the other app.** Comrade becomes a sync layer with no
+  player of its own: no video surface, no sleeve. The Together tab turns into
+  control-and-status. That is a product change, not an implementation detail.
+- **Coarse position**, so the coarse deadband — the same tier as an embed.
+- **Android only for now.** MPRIS, SMTC and MediaRemote are the equivalents
+  elsewhere, so it generalises, but not for free.
+
+### The decisions, and the one bug that would have been undebuggable
+
+`MediaSessionDecisions` is pure, and it runs under `kotlinc` + JUnit here with
+no SDK — 19 tests, green before CI.
+
+**`pick` excludes our own package, and that is not an optimisation.** Comrade
+publishes a `MediaSession` for the foreground service that keeps a file session
+alive. A picker that did not exclude it would find Comrade, sync Comrade to
+Comrade, and feed every correction straight back into the player that produced
+it. From a bug report that reads as "it randomly jumps".
+
+The rest:
+
+- **Playing beats paused**, and `buffering` counts as playing — demoting a
+  stalling session would hand the session to a paused app in another tab the
+  moment the network hiccuped. Among equals the framework's own priority order
+  wins, because it puts the session the user last touched first.
+- **Speed is honoured.** A podcast at 1.5× advances half again as fast;
+  extrapolating it at 1.0 would drift half a second per second, which is worse
+  than not extrapolating at all.
+- **Extrapolation is capped** at two seconds past the last report, for the
+  reason §11b gives: an app that stopped reporting has stalled or been frozen.
+- **`ACTION_SEEK_TO` decides `Full` against `StartOnly`**, mapping onto the
+  three-value `PlayheadControl` §11 already introduced. An app that cannot seek
+  must not run the ladder.
+- **A skip ends the claim.** `sameTrack` compares what each side is playing, and
+  blank metadata is *not* a match — an app that publishes nothing has told us
+  nothing, and reading silence as agreement is the invention this design
+  refuses.
+- **Two different playback speeds are not something a seek can fix**, so the
+  session says so rather than chasing a gap that reopens as fast as it closes.
+
+### Not built
+
+The `NotificationListenerService` itself, the `MediaController` adapter over it,
+and the `TogetherManager` change that lets a session follow an external player
+instead of owning one. Same reason as §11b: the manager is concrete on
+`TogetherPlayer` throughout and is where the foreground-service contract lives,
+so it wants one deliberate refactor rather than two half ones.
+
