@@ -1356,7 +1356,9 @@ compile and run under `kotlinc` with no SDK.
 
 **Still not built**, and now down to one thing rather than three: the
 `TogetherManager` change that holds a `SessionPlayer` instead of a
-`TogetherPlayer`, plus the two new implementations behind it. That file owns the
+`TogetherPlayer`, plus the two new implementations behind it. The work list, the
+exact call sites and the traps are in
+[`docs/TOGETHER_PLAYERS_HANDOFF.md`](TOGETHER_PLAYERS_HANDOFF.md). That file owns the
 foreground-service contract, which `.claude/rules/android.md` names as the most
 bug-prone area in the repo, so it wants one deliberate pass — but it is now a
 mechanical pass against a settled interface rather than a design question.
