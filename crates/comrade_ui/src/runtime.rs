@@ -8466,8 +8466,15 @@ const BLE_OUTBOUND_CAPACITY: usize = 512;
 /// interior is locked rather than `&mut` — the same posture
 /// [`comrade_core::dak::Outbox`] takes.
 pub struct BleRouter {
-    /// `false` until a platform BLE layer says it is scanning and advertising.
-    /// Feeds [`TransportReach`], so a build with no BLE service — desktop, the
+    /// `false` until a platform BLE layer reports **at least one linked peer**
+    /// — not merely that the radio is on.
+    ///
+    /// That distinction is the same one [`comrade_core::saathi::MeshReach`]
+    /// draws between discovered and deliverable, and for the same reason: a
+    /// running radio with nobody in range is not a route, and treating it as
+    /// one makes every outbox flush spend an attempt against a transport that
+    /// cannot deliver — eight of which mark the message failed. Feeds
+    /// [`TransportReach`], so a build with no BLE service at all — desktop, the
     /// CLI, a test — simply never routes over Bluetooth.
     active: std::sync::atomic::AtomicBool,
     mtu: std::sync::atomic::AtomicUsize,
@@ -8511,7 +8518,9 @@ impl BleRouter {
         self.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Told by the platform when its BLE service starts and stops.
+    /// Told by the platform whenever the set of linked peers becomes empty or
+    /// non-empty. `true` means "there is somebody to write to right now", not
+    /// "the radio is powered".
     pub fn set_active(&self, active: bool) {
         self.active
             .store(active, std::sync::atomic::Ordering::Relaxed);
