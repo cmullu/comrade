@@ -5,6 +5,7 @@ import mullu.comrade.together.TogetherDecisions.Local
 import mullu.comrade.together.TogetherDecisions.Op
 import mullu.comrade.together.TogetherDecisions.ScrubState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -230,5 +231,65 @@ class TogetherDecisionsTest {
         val idle = ScrubState(scrubbing = false, pendingRemoteMs = null)
         val next = TogetherDecisions.onRemoteSeek(idle, 42_000)
         assertNull(next.pendingRemoteMs)
+    }
+
+    // ── Picture ─────────────────────────────────────────────────────────────
+    //
+    // The regression these pin: the session had no video surface at all, so a
+    // film opened in watch-together played as audio. Nothing above could catch
+    // that, because nothing above knew whether there was a picture.
+
+    @Test
+    fun aVideoTrackAsksForASurface() {
+        val picture = TogetherDecisions.pictureOf(1920, 1080)
+        assertEquals(TogetherDecisions.Picture.Video(1920, 1080), picture)
+        assertEquals(16f / 9f, TogetherDecisions.aspectRatioOf(picture)!!, 0.001f)
+    }
+
+    @Test
+    fun anAudioOnlyRecordingAsksForNoSurface() {
+        // What MediaPlayer reports for a track with no video: zero, not null.
+        val picture = TogetherDecisions.pictureOf(0, 0)
+        assertEquals(TogetherDecisions.Picture.None, picture)
+        assertNull("audio gets no black rectangle", TogetherDecisions.aspectRatioOf(picture))
+    }
+
+    @Test
+    fun dimensionsThatArriveBeforeTheFirstFrameReadAsNoPictureYet() {
+        // Deliberately the same answer as audio-only: the surface appears when
+        // there is something to put on it.
+        assertEquals(TogetherDecisions.Picture.None, TogetherDecisions.pictureOf(1920, 0))
+        assertEquals(TogetherDecisions.Picture.None, TogetherDecisions.pictureOf(0, 1080))
+    }
+
+    /**
+     * Compose's `aspectRatio` throws on a non-positive ratio, and the dimensions
+     * come from a file the other person chose. A broken or hostile header must
+     * not be able to take the screen down.
+     */
+    @Test
+    fun aBrokenHeaderCannotProduceAnUndrawableShape() {
+        for ((w, h) in listOf(1 to 1_000_000, 1_000_000 to 1, 3 to 2, 9 to 16)) {
+            val ratio = TogetherDecisions.aspectRatioOf(TogetherDecisions.pictureOf(w, h))
+            assertNotNull("${w}x$h produced no ratio", ratio)
+            assertTrue("${w}x$h escaped the clamp", ratio!! >= TogetherDecisions.MIN_ASPECT)
+            assertTrue("${w}x$h escaped the clamp", ratio <= TogetherDecisions.MAX_ASPECT)
+        }
+    }
+
+    @Test
+    fun negativeDimensionsAreAudio() {
+        assertEquals(TogetherDecisions.Picture.None, TogetherDecisions.pictureOf(-1920, -1080))
+    }
+
+    @Test
+    fun onlyPlayingVideoHoldsTheScreenAwake() {
+        val video = TogetherDecisions.pictureOf(1920, 1080)
+        val audio = TogetherDecisions.pictureOf(0, 0)
+        assertTrue(TogetherDecisions.keepScreenOn(video, playing = true))
+        assertFalse("a paused film does not need the screen", TogetherDecisions.keepScreenOn(video, playing = false))
+        // The case that matters: two hours of music must not burn the battery
+        // holding up a screen with nothing on it.
+        assertFalse("audio must never hold the screen", TogetherDecisions.keepScreenOn(audio, playing = true))
     }
 }

@@ -466,6 +466,16 @@ Future<void> togetherReportPosition(
     RustLib.instance.api.crateApiTogetherReportPosition(
         posMs: posMs, playing: playing, outputLatencyMs: outputLatencyMs);
 
+/// Declare whether a direct peer channel is carrying this session — see
+/// [`Comrade::together_direct_ready`] in this crate's uniffi half.
+Future<void> togetherDirectReady({required bool ready}) =>
+    RustLib.instance.api.crateApiTogetherDirectReady(ready: ready);
+
+/// Hand over an envelope that arrived on the direct channel — see
+/// [`Comrade::together_receive_direct`] in this crate's uniffi half.
+Future<void> togetherReceiveDirect({required String json}) =>
+    RustLib.instance.api.crateApiTogetherReceiveDirect(json: json);
+
 /// See [`broadcast_chitthi`] for the lock discipline.
 Future<void> hangupCall(
         {required String peer,
@@ -651,6 +661,10 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.togetherShare(
     TogetherShareDto field0,
   ) = BridgeEvent_TogetherShare;
+  const factory BridgeEvent.togetherOutbound({
+    required String sessionId,
+    required String json,
+  }) = BridgeEvent_TogetherOutbound;
   const factory BridgeEvent.attachmentHandoff(
     AttachmentHandoffDto field0,
   ) = BridgeEvent_AttachmentHandoff;

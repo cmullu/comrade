@@ -117,6 +117,7 @@ import mullu.comrade.ui.StarIcon
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
 import mullu.comrade.ui.TaskListScreen
+import mullu.comrade.ui.QueueMusicIcon
 import mullu.comrade.ui.TimerIcon
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.purgeDecryptedMedia
@@ -430,7 +431,11 @@ fun ComradeApp() {
 private enum class MainTab(val label: String, val icon: ImageVector) {
     Chats("Chats", ChatBubbleIcon),
     Journal("Journal", BookIcon),
-    Feed("Feed", ArticleIcon),
+    // Took the slot Feed had. Feed is not gone — it moved to the drawer, because
+    // a public feed is somewhere you go and listening with someone is something
+    // you do *with* the person you are already talking to, which makes it a
+    // daily surface and the feed a deliberate one.
+    Together("Together", QueueMusicIcon),
     Focus("Focus", TimerIcon),
     Tara("Tara", HeartIcon),
 }
@@ -474,6 +479,8 @@ private fun MainShell(
     // Settings is a pushed screen (Telegram-style), reached from the drawer,
     // not a bottom-nav tab. The drawer is the app-wide navigation menu.
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
+    /// Feed is a pushed screen now, reached from the drawer — see [MainTab].
+    var feedOpen by rememberSaveable { mutableStateOf(false) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     // Owned by RelayConnectionService/ChatEventRouter now — the single
@@ -687,20 +694,38 @@ private fun MainShell(
     // Settings screen closes, then a Chats sub-screen returns to the list.
     BackHandler(
         enabled = drawerState.isOpen ||
-            settingsOpen ||
+            settingsOpen || feedOpen ||
             (tab == MainTab.Chats && chatNav != ChatNav.List) ||
             (tab == MainTab.Focus && focusNav != FocusNav.Sessions),
     ) {
         when {
             drawerState.isOpen -> scope.launch { drawerState.close() }
             settingsOpen -> settingsOpen = false
+            feedOpen -> feedOpen = false
             tab == MainTab.Focus -> focusNav = FocusNav.Sessions
             else -> chatNav = ChatNav.List
         }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        if (settingsOpen) {
+        if (feedOpen) {
+            // Reached from the drawer since Together took the bottom-nav slot.
+            // A pushed screen with its own back arrow rather than a tab, because
+            // that is what the drawer's other destinations are.
+            FeedPushedScreen(
+                feedItems = feedItems,
+                onBack = { feedOpen = false },
+                onOpenJournal = {
+                    feedOpen = false
+                    tab = MainTab.Journal
+                },
+                onOpenBreathing = {
+                    feedOpen = false
+                    tab = MainTab.Focus
+                    focusNav = FocusNav.Breathing
+                },
+            )
+        } else if (settingsOpen) {
             SettingsPushedScreen(
                 profile = profile,
                 onProfileChange = onProfileChange,
@@ -731,6 +756,10 @@ private fun MainShell(
                             scope.launch { drawerState.close() }
                             tab = MainTab.Chats
                             chatNav = ChatNav.Tasks
+                        },
+                        onOpenFeed = {
+                            scope.launch { drawerState.close() }
+                            feedOpen = true
                         },
                     )
                 },
@@ -996,7 +1025,7 @@ private fun MainShell(
                                             MainTab.Chats -> "Comrade"
                                             MainTab.Journal -> "Journal"
                                             MainTab.Tara -> "Tara"
-                                            MainTab.Feed -> "Feed"
+                                            MainTab.Together -> "Together"
                                             MainTab.Focus -> stringResource(R.string.attention_tab)
                                         },
                                     )
@@ -1078,6 +1107,16 @@ private fun MainShell(
                             is ChatNav.Open -> ConversationScreen(
                                 peer = nav.peer,
                                 chatTick = chatTick,
+                                // Same launcher the Together button in the chat
+                                // header uses, so a file arriving from `/play`
+                                // and one picked by hand start a session by the
+                                // identical path — including the persistable
+                                // read permission, which a second launcher
+                                // would have had to remember to take.
+                                onPickTogetherFile = { peer, label ->
+                                    togetherPeer = peer to label
+                                    togetherPicker.launch(arrayOf("video/*", "audio/*"))
+                                },
                                 modifier = content,
                             )
                         }
@@ -1099,14 +1138,13 @@ private fun MainShell(
                                 modifier = content,
                             )
                         }
-                        MainTab.Feed -> FeedScreen(
-                            feedItems = feedItems,
-                            onPosted = { ChatEventRouter.addChitthi(it, front = true) },
-                            onOpenJournal = { tab = MainTab.Journal },
-                            onOpenBreathing = {
-                                tab = MainTab.Focus
-                                focusNav = FocusNav.Breathing
-                            },
+                        // The session's own surface, rather than an overlay over
+                        // the whole app. A film or an album runs for hours, and
+                        // covering every other screen for the length of it meant
+                        // a session you could not leave without ending. Now the
+                        // playing stays here and the rest of the app stays usable.
+                        MainTab.Together -> mullu.comrade.ui.TogetherScreen(
+                            onPickFile = { togetherPicker.launch(arrayOf("video/*", "audio/*")) },
                             modifier = content,
                         )
                     }
@@ -1118,7 +1156,10 @@ private fun MainShell(
         // including one we were invited to but have not opened a file for yet,
         // because "Ana wants to watch Solaris with you" is not something to
         // leave buried behind a tab.
-        if (togetherState !is mullu.comrade.together.TogetherManager.UiState.Idle) {
+        // Only an *invitation* still covers the app. "Ana wants to watch Solaris
+        // with you" has to interrupt whatever is on screen — it expires, and a
+        // missed one is a missed evening. A live session does not: it has a tab.
+        if (togetherState is mullu.comrade.together.TogetherManager.UiState.Invited) {
             mullu.comrade.ui.TogetherScreen(
                 onPickFile = { togetherPicker.launch(arrayOf("video/*", "audio/*")) },
             )
@@ -1349,6 +1390,7 @@ private fun ComradeDrawerSheet(
     onOpenCallHistory: () -> Unit,
     onOpenComrades: () -> Unit,
     onOpenTasks: () -> Unit,
+    onOpenFeed: () -> Unit,
 ) {
     ModalDrawerSheet {
         Row(
@@ -1389,6 +1431,16 @@ private fun ComradeDrawerSheet(
             onClick = onOpenTasks,
             modifier = Modifier.testTag("drawer-tasks"),
         )
+        // Feed lives here rather than on the bottom nav — Together took that
+        // slot. It is still one tap from anywhere, which is what "off the nav"
+        // was supposed to mean and what deleting it would not have.
+        NavigationDrawerItem(
+            label = { Text("Feed") },
+            icon = { Icon(ArticleIcon, contentDescription = null) },
+            selected = false,
+            onClick = onOpenFeed,
+            modifier = Modifier.testTag("drawer-feed"),
+        )
         NavigationDrawerItem(
             label = { Text(stringResource(R.string.call_history_title)) },
             icon = { Icon(CallIcon, contentDescription = null) },
@@ -1402,6 +1454,49 @@ private fun ComradeDrawerSheet(
             onClick = onOpenSettings,
             modifier = Modifier.testTag("drawer-settings"),
         )
+    }
+}
+
+/**
+ * The public feed, as a pushed screen.
+ *
+ * It was a bottom-nav tab until Together took that slot. Kept whole and one tap
+ * from anywhere rather than removed: the argument for moving it was that a feed
+ * is somewhere you *go*, which is exactly what the drawer is for.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FeedPushedScreen(
+    feedItems: List<ComradeCore.ChitthiInfo>,
+    onBack: () -> Unit,
+    onOpenJournal: () -> Unit,
+    onOpenBreathing: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            modifier = Modifier.weight(1f),
+            topBar = {
+                TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                            )
+                        }
+                    },
+                    title = { Text("Feed") },
+                )
+            },
+        ) { padding ->
+            FeedScreen(
+                feedItems = feedItems,
+                onPosted = { ChatEventRouter.addChitthi(it, front = true) },
+                onOpenJournal = onOpenJournal,
+                onOpenBreathing = onOpenBreathing,
+                modifier = Modifier.padding(padding),
+            )
+        }
     }
 }
 

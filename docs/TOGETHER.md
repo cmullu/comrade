@@ -263,6 +263,24 @@ When a command DM is lost entirely, the heartbeat is the repair path: it
 carries `applied_seq`, so a peer who is *ahead* of us is adopted wholesale
 rather than corrected against.
 
+**A trim is sticky, so arriving back inside the deadband has to say so.** This
+is the third rule, and it was missing until a soak found it. A player told to
+run at 0.96× keeps running at 0.96× until it is told otherwise — neither
+`MediaPlayer` nor a `<video>` element resets itself — and `trim_rate` cannot
+return `1.0` for any drift large enough to have provoked a correction. So a
+verdict of `Hold` on the way back into the deadband left the trim applied: the
+follower ran permanently at least 2.5% off speed, coasted out the far side of
+the deadband, and was trimmed the other way. Bounded, never divergent, and
+never settled either.
+
+`sync_verdict` therefore returns `Nudge { rate: 1.0 }` rather than `Hold` when
+a trim is applied and the gap has closed, which is what `SyncSample::local_rate`
+is for. Over two simulated hours (`together_soak`) that is **4 rate changes
+instead of 191, and 271 ms of worst-case drift instead of 479 ms**. Worth
+naming because of *where* it would have been noticed: a ±4% wobble is invisible
+on video and an audible tempo and pitch error on music, so "listen together"
+would have been the broken half while "watch together" looked fine.
+
 ## 5. Timing
 
 | Constant | Value | Why |
@@ -289,6 +307,56 @@ binding cost, and it is why a two-second tick was rejected. **Whether public
 relays tolerate even this cadence for two hours is untested**: the in-process
 test relay accepts anything. If they push back, the answer is 15–20 s and a
 wider deadband, not a cleverer algorithm.
+
+## 5a. Which transport carries it, and why that is the real latency lever
+
+Every constant in §5 is chosen against a round trip, and the deadband is floored
+by half of the measured one (§3). So the transport does not merely *affect* how
+tight the sync can be — it **sets the floor**, and no amount of tuning gets under
+it. `send_together` therefore tries three rungs in order:
+
+| Rung | Round trip | When it is there |
+|---|---|---|
+| Local mesh (Saathi, LAN) | ~1–5 ms | Only while the mesh engine runs, which today means the off-grid workspace |
+| **Direct peer channel** | ~20–80 ms | When a frontend reports one up for the session |
+| Relay (gift-wrapped DM) | hundreds of ms | Always |
+
+The relay rung is not a fallback in the apologetic sense — it is the one that
+always works, needs no NAT traversal, and is what makes a session possible
+between two people who can never reach each other directly. The other two are
+what make it *tight*.
+
+**Core does not send on the direct channel; it asks the frontend to.** The
+connection belongs to the frontend — the same division of labour the file
+handover already uses, and for the same reason: mirroring a connection state
+machine in core would create two machines that must agree about something only
+one of them can see. So core emits `BridgeEvent::TogetherOutbound` and the
+frontend puts it on the wire. One event for the whole transport, not one per
+signal kind.
+
+**The direct path is deliberately less privileged than the relay path**, and this
+is the part worth reading twice. A relay message proves who sent it: every signal
+is individually NIP-44 authenticated. A data channel proves only "whoever is on
+the far end of this DTLS connection", which is the peer precisely because the
+connection was negotiated with them inside a live session. Two rules keep that
+honest:
+
+- **It cannot open a session.** `direct_signal_admissible` refuses `start` — the
+  only signal that creates state from nothing, and so the only one that really
+  needs per-message authentication. A channel that could open a session would
+  invert the thing that makes it trustworthy.
+- **The sender is the session's peer by definition, not by claim.** Nothing in
+  the payload is consulted for identity.
+
+Everything past that — the age gate, session scoping, `(seq, actor)` ordering —
+is literally the same code the relay path runs, because it is the same call.
+
+**What `direct_ready` does not have is a timeout.** A frontend that reports a
+live channel and then loses it must report `false`, or signals go into a socket
+nobody reads and the session dies on its TTL rather than falling back to the
+relay that was there the whole time. That is stated on the method, on the Tauri
+command, and in the Kotlin arm, because it is the one way to make this worse than
+not having it.
 
 ## 6. Replay safety
 
@@ -369,12 +437,42 @@ FFI bridges, the Tauri commands, the desktop decision module, and the **Android
 frontend end to end** — player, screen, entry point in the conversation bar, and
 a foreground service so a session keeps playing when the app is backgrounded.
 
+Read "tested" narrowly, because it has already been read too widely once. Every
+lane in this repo asserts about *values*; not one of them looks at a pixel. Two
+bugs shipped through a green board on exactly that gap — a film that played as
+sound because nothing gave the decoder a surface, and a session that drew as
+floating text over whatever tab was behind it because the overlay had no
+background — and both were obvious within a second of opening the app on a
+device. What CI can hold is the decision underneath a rendering bug:
+`pictureOf`, `aspectRatioOf` and `keepScreenOn` are pinned on both frontends
+against the same vectors. Whether anything reached the screen is still a human
+with a phone.
+
 Android specifics worth knowing:
 
 - **`MediaPlayer`, not Media3.** The deciding detail is `seekTo(long,
   SEEK_CLOSEST)`, which needs API 26 and `minSdk` is 26. The plain `seekTo(int)`
   lands on the nearest sync frame — with 5–10 s keyframe spacing that is a sync
   failure dressed up as a working feature. No new dependency.
+- **The picture needs a surface, and it is not optional.** A `MediaPlayer` with
+  no surface decodes video and discards it, so a film plays as sound with no
+  error anywhere — which is exactly how this shipped and how it was reported.
+  `TogetherPlayer.attachSurface` and `VideoSurface` in `TogetherScreen.kt` are
+  the fix. The surface and the player have **independent lifetimes**: the
+  surface is destroyed and recreated on every rotation while the session must
+  survive both, so the player holds the last surface it was handed and
+  re-attaches on `open`, and the holder callbacks are the only thing that
+  decides what exists. Detaching passes `null` before the player is released,
+  because a destroyed `Surface` the decoder still holds is a use-after-free in
+  the media server rather than a leak.
+- **Audio-only draws no surface at all.** `TogetherDecisions.pictureOf` reads
+  the decoder's reported dimensions — `0` means no video track — because the
+  picked MIME type cannot answer it: an `.mkv` of an album is
+  `video/x-matroska` and a `.mp4` podcast is `video/mp4`. Desktop makes the
+  same call in `together_sync.mjs` from `videoWidth`, against the same test
+  vectors, so a `<video>` element does not show a black rectangle over
+  someone's music either. Only a *playing* video holds the screen awake; two
+  hours of audio must not.
 - **Background playback is real**, via `FOREGROUND_SERVICE_MEDIA_PLAYBACK` and a
   **framework** `MediaSession` (`android.media.session`, API 21) rather than
   `androidx.media3.session` — same media-key routing, no ~2 MB dependency for
@@ -386,9 +484,8 @@ Android specifics worth knowing:
 
 - **The transports for sharing the file** — see below.
 
-- **The desktop player surface.** The commands and the decision module are in
-  place; the `<video>` element, the file picker and the DOM wiring are not, so
-  there is still no way to *start* a session from the desktop UI.
+- ~~**The desktop player surface.**~~ Built 2026-08-05. The `<video>` element,
+  the file picker and the DOM wiring all landed, and with them `/play` — see §9b.
 - **YouTube.** The envelope and the id validation support it; no frontend embeds
   one. When it lands on desktop it must be a **bare cross-origin iframe driven by
   `postMessage`**, with the CSP widened by exactly `frame-src
@@ -642,6 +739,90 @@ two real devices: no transfer has
 crossed a live `RTCPeerConnection`, and the Kotlin path additionally cannot be
 compiled in the development sandbox at all. Treat the connection handling as
 reviewed rather than exercised.
+
+## 9c. Where it lives
+
+Together has the bottom-nav slot Feed had on Android, and the sidebar slot Sabha
+had on desktop. Neither feed was removed — Feed is a pushed screen from the
+drawer (`drawer-feed`, asserted on a device, because "off the nav, not removed"
+is only true if something reaches it) and Sabha is a button in the desktop
+sidebar's Modes section. The argument for the swap is that a public feed is
+somewhere you *go*, which is what a drawer is for, while listening with someone
+is a daily surface.
+
+The tab is the **session's own screen**, which is a change on Android beyond the
+nav: a live session used to be an overlay covering the whole app, so an album
+running for an hour meant an hour of not being able to read anything else
+without ending it. Now only an *invitation* covers the app — those expire, and a
+missed one is a missed evening — and the playing itself stays in its tab.
+
+**Music-first, one block.** A square sleeve with a note in it, and the video
+surface inside that same block when the decoder reports a picture. So an album
+gets a record cover and a film gets a screen, from one layout rather than two
+kept in step, and the sleeve is the single owner of the aspect ratio (two things
+applying one is how a film ends up letterboxed inside a box already the right
+shape).
+
+**The readout is measured, not predicted.** Desktop shows the drift and the
+measurement quality off `TogetherCorrection`, and `player_view.mjs` decides what
+that is worth saying: a gap smaller than our own error is **not reported at
+all**, because printing "0.4 s apart" while the error is 0.8 s is invention
+rather than precision. The path is named beside it — `direct · ±0.05s` against
+`relayed · ±0.6s` — since that is what makes the number mean anything. Neither
+chip is colour-coded: "we've lost track of them" is an honest report, not a
+fault, and painting it red would say otherwise. Android does not show these two
+figures yet; the plumbing to carry them into `UiState.Live` is the follow-up.
+
+## 9b. Starting one — `/play`, and why it is one gesture
+
+The protocol was finished long before the way in was. Getting a session going
+meant *finding* the feature — a panel on desktop, a button in the chat header on
+the phone — then choosing a file, then saying start. Three deliberate acts to
+express one intention, and on desktop `/play` answered **"there is no player
+here yet"**, which had quietly stopped being true.
+
+So the way in is the command, in the conversation with the person you want to
+listen with:
+
+```
+/play kun faya kun
+/play https://open.spotify.com/track/…
+```
+
+`play_query` resolves the words or the link, `play_route` decides what is
+possible, and each frontend decides what *it* does about that — separately, and
+on purpose, because they can do different things:
+
+| Route | Phone | Desktop |
+|---|---|---|
+| `start_together` | Found it in the music library — session opens | Not reachable: a webview has no library to search |
+| `ask_for_file` | Opens the file picker, then starts | Opens the file picker, then starts |
+| `open_elsewhere` | Names the service — DRM audio no third-party client may decode | Same |
+| `play_embed` | "Comrade can't play YouTube here" | "…on the phone app, not this window yet" |
+| `nothing` | Asks for a name or a link | Same |
+
+Three things about that table are the substance rather than the layout.
+
+**The picker is an answer, not an error before one.** `ask_for_file` is the
+common route — desktop can never search, and a phone often has no copy — so it
+opens the picker itself and starts the session on the file that comes back.
+Naming a screen to go and open was asking someone to say the same thing twice.
+On the phone it opens whether or not the music library could be read: "no copy
+here" and "not allowed to look" are different sentences and the same next
+action, and the picker needs no permission either way.
+
+**The invitation says what it is.** The recording `/play` named travels with it,
+so the other person sees *Kun Faya Kun* rather than a blank — desktop used to
+send `recording: null` whatever had been typed. The **filename is still never
+sent**; on the phone the tags are read from the file itself, and a file picked
+by hand from the panel names nothing, because nothing was said about it.
+
+**Every route ends somewhere.** A command that silently does nothing is the
+failure this replaces, so `planPlay` returns an outcome for all five routes and
+for one it has never heard of — release skew, when core gains a variant before
+a frontend does. `play_flow.test.mjs` asserts that as a property over the whole
+set rather than case by case, and asserts separately that no refusal ever
+implies we are about to play something we cannot.
 
 ## 10. Deliberately out of scope
 

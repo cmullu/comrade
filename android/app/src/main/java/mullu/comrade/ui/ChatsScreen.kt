@@ -511,6 +511,17 @@ private sealed interface ChatItem {
 fun ConversationScreen(
     peer: String,
     chatTick: Int,
+    /**
+     * Open the file picker for a `/play` that knows what it wants and could not
+     * find it on this phone.
+     *
+     * Hoisted to the activity because that is where the picker and its
+     * persistable-permission handling already live — the same launcher the
+     * Together button in the header uses, so a file arriving by either route
+     * starts a session identically. Without it this screen could only *name* a
+     * place to go, which is one gesture too many for "listen to this with me".
+     */
+    onPickTogetherFile: (peer: String, label: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     var messages by remember { mutableStateOf<List<ComradeCore.MessageInfo>>(emptyList()) }
@@ -1086,25 +1097,35 @@ fun ConversationScreen(
                     // conditional write would let the previous command's
                     // sentence stand in for this one's.
                     var failed: String? = null
+                    // A label, not an npub: an invitation that says "npub1…"
+                    // wants to listen with you is unreadable. Needed by both
+                    // routes that reach a session, so it is read once.
+                    val label = withContext(Dispatchers.IO) {
+                        runCatching { ComradeCore.contacts() }.getOrNull()
+                            ?.firstOrNull { it.npub == peer }
+                            ?.let { peerTitle(it.npub, it.alias, it.name) }
+                            ?: shortNpub(peer)
+                    }
                     if (route == PlayRoute.START_TOGETHER && found != null) {
-                        // A label, not an npub: an invitation that says
-                        // "npub1…" wants to listen with you is unreadable.
-                        val label = withContext(Dispatchers.IO) {
-                            runCatching { ComradeCore.contacts() }.getOrNull()
-                                ?.firstOrNull { it.npub == peer }
-                                ?.let { peerTitle(it.npub, it.alias, it.name) }
-                                ?: shortNpub(peer)
-                        }
                         runCatching {
                             TogetherManager.start(context, peer, label, found.uri, found.recording)
                         }
                             .onSuccess { clearDraft() }
                             .onFailure { failed = it.message ?: "Could not start that." }
                     }
-                    // Said on every route, the successful one included: this
-                    // screen owns no nav state, so it can start the session but
-                    // cannot show it, and a session the user cannot find is the
-                    // same gap the task list had.
+                    // The other half of the same gesture. We know what they
+                    // asked for and this phone cannot hand it over, so the
+                    // picker *is* the next step — naming a screen to go and
+                    // open was asking them to say the same thing twice.
+                    //
+                    // Opened whether or not the library could be read: "no copy
+                    // here" and "not allowed to look" are different sentences
+                    // (below) but the same next action, and the file picker
+                    // needs no permission either way.
+                    if (route == PlayRoute.ASK_FOR_FILE) {
+                        clearDraft()
+                        onPickTogetherFile(peer, label)
+                    }
                     commandNote = when {
                         failed != null -> failed
                         route == PlayRoute.ASK_FOR_FILE && !mayLook -> ChatCommands.LIBRARY_UNSEEN

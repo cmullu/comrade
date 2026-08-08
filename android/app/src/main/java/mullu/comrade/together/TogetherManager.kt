@@ -56,6 +56,13 @@ object TogetherManager {
             val positionMs: Long,
             val durationMs: Long,
             val status: Status,
+            /**
+             * Whether this recording turned out to have a picture, and how big.
+             * Known only after the decoder reports it, so it starts as
+             * [TogetherDecisions.Picture.None] and the surface appears when
+             * there is something to put on it.
+             */
+            val picture: TogetherDecisions.Picture = TogetherDecisions.Picture.None,
         ) : UiState
     }
 
@@ -419,8 +426,43 @@ object TogetherManager {
             override fun onError(message: String) {
                 Log.w(TAG, "player: $message")
             }
+
+            override fun onVideoSize(width: Int, height: Int) {
+                refreshLive(picture = TogetherDecisions.pictureOf(width, height))
+            }
         })
         p.open(uri)
+    }
+
+    /**
+     * Core asking us to carry a signal over the direct peer channel.
+     *
+     * **Nothing arrives here yet, by construction.** Core only emits an outbound
+     * signal after a frontend has reported a live channel via
+     * `togetherDirectReady(true)`, and this frontend never does — a session-long
+     * peer connection is not built here yet, only the file-handover one that
+     * lives for the length of a transfer. So this drops, and says so, rather
+     * than looking like a wired path that silently loses signals.
+     *
+     * When the connection lands this becomes a `send` on it, and the only other
+     * thing it must do is report `togetherDirectReady(false)` the moment the
+     * channel closes — there is no timeout behind that flag, so a stale `true`
+     * would send every signal into a socket nobody reads and let the session die
+     * on its TTL instead of falling back to the relay.
+     */
+    fun onOutbound(json: String) {
+        Log.d(TAG, "dropping a direct together signal: no session channel on this frontend (${json.length}B)")
+    }
+
+    /**
+     * Hand the player the window to draw into, or take it away.
+     *
+     * Called by the screen as its surface is created and destroyed — which
+     * happens on every rotation, independently of the session. The player holds
+     * the last value, so the order the two arrive in does not matter.
+     */
+    fun attachSurface(surface: android.view.Surface?) {
+        player?.attachSurface(surface)
     }
 
     /** The one place a player callback becomes an outbound signal, or does not. */
@@ -460,12 +502,14 @@ object TogetherManager {
         playing: Boolean? = null,
         positionMs: Long? = null,
         status: Status? = null,
+        picture: TogetherDecisions.Picture? = null,
     ) {
         val live = _state.value as? UiState.Live ?: return
         _state.value = live.copy(
             playing = playing ?: live.playing,
             positionMs = positionMs ?: live.positionMs,
             status = status ?: live.status,
+            picture = picture ?: live.picture,
         )
     }
 

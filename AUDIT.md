@@ -717,6 +717,99 @@ is small; the content problem is the real constraint:
 > - **The Flutter app has no together surface** — all six events are dropped
 >   one variant at a time in `rust_comrade_repository.dart` so that building one
 >   is a compile error rather than a silent no-op.
+> - ~~**A film played as sound, and the session drew as invisible text over
+>   whatever tab was behind it.**~~ **Resolved 2026-08-05**, both reported from
+>   a real device and both structural rather than incidental.
+>   `TogetherPlayer` drove a `MediaPlayer` that was never given a surface —
+>   which decodes video and discards it — and `TogetherScreen` rendered no
+>   surface to give it; `TogetherPlayer.attachSurface` and the `SurfaceView` in
+>   `ui/TogetherScreen.kt`'s `VideoSurface` close that, with the two lifetimes
+>   kept separate because the surface dies on every rotation and the player must
+>   not. The overlay had no background at all, unlike `CallOverlay` which covers
+>   the app the same way; `TogetherOverlay` now supplies one and swallows the
+>   taps that were reaching the tab underneath. The half that could be pinned
+>   here was: `TogetherDecisions.pictureOf`/`aspectRatioOf` decide video from
+>   audio and clamp a hostile header, mirrored in `together_sync.mjs` with the
+>   same vectors on both sides. **The rendering itself is verified on a device,
+>   not by a test** — nothing in CI looks at a pixel.
+> - ~~**A rate trim was never taken back off.**~~ **Resolved 2026-08-05**, found
+>   by the new soak rather than by review. `trim_rate` cannot return `1.0` for
+>   any drift big enough to have provoked it, and `sync_verdict` returned `Hold`
+>   once inside the deadband — so after its first correction a follower ran
+>   permanently ≥2.5% off speed, sailed back out the far side and was trimmed
+>   the other way, forever. `sync_verdict` now returns `Nudge { rate: 1.0 }` on
+>   the way in, using the new `SyncSample::local_rate`; over two simulated hours
+>   that is **4 rate changes instead of 191, and 271 ms of worst-case drift
+>   instead of 479**. Invisible on video and an audible tempo wobble on music,
+>   which is why "listen together" is where it would have been reported.
+> - ~~**The soak the plan called for was never written.**~~ **Resolved
+>   2026-08-05**: `crates/comrade_core/tests/together_soak.rs`, `#[ignore]`d and
+>   gated by `.github/workflows/together.yml` — the `feed_flood_load`
+>   arrangement, and the reason the trim bug above is now a red test. Its first
+>   draft passed while simulating **no drift at all** (integer division rounded
+>   0.8 ms/beat to zero); the fractional accumulator and the "worst drift" line
+>   in its output exist so a future inert version is visible rather than green.
+> - ~~**There was no seamless way in.**~~ **Resolved 2026-08-05.** The protocol
+>   was finished long before the way into it: starting a session meant finding
+>   the feature (a panel on desktop, a header button on the phone), then picking
+>   a file, then saying start — three acts for one intention — and on desktop
+>   `/play` answered *"there is no player here yet"*, which had stopped being
+>   true when the `<video>` element landed. `DESKTOP_CAN_PLAY` is now on, its
+>   stated exit condition having been met, and `desktop/ui/play_flow.mjs` routes
+>   all five `PlayRoute`s; `ask_for_file` opens the picker and invites on the
+>   file that comes back, so the command *is* the gesture. The phone gained the
+>   same move through `ConversationScreen`'s `onPickTogetherFile`, reusing the
+>   activity's existing launcher so a file arriving either way takes the
+>   identical path, persistable read permission included. The invitation now
+>   carries the recording that was named, so the other side reads *Kun Faya Kun*
+>   rather than a blank — desktop had been sending `recording: null` whatever
+>   was typed. Two Android sentences that named a screen to go and open were
+>   rewritten, because the screen now opens itself.
+> - ~~**Sync had no transport faster than a relay.**~~ **Rung added 2026-08-05**,
+>   though **not yet carried by any frontend** — read this entry as "core is
+>   ready", not "it is fast now". §8.2's own note that "a later WebRTC data
+>   channel from 8.1 would make it tight" is the thing being answered.
+>   `send_together` now tries local mesh (~1–5 ms) → direct peer channel
+>   (~20–80 ms) → relay (hundreds), and since the correction deadband is floored
+>   by *half the measured round trip*, the transport sets the floor that no
+>   tuning gets under. Core emits `BridgeEvent::TogetherOutbound` rather than
+>   sending, because the connection belongs to the frontend — the division of
+>   labour `TogetherShareDto` already argues for. The direct path is deliberately
+>   less privileged than the relay one: `direct_signal_admissible` refuses
+>   `start`, and the sender is the session's peer by definition rather than by
+>   anything in the payload, because a data channel proves only "the far end of
+>   this DTLS connection" where a gift wrap proves authorship per message. What
+>   is **missing** is the connection itself on both shipping frontends: nothing
+>   reports `direct_ready(true)`, so nothing is emitted and every signal still
+>   takes the relay. The Kotlin arm and the Dart arm both say so rather than
+>   looking wired. A session-long peer connection (the file handover's one lives
+>   only as long as a transfer) is the next piece.
+> - **`direct_ready` has no timeout, on purpose, and that is a footgun.** A
+>   frontend that reports a live channel and then loses it must report `false`,
+>   or signals go to a socket nobody reads and the session dies on its TTL
+>   instead of falling back to the relay that was there all along. Stated on the
+>   method, the Tauri command and the Kotlin arm; there is no code that enforces
+>   it, and a watchdog is the honest follow-up.
+> - ~~**Together had no home of its own.**~~ **Moved 2026-08-05.** It has the
+>   bottom-nav slot Feed had on Android and the sidebar slot Sabha had on
+>   desktop; neither feed was removed — Feed is a drawer-reached pushed screen
+>   (`drawer-feed`, asserted in `MainActivityUiTest` because "off the nav, not
+>   removed" is only true if something reaches it) and Sabha is a button in the
+>   desktop sidebar's Modes section. Beyond the nav, this fixes a real Android
+>   problem: a live session was an overlay over the whole app, so an hour-long
+>   album meant an hour of being unable to read anything else without ending it.
+>   Now only an *invitation* covers the app and the session lives in its tab.
+>   Both frontends got a music-first player — one square sleeve holding the note
+>   glyph or the video surface, so an album is a record cover and a film is a
+>   screen from one layout — and desktop shows the measured drift and quality off
+>   `TogetherCorrection`, where `player_view.mjs` refuses to report a gap smaller
+>   than the measurement error. **Android does not show those two figures yet**:
+>   carrying them into `UiState.Live` is the follow-up, and until then its player
+>   reports status but not distance.
+> - **Nothing in CI renders anything.** Both bugs above were visible instantly
+>   on a device and invisible to 332 JS tests, 514 core tests and two emulator
+>   lanes, because every one of them asserts about values rather than pixels. A
+>   screenshot test on the emulator lanes is the honest fix and is not built.
 >
 > And the limit no test count can cover: **no session and no transfer has ever
 > run between two real devices.** The wire, the clock filter, the drift verdict,

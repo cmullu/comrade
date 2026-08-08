@@ -290,13 +290,15 @@ object ChatCommands {
      * caller says which recording opened, which it knows and this does not.
      */
     fun playNote(route: PlayRoute, service: MusicService?, query: String): String = when (route) {
-        // Named, because this screen owns no nav state and cannot open Together
-        // itself — the same limitation `/breathe` has.
-        PlayRoute.START_TOGETHER -> "Playing \"$query\" together — it's under Together."
-        // The confidence bar did its job. Opening the wrong track on someone's
-        // behalf is worse than asking, so this says what to do next.
+        // No longer "it's under Together": the session overlay covers the app
+        // the moment one exists, so it is already on screen by the time this is
+        // read, and sending someone to look for it was sending them nowhere.
+        PlayRoute.START_TOGETHER -> "Playing \"$query\" together."
+        // The confidence bar did its job — opening the wrong track on someone's
+        // behalf is worse than asking. The picker is already open by the time
+        // this is read, so this says *why* it opened rather than what to do.
         PlayRoute.ASK_FOR_FILE ->
-            "No copy of \"$query\" on this phone. Open Together and pick the file."
+            "No copy of \"$query\" on this phone — pick the file."
         // Never "not supported yet": this one is not coming, and saying so is
         // more use than an implied promise. See docs/TOGETHER.md §9.
         PlayRoute.OPEN_ELSEWHERE ->
@@ -318,8 +320,7 @@ object ChatCommands {
      * `LibraryResolver.mayRead` is what distinguishes them.
      */
     const val LIBRARY_UNSEEN: String =
-        "Comrade can't read your music library, so it can't look. " +
-            "Open Together and pick the file."
+        "Comrade can't read your music library, so it can't look — pick the file."
 
     /** Human name for a music service, for [playNote]. */
     fun serviceLabel(service: MusicService?): String = when (service) {

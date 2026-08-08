@@ -242,10 +242,10 @@ test("every desktop screen in the set actually opens", () => {
   }
 });
 
-test("play is refused honestly while there is no player in this window", () => {
-  // `docs/TOGETHER.md` §9: the commands and the decision module are here, the
-  // <video> element and the file picker are not. When that lands, flip
-  // DESKTOP_CAN_PLAY and this test's other branch takes over.
+test("play reaches the player now that this window has one", () => {
+  // Both branches kept: the constant is still a real question — `play_embed`
+  // has nowhere to go here — and this is the test that would catch it being
+  // flipped back without the routing being removed with it.
   const p = planFor({ kind: "play", query: "Kun Faya Kun", service: "spotify" });
   if (DESKTOP_CAN_PLAY) {
     assert.equal(p.action, "play");

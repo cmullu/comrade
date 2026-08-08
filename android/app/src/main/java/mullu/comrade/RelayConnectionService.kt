@@ -562,6 +562,14 @@ object ChatEventRouter {
             is BridgeEvent.TogetherEnded ->
                 mullu.comrade.together.TogetherManager.onEnded(byPeer = event.byPeer)
 
+            // Core asking us to carry a signal ourselves, because the direct
+            // peer channel belongs to the frontend. Straight to the manager,
+            // which owns the connection; if it has none the signal is dropped,
+            // and `togetherDirectReady(false)` is what puts traffic back on the
+            // relay — nothing times out behind this.
+            is BridgeEvent.TogetherOutbound ->
+                mullu.comrade.together.TogetherManager.onOutbound(event.json)
+
             // Handing a large attachment over (`comrade_core::handoff`). Straight
             // to the manager, not to a screen, for the reason that matters most
             // here: a 400 MB transfer must not die because a thread was

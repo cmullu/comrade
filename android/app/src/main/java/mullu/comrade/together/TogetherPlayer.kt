@@ -7,6 +7,7 @@ import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.net.Uri
 import android.util.Log
+import android.view.Surface
 
 /**
  * The player half of watch-together, behind a small interface so swapping the
@@ -42,10 +43,25 @@ class TogetherPlayer(private val context: Context) {
         fun onSeekComplete(posMs: Long)
         fun onCompletion(posMs: Long)
         fun onError(message: String)
+
+        /**
+         * The decoder's picture size, `0x0` for a recording with no video track.
+         * Fires before the first frame and again if the track changes size.
+         */
+        fun onVideoSize(width: Int, height: Int)
     }
 
     private var player: MediaPlayer? = null
     private var listener: Listener? = null
+
+    /**
+     * The window to draw into, held here because it and the player have
+     * independent lifetimes: the surface is destroyed and recreated on every
+     * rotation and every trip through the background, while the player must
+     * survive both — losing the film at a rotation is not a fix for losing the
+     * picture. Whichever arrives second re-attaches to the first.
+     */
+    private var surface: Surface? = null
 
     /** `seekTo` before `prepare()` throws — every caller checks this first. */
     var prepared: Boolean = false
@@ -53,6 +69,24 @@ class TogetherPlayer(private val context: Context) {
 
     fun setListener(listener: Listener?) {
         this.listener = listener
+    }
+
+    /**
+     * Give the decoder somewhere to put the picture, or take it away again.
+     *
+     * **Without this call `MediaPlayer` decodes video to nowhere and the film
+     * plays as sound only** — which is exactly what shipped, because nothing
+     * ever handed it a surface. It is safe before `prepare()` and safe while
+     * playing.
+     *
+     * Passing `null` is not optional tidiness: a `Surface` that has been
+     * destroyed while the decoder still holds it is a use-after-free in the
+     * media server, so the view detaching *must* clear it.
+     */
+    fun attachSurface(surface: Surface?) {
+        this.surface = surface
+        runCatching { player?.setSurface(surface) }
+            .onFailure { Log.w(TAG, "could not attach surface", it) }
     }
 
     val positionMs: Long
@@ -79,6 +113,12 @@ class TogetherPlayer(private val context: Context) {
                 listener?.onPrepared(it.duration.toLong())
             }
             setOnSeekCompleteListener { listener?.onSeekComplete(it.currentPosition.toLong()) }
+            // How the screen learns there is a picture at all. `0x0` here is
+            // the audio-only answer, and the screen draws no surface for it
+            // rather than a black rectangle over someone's album.
+            setOnVideoSizeChangedListener { _, width, height ->
+                listener?.onVideoSize(width, height)
+            }
             setOnCompletionListener { listener?.onCompletion(it.currentPosition.toLong()) }
             setOnErrorListener { _, what, extra ->
                 listener?.onError("player error $what/$extra")
@@ -86,6 +126,11 @@ class TogetherPlayer(private val context: Context) {
             }
         }
         player = mp
+        // Re-attach whatever the view already gave us: `open` is also how a
+        // handed-over copy replaces the file mid-session, and the surface from
+        // before that swap is still on screen.
+        runCatching { mp.setSurface(surface) }
+            .onFailure { Log.w(TAG, "could not attach surface", it) }
         runCatching {
             mp.setDataSource(context, uri)
             // Asynchronous: prepare() blocks, and a large local file on slow
@@ -136,6 +181,9 @@ class TogetherPlayer(private val context: Context) {
     }
 
     fun release() {
+        // Drop the surface before the player goes: the view may outlive this,
+        // and a released player still holding it is the crash above.
+        runCatching { player?.setSurface(null) }
         runCatching { player?.release() }
         player = null
         prepared = false

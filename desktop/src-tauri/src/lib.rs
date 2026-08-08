@@ -149,6 +149,8 @@ pub fn run() {
             commands::together_set_state,
             commands::together_end,
             commands::together_report_position,
+            commands::together_direct_ready,
+            commands::together_receive_direct,
             commands::together_session,
             commands::together_share,
             // Large attachments (over the hosted cap) handed straight to the

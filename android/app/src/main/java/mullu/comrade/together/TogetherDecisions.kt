@@ -246,4 +246,65 @@ object TogetherDecisions {
 
     /** Whether a queued remote seek should now be applied (drag ended, nothing newer). */
     fun pendingRemoteToApply(state: ScrubState): Long? = if (state.scrubbing) null else state.pendingRemoteMs
+
+    // ── Picture ─────────────────────────────────────────────────────────────
+
+    /**
+     * What this recording turned out to be, decided from the only thing
+     * `MediaPlayer` will tell us: the video track's dimensions, which are `0`
+     * when there is no video track.
+     *
+     * This exists because the screen has to answer "video or not" *after*
+     * opening the file rather than before. The picked MIME type is not a usable
+     * answer — an `.mkv` of an album is `video/x-matroska` with no video track,
+     * and a `.mp4` podcast is `video/mp4` — so trusting it shows a permanent
+     * black rectangle to someone listening to music.
+     */
+    sealed interface Picture {
+        /** A video track, with the dimensions the decoder reported. */
+        data class Video(val width: Int, val height: Int) : Picture
+
+        /** Audio only, or not yet known — both mean "draw no surface". */
+        data object None : Picture
+    }
+
+    /**
+     * Classify from reported dimensions.
+     *
+     * Non-positive is the audio-only signal, and it is also what `MediaPlayer`
+     * reports *before* the first frame is decoded, so this deliberately makes
+     * "not yet" and "never" the same answer: the surface appears when there is
+     * something to put on it, which is the transition [Picture.Video] describes.
+     */
+    fun pictureOf(width: Int, height: Int): Picture =
+        if (width > 0 && height > 0) Picture.Video(width, height) else Picture.None
+
+    /**
+     * The shape to give the video surface, or `null` when there is no picture.
+     *
+     * Compose's `aspectRatio` modifier throws on a non-positive ratio, so the
+     * clamp is not decoration — a corrupt header reporting `1x1000000` would
+     * otherwise take the whole screen down. The bounds are wider than any real
+     * recording (32:9 ultrawide is 3.56, a vertical phone clip is 0.56) and
+     * exist only to keep a hostile or broken file inside something drawable.
+     */
+    fun aspectRatioOf(picture: Picture): Float? = when (picture) {
+        is Picture.None -> null
+        is Picture.Video -> (picture.width.toFloat() / picture.height.toFloat())
+            .takeIf { it.isFinite() && it > 0f }
+            ?.coerceIn(MIN_ASPECT, MAX_ASPECT)
+    }
+
+    const val MIN_ASPECT: Float = 0.25f
+    const val MAX_ASPECT: Float = 4.0f
+
+    /**
+     * Whether to hold the screen awake.
+     *
+     * Only for video that is actually playing. An audio session must *not* hold
+     * it: "listen together" over a two-hour album is the case where a burnt-out
+     * battery is the whole failure, and there is nothing to look at anyway.
+     */
+    fun keepScreenOn(picture: Picture, playing: Boolean): Boolean =
+        playing && picture is Picture.Video
 }

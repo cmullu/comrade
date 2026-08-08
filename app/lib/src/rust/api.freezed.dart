@@ -68,6 +68,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
     TResult Function(BridgeEvent_TogetherEnded value)? togetherEnded,
     TResult Function(BridgeEvent_TogetherShare value)? togetherShare,
+    TResult Function(BridgeEvent_TogetherOutbound value)? togetherOutbound,
     TResult Function(BridgeEvent_AttachmentHandoff value)? attachmentHandoff,
     TResult Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
@@ -109,6 +110,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that);
+      case BridgeEvent_TogetherOutbound() when togetherOutbound != null:
+        return togetherOutbound(_that);
       case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
         return attachmentHandoff(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
@@ -161,6 +164,8 @@ extension BridgeEventPatterns on BridgeEvent {
         togetherCorrection,
     required TResult Function(BridgeEvent_TogetherEnded value) togetherEnded,
     required TResult Function(BridgeEvent_TogetherShare value) togetherShare,
+    required TResult Function(BridgeEvent_TogetherOutbound value)
+        togetherOutbound,
     required TResult Function(BridgeEvent_AttachmentHandoff value)
         attachmentHandoff,
     required TResult Function(BridgeEvent_MeshStatusChanged value)
@@ -201,6 +206,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that);
       case BridgeEvent_TogetherShare():
         return togetherShare(_that);
+      case BridgeEvent_TogetherOutbound():
+        return togetherOutbound(_that);
       case BridgeEvent_AttachmentHandoff():
         return attachmentHandoff(_that);
       case BridgeEvent_MeshStatusChanged():
@@ -242,6 +249,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_TogetherCorrection value)? togetherCorrection,
     TResult? Function(BridgeEvent_TogetherEnded value)? togetherEnded,
     TResult? Function(BridgeEvent_TogetherShare value)? togetherShare,
+    TResult? Function(BridgeEvent_TogetherOutbound value)? togetherOutbound,
     TResult? Function(BridgeEvent_AttachmentHandoff value)? attachmentHandoff,
     TResult? Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult? Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
@@ -282,6 +290,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that);
+      case BridgeEvent_TogetherOutbound() when togetherOutbound != null:
+        return togetherOutbound(_that);
       case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
         return attachmentHandoff(_that);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
@@ -325,6 +335,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(TogetherCorrectionDto field0)? togetherCorrection,
     TResult Function(String sessionId, String peer, bool byPeer)? togetherEnded,
     TResult Function(TogetherShareDto field0)? togetherShare,
+    TResult Function(String sessionId, String json)? togetherOutbound,
     TResult Function(AttachmentHandoffDto field0)? attachmentHandoff,
     TResult Function(MeshStatusDto field0)? meshStatusChanged,
     TResult Function(String ledger)? ledgerUpdated,
@@ -366,6 +377,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that.field0);
+      case BridgeEvent_TogetherOutbound() when togetherOutbound != null:
+        return togetherOutbound(_that.sessionId, _that.json);
       case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
         return attachmentHandoff(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
@@ -412,6 +425,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(String sessionId, String peer, bool byPeer)
         togetherEnded,
     required TResult Function(TogetherShareDto field0) togetherShare,
+    required TResult Function(String sessionId, String json) togetherOutbound,
     required TResult Function(AttachmentHandoffDto field0) attachmentHandoff,
     required TResult Function(MeshStatusDto field0) meshStatusChanged,
     required TResult Function(String ledger) ledgerUpdated,
@@ -450,6 +464,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_TogetherShare():
         return togetherShare(_that.field0);
+      case BridgeEvent_TogetherOutbound():
+        return togetherOutbound(_that.sessionId, _that.json);
       case BridgeEvent_AttachmentHandoff():
         return attachmentHandoff(_that.field0);
       case BridgeEvent_MeshStatusChanged():
@@ -492,6 +508,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(String sessionId, String peer, bool byPeer)?
         togetherEnded,
     TResult? Function(TogetherShareDto field0)? togetherShare,
+    TResult? Function(String sessionId, String json)? togetherOutbound,
     TResult? Function(AttachmentHandoffDto field0)? attachmentHandoff,
     TResult? Function(MeshStatusDto field0)? meshStatusChanged,
     TResult? Function(String ledger)? ledgerUpdated,
@@ -532,6 +549,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return togetherEnded(_that.sessionId, _that.peer, _that.byPeer);
       case BridgeEvent_TogetherShare() when togetherShare != null:
         return togetherShare(_that.field0);
+      case BridgeEvent_TogetherOutbound() when togetherOutbound != null:
+        return togetherOutbound(_that.sessionId, _that.json);
       case BridgeEvent_AttachmentHandoff() when attachmentHandoff != null:
         return attachmentHandoff(_that.field0);
       case BridgeEvent_MeshStatusChanged() when meshStatusChanged != null:
@@ -1684,6 +1703,82 @@ class _$BridgeEvent_TogetherShareCopyWithImpl<$Res>
           ? _self.field0
           : field0 // ignore: cast_nullable_to_non_nullable
               as TogetherShareDto,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TogetherOutbound extends BridgeEvent {
+  const BridgeEvent_TogetherOutbound(
+      {required this.sessionId, required this.json})
+      : super._();
+
+  final String sessionId;
+  final String json;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TogetherOutboundCopyWith<BridgeEvent_TogetherOutbound>
+      get copyWith => _$BridgeEvent_TogetherOutboundCopyWithImpl<
+          BridgeEvent_TogetherOutbound>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TogetherOutbound &&
+            (identical(other.sessionId, sessionId) ||
+                other.sessionId == sessionId) &&
+            (identical(other.json, json) || other.json == json));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, sessionId, json);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.togetherOutbound(sessionId: $sessionId, json: $json)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TogetherOutboundCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TogetherOutboundCopyWith(
+          BridgeEvent_TogetherOutbound value,
+          $Res Function(BridgeEvent_TogetherOutbound) _then) =
+      _$BridgeEvent_TogetherOutboundCopyWithImpl;
+  @useResult
+  $Res call({String sessionId, String json});
+}
+
+/// @nodoc
+class _$BridgeEvent_TogetherOutboundCopyWithImpl<$Res>
+    implements $BridgeEvent_TogetherOutboundCopyWith<$Res> {
+  _$BridgeEvent_TogetherOutboundCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TogetherOutbound _self;
+  final $Res Function(BridgeEvent_TogetherOutbound) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? sessionId = null,
+    Object? json = null,
+  }) {
+    return _then(BridgeEvent_TogetherOutbound(
+      sessionId: null == sessionId
+          ? _self.sessionId
+          : sessionId // ignore: cast_nullable_to_non_nullable
+              as String,
+      json: null == json
+          ? _self.json
+          : json // ignore: cast_nullable_to_non_nullable
+              as String,
     ));
   }
 }

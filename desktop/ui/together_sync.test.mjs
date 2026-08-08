@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   TOGETHER_UI,
+  aspectRatioOf,
   classifyLocalEvent,
   createEchoSuppressor,
+  pictureOf,
   planApply,
   sessionStatusLabel,
 } from "./together_sync.mjs";
@@ -270,5 +272,50 @@ test("nothing in the vocabulary says synced or in sync", () => {
   for (const state of states) {
     const label = sessionStatusLabel(state).toLowerCase();
     assert.ok(!label.includes("sync"), `"${label}" claims more than we know`);
+  }
+});
+
+// ── Picture ─────────────────────────────────────────────────────────────────
+//
+// The same vectors as `TogetherDecisionsTest.kt`, with the same numbers. The
+// bug behind them was Android-only — a session with no video surface at all,
+// so a film played as sound — but the classification is shared, and the reason
+// these live in both places is that a fix on one frontend must not quietly
+// leave the other showing a dead black box.
+
+test("a video track asks for a surface", () => {
+  const picture = pictureOf(1920, 1080);
+  assert.deepEqual(picture, { kind: "video", width: 1920, height: 1080 });
+  assert.ok(Math.abs(aspectRatioOf(picture) - 16 / 9) < 0.001);
+});
+
+test("an audio-only recording asks for no surface", () => {
+  // What a <video> element reports for a file with no picture: 0, not null.
+  const picture = pictureOf(0, 0);
+  assert.deepEqual(picture, { kind: "none" });
+  assert.equal(aspectRatioOf(picture), null, "audio gets no black rectangle");
+});
+
+test("dimensions that arrive before the first frame read as no picture yet", () => {
+  assert.deepEqual(pictureOf(1920, 0), { kind: "none" });
+  assert.deepEqual(pictureOf(0, 1080), { kind: "none" });
+});
+
+test("a broken header cannot produce an undrawable shape", () => {
+  for (const [w, h] of [[1, 1000000], [1000000, 1], [3, 2], [9, 16]]) {
+    const ratio = aspectRatioOf(pictureOf(w, h));
+    assert.ok(ratio !== null, `${w}x${h} produced no ratio`);
+    assert.ok(ratio >= TOGETHER_UI.MIN_ASPECT, `${w}x${h} escaped the clamp`);
+    assert.ok(ratio <= TOGETHER_UI.MAX_ASPECT, `${w}x${h} escaped the clamp`);
+  }
+});
+
+test("negative dimensions are audio", () => {
+  assert.deepEqual(pictureOf(-1920, -1080), { kind: "none" });
+});
+
+test("a ratio is never asked of a shape that has none", () => {
+  for (const bad of [null, undefined, {}, { kind: "none" }]) {
+    assert.equal(aspectRatioOf(bad), null);
   }
 });

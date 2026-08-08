@@ -65,9 +65,13 @@
         </div>
 
         <nav class="tabs" role="tablist" aria-orientation="vertical" aria-label="Sections">
-          <button class="tab is-active" data-tab="sabha" role="tab" aria-selected="true">
-            <span class="tab-icon" aria-hidden="true">📢</span>
-            <span class="tab-text">Sabha <span class="tab-sub">Public Chitthis</span></span>
+          <!-- Together took the slot Sabha had. Sabha is not gone — it moved to
+               the Modes section below, because a public feed is something you go
+               to, and listening with someone is something you do *with* the
+               person you are already talking to. -->
+          <button class="tab is-active" data-tab="together" role="tab" aria-selected="true">
+            <span class="tab-icon" aria-hidden="true">♫</span>
+            <span class="tab-text">Together <span class="tab-sub">Listen · watch in step</span></span>
           </button>
           <button class="tab" data-tab="vault" role="tab" aria-selected="false">
             <span class="tab-icon" aria-hidden="true">🔐</span>
@@ -91,6 +95,10 @@
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-text">Off-Grid / Travel</span>
           </label>
+
+          <button id="sabha-btn" class="btn btn-ghost partner-btn" title="Open Sabha — public Chitthis">
+            <span aria-hidden="true">📢</span> Sabha
+          </button>
 
           <button id="partner-btn" class="btn btn-ghost partner-btn" title="Open Partner Portal">
             <span aria-hidden="true">❤</span> Partner Portal
@@ -116,7 +124,78 @@
 
       <main class="app-body">
         <!-- Sabha timeline -->
-        <section id="view-sabha" class="view view-sabha" role="tabpanel">
+        <!-- ───────────────────────── Together: the player ─────────────────────
+             The session's own surface. Music-first: the artwork block is the
+             centrepiece and the <video> sits inside it, revealed only when the
+             recording turns out to have a picture (`together_sync.mjs`'s
+             `pictureOf`), so an album is a record sleeve rather than a black
+             rectangle.
+
+             Every number shown here is measured, not predicted — the drift and
+             the quality figures come off `TogetherCorrection`, which is the only
+             honest way to report sync. The vocabulary follows PRESENCE.md §5: it
+             never says "synced". -->
+        <section id="view-together" class="view view-together" role="tabpanel">
+          <div id="together-empty" class="together-empty">
+            <div class="together-empty-mark" aria-hidden="true">♫</div>
+            <h2 class="together-empty-title">Nothing playing yet</h2>
+            <p class="together-empty-body">
+              Open a conversation and type <code>/play</code> with the name of a
+              song, or a link. You each play your own copy — Comrade only keeps
+              the two of you in step.
+            </p>
+          </div>
+
+          <div id="together-stage" class="together-stage" hidden>
+            <div class="together-art">
+              <div class="together-art-mark" aria-hidden="true">♫</div>
+              <video id="together-player" class="together-player" playsinline hidden></video>
+            </div>
+
+            <div class="together-meta">
+              <h2 id="together-title-full" class="together-title-full">—</h2>
+              <p id="together-with" class="together-with muted"></p>
+            </div>
+
+            <div class="together-scrub">
+              <span id="together-elapsed" class="together-time">0:00</span>
+              <input
+                id="together-seek"
+                class="together-seek"
+                type="range"
+                min="0"
+                max="1000"
+                value="0"
+                step="1"
+                aria-label="Position"
+              />
+              <span id="together-duration" class="together-time">0:00</span>
+            </div>
+
+            <div class="together-transport">
+              <button id="together-back" class="together-ctl" title="Back 10 seconds" aria-label="Back 10 seconds">↺</button>
+              <button id="together-toggle" class="together-ctl together-ctl-main" aria-label="Play">▶</button>
+              <button id="together-fwd" class="together-ctl" title="Forward 10 seconds" aria-label="Forward 10 seconds">↻</button>
+            </div>
+
+            <!-- The honest readout. `quality_ms` is our own measurement error,
+                 so a small drift beside a large quality figure means "we cannot
+                 tell", which is a different statement from "we are together". -->
+            <div class="together-health">
+              <span id="together-state" class="together-chip">Waiting for them</span>
+              <span id="together-drift" class="together-health-num muted sm"></span>
+              <span id="together-path" class="together-health-num muted sm"></span>
+            </div>
+
+            <p id="together-note" class="hint sm">
+              Positions travel between you, so you will be within about a second
+              of each other — not frame-perfect.
+            </p>
+            <button id="together-leave-full" class="btn btn-ghost">Leave</button>
+          </div>
+        </section>
+
+        <section id="view-sabha" class="view view-sabha" role="tabpanel" hidden>
           <div class="composer">
             <textarea
               id="chitthi-input"
@@ -187,7 +266,10 @@
                 <button id="together-join" class="btn btn-primary" hidden>I'm ready</button>
                 <button id="together-leave" class="btn btn-ghost" hidden>Leave</button>
               </div>
-              <video id="together-player" class="together-player" controls playsinline hidden></video>
+              <!-- The player itself lives in the Together tab now; this panel is
+                   the entry point. One <video>, one id — two would mean two
+                   elements to keep the echo ledger in step with, which is
+                   exactly the wiring that must not be written twice. -->
               <p id="together-share-status" class="hint sm"></p>
               <div id="share-consent" class="share-consent" hidden></div>
               <p class="hint sm">
