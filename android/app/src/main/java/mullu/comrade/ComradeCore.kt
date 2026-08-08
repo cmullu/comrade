@@ -256,11 +256,18 @@ object ComradeCore {
      * Hand one packet heard over BLE to the core. Never throws for a malformed
      * packet: a stranger in radio range sending rubbish is an ordinary event.
      */
-    fun bleDeliver(packet: ByteArray) = ffi.bleDeliver(packet.toList())
+    fun bleDeliver(packet: ByteArray) = ffi.bleDeliver(packet)
 
-    /** Packets the core wants transmitted, oldest first. Drains the queue. */
-    fun bleDrainOutbound(): List<ByteArray> =
-        ffi.bleDrainOutbound().map { it.toByteArray() }
+    /**
+     * Packets the core wants transmitted, oldest first. Drains the queue.
+     *
+     * No conversion either way: uniffi maps a Rust `Vec<u8>` to a Kotlin
+     * `ByteArray`, not to a `List<Byte>`, so `ble_deliver(Vec<u8>)` and
+     * `ble_drain_outbound() -> Vec<Vec<u8>>` arrive here as `ByteArray` and
+     * `List<ByteArray>` already. The `toList()`/`toByteArray()` pair this
+     * replaced did not compile.
+     */
+    fun bleDrainOutbound(): List<ByteArray> = ffi.bleDrainOutbound()
 
     data class UpiIntent(val amountInr: Double, val vpa: String, val uri: String)
 
