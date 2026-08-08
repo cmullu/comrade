@@ -1119,6 +1119,65 @@ peer-chosen string could be added, wired through three frontends, and reach a
 `src` attribute without either of them noticing. Now a new variant has to say
 which side of the line it is on.
 
+## 11b. Driving a player that only says where it is once a second
+
+_Added 2026-08-08, when the owner made `android/` the standing priority frontend
+and asked for the YouTube embed there first._
+
+The embed is the only source that gets close to "any song, and neither of us has
+it": effectively the whole commercial catalogue, no account on either side, and a
+playhead we can actually drive. `com.pierfrancescosoffritti.androidyoutubeplayer:core`
+is on Maven Central — unlike Spotify's App Remote, which is a hand-vendored
+`.aar` (§11) — and it is a `WebView` around the official IFrame player, so the
+embed stays the sanctioned one.
+
+What makes it interesting is not the wiring but the **reporting rate**.
+`onCurrentSecond` fires about once a second. `together_report_position` is called
+by the poll four times a second, and the drift ladder compares whatever it was
+last handed against the peer. Feed it a reading up to a second old and the
+session invents a second of drift that is not there — on a source whose deadband
+is already the coarse one.
+
+`TogetherDecisions.CoarsePlayhead` is the answer and it is three rules, all of
+them tested:
+
+- **Interpolate between ticks while playing**, and not while paused.
+- **Bank the elapsed time when the state changes.** A pause 900 ms after a tick
+  means 900 ms of real playback; discarding it reports a position the video has
+  already gone past.
+- **Move on our own seek immediately, without waiting for the next tick.** This
+  is the one that would be a bug rather than a rounding error: for a whole second
+  after a correction the player would still report where it *was*, so the ladder
+  would see the gap it had just closed and correct again. That is the sticky
+  rate-trim sawtooth `AUDIT.md` already records, wearing a different costume.
+
+And a cap: past two ticks of silence, stop guessing and report the last thing
+actually known. A stalled video — or one the system froze when the app went to
+the background — sends no ticks at all, and an uncapped estimate advances a
+standing-still playhead forever, confidently, hiding the stall from the very
+verdict that should see it.
+
+**Buffering is not a pause, and this is where §10's rule is enforced rather than
+merely stated.** `embedState` maps the embed's `buffering` to its own
+`EmbedState.Stalled`, and `embedStateIsWorthSending` refuses to tell the peer
+about it. Reporting a stall as a pause is the worst ping-pong available here:
+they pause because we stalled, which makes us re-evaluate, which makes them
+re-evaluate.
+
+**This layer is verified, unusually for Android.** It has no Android imports, so
+`kotlinc` plus JUnit compiles and runs it in this sandbox with no SDK — 47 tests,
+green, before CI. The commands are in `CLAUDE.md`. That is the practical reason
+to keep decision logic in framework-free files, and it matters more now that the
+priority frontend is the one that cannot otherwise be built here.
+
+**Not built yet**: the player adapter around `YouTubePlayerView`, the Compose
+surface for it, and the `TogetherManager` change that lets a session hold an
+embed instead of a `MediaPlayer`. That last one is the real work — `TogetherPlayer`
+is concrete throughout the manager, so it needs a small interface both players
+satisfy, and the manager is also where the foreground-service contract lives,
+which `.claude/rules/android.md` names as the most bug-prone area in the repo.
+It is deliberately not half-done here.
+
 ## 12. Playing a handed-over file before it has finished arriving
 
 _Also from the 2026-08-08 request: "even when one person has the file it should

@@ -394,4 +394,118 @@ class TogetherDecisionsTest {
         assertEquals(TogetherDecisions.Drift.Silent, m.drift)
         assertEquals(TogetherDecisions.Quality.Unknown, m.quality)
     }
+
+    // ── A player that reports where it is once a second ─────────────────────
+
+    private fun playhead() = TogetherDecisions.CoarsePlayhead()
+
+    @Test
+    fun aPlayheadBetweenTicksIsInterpolatedRatherThanStale() {
+        // The whole reason this exists. `onCurrentSecond` fires ~1 Hz and the
+        // poll reports 4x a second; handing the ladder a reading a second old
+        // is how a session invents drift that is not there.
+        val p = playhead()
+        p.onPlaying(true, 1_000)
+        p.onTick(30_000, 1_000)
+        assertEquals(30_000, p.estimateMs(1_000))
+        assertEquals(30_250, p.estimateMs(1_250))
+        assertEquals(30_900, p.estimateMs(1_900))
+    }
+
+    @Test
+    fun aPausedPlayheadDoesNotAdvance() {
+        val p = playhead()
+        p.onPlaying(false, 1_000)
+        p.onTick(30_000, 1_000)
+        assertEquals(30_000, p.estimateMs(9_000))
+    }
+
+    @Test
+    fun pausingBanksTheTimeSinceTheLastTickInsteadOfDiscardingIt() {
+        // Pause 900ms after a tick and that 900ms of real playback is real.
+        // Throwing it away reports a position the video has already passed.
+        val p = playhead()
+        p.onPlaying(true, 1_000)
+        p.onTick(30_000, 1_000)
+        p.onPlaying(false, 1_900)
+        assertEquals(30_900, p.estimateMs(5_000))
+    }
+
+    @Test
+    fun ourOwnSeekMovesTheEstimateAtOnce() {
+        // The bug this prevents is the sticky-trim sawtooth in a different
+        // costume: without it, the second after a correction still reports the
+        // old position, so the ladder corrects again for a gap it just closed.
+        val p = playhead()
+        p.onPlaying(true, 1_000)
+        p.onTick(30_000, 1_000)
+        p.onSeek(120_000, 1_100)
+        assertEquals(120_000, p.estimateMs(1_100))
+        assertEquals(120_400, p.estimateMs(1_500))
+    }
+
+    @Test
+    fun aPlayerThatStoppedTickingStopsBeingGuessedAt() {
+        // A stalled video, or one the system froze on backgrounding, sends no
+        // ticks. An uncapped estimate would advance a standing-still playhead
+        // forever and hide the stall from the drift verdict that should see it.
+        val p = playhead()
+        p.onPlaying(true, 1_000)
+        p.onTick(30_000, 1_000)
+        val capped = 30_000 + TogetherDecisions.COARSE_EXTRAPOLATE_MAX_MS
+        assertEquals(capped, p.estimateMs(1_000 + TogetherDecisions.COARSE_EXTRAPOLATE_MAX_MS))
+        assertEquals(capped, p.estimateMs(60_000))
+    }
+
+    @Test
+    fun aClockThatWentBackwardsDoesNotRewindThePlayhead() {
+        val p = playhead()
+        p.onPlaying(true, 10_000)
+        p.onTick(30_000, 10_000)
+        assertEquals(30_000, p.estimateMs(9_000))
+    }
+
+    @Test
+    fun aResetPlayheadClaimsNothing() {
+        val p = playhead()
+        p.onPlaying(true, 1_000)
+        p.onTick(30_000, 1_000)
+        p.reset()
+        assertEquals(0, p.estimateMs(99_000))
+    }
+
+    // ── What an embed's state means ─────────────────────────────────────────
+
+    @Test
+    fun bufferingIsNeverReportedAsAPause() {
+        // docs/TOGETHER.md §10. Telling the peer "they paused" because our own
+        // video stalled is the worst ping-pong available: they pause, which
+        // makes us re-evaluate, which makes them re-evaluate.
+        val stalled = TogetherDecisions.embedState("buffering")
+        assertEquals(TogetherDecisions.EmbedState.Stalled, stalled)
+        assertFalse(TogetherDecisions.embedStateIsWorthSending(stalled))
+    }
+
+    @Test
+    fun playingAndPausingAreBothWorthSending() {
+        assertEquals(
+            TogetherDecisions.EmbedState.Live(playing = true),
+            TogetherDecisions.embedState("playing"),
+        )
+        assertEquals(
+            TogetherDecisions.EmbedState.Live(playing = false),
+            TogetherDecisions.embedState("paused"),
+        )
+        for (s in listOf("playing", "paused", "ended")) {
+            assertTrue(s, TogetherDecisions.embedStateIsWorthSending(TogetherDecisions.embedState(s)))
+        }
+    }
+
+    @Test
+    fun aPlayerThatHasNotStartedHasNoPositionWorthSending() {
+        for (s in listOf("unstarted", "video_cued", "unknown", "", "nonsense")) {
+            assertEquals(s, TogetherDecisions.EmbedState.NotReady, TogetherDecisions.embedState(s))
+            assertFalse(s, TogetherDecisions.embedStateIsWorthSending(TogetherDecisions.embedState(s)))
+        }
+    }
 }

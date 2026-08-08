@@ -346,6 +346,136 @@ object TogetherDecisions {
         else -> Quality.Known(qualityMs, direct = false, decimals = 1)
     }
 
+    // ── Driving a player that only reports where it is once a second ────────
+    //
+    // A YouTube embed tells us its position through `onCurrentSecond`, which
+    // fires about once a second. `together_report_position` is called by the
+    // poll four times a second, and the drift ladder compares whatever it was
+    // last given against the peer. Handing it a reading up to a second old is
+    // how a session invents drift that is not there. Everything below is about
+    // that gap, and none of it imports anything — the JVM lane is the only lane
+    // that will check it before CI.
+
+    /**
+     * How far past its last tick a coarse playhead may be extrapolated.
+     *
+     * Beyond this we stop guessing and report the last thing we actually knew.
+     * The difference matters: a video that stalled, or a player the system
+     * froze when the app went to the background, sends no ticks at all — and an
+     * uncapped estimate would keep advancing a playhead that is standing still,
+     * confidently, forever. Reporting a stale-but-true position lets the next
+     * drift verdict see a real gap; reporting an invented one hides it.
+     *
+     * Two ticks, so a single late one costs nothing.
+     */
+    const val COARSE_EXTRAPOLATE_MAX_MS: Long = 2_000
+
+    /**
+     * Where a once-a-second player is *now*, between its ticks.
+     *
+     * Not thread-safe, like [EchoSuppressor] and for the same reason: it
+     * belongs to the thread that both observes the player and reports for it.
+     */
+    class CoarsePlayhead(private val maxExtrapolateMs: Long = COARSE_EXTRAPOLATE_MAX_MS) {
+        private var knownMs: Long = 0
+        private var knownAtMs: Long = 0
+        private var running: Boolean = false
+
+        /** The player said where it is. */
+        fun onTick(posMs: Long, nowMs: Long) {
+            knownMs = posMs.coerceAtLeast(0)
+            knownAtMs = nowMs
+        }
+
+        /**
+         * *We* moved it, and the estimate must move with it immediately.
+         *
+         * This is the one that would otherwise be a real bug rather than a
+         * rounding error. Waiting for the next tick means up to a second of
+         * reporting the position we just left — so the ladder sees the same gap
+         * it has already closed and corrects a second time. That is the
+         * sawtooth `AUDIT.md` already records for the sticky rate trim, in a
+         * different costume.
+         */
+        fun onSeek(posMs: Long, nowMs: Long) = onTick(posMs, nowMs)
+
+        /** Play or pause. A paused playhead does not advance. */
+        fun onPlaying(playing: Boolean, nowMs: Long) {
+            // Bank the elapsed time before the state changes, or a pause after
+            // 900 ms of un-ticked playback throws that 900 ms away.
+            knownMs = estimateMs(nowMs)
+            knownAtMs = nowMs
+            running = playing
+        }
+
+        /** Start again from nothing — a new video, or a released player. */
+        fun reset() {
+            knownMs = 0
+            knownAtMs = 0
+            running = false
+        }
+
+        /**
+         * Best estimate of the playhead at `nowMs`.
+         *
+         * A clock that steps backwards reads as "no time has passed" rather
+         * than as a negative advance, the same saturating choice
+         * `direct_path_live` makes in core.
+         */
+        fun estimateMs(nowMs: Long): Long {
+            if (!running) return knownMs
+            val elapsed = (nowMs - knownAtMs).coerceIn(0, maxExtrapolateMs)
+            return knownMs + elapsed
+        }
+    }
+
+    /**
+     * What an embedded player's state means to a session.
+     *
+     * A `String` rather than the library's enum on purpose: this file has no
+     * Android and no third-party imports, which is what lets the JVM lane run
+     * it — the same reason [planCorrection] takes a verdict `kind` as text.
+     */
+    sealed interface EmbedState {
+        /** Loaded but never started, or cued and waiting. Nothing to report. */
+        data object NotReady : EmbedState
+
+        data class Live(val playing: Boolean) : EmbedState
+
+        /** Reached the end, which is a pause the peer should hear about. */
+        data object Ended : EmbedState
+
+        /**
+         * Buffering. Deliberately **not** [Live] with `playing = false`.
+         *
+         * `docs/TOGETHER.md` §10 rules out reporting buffering to the peer, and
+         * this is where that rule is actually enforced: telling them "they
+         * paused" because our own video stalled is the worst ping-pong
+         * available here — they pause, which makes us re-evaluate, which makes
+         * them re-evaluate. A stall is ridden out locally and the next drift
+         * verdict closes the gap.
+         */
+        data object Stalled : EmbedState
+    }
+
+    /** Map the embed's reported state. Anything unrecognised is "not ready". */
+    fun embedState(state: String): EmbedState = when (state) {
+        "playing" -> EmbedState.Live(playing = true)
+        "paused" -> EmbedState.Live(playing = false)
+        "buffering" -> EmbedState.Stalled
+        "ended" -> EmbedState.Ended
+        else -> EmbedState.NotReady
+    }
+
+    /**
+     * Whether this state change is ours to tell the other person about.
+     *
+     * [EmbedState.Stalled] never is (see above), and [EmbedState.NotReady]
+     * never is — a player that has not started has no position worth sending.
+     */
+    fun embedStateIsWorthSending(state: EmbedState): Boolean =
+        state is EmbedState.Live || state is EmbedState.Ended
+
     // ── Picture ─────────────────────────────────────────────────────────────
 
     /**

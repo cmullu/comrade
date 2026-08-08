@@ -911,6 +911,34 @@ is small; the content problem is the real constraint:
 >   `if let … Youtube` guard, so a new variant carrying a peer-chosen string could
 >   be added and wired through three frontends without either noticing. Both now
 >   call `TogetherContent::admissible`, which matches exhaustively.
+> - **The YouTube embed is the closest thing to "any song neither of us has",
+>   and the Android half is started.** The owner made `android/` the standing
+>   priority frontend (2026-08-08) and asked for the embed there first. Unlike
+>   Spotify's App Remote, the player library is a real Maven Central artifact
+>   (`com.pierfrancescosoffritti.androidyoutubeplayer:core`) wrapping the
+>   official IFrame player in a `WebView`, so there is no vendored binary
+>   question. What landed is the decision layer the embed needs and nothing
+>   else: `TogetherDecisions.CoarsePlayhead` interpolates a playhead that is only
+>   reported once a second — including banking elapsed time on a state change,
+>   and moving on our *own* seek rather than waiting a full second and letting
+>   the ladder correct twice for one gap, which is the sticky-trim sawtooth
+>   above in a different costume — and caps extrapolation at two ticks so a
+>   stalled or backgrounded player stops being guessed at. `embedState` is where
+>   §10's "never report buffering" stops being a written rule and becomes code.
+>   **Still missing**: the `YouTubePlayerView` adapter, its Compose surface, and
+>   the `TogetherManager` change that lets a session hold an embed instead of a
+>   `MediaPlayer` — the manager is concrete on `TogetherPlayer` throughout and is
+>   also where the foreground-service contract lives, so it was left whole rather
+>   than half-refactored. `docs/TOGETHER.md` §11b.
+> - ~~**No Android code can be checked before CI.**~~ **Half of it can, as of
+>   2026-08-08**, and believing otherwise was costing the frontend that is now
+>   the priority. The Android *SDK* is what this sandbox lacks, not Kotlin — and
+>   the files worth testing are the ones deliberately written without Android
+>   imports. `kotlinc` (the version `android/build.gradle.kts` pins) plus JUnit
+>   compiles and runs `TogetherDecisions` and its 47 tests here in about a
+>   minute, no Gradle involved. Commands in `CLAUDE.md`. This turns "keep
+>   decisions in framework-free files" from a style preference into the thing
+>   that decides whether a change is checkable at all.
 > - **A handed-over file still plays only once it is whole**, and core has been
 >   ready for it since the transfer landed. `ShareTracker::playable_at` and
 >   `runway_ms` are unit-tested and remain dead code — the gap is per-frontend and
