@@ -1576,3 +1576,113 @@ it — and all three say so where they narrow.
 The work list, the exact call sites and the traps are in
 [`docs/TOGETHER_PLAYERS_HANDOFF.md`](TOGETHER_PLAYERS_HANDOFF.md).
 
+
+## 15. Sending the picture and the sound, not the clock
+
+_Added 2026-08-08, from "ideally the app should just stream whatever is playing
+on one device — video/audio — with the best sync"._
+
+**The instinct is right, and it is worth saying why before saying what it
+costs.** Everything hard in §3–§11b exists for one reason: two independent
+players have to be kept in step. The drift ladder, the deadband, the coarse and
+fine tiers, `CoarsePlayhead`, the ad-break `StallWatch` — all of it is machinery
+for a problem that a stream simply does not have. Send the frames and there is
+**one** playhead; A/V sync becomes the transport's job, and it is a job WebRTC
+already does. "Best sync" is not something to tune here. It is exact by
+construction.
+
+So this section reverses §1 — but only as far as §1's actual reason goes, which
+is worth reading precisely rather than as a blanket ban.
+
+### What §1 rules out, and what it does not
+
+§1 and `AUDIT.md` §8.2 rule out **re-streaming or proxying licensed content**:
+a copyright problem, a bandwidth problem, and a technical wall on DRM'd
+platforms. Every word of that still holds.
+
+What it never ruled out is a person sending **their own file** to **one person
+they invited**, which is a thing this app already does — that is the §9a
+handover, and nobody thought it needed a different answer. Decoding that same
+file and sending the pictures instead of the bytes is the same act with a
+different codec. So:
+
+| | Streamed? | Why |
+|---|---|---|
+| A file the leader holds | **yes** | Their own file, one invited peer. §1's reason does not reach it. |
+| Comrade's YouTube embed (§11b) | no | Both sides get the real player free. Re-streaming it breaks YouTube's terms and looks worse. |
+| A service track (§11, §13) | no | Licensed audio, and the platforms block capture anyway. |
+| Anything else on the phone | **later, and honestly** | See "Screen capture" below. |
+
+### The two halves, and which one was the risk
+
+**Video** is the half that already exists in outline. `CallManager.startScreenShare`
+already pushes a `ScreenCapturerAndroid` into a `VideoSource` over a live
+`PeerConnection`, foreground-service dance and renegotiation included. A player's
+frames reach a `VideoSource` the same way a screen's do.
+
+**Audio was the real feasibility question**, and the answer is not obvious:
+libwebrtc's Android audio path captures from the *microphone*, and there is no
+supported way to hand it a buffer. Sharing a film with the machinery as it
+stands would send the picture and the sound of the room.
+
+It is possible with the build this repo already depends on, and it was checked
+against the AAR rather than assumed. `io.github.webrtc-sdk:android` adds
+`JavaAudioDeviceModule.Builder.setAudioBufferCallback`, whose
+`onBuffer(ByteBuffer, audioFormat, channelCount, sampleRate, bytesRead, captureTimeNs)`
+is handed the record buffer **before** it reaches the encoder. Writing into that
+buffer replaces the microphone. That is the injection point the whole feature
+rests on, it is absent from upstream libwebrtc, and it is the reason
+`io.github.webrtc-sdk` being the fork already in use is load-bearing rather than
+incidental — swapping it for another would take this feature with it.
+
+Where the PCM comes from is the second half. `AudioPlaybackCapture` (API 29+)
+with `addMatchingUid(Process.myUid())` captures **our own app's** playback, and
+an app may always capture itself — so the `MediaPlayer` in `TogetherPlayer`
+needs no replacing. The cost is that it needs a `MediaProjection`, which means
+the system's recording-consent dialog even to capture ourselves.
+
+### Screen capture, and the limits stated before anyone builds on them
+
+Streaming *whatever* is playing — Spotify, a podcast app, someone's downloads
+folder — is the same pipeline with a wider capture configuration, and it is
+worth writing down now what it will and will not do, because discovering it in
+the field reads as a bug:
+
+- **`FLAG_SECURE` surfaces come through black.** Netflix, Prime Video and
+  Disney+ set it. `MediaProjection` hands us black frames and there is nothing
+  to fix — the platform is working as designed.
+- **Apps can refuse to be recorded.** `ALLOW_CAPTURE_BY_NONE`, set by the app
+  being captured, means silence with no error. Confidence here is about the
+  mechanism, not about which specific apps use it: that needs a device, and this
+  document should not guess.
+- **The copyright question is the user's and is not made better by the code.**
+  Pointing a capture at licensed content is the thing §8.2 declines. The feature
+  may exist as *"show them your screen"* — a gesture that already ships inside a
+  call — and it must never be documented, named or marketed as a way to watch
+  somebody else's subscription. That is the same line §13 draws for patched
+  clients, and for the same reason: a neutral tool and an induced one differ in
+  what they are *for*, not in what they do.
+
+### What this does not replace
+
+**The handover is still the better answer whenever it can run**, and it got
+better on 2026-08-08 (§12): a file now plays while it arrives, so the follower
+starts within about five seconds instead of after the whole transfer. Against
+that, a stream is lossy, needs both sides online for its whole length, costs
+continuous bandwidth, and leaves the follower with nothing afterwards. What it
+buys is exactness of sync the deadband already makes imperceptible, and reach
+into content the follower can never hold.
+
+So streaming is the **third** answer to §9a's question, not a replacement for
+the first two: *find your own copy*, *take mine*, and now *watch mine as I play
+it*. The session picks one and says which; `PlaybackModeDecision` is where that
+belongs, and it stays a decision made once per session (§14).
+
+### Not built
+
+All of it, beyond the feasibility check above. What is settled is the design,
+the legal boundary, and the one piece that was genuinely in doubt — the audio
+injection point exists in the dependency already pinned. What remains is the
+leader's capture, a media `PeerConnection` alongside the transfer's data one,
+the follower's `SessionPlayer` over a remote track, and the desktop half, where
+receiving is a `srcObject` and sending is not.
