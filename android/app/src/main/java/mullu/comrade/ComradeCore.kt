@@ -256,11 +256,10 @@ object ComradeCore {
      * Hand one packet heard over BLE to the core. Never throws for a malformed
      * packet: a stranger in radio range sending rubbish is an ordinary event.
      */
-    fun bleDeliver(packet: ByteArray) = ffi.bleDeliver(packet.toList())
+    fun bleDeliver(packet: ByteArray) = ffi.bleDeliver(packet)
 
     /** Packets the core wants transmitted, oldest first. Drains the queue. */
-    fun bleDrainOutbound(): List<ByteArray> =
-        ffi.bleDrainOutbound().map { it.toByteArray() }
+    fun bleDrainOutbound(): List<ByteArray> = ffi.bleDrainOutbound()
 
     data class UpiIntent(val amountInr: Double, val vpa: String, val uri: String)
 
