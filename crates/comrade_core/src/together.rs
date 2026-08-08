@@ -92,6 +92,24 @@ pub const TOGETHER_SESSION_TTL_SECS: u64 = 45;
 /// multiplication scattered over three frontends.
 pub const TOGETHER_SESSION_TTL_MS: u64 = TOGETHER_SESSION_TTL_SECS * 1000;
 
+/// How long a direct peer channel may carry nothing back before we stop
+/// believing it is carrying anything at all.
+///
+/// Two heartbeats. The frontend owns the socket and is *supposed* to report
+/// `false` the moment it closes, but a report that never comes is exactly the
+/// failure this guards: signals leave for a socket nobody reads, and the first
+/// thing that notices is the session's own TTL — which ends the evening rather
+/// than falling back to the relay that was there all along.
+///
+/// The number is derived from the cadence rather than picked, because that is
+/// what makes it correct: a live channel carries the peer's heartbeat every
+/// [`TOGETHER_HEARTBEAT_SECS`], so two of them passing in silence means at least
+/// one was lost. It has to sit comfortably under
+/// [`TOGETHER_SESSION_TTL_SECS`] as well, or the fallback would arrive after the
+/// session it was meant to save — 20 s against 45 s leaves a full heartbeat on
+/// the relay to refresh the TTL before it lapses.
+pub const TOGETHER_DIRECT_SILENCE_MS: u64 = TOGETHER_HEARTBEAT_SECS * 2 * 1000;
+
 /// A together signal older than this is meaningless and is dropped on arrival.
 ///
 /// Relays redeliver at-least-once and the vault inbox backfills up to two days
@@ -209,6 +227,11 @@ const _: () = assert!(TOGETHER_DEADBAND_COARSE_MS > TOGETHER_DEADBAND_FINE_MS);
 // quietly collapsed them into each other would otherwise cost either the first
 // minute of every session or a two-hour film's worth of persistent events.
 const _: () = assert!(TOGETHER_BURST_INTERVAL_MS * 10 < TOGETHER_HEARTBEAT_SECS * 1000);
+// The direct-channel watchdog has to fire with a whole heartbeat to spare, or
+// the relay it falls back to gets no chance to refresh the TTL before the
+// session it was meant to save has already lapsed.
+const _: () =
+    assert!(TOGETHER_DIRECT_SILENCE_MS + TOGETHER_HEARTBEAT_SECS * 1000 < TOGETHER_SESSION_TTL_MS);
 
 // ── What is being played ─────────────────────────────────────────────────────
 
@@ -447,6 +470,63 @@ pub enum TogetherContent {
     /// what is being watched. That asymmetry is a property of the two sources,
     /// and the inviting UI should name it rather than hide it.
     Youtube { video_id: String },
+    /// A recording on a streaming service, which **each side plays from their
+    /// own subscription**.
+    ///
+    /// This is the shape every working listen-together product has, Spotify's
+    /// own Jam included: no audio is shared, each participant's client streams
+    /// the track itself, and only control events travel. It is also the only
+    /// shape available to us — §1 rules out moving the bytes, and the platforms
+    /// rule it out harder.
+    ///
+    /// Whether a session on one of these can actually be *held* together is not
+    /// a property of the link. It depends on what each device can drive, which
+    /// is [`ServiceAccess`] and [`MusicLink::playhead_control`] — a Spotify
+    /// track is a full session on two devices with signed-in Premium accounts
+    /// and a bare "here's where to open it" on a device with neither.
+    ///
+    /// Fully disclosing, like [`Self::Youtube`] and for the same reason: the id
+    /// is publicly resolvable, so the invitation says exactly what is being
+    /// played.
+    Service {
+        link: MusicLink,
+        /// What it is, when the inviting side could name it — so the other
+        /// device can look for its own copy if it cannot reach the service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recording: Option<Recording>,
+    },
+    /// One public HTTPS URL that both sides fetch for themselves — a podcast
+    /// episode off its RSS feed, an Internet Archive item, a Jamendo track.
+    ///
+    /// **The best-syncing online source there is, and it took the longest to
+    /// notice.** The work went to streaming services first because that is what
+    /// "listen to something online together" sounds like, and the whole time the
+    /// tightest answer was the one with no account, no vendor SDK and no terms
+    /// question in it. A podcast is an ordinary MP3 the publisher wants clients
+    /// to fetch; nothing is transferred between peers, because both devices pull
+    /// the same public URL themselves.
+    ///
+    /// It also **syncs four times tighter than a service track ever can**. This
+    /// plays in a plain media element, which reports an accurate position and
+    /// takes any `playbackRate` — so it earns the fine deadband and the whole
+    /// correction ladder, where a vendor SDK reporting position only on state
+    /// changes is stuck with the coarse one. See [`Self::tuning`].
+    ///
+    /// Fully disclosing, and more so than the other two: the URL names not only
+    /// what is being played but where it came from.
+    Stream {
+        /// Validated by [`valid_stream_url`] on the way out **and** on the way
+        /// in. Not a nicety — this string ends up in a media element's `src` on
+        /// the strength of a peer having sent it, so the guard belongs here
+        /// rather than in three UIs that each have to remember.
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recording: Option<Recording>,
+        /// When the feed said. `None` is normal and costs nothing but the
+        /// length-disagreement warning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
 }
 
 impl TogetherContent {
@@ -468,6 +548,53 @@ impl TogetherContent {
     pub fn duration_ms(&self) -> Option<u64> {
         match self {
             Self::LocalFile { duration_ms, .. } => Some(*duration_ms),
+            Self::Stream { duration_ms, .. } => *duration_ms,
+            // Both of these are the player's to report, not the inviter's to
+            // claim — and for a service track the two devices may legitimately
+            // be handed different masters of the same recording.
+            Self::Youtube { .. } | Self::Service { .. } => None,
+        }
+    }
+
+    /// Whether this content may be acted on at all — checked on the way **out**
+    /// and again on the way **in**.
+    ///
+    /// One predicate rather than a check at each call site, because the two used
+    /// to be separate `if let` arms that each named `Youtube` and nothing else:
+    /// a variant carrying a peer-chosen string could be added, wired through
+    /// three frontends, and reach a `src` attribute without either arm noticing.
+    /// A `match` here means a new variant has to say which side of this line it
+    /// is on.
+    ///
+    /// Deliberately not an error type. There is exactly one reason a peer's
+    /// invitation is refused here — it carried something we will not put in a
+    /// player — and the sender's copy of the same check is what turns it into a
+    /// message for the person who typed it.
+    pub fn admissible(&self) -> bool {
+        match self {
+            // Nothing peer-chosen reaches a URL: a duration is a number and a
+            // recording is only ever text in a label.
+            Self::LocalFile { .. } => true,
+            // Eleven characters into an `<iframe src>`.
+            Self::Youtube { video_id } => valid_youtube_id(video_id),
+            // A catalogue id, used to *look something up*, never concatenated
+            // into a request by this crate. The frontends that resolve it are
+            // the ones that must escape it, and `MusicLink`'s shape — separate
+            // storefront and id fields, not a URL — is what keeps that possible.
+            Self::Service { .. } => true,
+            // A whole URL the other person chose, going into a media element.
+            // The strict one.
+            Self::Stream { url, .. } => valid_stream_url(url),
+        }
+    }
+
+    /// What the invitation names, when it names anything — so a device that
+    /// cannot reach the source can look for its own copy instead.
+    pub fn recording(&self) -> Option<&Recording> {
+        match self {
+            Self::LocalFile { recording, .. }
+            | Self::Service { recording, .. }
+            | Self::Stream { recording, .. } => recording.as_ref(),
             Self::Youtube { .. } => None,
         }
     }
@@ -482,11 +609,20 @@ impl TogetherContent {
     /// be wide enough not to thrash.
     pub fn tuning(&self) -> SyncTuning {
         match self {
-            Self::LocalFile { .. } => SyncTuning {
+            // A plain media element on an HTTPS URL is the same player as one on
+            // a local file — accurate position, any `playbackRate` — so it earns
+            // the same ladder. This is the whole practical argument for the
+            // `Stream` variant: it is the only *online* source that syncs as
+            // tightly as a file on disk.
+            Self::LocalFile { .. } | Self::Stream { .. } => SyncTuning {
                 min_deadband_ms: TOGETHER_DEADBAND_FINE_MS,
                 can_rate_trim: true,
             },
-            Self::Youtube { .. } => SyncTuning {
+            // A third-party player we drive through an SDK: no rate trim is
+            // expressible, and the position it reports is event-driven rather
+            // than continuous, so the deadband has to be wide enough not to
+            // thrash against its own reporting granularity.
+            Self::Youtube { .. } | Self::Service { .. } => SyncTuning {
                 min_deadband_ms: TOGETHER_DEADBAND_COARSE_MS,
                 can_rate_trim: false,
             },
@@ -528,15 +664,119 @@ impl MusicLink {
         }
     }
 
-    /// Whether this link can be *played* by us, as opposed to merely naming
-    /// something the listener must already have.
+    /// How well this device could hold a playhead on this link, given what it
+    /// is signed in to.
     ///
-    /// Only YouTube can, and only through its embed player. Spotify and Apple
-    /// Music serve DRM-protected audio that no third-party client may decode, so
-    /// for those the honest answer is "this tells you what to open", not "press
-    /// play". A UI that blurs the two would be promising something it cannot do.
-    pub fn playable_in_place(&self) -> bool {
-        matches!(self, Self::Youtube { .. })
+    /// **This used to be a property of the link, and that was the mistake.**
+    /// `playable_in_place` answered "only YouTube", reasoning that Spotify and
+    /// Apple Music serve DRM audio no third-party client may decode. The decode
+    /// part is true and unchanged — we never touch their bytes. What does not
+    /// follow is that we cannot *drive* them: both vendors ship SDKs whose whole
+    /// purpose is letting another app control playback happening inside their
+    /// own client, on the listener's own subscription. That is how every
+    /// third-party listen-together product works, and how Spotify's own Jam
+    /// works — nobody shares audio, each participant streams the track from
+    /// their own client, and only control events travel.
+    ///
+    /// So the answer depends on the device, not the URL, and it has three values
+    /// rather than two — see [`PlayheadControl`].
+    pub fn playhead_control(&self, access: &ServiceAccess) -> PlayheadControl {
+        match self {
+            // The embed player needs no account at all, which is what keeps it
+            // the only source that works for two strangers.
+            Self::Youtube { .. } => PlayheadControl::Full,
+            // Web Playback SDK in a webview, App Remote against the installed
+            // app on Android. Both expose a seek and a position, so the whole
+            // correction ladder short of a rate trim is available.
+            Self::Spotify { .. } => {
+                if access.spotify {
+                    PlayheadControl::Full
+                } else {
+                    PlayheadControl::None
+                }
+            }
+            // Deliberately never `Full`, even signed in. MusicKit offers no
+            // precise scheduling, so there is no call that places a playhead at
+            // a named moment — and its terms restrict synchronising MusicKit
+            // content with other content, which at minimum needs a legal read
+            // before anyone tries. `StartOnly` is what §9a already calls the
+            // honest degradation: we started together, and nothing can pull us
+            // back afterwards.
+            Self::AppleMusic { .. } => {
+                if access.apple_music {
+                    PlayheadControl::StartOnly
+                } else {
+                    PlayheadControl::None
+                }
+            }
+        }
+    }
+}
+
+/// What this device is signed in to, and may therefore drive playback on.
+///
+/// Answered by the frontend, because only it knows: an OAuth token on desktop,
+/// a connected `SpotifyAppRemote` on Android. Never persisted here and never
+/// inferred — a device that has not said is a device that cannot.
+///
+/// **Premium is the real gate on Spotify**, not sign-in: both SDKs refuse to
+/// play on a free account. A frontend must report `false` for a free account
+/// rather than `true`-and-hope, or the session opens and the other person waits
+/// for a track that will never start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ServiceAccess {
+    /// A signed-in Spotify **Premium** account this device may drive.
+    #[serde(default)]
+    pub spotify: bool,
+    /// A signed-in Apple Music subscription.
+    #[serde(default)]
+    pub apple_music: bool,
+}
+
+impl ServiceAccess {
+    /// Nothing connected — what every device reports until a frontend says
+    /// otherwise, and what a frontend with no integration reports forever.
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
+/// How tightly a source's playhead can be held.
+///
+/// Three values because the middle one is real and pretending it is not is how
+/// a UI ends up claiming a precision it does not have. A deep link into someone
+/// else's subscription genuinely does start two people together and genuinely
+/// cannot pull them back afterwards, and saying so is better than either
+/// refusing it or dressing it up as a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayheadControl {
+    /// Play, pause and *seek* all reach the player, and it reports where it is.
+    /// A full session: the drift ladder applies, at whatever tuning the source
+    /// supports.
+    Full,
+    /// It can be started, and that is all. The two devices agree on "now" and
+    /// then drift with nothing able to close the gap — so a session must not
+    /// claim to be holding them together, and must not emit corrections it
+    /// cannot apply.
+    StartOnly,
+    /// Not drivable at all. The honest offer is a link to open, not a player.
+    None,
+}
+
+impl PlayheadControl {
+    /// Whether a session on this source should run the drift ladder at all.
+    ///
+    /// Load-bearing rather than cosmetic: emitting corrections to a player that
+    /// cannot seek produces a stream of verdicts nothing applies, and a screen
+    /// that says "catching up…" forever while nothing catches up.
+    pub fn corrects(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Whether a session can be opened on this source at all.
+    pub fn playable(&self) -> bool {
+        !matches!(self, Self::None)
     }
 }
 
@@ -610,6 +850,101 @@ pub fn valid_youtube_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The longest URL a peer may hand us for [`TogetherContent::Stream`].
+///
+/// A bound rather than a limit that matters: real episode URLs with tracking
+/// query strings run long, and the point is only that a session invitation
+/// cannot carry a megabyte of string into three UIs' DOM.
+pub const STREAM_URL_MAX_LEN: usize = 2048;
+
+/// Whether `url` is something we will hand to a media element on a peer's word.
+///
+/// The strictest validator in this module, and deliberately so: unlike a YouTube
+/// id — eleven characters of a known alphabet — this is a whole URL that the
+/// *other person* chose, and it ends up as a media element's `src`. The
+/// device will then make a request to wherever it points, with the user's
+/// network position and cookies-for-that-origin, because that is what a media
+/// element does.
+///
+/// Six rules, each of them a thing a hostile invitation would otherwise buy:
+///
+/// - **HTTPS only.** `http:` is a downgrade a peer must not be able to choose,
+///   `file:` reads the listener's disk, `javascript:` and `data:` are script
+///   execution in whichever frontend is least careful about where it puts the
+///   string. The same HTTPS-only line `media-http` already holds.
+/// - **No credentials in the authority.** `https://user:pass@host/` is a
+///   phishing shape and some fetchers hand the credentials on through a
+///   redirect.
+/// - **A real host, with a dot in it.** This is what stops
+///   `https://router/reboot` — a peer-supplied URL that resolves on the
+///   listener's *LAN*, not ours. Combined with the literal-IP refusal below it
+///   is a blunt instrument, and it is the right blunt instrument: a session
+///   invitation has no business naming a host that only exists inside somebody
+///   else's house.
+/// - **No literal IP addresses**, for the same reason and because a name is
+///   what makes the disclosure meaningful. "Play this from 10.0.0.7" tells the
+///   listener nothing about what they are fetching.
+/// - **No control characters, spaces, quotes or angle brackets.** Any frontend
+///   that ever builds an attribute by concatenation is an injection otherwise,
+///   and this is the "do it where no UI can forget" argument the MIME branch
+///   already makes.
+/// - **Bounded length** ([`STREAM_URL_MAX_LEN`]).
+///
+/// What this deliberately does **not** do is resolve the name or follow the
+/// request. A DNS answer can point inside the listener's network whatever the
+/// name looks like, and this runs on a device with no network guarantee at all.
+/// The honest statement is that this refuses the *stated* private target, not
+/// every possible one — closing the rest belongs to whatever actually makes the
+/// request, not to a pure function.
+pub fn valid_stream_url(url: &str) -> bool {
+    if url.len() > STREAM_URL_MAX_LEN {
+        return false;
+    }
+    // Case-insensitive on the scheme only: the path is a peer's to case as they
+    // like, and lowercasing it would corrupt URLs that are case-sensitive.
+    let Some(rest) = url
+        .get(..8)
+        .filter(|p| p.eq_ignore_ascii_case("https://"))
+        .map(|_| &url[8..])
+    else {
+        return false;
+    };
+    if rest
+        .bytes()
+        .any(|b| b.is_ascii_control() || matches!(b, b' ' | b'"' | b'\'' | b'<' | b'>' | b'\\'))
+    {
+        return false;
+    }
+    // The authority ends at the first `/`, `?` or `#`; everything after is the
+    // server's business and not ours to judge.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // Credentials, and also the case where a peer tries to hide the real host
+    // behind an `@` — the authority is what a browser resolves, so the part
+    // *after* the last `@` is what actually matters and we refuse the shape
+    // outright rather than parsing it.
+    if authority.contains('@') {
+        return false;
+    }
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    if host.is_empty() || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    // A bracketed IPv6 literal, refused with the IPv4 ones below.
+    if host.starts_with('[') {
+        return false;
+    }
+    // A dotted host that parses as an address is a literal, not a name.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    // A name with no dot is a LAN name — `router`, `nas`, `localhost`.
+    if !host.contains('.') {
+        return false;
+    }
+    host.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
 }
 
 /// Pull a video id out of a bare id or any of the usual link shapes
@@ -848,6 +1183,31 @@ pub fn new_session_id() -> String {
 /// can only observe the behaviour both rules share.
 pub fn direct_signal_admissible(signal: &TogetherSignal) -> bool {
     !matches!(signal, TogetherSignal::Start { .. })
+}
+
+/// Whether a direct peer channel the frontend declared open should still be
+/// used, given when it last produced evidence of being alive.
+///
+/// `last_evidence_ms` is the later of two things: when the frontend said the
+/// channel was up, and when an envelope last arrived over it. The first is a
+/// grace window — a channel deserves a chance to prove itself before anything
+/// is concluded from silence — and the second is the only proof available,
+/// because a send on this path is fire-and-forget by construction: the socket
+/// belongs to the frontend, so "did it arrive" is not a question core can ask.
+///
+/// Silence is read as a dead channel rather than as a quiet one, and that is
+/// sound rather than pessimistic: a data channel is symmetric, so a peer whose
+/// channel is open sends *their* heartbeats down it, every
+/// [`TOGETHER_HEARTBEAT_SECS`]. Two of those passing with nothing to show for
+/// them means the path is not carrying, whichever end broke.
+///
+/// **Self-healing, deliberately.** This is a per-send question, not a latch, so
+/// a channel that goes quiet and comes back is trusted again the moment an
+/// envelope arrives on it — no re-declaration from the frontend needed. There is
+/// no deadlock hiding in that, because the evidence is the peer's traffic and
+/// not our own: nothing we stop sending can stop them sending.
+pub fn direct_path_live(last_evidence_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_evidence_ms) < TOGETHER_DIRECT_SILENCE_MS
 }
 
 /// Whether a signal sent at `created_at` (seconds) is still worth acting on.
@@ -2173,18 +2533,232 @@ mod tests {
                 video_id: "dQw4w9WgXcQ".into()
             }
         );
-        assert!(link.playable_in_place());
-        // The other two name something you must already have; saying otherwise
-        // would promise a thing this app cannot do.
-        assert!(!MusicLink::Spotify {
-            track_id: "x".into()
+        // The embed needs no account, so it is the one source that works
+        // between two people who share nothing but a link.
+        assert_eq!(
+            link.playhead_control(&ServiceAccess::none()),
+            PlayheadControl::Full
+        );
+    }
+
+    // ── What a device can actually drive ────────────────────────────────────
+
+    fn spotify() -> MusicLink {
+        MusicLink::Spotify {
+            track_id: "6habFhsOp2NvshLv26DqMb".into(),
         }
-        .playable_in_place());
-        assert!(!MusicLink::AppleMusic {
+    }
+
+    fn apple() -> MusicLink {
+        MusicLink::AppleMusic {
             storefront: "in".into(),
-            track_id: "1".into()
+            track_id: "1440931493".into(),
         }
-        .playable_in_place());
+    }
+
+    /// The correction this whole model turns on: it is the *device* that decides
+    /// whether a service track is playable, not the URL. This is how Spotify's
+    /// own Jam works and how every third-party clone of it works — each
+    /// participant plays the track from their own client on their own
+    /// subscription, and only control events travel.
+    #[test]
+    fn a_service_track_is_playable_exactly_when_this_device_is_signed_in() {
+        assert_eq!(
+            spotify().playhead_control(&ServiceAccess::none()),
+            PlayheadControl::None,
+            "no account is no session, and must not read as one",
+        );
+        assert_eq!(
+            spotify().playhead_control(&ServiceAccess {
+                spotify: true,
+                apple_music: false,
+            }),
+            PlayheadControl::Full,
+        );
+    }
+
+    /// Apple Music is never `Full`, signed in or not. MusicKit exposes no way to
+    /// place a playhead at a named moment, so a session on it could be started
+    /// and never held — and a correction ladder running against a player that
+    /// cannot seek produces verdicts nothing applies.
+    #[test]
+    fn apple_music_can_be_started_and_never_placed() {
+        let connected = ServiceAccess {
+            spotify: false,
+            apple_music: true,
+        };
+        assert_eq!(
+            apple().playhead_control(&connected),
+            PlayheadControl::StartOnly
+        );
+        assert!(!apple().playhead_control(&connected).corrects());
+        assert!(apple().playhead_control(&connected).playable());
+        assert_eq!(
+            apple().playhead_control(&ServiceAccess::none()),
+            PlayheadControl::None
+        );
+    }
+
+    #[test]
+    fn one_service_being_connected_says_nothing_about_the_other() {
+        // The two are separate subscriptions and separate SDKs; a shared
+        // boolean here would open a Spotify session on an Apple Music account.
+        let only_spotify = ServiceAccess {
+            spotify: true,
+            apple_music: false,
+        };
+        assert_eq!(
+            apple().playhead_control(&only_spotify),
+            PlayheadControl::None
+        );
+        let only_apple = ServiceAccess {
+            spotify: false,
+            apple_music: true,
+        };
+        assert_eq!(
+            spotify().playhead_control(&only_apple),
+            PlayheadControl::None
+        );
+    }
+
+    #[test]
+    fn only_a_full_playhead_runs_the_drift_ladder() {
+        // `corrects()` gates the ladder, so a source that cannot seek must not
+        // pass it — otherwise the screen says "catching up…" forever while
+        // nothing catches up.
+        assert!(PlayheadControl::Full.corrects());
+        assert!(!PlayheadControl::StartOnly.corrects());
+        assert!(!PlayheadControl::None.corrects());
+        assert!(PlayheadControl::Full.playable());
+        assert!(PlayheadControl::StartOnly.playable());
+        assert!(!PlayheadControl::None.playable());
+    }
+
+    // ── A public URL both sides fetch for themselves ────────────────────────
+
+    #[test]
+    fn a_stream_syncs_as_tightly_as_a_local_file() {
+        // The point of the variant. A podcast episode is an ordinary media
+        // element on an HTTPS URL, so it reports an accurate position and takes
+        // any rate — the fine ladder, not the coarse one a vendor SDK forces.
+        let stream = TogetherContent::Stream {
+            url: "https://feeds.example.com/ep/42.mp3".into(),
+            recording: None,
+            duration_ms: Some(3_600_000),
+        };
+        assert_eq!(
+            stream.tuning(),
+            TogetherContent::local_file(3_600_000, None).tuning(),
+        );
+        assert!(stream.tuning().can_rate_trim);
+        assert_eq!(stream.duration_ms(), Some(3_600_000));
+    }
+
+    #[test]
+    fn a_feed_that_did_not_say_how_long_costs_only_the_warning() {
+        let stream = TogetherContent::Stream {
+            url: "https://feeds.example.com/ep/42.mp3".into(),
+            recording: None,
+            duration_ms: None,
+        };
+        assert_eq!(stream.duration_ms(), None);
+    }
+
+    #[test]
+    fn an_ordinary_episode_url_is_accepted() {
+        for url in [
+            "https://feeds.example.com/ep/42.mp3",
+            "https://archive.org/download/item/track%2001.flac",
+            "https://cdn.example.co.uk:8443/a/b.m4a?token=abc-123&t=9",
+            "https://example.com",
+            "https://sub.domain.example.org/x#t=30",
+        ] {
+            assert!(valid_stream_url(url), "refused a real one: {url}");
+        }
+    }
+
+    /// Each case here is a thing a hostile invitation would otherwise buy,
+    /// because this string becomes a media element's `src` on the strength of a
+    /// peer having sent it.
+    #[test]
+    fn a_stream_url_refuses_everything_that_is_not_a_public_https_name() {
+        for url in [
+            // Scheme: a downgrade, the listener's disk, and two flavours of
+            // script execution in whichever frontend is least careful.
+            "http://feeds.example.com/ep.mp3",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:audio/mp3;base64,AAAA",
+            "ftp://example.com/a.mp3",
+            "//example.com/a.mp3",
+            "",
+            // Credentials, and the `@` trick that hides the real host.
+            "https://user:pass@example.com/a.mp3",
+            "https://example.com@evil.test/a.mp3",
+            // Hosts that only exist inside the listener's house.
+            "https://localhost/a.mp3",
+            "https://router/reboot",
+            "https://127.0.0.1/a.mp3",
+            "https://10.0.0.7/a.mp3",
+            "https://192.168.1.1/admin",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/a.mp3",
+            // Malformed authorities.
+            "https:///a.mp3",
+            "https://.example.com/a.mp3",
+            "https://example.com./a.mp3",
+            // Injection shapes, for the frontend that builds an attribute by
+            // concatenation.
+            "https://example.com/a\"onerror=x.mp3",
+            "https://example.com/<script>.mp3",
+            "https://example.com/a b.mp3",
+            "https://example.com/a\nb.mp3",
+            "https://exa mple.com/a.mp3",
+        ] {
+            assert!(!valid_stream_url(url), "accepted a hostile one: {url:?}");
+        }
+    }
+
+    #[test]
+    fn a_stream_url_is_bounded() {
+        let long = format!("https://example.com/{}", "a".repeat(STREAM_URL_MAX_LEN));
+        assert!(!valid_stream_url(&long));
+        // And a realistically long one with tracking junk still passes.
+        let real = format!("https://cdn.example.com/ep.mp3?{}", "k=v&".repeat(200));
+        assert!(real.len() < STREAM_URL_MAX_LEN);
+        assert!(valid_stream_url(&real));
+    }
+
+    #[test]
+    fn the_scheme_is_matched_without_regard_to_case_and_the_path_is_not() {
+        assert!(valid_stream_url("HTTPS://example.com/A.MP3"));
+        // The path's case is the server's business — this must not normalise it
+        // and it must not refuse it.
+        assert!(valid_stream_url(
+            "https://example.com/CaseSensitive/Path.mp3"
+        ));
+    }
+
+    #[test]
+    fn a_service_session_syncs_as_coarsely_as_an_embed() {
+        // Both are third-party players driven through an SDK: no rate trim is
+        // expressible and the reported position is event-driven rather than
+        // continuous, so the deadband must not be the local-file one.
+        let service = TogetherContent::Service {
+            link: spotify(),
+            recording: None,
+        };
+        assert_eq!(
+            service.tuning(),
+            TogetherContent::Youtube {
+                video_id: "dQw4w9WgXcQ".into()
+            }
+            .tuning(),
+        );
+        assert!(!service.tuning().can_rate_trim);
+        // And it claims no duration: the two devices may be handed different
+        // masters of the same recording.
+        assert_eq!(service.duration_ms(), None);
     }
 
     #[test]
@@ -2409,6 +2983,61 @@ mod tests {
                 signal.kind_str(),
             );
         }
+    }
+
+    // ── When a declared channel stops being believed ────────────────────────
+
+    #[test]
+    fn a_freshly_declared_channel_is_trusted_before_it_has_proved_anything() {
+        // The grace window. A frontend that has just negotiated a channel has
+        // received nothing on it yet, and refusing it on that ground would mean
+        // the fast path could never be taken at all.
+        assert!(direct_path_live(1_000_000, 1_000_000));
+        assert!(direct_path_live(1_000_000, 1_000_000 + 9_999));
+    }
+
+    #[test]
+    fn a_channel_silent_for_two_heartbeats_is_no_longer_believed() {
+        let declared = 1_000_000;
+        // One heartbeat of silence is ordinary: a beat can be late.
+        assert!(direct_path_live(
+            declared,
+            declared + TOGETHER_HEARTBEAT_SECS * 1000
+        ));
+        // Two is not. This is the case the whole constant exists for — the
+        // frontend never reported the close, so nothing else would notice.
+        assert!(!direct_path_live(
+            declared,
+            declared + TOGETHER_DIRECT_SILENCE_MS
+        ));
+        assert!(!direct_path_live(
+            declared,
+            declared + TOGETHER_DIRECT_SILENCE_MS + 1
+        ));
+    }
+
+    // The property that makes the watchdog safe to have at all — it must fire
+    // with a full heartbeat to spare — is a compile-time invariant beside the
+    // constants rather than a test here, matching the four already there.
+
+    #[test]
+    fn traffic_on_the_channel_earns_it_back_without_the_frontend_saying_anything() {
+        let declared = 1_000_000;
+        let long_gone = declared + TOGETHER_DIRECT_SILENCE_MS + 5_000;
+        assert!(!direct_path_live(declared, long_gone));
+        // One envelope arriving over the channel is the evidence, and it is the
+        // peer's traffic rather than ours — so nothing we stopped sending can
+        // keep this from happening.
+        assert!(direct_path_live(long_gone, long_gone + 1_000));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_does_not_read_as_silence() {
+        // `now_ms` is a wall clock and can step behind a stamp taken moments
+        // ago. Saturating means that reads as "no time has passed", which keeps
+        // the channel; the alternative underflows to a huge gap and drops a
+        // perfectly good path over an NTP correction.
+        assert!(direct_path_live(1_000_000, 999_000));
     }
 
     #[test]

@@ -18,6 +18,23 @@
 export const TOGETHER_MS = 400;
 
 /**
+ * How long a measurement is worth showing after it was taken.
+ *
+ * Both figures below come from one event — a drift correction — and corrections
+ * are emitted *only* when the verdict is not `hold`. The steady state is
+ * therefore silent, which means a screen that simply keeps the last numbers
+ * shows a gap that has already been closed, for as long as the session stays
+ * closed. "3.2 s behind them", printed under the word "Together", forever.
+ *
+ * Two heartbeats, matching `together::TOGETHER_DIRECT_SILENCE_MS` and derived
+ * the same way: a correction can only arrive on a heartbeat, so once two have
+ * passed in silence, at least one of them said the gap was inside the deadband
+ * — and the numbers on screen are describing a moment that is over. Showing
+ * nothing is the honest state; `stateLabel` still says how it is going.
+ */
+export const READING_STALE_MS = 20_000;
+
+/**
  * `m:ss`, or `h:mm:ss` past an hour.
  *
  * Takes seconds because that is what a `<video>` reports. Guards the non-finite
@@ -117,6 +134,37 @@ export function qualityLabel(qualityMs) {
   if (qualityMs <= 50) return "direct · ±0.05s";
   if (qualityMs <= 150) return `direct · ±${(qualityMs / 1000).toFixed(2)}s`;
   return `relayed · ±${(qualityMs / 1000).toFixed(1)}s`;
+}
+
+/**
+ * The two measured lines together, or nothing at all.
+ *
+ * They are one call rather than two because they are one measurement, and the
+ * question that governs both is the same: is this still describing now? A drift
+ * figure without its error is unreadable, and an error left on screen after its
+ * drift figure aged out would claim we are still measuring when we have stopped
+ * hearing verdicts. So they age out as a pair.
+ *
+ * `ageMs` is how long ago the correction that produced these arrived. A caller
+ * that has never had one passes something large (or `Infinity`), which reads as
+ * "nothing measured yet" — the same blank as a stale reading, which is right:
+ * both mean we have no current number.
+ *
+ * @param {object} r
+ * @param {number|null} [r.driftMs] signed; positive means we are ahead
+ * @param {number|null} [r.qualityMs] our own measurement error
+ * @param {number} [r.ageMs]
+ * @returns {{drift: string|null, path: string|null}}
+ */
+export function measurementLines(r = {}) {
+  const age = Number(r.ageMs);
+  if (!Number.isFinite(age) || age >= READING_STALE_MS) {
+    return { drift: null, path: null };
+  }
+  return {
+    drift: driftLabel(r.driftMs, r.qualityMs),
+    path: qualityLabel(r.qualityMs),
+  };
 }
 
 /** `▶` or `⏸`, and the label a screen reader gets. */

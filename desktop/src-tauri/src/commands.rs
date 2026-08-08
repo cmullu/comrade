@@ -492,9 +492,11 @@ pub async fn together_session(
 /// so they take it rather than a relay — tens of milliseconds against hundreds,
 /// which is what decides how tight the sync can be.
 ///
-/// Must be set back to `false` when the channel closes: nothing times out behind
-/// it, so a stale `true` sends signals into a socket nobody reads and the session
-/// dies on its TTL instead of falling back to the relay.
+/// Should be set back to `false` when the channel closes, and the runtime no
+/// longer depends on that happening: a declaration expires after two heartbeats
+/// of silence on the channel and sends go back to the relay by themselves
+/// (`comrade_core::together::direct_path_live`). Reporting it promptly still
+/// matters — it moves the fallback from twenty seconds away to immediate.
 #[tauri::command]
 pub async fn together_direct_ready(
     state: tauri::State<'_, Runtime>,
@@ -1117,9 +1119,28 @@ pub async fn play_query(
 /// Pure, so it never touches the runtime — it is a command only so the decision
 /// stays in one place across the frontends rather than being reimplemented in JS
 /// the day desktop grows a player (`docs/TOGETHER.md` §9).
+///
+/// `link` and `access` are what decide a streaming-service track: the same
+/// Spotify URL routes to a session on a window with a Premium account connected
+/// and to a signpost on one without, and nothing in the URL tells them apart.
+/// This window connects to nothing yet, so it passes an empty `access` and gets
+/// exactly the behaviour it had before — see `docs/TOGETHER.md` §11.
 #[tauri::command]
-pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
-    comrade_ui::play_route(plan, found_local_copy)
+pub fn play_route(
+    plan: PlayPlan,
+    found_local_copy: bool,
+    link: Option<comrade_ui::MusicLink>,
+    access: Option<comrade_ui::ServiceAccess>,
+) -> PlayRoute {
+    // `None` is "this frontend has no service integration", not "I forgot to
+    // say" — and it must resolve to no access rather than to a default that
+    // could claim an account the window does not have.
+    comrade_ui::play_route(
+        plan,
+        found_local_copy,
+        link,
+        access.unwrap_or_else(comrade_ui::ServiceAccess::none),
+    )
 }
 
 /// Name a piece of work. `peer` of `None` is a note to self — no relay.

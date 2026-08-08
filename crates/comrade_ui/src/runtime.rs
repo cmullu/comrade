@@ -112,11 +112,11 @@ use comrade_core::tara::{
     tara_chat_answer, tara_chat_line, CompanionEngine, JournalSignal, ReflectiveCompanion,
 };
 use comrade_core::together::{
-    command_apply, describe_state_change, direct_signal_admissible, heartbeat_interval_ms,
-    parse_together_envelope, projected_peer_pos_ms, session_is_live_at, signal_is_fresh,
-    sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandApply, CommandStamp,
-    StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope, TogetherSignal,
-    CLOCK_BURST_PROBES,
+    command_apply, describe_state_change, direct_path_live, direct_signal_admissible,
+    heartbeat_interval_ms, parse_together_envelope, projected_peer_pos_ms, session_is_live_at,
+    signal_is_fresh, sync_verdict, ClockEcho, ClockFilter, CommandApply, CommandStamp,
+    PlayheadControl, StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope,
+    TogetherSignal, CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
@@ -655,8 +655,19 @@ pub enum PlayRoute {
     /// Music). All we can honestly do is say where to open it.
     OpenElsewhere,
     /// A YouTube embed, which can be driven in place by a frontend that has a
-    /// webview to drive it in.
+    /// webview to drive it in. Needs no account on either side, which is what
+    /// keeps it the one source that works between two strangers.
     PlayEmbed,
+    /// A streaming-service track this device is signed in to and can drive —
+    /// play it there, on the listener's own subscription, and hold the session
+    /// against it.
+    ///
+    /// Distinct from [`Self::PlayEmbed`] because the mechanism is different
+    /// (a vendor SDK against an authenticated account, not a public embed) and
+    /// so is the failure: an expired token or a downgraded subscription turns
+    /// this back into [`Self::OpenElsewhere`] at any moment, whereas an embed
+    /// either exists or does not.
+    PlayOnService,
     /// Nothing usable in the query.
     Nothing,
 }
@@ -667,13 +678,34 @@ pub enum PlayRoute {
 /// `found_local_copy` is the frontend's answer to "is a copy of this on *this*
 /// device, above the confidence bar" — and it is consulted **only** for
 /// [`PlayPlan::FindLocally`]. A caller that has a local file of a Spotify track
-/// still gets [`PlayRoute::OpenElsewhere`]: the plan is about what the *query*
-/// named, and a link to DRM audio does not become playable because something
-/// with a similar title happens to be on the phone.
-pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+/// still gets a service route or [`PlayRoute::OpenElsewhere`]: the plan is about
+/// what the *query* named, and a link does not become a local file because
+/// something with a similar title happens to be on the phone.
+///
+/// `link` is the service link the query resolved to, when it was one, and
+/// `access` is what this device is signed in to. Together they answer the
+/// question `PlayPlan::NameOnly` could not: a Spotify link is
+/// [`PlayRoute::PlayOnService`] on a device with a Premium account behind it and
+/// [`PlayRoute::OpenElsewhere`] on one without, and no amount of looking at the
+/// URL distinguishes those two devices.
+pub fn play_route(
+    plan: PlayPlan,
+    found_local_copy: bool,
+    link: Option<comrade_core::together::MusicLink>,
+    access: comrade_core::together::ServiceAccess,
+) -> PlayRoute {
     match plan {
         PlayPlan::Empty => PlayRoute::Nothing,
-        PlayPlan::NameOnly => PlayRoute::OpenElsewhere,
+        PlayPlan::NameOnly => match link.as_ref().map(|l| l.playhead_control(&access)) {
+            // Signed in and drivable: a real session, on their own subscription.
+            Some(PlayheadControl::Full) => PlayRoute::PlayOnService,
+            // `StartOnly` deliberately lands here rather than opening a session
+            // that cannot be held. Apple Music can be started and never placed,
+            // so a session on it would emit corrections nothing applies and a
+            // screen that says "catching up…" while nothing catches up. Saying
+            // "open it there" is the smaller promise and the true one.
+            _ => PlayRoute::OpenElsewhere,
+        },
         PlayPlan::OpenNow => PlayRoute::PlayEmbed,
         PlayPlan::FindLocally => {
             if found_local_copy {
@@ -754,7 +786,18 @@ struct TogetherSession {
     /// connection belongs to the frontend — the same division of labour
     /// [`TogetherShareDto`] describes. It is per-session and never persisted:
     /// a channel does not outlive the session it was negotiated inside.
+    ///
+    /// A claim, not a fact — see [`direct_evidence_ms`](Self::direct_evidence_ms)
+    /// for what keeps it honest.
     direct_ready: bool,
+    /// The last moment the direct channel gave any sign of being alive: the
+    /// frontend declaring it up, or an envelope arriving over it.
+    ///
+    /// `direct_ready` alone is a promise the frontend has no way to keep — a
+    /// closed socket reports nothing, and a frontend that crashes past its own
+    /// close handler reports nothing forever. `direct_path_live` reads this to
+    /// decide whether the promise is still worth acting on.
+    direct_evidence_ms: u64,
     /// The rate trim we last asked this device's player for. Tracked because a
     /// trim is sticky — see `SyncSample::local_rate`; without it the ladder can
     /// never take one back off.
@@ -3037,6 +3080,9 @@ impl ComradeRuntime {
     pub fn together_direct_ready(&self, ready: bool) {
         if let Some(session) = self.together.lock().unwrap().as_mut() {
             session.direct_ready = ready;
+            if ready {
+                session.direct_evidence_ms = now_ms();
+            }
         }
     }
 
@@ -6070,7 +6116,7 @@ impl RuntimeHandles {
                 session.peer_hex.clone(),
                 env,
                 session.id.clone(),
-                session.direct_ready,
+                session.direct_ready && direct_path_live(session.direct_evidence_ms, at_ms),
             )
         };
         let peer_pk = parse_pubkey(&peer_hex)?;
@@ -6100,9 +6146,12 @@ impl RuntimeHandles {
         // correction that can be tight and one that cannot.
         //
         // Fire-and-forget by construction: the frontend owns the socket, so
-        // "did it arrive" is not answerable here and is not asked. The peer's
-        // heartbeats and the session TTL are what notice a channel that has
-        // stopped carrying, exactly as they notice a relay that has.
+        // "did it arrive" is not answerable here and is not asked. What *is*
+        // asked is whether the channel has shown any sign of life in the last
+        // two heartbeats — `direct_path_live`, folded into `direct_ready`
+        // above. Without that, a frontend that lost its channel without
+        // reporting it would keep this branch sending into a socket nobody
+        // reads until the session died on its TTL.
         if direct_ready {
             let _ = self.events.send(BridgeEvent::TogetherOutbound {
                 session_id,
@@ -6131,10 +6180,13 @@ impl RuntimeHandles {
         content: TogetherContent,
     ) -> Result<TogetherSessionDto, UiError> {
         let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
-        if let TogetherContent::Youtube { video_id } = &content {
-            if !valid_youtube_id(video_id) {
-                return Err(UiError::Engine("not a YouTube video link".into()));
-            }
+        // The same predicate the receiving side runs, so a thing we would refuse
+        // to accept is a thing we refuse to send — and so a new content variant
+        // cannot slip past one arm while satisfying the other.
+        if !content.admissible() {
+            return Err(UiError::Engine(
+                "that link isn't something Comrade will play".into(),
+            ));
         }
         let peer_pk = parse_pubkey(peer)?;
         let peer_npub = to_npub(peer);
@@ -6169,6 +6221,7 @@ impl RuntimeHandles {
                 last_heard_ms: at_ms,
                 last_seek_ms: 0,
                 direct_ready: false,
+                direct_evidence_ms: 0,
                 local_rate: 1.0,
                 local_output_latency_ms: 0,
                 peer_output_latency_ms: 0,
@@ -6291,13 +6344,20 @@ impl RuntimeHandles {
     /// Idempotent and safe to call with no session — a channel that opens after
     /// one has ended is simply nothing to record.
     ///
-    /// Must be set back to `false` the moment the channel closes or fails.
-    /// There is no timeout behind it: signals would keep going out to a socket
-    /// nobody is reading, and the session would die on its TTL rather than
-    /// falling back to the relay that was there all along.
+    /// Should be set back to `false` the moment the channel closes or fails —
+    /// but the runtime does not depend on that happening, because a frontend
+    /// that has crashed past its own close handler cannot report anything. A
+    /// declaration is treated as a claim with an expiry: two heartbeats of
+    /// silence on the channel and sends go back to the relay on their own
+    /// ([`comrade_core::together::direct_path_live`]). Reporting `false`
+    /// promptly is still worth doing — it moves the fallback from twenty
+    /// seconds away to immediate.
     pub fn together_direct_ready(&self, ready: bool) {
         if let Some(session) = self.together.lock().unwrap().as_mut() {
             session.direct_ready = ready;
+            if ready {
+                session.direct_evidence_ms = now_ms();
+            }
         }
     }
 
@@ -6330,8 +6390,17 @@ impl RuntimeHandles {
             return;
         }
         let known = {
-            let guard = self.together.lock().unwrap();
-            guard.as_ref().map(|s| (s.peer.clone(), s.peer_hex.clone()))
+            let mut guard = self.together.lock().unwrap();
+            guard.as_mut().map(|s| {
+                // The channel just carried something, which is the only proof
+                // available that it is still carrying anything — see
+                // `direct_path_live`. Stamped on *our* clock rather than from
+                // `env.at_ms`, because the envelope's stamp is the sender's
+                // claim and a peer that dated it into next week would otherwise
+                // buy their channel a permanent reprieve.
+                s.direct_evidence_ms = now_ms();
+                (s.peer.clone(), s.peer_hex.clone())
+            })
         };
         let Some((peer_npub, peer_hex)) = known else {
             return;
@@ -7701,13 +7770,13 @@ fn handle_together_envelope(
             tracing::debug!(session = %env.session_id, "dropping duplicate together invite");
             return;
         }
-        // A peer-supplied video id ends up in an `<iframe src>`. Refuse a
-        // malformed one here so no frontend has to remember to.
-        if let TogetherContent::Youtube { video_id } = &content {
-            if !valid_youtube_id(video_id) {
-                tracing::warn!(peer = %peer_npub, "dropping together invite with a bad video id");
-                return;
-            }
+        // A peer-supplied id or URL ends up in a `src` attribute. Refuse it here
+        // so no frontend has to remember to — `TogetherContent::admissible` is
+        // the one place that decides, and it matches exhaustively so a new
+        // variant cannot inherit a yes.
+        if !content.admissible() {
+            tracing::warn!(peer = %peer_npub, "dropping together invite we will not play");
+            return;
         }
         *guard = Some(TogetherSession {
             id: env.session_id.clone(),
@@ -7727,6 +7796,7 @@ fn handle_together_envelope(
             last_heard_ms: at,
             last_seek_ms: 0,
             direct_ready: false,
+            direct_evidence_ms: 0,
             local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
@@ -12314,6 +12384,8 @@ mod tests {
             .unwrap()
     }
 
+    use comrade_core::together::TOGETHER_DIRECT_SILENCE_MS;
+
     /// Plant a live session the way an invitation would, so the direct-channel
     /// tests do not need a vault or a relay to have something to be inside of.
     fn plant_session(rt: &ComradeRuntime, peer_npub: &str, peer_hex: &str) {
@@ -12455,7 +12527,7 @@ mod tests {
     }
 
     /// Declaring a channel is what routes traffic to it, and un-declaring it
-    /// must put traffic back on the relay — there is no timeout behind it.
+    /// must put traffic back on the relay.
     #[test]
     fn declaring_and_dropping_a_channel_moves_the_traffic() {
         let rt = ComradeRuntime::new();
@@ -12466,6 +12538,73 @@ mod tests {
         assert_eq!(direct(), Some(true));
         rt.together_direct_ready(false);
         assert_eq!(direct(), Some(false), "a dead channel must fall back");
+    }
+
+    /// Which rung a send took, read off the one thing that distinguishes them
+    /// on a runtime with no vault: the direct path returns `Ok` and emits a
+    /// `TogetherOutbound`, and the relay path can only reach `VaultLocked`.
+    async fn send_took_the_direct_path(rt: &ComradeRuntime) -> bool {
+        let mut rx = rt.subscribe_events();
+        let sent = rt
+            .handles()
+            .send_together(TogetherSignal::Join)
+            .await
+            .is_ok();
+        let announced = matches!(rx.try_recv(), Ok(BridgeEvent::TogetherOutbound { .. }));
+        assert_eq!(sent, announced, "a rung that returned Ok said nothing");
+        announced
+    }
+
+    /// The failure a frontend cannot report: it declares a channel, the channel
+    /// dies, and the close handler never runs — a crashed webview, a killed
+    /// process, a bug. Nothing arrives to say so, so before this the runtime
+    /// kept posting every signal into a socket nobody read until the session
+    /// died on its 45 s TTL. Two heartbeats of silence now put it back on the
+    /// relay by itself.
+    #[tokio::test]
+    async fn a_channel_that_went_quiet_without_saying_so_falls_back_to_the_relay() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        rt.together_direct_ready(true);
+        assert!(
+            send_took_the_direct_path(&rt).await,
+            "a freshly declared channel must be given its chance",
+        );
+
+        // Age the last sign of life past the watchdog. The frontend still says
+        // the channel is up — that is the whole point; its claim is the thing
+        // that stopped being true.
+        {
+            let mut guard = rt.together.lock().unwrap();
+            let session = guard.as_mut().unwrap();
+            session.direct_evidence_ms = now_ms() - TOGETHER_DIRECT_SILENCE_MS - 1;
+            assert!(session.direct_ready, "the stale claim is still standing");
+        }
+        assert!(
+            !send_took_the_direct_path(&rt).await,
+            "signals kept going into a socket nobody was reading",
+        );
+    }
+
+    /// And it heals without the frontend's help: one envelope arriving over the
+    /// channel is proof enough, which matters because a frontend that never
+    /// noticed the outage has nothing to re-declare.
+    #[tokio::test]
+    async fn traffic_arriving_on_the_channel_earns_the_fast_path_back() {
+        let rt = ComradeRuntime::new();
+        plant_session(&rt, "npub_peer", &"11".repeat(32));
+        rt.together_direct_ready(true);
+        {
+            let mut guard = rt.together.lock().unwrap();
+            guard.as_mut().unwrap().direct_evidence_ms = now_ms() - TOGETHER_DIRECT_SILENCE_MS - 1;
+        }
+        assert!(!send_took_the_direct_path(&rt).await);
+
+        rt.together_receive_direct(&together_json("s-direct", 2, TogetherSignal::Join));
+        assert!(
+            send_took_the_direct_path(&rt).await,
+            "the channel proved itself alive and was not believed",
+        );
     }
 
     /// Announcing a channel with no session is a no-op rather than a panic: the
@@ -13523,6 +13662,7 @@ mod tests {
             last_heard_ms: now_ms(),
             last_seek_ms: 0,
             direct_ready: false,
+            direct_evidence_ms: 0,
             local_rate: 1.0,
             local_output_latency_ms: 0,
             peer_output_latency_ms: 0,
@@ -14813,51 +14953,142 @@ mod tests {
         assert_eq!(t.service, Some(MusicService::Spotify));
     }
 
+    fn no_accounts() -> comrade_core::together::ServiceAccess {
+        comrade_core::together::ServiceAccess::none()
+    }
+
+    fn spotify_link() -> comrade_core::together::MusicLink {
+        comrade_core::together::MusicLink::Spotify {
+            track_id: "6habFhsOp2NvshLv26DqMb".into(),
+        }
+    }
+
     #[test]
     fn a_local_copy_is_what_turns_a_query_into_a_session() {
         // The only branch the library answer decides.
         assert_eq!(
-            play_route(PlayPlan::FindLocally, true),
+            play_route(PlayPlan::FindLocally, true, None, no_accounts()),
             PlayRoute::StartTogether
         );
         // Asking beats guessing: below the confidence bar we do not open a file
         // on somebody's behalf.
         assert_eq!(
-            play_route(PlayPlan::FindLocally, false),
+            play_route(PlayPlan::FindLocally, false, None, no_accounts()),
             PlayRoute::AskForFile
         );
     }
 
     #[test]
-    fn a_local_file_does_not_make_a_drm_link_playable() {
+    fn a_local_file_does_not_make_a_service_link_a_local_session() {
         // The plan describes what the *query* named. Someone with a similarly
-        // titled mp3 on their phone has not acquired the right to decode a
-        // Spotify stream, and a `/play <spotify url>` that quietly started a
-        // session on a different file would put the two of them on different
-        // audio while the UI claimed otherwise.
+        // titled mp3 on their phone has not been handed the Spotify track, and a
+        // `/play <spotify url>` that quietly started a session on a different
+        // file would put the two of them on different audio while the UI claimed
+        // otherwise.
         for found in [true, false] {
             assert_eq!(
-                play_route(PlayPlan::NameOnly, found),
+                play_route(
+                    PlayPlan::NameOnly,
+                    found,
+                    Some(spotify_link()),
+                    no_accounts()
+                ),
                 PlayRoute::OpenElsewhere,
                 "found={found}",
             );
             assert_eq!(
-                play_route(PlayPlan::OpenNow, found),
+                play_route(PlayPlan::OpenNow, found, None, no_accounts()),
                 PlayRoute::PlayEmbed,
                 "found={found}",
             );
             assert_eq!(
-                play_route(PlayPlan::Empty, found),
+                play_route(PlayPlan::Empty, found, None, no_accounts()),
                 PlayRoute::Nothing,
                 "found={found}"
             );
         }
     }
 
+    /// The Jam model, at the routing layer: the same link is a session on a
+    /// device with the subscription behind it and a signpost on one without.
     #[test]
-    fn every_plan_routes_somewhere_and_only_one_route_starts_a_session() {
+    fn the_same_link_routes_differently_on_two_devices() {
+        let signed_in = comrade_core::together::ServiceAccess {
+            spotify: true,
+            apple_music: false,
+        };
+        assert_eq!(
+            play_route(PlayPlan::NameOnly, false, Some(spotify_link()), signed_in),
+            PlayRoute::PlayOnService,
+        );
+        assert_eq!(
+            play_route(
+                PlayPlan::NameOnly,
+                false,
+                Some(spotify_link()),
+                no_accounts()
+            ),
+            PlayRoute::OpenElsewhere,
+        );
+    }
+
+    /// Apple Music is signed in and still does not open a session, because
+    /// `StartOnly` cannot be held — a ladder running against a player with no
+    /// seek emits verdicts nothing applies.
+    #[test]
+    fn a_playhead_that_cannot_be_placed_does_not_open_a_session() {
+        let apple = comrade_core::together::MusicLink::AppleMusic {
+            storefront: "in".into(),
+            track_id: "1440931493".into(),
+        };
+        let signed_in = comrade_core::together::ServiceAccess {
+            spotify: false,
+            apple_music: true,
+        };
+        assert_eq!(
+            play_route(PlayPlan::NameOnly, false, Some(apple), signed_in),
+            PlayRoute::OpenElsewhere,
+        );
+    }
+
+    /// A `NameOnly` plan whose link went missing must not fall through to a
+    /// player. The two travel together everywhere in the real call path; this
+    /// pins what happens if a caller ever separates them.
+    #[test]
+    fn a_service_plan_with_no_link_is_a_signpost_not_a_session() {
+        for access in [
+            no_accounts(),
+            comrade_core::together::ServiceAccess {
+                spotify: true,
+                apple_music: true,
+            },
+        ] {
+            assert_eq!(
+                play_route(PlayPlan::NameOnly, false, None, access),
+                PlayRoute::OpenElsewhere,
+            );
+        }
+    }
+
+    #[test]
+    fn every_plan_routes_somewhere_and_only_one_route_starts_a_local_session() {
         // A plan falling through to a route that opens a player would open one
         // on a query nobody resolved.
+        let every_access = [
+            no_accounts(),
+            comrade_core::together::ServiceAccess {
+                spotify: true,
+                apple_music: false,
+            },
+            comrade_core::together::ServiceAccess {
+                spotify: false,
+                apple_music: true,
+            },
+            comrade_core::together::ServiceAccess {
+                spotify: true,
+                apple_music: true,
+            },
+        ];
         for plan in [
             PlayPlan::OpenNow,
             PlayPlan::FindLocally,
@@ -14865,10 +15096,15 @@ mod tests {
             PlayPlan::Empty,
         ] {
             for found in [true, false] {
-                let route = play_route(plan, found);
-                if route == PlayRoute::StartTogether {
-                    assert_eq!(plan, PlayPlan::FindLocally, "only a library hit starts one");
-                    assert!(found, "and only when a copy was actually found");
+                for access in every_access {
+                    let route = play_route(plan, found, Some(spotify_link()), access);
+                    if route == PlayRoute::StartTogether {
+                        assert_eq!(plan, PlayPlan::FindLocally, "only a library hit starts one");
+                        assert!(found, "and only when a copy was actually found");
+                    }
+                    if route == PlayRoute::PlayOnService {
+                        assert!(access.spotify, "a service route needs the account");
+                    }
                 }
             }
         }

@@ -22,6 +22,21 @@ comms on Nostr + libp2p.
 until parity. See `docs/FRONTEND_STRATEGY.md` §7 for the retirement trigger —
 do not delete their code or CI lanes before it fires.
 
+**`android/` is the priority frontend** (owner, 2026-08-08). When a feature
+cannot land everywhere at once, Android goes first and the others follow; when
+a design choice suits one frontend and costs another, Android's is the one that
+wins. This is a standing instruction, not a note about one feature — it is why
+the YouTube embed went to Android before desktop despite desktop being the only
+frontend that builds in this sandbox, and it should decide the next such call
+the same way without asking again.
+
+The awkward consequence is worth stating plainly rather than rediscovering: the
+priority frontend is the one this sandbox **cannot compile**. So Android work
+means more of the reasoning has to be done in pure, JVM-testable Kotlin
+(`together/TogetherDecisions.kt` is the pattern) and less of it in the code that
+touches the framework, because the tested half is the only half that gets
+checked before CI.
+
 ## Commands
 
 `desktop/src-tauri` is **excluded from the workspace** (needs system webview
@@ -54,6 +69,36 @@ bridge you should: `.claude/rules/flutter.md` has the commands, the pinned
 version, and the `--no-web` flag whose absence fails CI in a way that reads like
 a different bug. Budget ~10 minutes and a `cargo clean` for the disk. Nothing
 equivalent exists for the Android SDK or `maturin`.
+
+**But "Android cannot be verified here" is too strong, and it was costing the
+priority frontend.** The Android SDK is what is missing, not Kotlin — and the
+files worth testing are deliberately the ones with **no Android imports**
+(`together/TogetherDecisions.kt` and its test import only the Kotlin stdlib and
+JUnit). Those compile and *run* here in about a minute:
+
+```bash
+curl -sSL -o /tmp/kc.zip \
+  https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
+unzip -q /tmp/kc.zip -d /tmp            # version pinned in android/build.gradle.kts
+cd /tmp && curl -sSLO https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar
+curl -sSLO https://repo1.maven.org/maven2/org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar
+
+CP=/tmp/junit-4.13.2.jar:/tmp/hamcrest-core-1.3.jar
+/tmp/kotlinc/bin/kotlinc \
+  android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt \
+  android/app/src/test/java/mullu/comrade/together/TogetherDecisionsTest.kt \
+  -cp "$CP" -d /tmp/kout
+java -cp "/tmp/kout:$CP:/tmp/kotlinc/lib/kotlin-stdlib.jar" \
+  org.junit.runner.JUnitCore mullu.comrade.together.TogetherDecisionsTest
+```
+
+This is the whole argument for keeping decision logic in files with no
+framework imports, restated as a capability rather than a style preference: that
+half of Android is checkable before CI, and the half that touches Compose,
+`MediaPlayer` or a foreground service is not. Put new logic on the checkable
+side. It does **not** need `gradle`, and Gradle's own `test` task still cannot
+run here — Kotlin compile depends on `generateUniffiBindings`, which needs the
+Android SDK.
 
 **`desktop/src-tauri` is a fourth blocked lane, and it fails in a way that looks
 like your bug.** `cargo clippy` there exits **101** before compiling a single

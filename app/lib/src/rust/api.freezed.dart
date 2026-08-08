@@ -5197,6 +5197,8 @@ extension TogetherContentPatterns on TogetherContent {
   TResult maybeMap<TResult extends Object?>({
     TResult Function(TogetherContent_LocalFile value)? localFile,
     TResult Function(TogetherContent_Youtube value)? youtube,
+    TResult Function(TogetherContent_Service value)? service,
+    TResult Function(TogetherContent_Stream value)? stream,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -5205,6 +5207,10 @@ extension TogetherContentPatterns on TogetherContent {
         return localFile(_that);
       case TogetherContent_Youtube() when youtube != null:
         return youtube(_that);
+      case TogetherContent_Service() when service != null:
+        return service(_that);
+      case TogetherContent_Stream() when stream != null:
+        return stream(_that);
       case _:
         return orElse();
     }
@@ -5227,6 +5233,8 @@ extension TogetherContentPatterns on TogetherContent {
   TResult map<TResult extends Object?>({
     required TResult Function(TogetherContent_LocalFile value) localFile,
     required TResult Function(TogetherContent_Youtube value) youtube,
+    required TResult Function(TogetherContent_Service value) service,
+    required TResult Function(TogetherContent_Stream value) stream,
   }) {
     final _that = this;
     switch (_that) {
@@ -5234,6 +5242,10 @@ extension TogetherContentPatterns on TogetherContent {
         return localFile(_that);
       case TogetherContent_Youtube():
         return youtube(_that);
+      case TogetherContent_Service():
+        return service(_that);
+      case TogetherContent_Stream():
+        return stream(_that);
     }
   }
 
@@ -5253,6 +5265,8 @@ extension TogetherContentPatterns on TogetherContent {
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(TogetherContent_LocalFile value)? localFile,
     TResult? Function(TogetherContent_Youtube value)? youtube,
+    TResult? Function(TogetherContent_Service value)? service,
+    TResult? Function(TogetherContent_Stream value)? stream,
   }) {
     final _that = this;
     switch (_that) {
@@ -5260,6 +5274,10 @@ extension TogetherContentPatterns on TogetherContent {
         return localFile(_that);
       case TogetherContent_Youtube() when youtube != null:
         return youtube(_that);
+      case TogetherContent_Service() when service != null:
+        return service(_that);
+      case TogetherContent_Stream() when stream != null:
+        return stream(_that);
       case _:
         return null;
     }
@@ -5281,6 +5299,9 @@ extension TogetherContentPatterns on TogetherContent {
   TResult maybeWhen<TResult extends Object?>({
     TResult Function(BigInt durationMs, Recording? recording)? localFile,
     TResult Function(String videoId)? youtube,
+    TResult Function(MusicLink link, Recording? recording)? service,
+    TResult Function(String url, Recording? recording, BigInt? durationMs)?
+        stream,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -5289,6 +5310,10 @@ extension TogetherContentPatterns on TogetherContent {
         return localFile(_that.durationMs, _that.recording);
       case TogetherContent_Youtube() when youtube != null:
         return youtube(_that.videoId);
+      case TogetherContent_Service() when service != null:
+        return service(_that.link, _that.recording);
+      case TogetherContent_Stream() when stream != null:
+        return stream(_that.url, _that.recording, _that.durationMs);
       case _:
         return orElse();
     }
@@ -5312,6 +5337,10 @@ extension TogetherContentPatterns on TogetherContent {
     required TResult Function(BigInt durationMs, Recording? recording)
         localFile,
     required TResult Function(String videoId) youtube,
+    required TResult Function(MusicLink link, Recording? recording) service,
+    required TResult Function(
+            String url, Recording? recording, BigInt? durationMs)
+        stream,
   }) {
     final _that = this;
     switch (_that) {
@@ -5319,6 +5348,10 @@ extension TogetherContentPatterns on TogetherContent {
         return localFile(_that.durationMs, _that.recording);
       case TogetherContent_Youtube():
         return youtube(_that.videoId);
+      case TogetherContent_Service():
+        return service(_that.link, _that.recording);
+      case TogetherContent_Stream():
+        return stream(_that.url, _that.recording, _that.durationMs);
     }
   }
 
@@ -5338,6 +5371,9 @@ extension TogetherContentPatterns on TogetherContent {
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function(BigInt durationMs, Recording? recording)? localFile,
     TResult? Function(String videoId)? youtube,
+    TResult? Function(MusicLink link, Recording? recording)? service,
+    TResult? Function(String url, Recording? recording, BigInt? durationMs)?
+        stream,
   }) {
     final _that = this;
     switch (_that) {
@@ -5345,6 +5381,10 @@ extension TogetherContentPatterns on TogetherContent {
         return localFile(_that.durationMs, _that.recording);
       case TogetherContent_Youtube() when youtube != null:
         return youtube(_that.videoId);
+      case TogetherContent_Service() when service != null:
+        return service(_that.link, _that.recording);
+      case TogetherContent_Stream() when stream != null:
+        return stream(_that.url, _that.recording, _that.durationMs);
       case _:
         return null;
     }
@@ -5487,6 +5527,175 @@ class _$TogetherContent_YoutubeCopyWithImpl<$Res>
           ? _self.videoId
           : videoId // ignore: cast_nullable_to_non_nullable
               as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class TogetherContent_Service extends TogetherContent {
+  const TogetherContent_Service({required this.link, this.recording})
+      : super._();
+
+  final MusicLink link;
+  final Recording? recording;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TogetherContent_ServiceCopyWith<TogetherContent_Service> get copyWith =>
+      _$TogetherContent_ServiceCopyWithImpl<TogetherContent_Service>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TogetherContent_Service &&
+            (identical(other.link, link) || other.link == link) &&
+            (identical(other.recording, recording) ||
+                other.recording == recording));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, link, recording);
+
+  @override
+  String toString() {
+    return 'TogetherContent.service(link: $link, recording: $recording)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TogetherContent_ServiceCopyWith<$Res>
+    implements $TogetherContentCopyWith<$Res> {
+  factory $TogetherContent_ServiceCopyWith(TogetherContent_Service value,
+          $Res Function(TogetherContent_Service) _then) =
+      _$TogetherContent_ServiceCopyWithImpl;
+  @useResult
+  $Res call({MusicLink link, Recording? recording});
+
+  $MusicLinkCopyWith<$Res> get link;
+}
+
+/// @nodoc
+class _$TogetherContent_ServiceCopyWithImpl<$Res>
+    implements $TogetherContent_ServiceCopyWith<$Res> {
+  _$TogetherContent_ServiceCopyWithImpl(this._self, this._then);
+
+  final TogetherContent_Service _self;
+  final $Res Function(TogetherContent_Service) _then;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? link = null,
+    Object? recording = freezed,
+  }) {
+    return _then(TogetherContent_Service(
+      link: null == link
+          ? _self.link
+          : link // ignore: cast_nullable_to_non_nullable
+              as MusicLink,
+      recording: freezed == recording
+          ? _self.recording
+          : recording // ignore: cast_nullable_to_non_nullable
+              as Recording?,
+    ));
+  }
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $MusicLinkCopyWith<$Res> get link {
+    return $MusicLinkCopyWith<$Res>(_self.link, (value) {
+      return _then(_self.copyWith(link: value));
+    });
+  }
+}
+
+/// @nodoc
+
+class TogetherContent_Stream extends TogetherContent {
+  const TogetherContent_Stream(
+      {required this.url, this.recording, this.durationMs})
+      : super._();
+
+  final String url;
+  final Recording? recording;
+  final BigInt? durationMs;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $TogetherContent_StreamCopyWith<TogetherContent_Stream> get copyWith =>
+      _$TogetherContent_StreamCopyWithImpl<TogetherContent_Stream>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is TogetherContent_Stream &&
+            (identical(other.url, url) || other.url == url) &&
+            (identical(other.recording, recording) ||
+                other.recording == recording) &&
+            (identical(other.durationMs, durationMs) ||
+                other.durationMs == durationMs));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, url, recording, durationMs);
+
+  @override
+  String toString() {
+    return 'TogetherContent.stream(url: $url, recording: $recording, durationMs: $durationMs)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $TogetherContent_StreamCopyWith<$Res>
+    implements $TogetherContentCopyWith<$Res> {
+  factory $TogetherContent_StreamCopyWith(TogetherContent_Stream value,
+          $Res Function(TogetherContent_Stream) _then) =
+      _$TogetherContent_StreamCopyWithImpl;
+  @useResult
+  $Res call({String url, Recording? recording, BigInt? durationMs});
+}
+
+/// @nodoc
+class _$TogetherContent_StreamCopyWithImpl<$Res>
+    implements $TogetherContent_StreamCopyWith<$Res> {
+  _$TogetherContent_StreamCopyWithImpl(this._self, this._then);
+
+  final TogetherContent_Stream _self;
+  final $Res Function(TogetherContent_Stream) _then;
+
+  /// Create a copy of TogetherContent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? url = null,
+    Object? recording = freezed,
+    Object? durationMs = freezed,
+  }) {
+    return _then(TogetherContent_Stream(
+      url: null == url
+          ? _self.url
+          : url // ignore: cast_nullable_to_non_nullable
+              as String,
+      recording: freezed == recording
+          ? _self.recording
+          : recording // ignore: cast_nullable_to_non_nullable
+              as Recording?,
+      durationMs: freezed == durationMs
+          ? _self.durationMs
+          : durationMs // ignore: cast_nullable_to_non_nullable
+              as BigInt?,
     ));
   }
 }

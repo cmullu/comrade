@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  READING_STALE_MS,
   TOGETHER_MS,
   driftLabel,
   formatTime,
+  measurementLines,
   playingTitle,
   qualityLabel,
   seekPosition,
@@ -168,4 +170,43 @@ test("a title falls back to the person, never to a filename", () => {
   assert.match(playingTitle({ peerLabel: "Ana" }), /Ana/);
   assert.equal(playingTitle({}), "Together");
   assert.equal(playingTitle({ title: "   ", peerLabel: "" }), "Together");
+});
+
+// ── When a reading stops describing now ──────────────────────────────────────
+//
+// Corrections arrive only when the verdict is not `hold`, so the steady state
+// emits nothing at all. A screen that just keeps the last pair therefore shows
+// a gap that was closed minutes ago, under the word "Together".
+
+test("a fresh reading shows both lines", () => {
+  const m = measurementLines({ driftMs: 3200, qualityMs: 100, ageMs: 1_000 });
+  assert.match(m.drift, /3\.2s ahead of them/);
+  assert.match(m.path, /direct/);
+});
+
+test("a reading older than two heartbeats is not shown at all", () => {
+  const stale = { driftMs: 3200, qualityMs: 100, ageMs: READING_STALE_MS };
+  assert.deepEqual(measurementLines(stale), { drift: null, path: null });
+});
+
+test("the error line ages out with the drift line, never after it", () => {
+  // Leaving "±0.05s" on screen once the gap it qualified has gone would claim
+  // we are still measuring, which is the exact inversion of the point.
+  const m = measurementLines({ driftMs: 9_000, qualityMs: 40, ageMs: 60_000 });
+  assert.equal(m.drift, null);
+  assert.equal(m.path, null);
+});
+
+test("a session that has never been corrected shows blanks, not zeroes", () => {
+  // What `main.js` computes before the first correction: `Date.now() - 0`.
+  const m = measurementLines({ ageMs: Date.now() });
+  assert.deepEqual(m, { drift: null, path: null });
+  assert.deepEqual(measurementLines({}), { drift: null, path: null });
+});
+
+test("a fresh reading inside the deadband still names the path", () => {
+  // The gap is not worth mentioning; how well we can see it still is.
+  const m = measurementLines({ driftMs: 50, qualityMs: 40, ageMs: 500 });
+  assert.equal(m.drift, null);
+  assert.match(m.path, /direct/);
 });

@@ -299,10 +299,19 @@ object ChatCommands {
         // this is read, so this says *why* it opened rather than what to do.
         PlayRoute.ASK_FOR_FILE ->
             "No copy of \"$query\" on this phone — pick the file."
-        // Never "not supported yet": this one is not coming, and saying so is
-        // more use than an implied promise. See docs/TOGETHER.md §9.
+        // Reworded 2026-08-08. The old sentence said the service "won't let
+        // another app play its audio", and that was never quite the reason —
+        // decoding their bytes is out, but driving playback inside their own
+        // client on this listener's own subscription is exactly what their SDKs
+        // are for. What is actually missing on this device is the connected
+        // account, so that is what it now says. See docs/TOGETHER.md §11.
         PlayRoute.OPEN_ELSEWHERE ->
-            "${serviceLabel(service)} won't let another app play its audio — open it there."
+            "No ${serviceLabel(service)} account connected here — open it there."
+        // The account is connected and the track can be driven: a real session,
+        // playing from this listener's own subscription. Nothing is shared but
+        // the playhead.
+        PlayRoute.PLAY_ON_SERVICE ->
+            "Playing \"$query\" together on ${serviceLabel(service)}."
         // Core can carry a YouTube invitation, but this app has no player for
         // one, so sending it would invite someone to something we cannot join.
         PlayRoute.PLAY_EMBED ->

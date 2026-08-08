@@ -101,15 +101,24 @@ worse than asking.
 
 **Links.** `parse_music_link` recognises Spotify, Apple Music and YouTube URLs
 and reduces them to what they identify — offline, metadata-only, no account and
-no audio. Only a YouTube link is *playable in place* (`playable_in_place`),
-through the embed player; for the other two the honest answer is "this tells you
-what to open", and a UI that blurred the two would be promising something the app
-cannot do.
+no audio. Whether a link can then be *played* is not a property of the link:
+`playhead_control(&ServiceAccess)` answers it against what this device is signed
+in to, because the same Spotify URL is a session on a phone with Premium behind
+it and a signpost on one without. YouTube is `Full` either way, needing no
+account at all. **§11 is the long version, and it is the section to read before
+touching any of this** — the predicate it replaced (`playable_in_place`, a
+property of the URL) encoded a conclusion that was wrong.
 
 A YouTube id is the asymmetric case and is named rather than hidden: it *is*
 fully disclosing, because it is publicly resolvable. It is also validated in
 core on send **and** receive, because a peer-supplied string ends up in an
 `<iframe src>` and no UI should have to remember that.
+
+That check is now `TogetherContent::admissible`, which **matches exhaustively**
+rather than testing one variant. It replaced two separate `if let … Youtube`
+arms, one on send and one on receive, and the reason is §11a: a new variant
+carrying a peer-chosen string could otherwise be added, wired through three
+frontends, and reach a `src` attribute without either arm noticing.
 
 ## 3. The clock, and why "< 300 ms" is not a target we can hold
 
@@ -351,12 +360,36 @@ honest:
 Everything past that — the age gate, session scoping, `(seq, actor)` ordering —
 is literally the same code the relay path runs, because it is the same call.
 
-**What `direct_ready` does not have is a timeout.** A frontend that reports a
-live channel and then loses it must report `false`, or signals go into a socket
-nobody reads and the session dies on its TTL rather than falling back to the
-relay that was there the whole time. That is stated on the method, on the Tauri
-command, and in the Kotlin arm, because it is the one way to make this worse than
-not having it.
+**`direct_ready` is a claim with an expiry, not a fact.** A frontend that reports
+a live channel and then loses it should report `false` — but the failure worth
+designing for is the one where it *cannot*: a crashed webview, a killed process,
+a close handler that never ran. Nothing arrives to say so, so signals would keep
+going into a socket nobody reads until the session died on its 45 s TTL, which is
+strictly worse than never having had the fast path.
+
+So the claim is checked against evidence. `direct_path_live` reads the last
+moment the channel gave any sign of life — the frontend declaring it up, or an
+envelope arriving *on* it — and after `TOGETHER_DIRECT_SILENCE_MS` (two
+heartbeats, 20 s) `send_together` goes back to the relay on its own. Three
+properties make that the right shape rather than a timer bolted on:
+
+- **Silence is real evidence, not pessimism.** A data channel is symmetric, so a
+  peer whose end is open sends *their* heartbeats down it every 10 s. Two of
+  those passing with nothing to show means the path is not carrying, whichever
+  end broke.
+- **It fires with a heartbeat to spare.** 20 s of watchdog plus one 10 s
+  heartbeat is still under the 45 s TTL, so the relay it falls back to gets a
+  beat through before the session it was meant to save would have lapsed. A unit
+  test asserts that inequality rather than trusting the arithmetic to stay true.
+- **It heals by itself.** This is a per-send question, not a latch: one envelope
+  arriving on the channel earns the fast path back with no re-declaration. That
+  matters because a frontend that never noticed the outage has nothing to
+  re-declare. There is no deadlock in it either — the evidence is the peer's
+  traffic, not ours, so nothing we stop sending can stop them sending.
+
+Reporting `false` promptly is still worth doing. It moves the fallback from
+twenty seconds away to immediate, which is the difference between two dropped
+commands and none.
 
 ## 6. Replay safety
 
@@ -411,12 +444,43 @@ And a permanent line under the stage:
 > Positions travel over the relay, so you'll be within about a second of each
 > other — not frame-perfect.
 
+### The two measured numbers, and when they may be shown
+
+Beside the state, both players now show what was actually measured: the gap
+between the playheads, and the error on that gap. Three rules govern them, and
+they hold on desktop (`player_view.mjs`) and Android
+(`TogetherDecisions.measurement`) against the same vectors, gated by
+`together_parity.test.mjs`.
+
+**A gap smaller than our own error is not reported at all.** Printing "0.4 s
+apart" while the measurement error is 0.8 s is invention dressed as precision.
+Below `max(error, 400 ms)` the line is blank — and blank covers both "genuinely
+together" and "cannot tell", which is why the error is shown beside it rather
+than instead of it: `direct · ±0.05s` and `relayed · ±0.6s` are what make the
+number above them mean anything. Neither is colour-coded. "We've lost track of
+them" is an honest report of poor measurement, not a fault, and red would say
+otherwise.
+
+**A direct path never claims to be tighter than 50 ms**, because neither player
+can report a playhead more precisely than that (§3), and a relayed figure gets
+one decimal place rather than two — the second digit is not real.
+
+**And both age out together after two heartbeats.** This is the rule that was
+missing when the readout first shipped, and it is not a detail: corrections
+cross the bridge *only* when the verdict is not `hold`, so the steady state
+emits nothing at all. A screen that simply keeps the last pair therefore prints
+a gap that was closed minutes ago, underneath the word "together", for the rest
+of the session. Twenty seconds — two heartbeats, so at least one verdict has
+since said the gap was inside the deadband — and the lines go blank. A session
+that has never been corrected shows blanks for the same reason, rather than a
+reassuring pair of zeroes.
+
 ## 8. Where the code lives
 
 | Layer | What it owns |
 |---|---|
 | `comrade_core::together` | Wire protocol, the clock filter and its NTP arithmetic, `sync_verdict`, the Lamport order, every timing constant and its compile-time invariants. Pure; 40 unit tests. |
-| `comrade_ui::runtime` | `together_start` / `together_join` / `together_set_state` / `together_end` (each a `RuntimeHandles` twin, so no bridge holds the lock across a relay round trip), `together_report_position`, `together_session`, the receive arm in `dispatch_incoming_dm`, the session loop, and five `BridgeEvent` variants. |
+| `comrade_ui::runtime` | `together_start` / `together_join` / `together_set_state` / `together_end` (each a `RuntimeHandles` twin, so no bridge holds the lock across a relay round trip), `together_report_position`, `together_session`, the receive arm in `dispatch_incoming_dm`, the session loop, and seven `BridgeEvent` variants. |
 | `comrade_jni`, `desktop/src-tauri` | The same calls over uniffi / flutter_rust_bridge / Tauri commands. `together_report_position` is the one that is **synchronous and skipped under contention**, because a player calls it several times a second from its UI thread — the trade `note_draft` already makes. |
 | `desktop/ui/together_sync.mjs` | Echo suppression, the verdict→player plan, and the status wording. Pure, 20 `node --test` cases. |
 | `android/…/together/LibraryResolver.kt` | Finds the listener's own copy via `MediaStore`, scored by the shared `match_score`; reads a picked file's tags so an invitation can name what it is. |
@@ -479,6 +543,11 @@ Android specifics worth knowing:
   adaptive streaming this feature does not use.
 - **Audio focus is honoured**: losing it pauses *and tells the peer*, so what
   they see is "they paused" rather than an unexplained drift.
+- **The measured drift and its error are on screen** as of 2026-08-08, in the
+  same words desktop uses and under the same three rules (§7). `UiState.Live`
+  carries the raw pair plus when it was taken, because whether any of it may be
+  shown depends on how old it is at the moment the screen draws — so the
+  decision is recomputed each recomposition rather than stored.
 
 **Not built**, and stated here rather than discovered:
 
@@ -829,7 +898,10 @@ implies we are about to play something we cannot.
 - **Group watch.** Two-party is what makes the arbitration analysis tractable
   and provable. N-way is a different problem, and nobody asked for it.
 - **Streaming anything between peers.** §1. This is the constraint the whole
-  design exists inside, not a limitation to be engineered around later.
+  design exists inside, not a limitation to be engineered around later — and
+  note that §11 does not soften it. A service session moves no audio between
+  peers either; each side streams from the vendor on its own subscription,
+  which is the same shape as each side opening its own file.
 - **Resuming a session across a restart.** A playhead is a claim about right
   now. "Pick up where we left off" is a media-player feature, and this app does
   not own the player — and persisting a session would reopen §6's replay hole.
@@ -838,3 +910,454 @@ implies we are about to play something we cannot.
   makes the first re-evaluate. A stall is ridden out locally and the next drift
   verdict closes the gap. This will occasionally look worse than it could; it is
   much better than the alternative.
+
+## 11. Online tracks — what Spotify Jam actually does, and what we can copy
+
+_Added 2026-08-08, after the owner asked for "something like Spotify Jam, should
+work with online tracks as well"._
+
+### The thing worth knowing first
+
+**Spotify Jam does not share audio.** Every participant's own Spotify client
+streams the track from Spotify's servers on their own subscription; what travels
+between them is a queue and playback events carrying track-millisecond
+timestamps, over Spotify's own infrastructure, with clock alignment on top.
+It is a shared remote control, not a shared pipe.
+
+That is worth sitting with, because it means **§1 was never the thing standing
+between us and a Jam**. The clock-not-a-pipe model in this document *is* the Jam
+model. Sync was never the hard part for anyone; Spotify's advantage is that it
+owns the catalogue, so "the same track" resolves trivially on both ends and both
+ends are already licensed to play it.
+
+So the gap is not the engine. It is: **can each device independently play the
+thing the invitation names?**
+
+### How the third-party ones close that gap
+
+JQBX and Vertigo are Jam-alikes built by people who own no catalogue at all, and
+they close it the only way available: each participant connects **their own**
+account, and the app drives **their own** client.
+
+- **Spotify, in a browser** — the Web Playback SDK is a player you instantiate in
+  a page; it exposes `seek(position_ms)` and a `player_state_changed` event.
+  Premium-only, per participant.
+- **Spotify, on Android** — the App Remote SDK connects to the *installed
+  Spotify app* and drives it: `PlayerApi.seekTo`, `PlayerState.playbackPosition`.
+  Premium-only again.
+- **Apple Music** — Vertigo offers it, and it is a weaker deal (below).
+
+None of this is a hack around DRM and none of it decodes anyone's bytes. Driving
+playback inside a vendor's own client is exactly what these SDKs are *for*.
+
+**This repo had that wrong, and the correction is the substance of this
+section.** `MusicLink::playable_in_place` answered "only YouTube", on the
+reasoning that Spotify and Apple Music serve DRM audio no third-party client may
+decode. The decode half is true and unchanged. What does not follow is that we
+cannot *drive* them — and because the old predicate was a property of the *link*,
+it could not express the thing that actually decides the answer, which is what
+the **device** is signed in to. The same Spotify URL is a full session on a phone
+with Premium behind it and a signpost on one without.
+
+### What replaced it
+
+`MusicLink::playhead_control(&ServiceAccess) -> PlayheadControl`, and three
+values rather than two, because the middle one is real:
+
+| | Signed in | Not signed in |
+|---|---|---|
+| YouTube | `Full` (embed needs no account at all) | `Full` |
+| Spotify | `Full` — seek and position both reach the player | `None` |
+| Apple Music | `StartOnly` | `None` |
+
+`Full` runs the drift ladder. `StartOnly` means it can be started and never
+*placed*: the two devices agree on "now" and then drift with nothing able to pull
+them back — which is what §9a already calls the honest degradation of a deep
+link. `None` means the honest offer is a link to open, not a player.
+
+**Apple Music is never `Full`, signed in or not**, and that is a finding rather
+than caution: MusicKit exposes no precise scheduling, so there is no call that
+places a playhead at a named moment. Its terms also restrict synchronising
+MusicKit content with other content, which at minimum wants a legal read before
+anyone ships it. `PlayheadControl::corrects()` is what keeps that from becoming a
+UI bug — a ladder running against a player that cannot seek emits verdicts
+nothing applies and a screen that says "catching up…" while nothing catches up.
+For now `play_route` sends `StartOnly` to `OpenElsewhere`: opening a session that
+cannot be held is a bigger promise than we can keep.
+
+**Premium, not sign-in, is the real gate on Spotify.** Both SDKs refuse to play
+on a free account, so a frontend that reports `spotify: true` for a free account
+opens a session and leaves the other person waiting for a track that will never
+start. `ServiceAccess` says this on itself.
+
+### What travels, and what it costs
+
+`TogetherContent::Service { link, recording }` — a public catalogue id and,
+optionally, what it is. Fully disclosing, exactly like the YouTube variant and
+for the same reason: the id is publicly resolvable, so the invitation says
+precisely what is being played. `recording` rides along so a device that *cannot*
+reach the service can fall back to looking for its own copy (§9a) rather than
+failing.
+
+The privacy cost is the one §9's YouTube note already states, and it applies
+here identically and must be disclosed the same way: **both devices contact the
+vendor**, who learns each IP, the track, and — because sync-play works — that two
+IPs paused at the same moments. That correlation is unavoidable by construction.
+It is the first time this app would contact a third party during ordinary
+listening, so it ships **off by default, behind one disclosure that says this**.
+
+### The session syncs coarsely, and why
+
+A `Service` session takes the same `SyncTuning` as a YouTube embed: no rate trim
+(not expressible through either SDK) and the coarse deadband. The deciding
+detail is that **`PlayerState.playbackPosition` is not continuously updated** —
+the Android SDK reports it on state changes, not on a tick (spotify/android-sdk
+issue 143), so a follower's position has to be interpolated between events. A
+deadband tuned for an HTML5 element on a local file would thrash against that
+reporting granularity rather than against any real drift.
+
+### What is built, and what is not
+
+**Built and tested here**: the whole model above — `ServiceAccess`,
+`PlayheadControl`, `MusicLink::playhead_control`, `TogetherContent::Service` and
+its tuning, `play_route`'s new `PlayOnService` branch — plus the FFI surface for
+all of it (uniffi and a regenerated frb bridge) and the three frontends' routing
+and wording brought in line.
+
+**Not built**: the actual account connection. No frontend authenticates to
+anything, so every frontend passes `ServiceAccess::none()` and behaviour is
+byte-for-byte what it was — a Spotify link still routes to "open it there", it
+just now says *"no Spotify account connected here"* instead of blaming DRM,
+because that is the true reason and it is a fixable one.
+
+What each frontend needs next, in the order that makes them useful:
+
+1. **Desktop** — OAuth (PKCE, no client secret in a shipped binary), the Web
+   Playback SDK in the webview, `ServiceAccess { spotify: true }` once a Premium
+   account is live. The CSP consequence needs the same care §9 demands of
+   YouTube: the SDK is Spotify-hosted JavaScript, so this is a `script-src`
+   widening in the origin where `withGlobalTauri` exposes every registered
+   command — the exact thing the YouTube note refuses. **It must run in a
+   sandboxed child frame with its own origin**, not in the main window.
+2. **Android** — App Remote against the installed Spotify app, which needs no
+   webview and no CSP argument at all. This is the cheaper and safer of the two,
+   and it should land first.
+3. **Both** — the token lifecycle. A token expires mid-album and a subscription
+   can be downgraded, so `ServiceAccess` has to be able to go back to `false`
+   during a session, and the session has to survive it becoming a signpost.
+
+## 11a. The online source nobody asked about, which syncs best of all
+
+_Added 2026-08-08, after "how do apps like BlackHole and Echo work, where do
+they stream media from?"_
+
+**How that category actually works**, because it is worth being precise rather
+than vague. BlackHole took audio from JioSaavn's undocumented endpoints and from
+YouTube; Spotify appeared in it only for *metadata and playlist import*, which is
+the pattern across all of them — Spotify's public Web API hands out track names
+and never audio bytes, so the catalogue and the sound come from different places.
+ViMusic and InnerTune use YouTube's private **InnerTube** API (`youtubei/v1`), the
+internal endpoint youtube.com's own frontend calls, plus stream-URL extraction of
+the yt-dlp/NewPipe kind. Echo ships no sources at all and says so on itself:
+*"This application hosts zero content… the user manages any external sources."*
+
+None of them hold a licence; they impersonate a first-party client against a
+private API. The practical consequences are as instructive as the legal one: they
+break whenever the internal API shifts, and they get removed — BlackHole's GitHub
+repository and F-Droid listing are both gone. §9 already declined this chain and
+that has not changed.
+
+**But looking at it surfaced the source this design had been walking past.**
+
+A podcast episode is an ordinary MP3 over HTTPS, named by an RSS feed the
+publisher wants clients to fetch. So are Internet Archive items, Jamendo tracks,
+Free Music Archive tracks. There is no DRM, no account, no vendor SDK, no terms
+question, and nothing is transferred between peers — **both devices pull the same
+public URL themselves**, which is the same shape as both opening their own file.
+
+That is `TogetherContent::Stream`, and it is the best-syncing online source
+available to this app by some distance:
+
+| Source | Deadband | Why |
+|---|---|---|
+| Local file | fine (250 ms) | accurate position, any `playbackRate` |
+| **HTTPS stream** | **fine (250 ms)** | **it is the same media element** |
+| YouTube embed | coarse (1200 ms) | discrete rates, coarse position |
+| Service track | coarse (1200 ms) | position reported on state change, not on a tick |
+
+A podcast session therefore holds **four times tighter than a Spotify session
+ever can**, and needs no account on either side. The catalogue is the only thing
+it gives up.
+
+### The URL is the dangerous part, and it is guarded in core
+
+Unlike a YouTube id — eleven characters of a known alphabet — this is a whole URL
+the *other person* chose, and it becomes a media element's `src`. The device then
+makes a request to wherever it points, from the listener's network position,
+because that is what a media element does.
+
+`valid_stream_url` runs on the way out **and** on the way in, and holds six
+lines: HTTPS only (no `http:` downgrade a peer can force, no `file:`, no
+`javascript:`, no `data:`); no credentials in the authority and no `@` at all,
+which also kills `https://example.com@evil.test/`; a host with a dot in it, which
+is what refuses `https://router/reboot` — a URL that resolves inside the
+*listener's* house rather than ours; no literal IP addresses, v4 or bracketed v6,
+which takes `127.0.0.1`, `192.168.1.1` and `169.254.169.254` with it; no control
+characters, spaces, quotes, backslashes or angle brackets, for the frontend that
+one day builds an attribute by concatenation; and a length bound.
+
+**What it does not do is resolve the name**, and that limit is stated rather than
+papered over: DNS can point a perfectly ordinary-looking name inside the
+listener's network, and a pure function on a device with no network guarantee
+cannot see that. This refuses the *stated* private target. Closing the rest
+belongs to whatever actually makes the request.
+
+The check moved into `TogetherContent::admissible`, which **matches
+exhaustively**, replacing two separate `if let … Youtube` arms that each guarded
+one variant. Those arms were the real hazard: a new variant carrying a
+peer-chosen string could be added, wired through three frontends, and reach a
+`src` attribute without either of them noticing. Now a new variant has to say
+which side of the line it is on.
+
+## 11b. Driving a player that only says where it is once a second
+
+_Added 2026-08-08, when the owner made `android/` the standing priority frontend
+and asked for the YouTube embed there first._
+
+The embed is the only source that gets close to "any song, and neither of us has
+it": effectively the whole commercial catalogue, no account on either side, and a
+playhead we can actually drive. `com.pierfrancescosoffritti.androidyoutubeplayer:core`
+is on Maven Central — unlike Spotify's App Remote, which is a hand-vendored
+`.aar` (§11) — and it is a `WebView` around the official IFrame player, so the
+embed stays the sanctioned one.
+
+What makes it interesting is not the wiring but the **reporting rate**.
+`onCurrentSecond` fires about once a second. `together_report_position` is called
+by the poll four times a second, and the drift ladder compares whatever it was
+last handed against the peer. Feed it a reading up to a second old and the
+session invents a second of drift that is not there — on a source whose deadband
+is already the coarse one.
+
+`TogetherDecisions.CoarsePlayhead` is the answer and it is three rules, all of
+them tested:
+
+- **Interpolate between ticks while playing**, and not while paused.
+- **Bank the elapsed time when the state changes.** A pause 900 ms after a tick
+  means 900 ms of real playback; discarding it reports a position the video has
+  already gone past.
+- **Move on our own seek immediately, without waiting for the next tick.** This
+  is the one that would be a bug rather than a rounding error: for a whole second
+  after a correction the player would still report where it *was*, so the ladder
+  would see the gap it had just closed and correct again. That is the sticky
+  rate-trim sawtooth `AUDIT.md` already records, wearing a different costume.
+
+And a cap: past two ticks of silence, stop guessing and report the last thing
+actually known. A stalled video — or one the system froze when the app went to
+the background — sends no ticks at all, and an uncapped estimate advances a
+standing-still playhead forever, confidently, hiding the stall from the very
+verdict that should see it.
+
+**Buffering is not a pause, and this is where §10's rule is enforced rather than
+merely stated.** `embedState` maps the embed's `buffering` to its own
+`EmbedState.Stalled`, and `embedStateIsWorthSending` refuses to tell the peer
+about it. Reporting a stall as a pause is the worst ping-pong available here:
+they pause because we stalled, which makes us re-evaluate, which makes them
+re-evaluate.
+
+**This layer is verified, unusually for Android.** It has no Android imports, so
+`kotlinc` plus JUnit compiles and runs it in this sandbox with no SDK — 47 tests,
+green, before CI. The commands are in `CLAUDE.md`. That is the practical reason
+to keep decision logic in framework-free files, and it matters more now that the
+priority frontend is the one that cannot otherwise be built here.
+
+**Not built yet**: the player adapter around `YouTubePlayerView`, the Compose
+surface for it, and the `TogetherManager` change that lets a session hold an
+embed instead of a `MediaPlayer`. That last one is the real work — `TogetherPlayer`
+is concrete throughout the manager, so it needs a small interface both players
+satisfy, and the manager is also where the foreground-service contract lives,
+which `.claude/rules/android.md` names as the most bug-prone area in the repo.
+It is deliberately not half-done here.
+
+## 12. Playing a handed-over file before it has finished arriving
+
+_Also from the 2026-08-08 request: "even when one person has the file it should
+be streamed."_
+
+Today it is not streamed, and the honest statement of where that stands is that
+**core has been ready for this since the transfer landed, and neither frontend
+uses it**. `ShareTracker::playable_at(pos_ms)` answers "may playback start here",
+and `runway_ms(pos_ms)` answers "how many milliseconds of *uninterrupted* audio
+are available from here" — a gap ends the runway however much lies beyond it,
+because audio after a hole is a stutter waiting to happen. Both are unit-tested;
+both are dead code.
+
+What is missing is per-frontend, and the two frontends need genuinely different
+things:
+
+- **Android** wants `MediaDataSource` (API 23+, and `minSdk` is 26). Its
+  `readAt(position, buffer, offset, size)` is called by the decoder on demand, so
+  a source backed by the tracker can hand over the bytes it has and block on the
+  ones it does not. This is the closer of the two to working: `TogetherPlayer`
+  already owns a `MediaPlayer`, and `setDataSource(MediaDataSource)` is a
+  one-line change to how it is fed.
+- **Desktop** cannot use a `blob:` URL, and that is the whole reason it waits
+  today: a blob is a fixed-length snapshot and cannot grow. The clean answer is
+  **not** MSE — that needs a fragmented container we do not control — but a Tauri
+  custom protocol serving the partial file with `Range` support, pointed at by
+  the `<video>` element's `src`. The element then does ordinary progressive
+  playback and a range that runs past the received prefix is where the tracker's
+  answer goes.
+
+Both need one shared decision that does not exist yet: **what to do when the
+runway runs out mid-playback.** §10 rules out reporting buffering to the peer,
+and that rule stands — a stall signalled as a remote pause is the worst ping-pong
+available here. So a starved reader pauses locally, and the next drift verdict is
+what closes the gap. Writing that down is the prerequisite for either frontend,
+because a stall handled two different ways on two devices is a session that
+argues with itself.
+
+## 13. Following what the device is already playing
+
+_Added 2026-08-08, from "if users already have Morphe or ReVanced installed,
+can we use it somehow?"_
+
+The literal question has a dull answer and a much better one behind it.
+
+**Launching their patched client does nothing for a session.** An intent at a
+YouTube URL resolves to whatever app handles it, which may well be a patched
+one — and that hands playback away entirely. No seek, no position, no callbacks.
+A video opens and the session is left behind.
+
+**But Android publishes every app's media session system-wide**, and that is a
+different proposition. With notification-listener access, Comrade can enumerate
+active sessions and drive them — `seekTo`, `play`, `pause` — and read position
+from `PlaybackState`. It is what a car head unit and a watch companion do.
+
+### Why this is better than every integration §11 was reaching for
+
+| | Per-vendor | Media session |
+|---|---|---|
+| Spotify | OAuth + Premium API, or a hand-vendored `.aar` | **their app, as installed** |
+| YouTube / YT Music | embed + a CSP argument | **their app, as installed** |
+| Podcast apps, VLC, local players | nothing | works |
+| Implementations to maintain | one per service | **one** |
+
+It removes the client id, the OAuth flow, the App Remote distribution problem
+and the `script-src` widening, all at once. Comrade never learns what the other
+app is or where its bytes came from — which is the posture, not a loophole.
+
+**On patched clients specifically.** The feature is source-agnostic by
+construction: it drives a published media session and touches no vendor's API.
+That is defensible in a way that InnerTube extraction (§11a) is not. What would
+*not* be defensible is documenting or marketing it as a route to ad-free
+playback — that is inducement, and it would convert a neutral tool into a
+targeted one regardless of what the code does. Build the neutral feature; do not
+build the funnel. Nothing technical is lost by holding that line.
+
+### What it costs, stated before anyone builds on it
+
+- **Notification-listener access.** Confirmed *not* on Play's restricted-
+  permissions list (unlike the Accessibility API, which is gated and would have
+  been a blocker), so there is no declaration form in the way. That is not the
+  same as approved — general policy still applies and this permission is
+  scrutinised. Worth confirming against a real submission before it ships.
+- **Playback lives in the other app.** Comrade becomes a sync layer with no
+  player of its own: no video surface, no sleeve. The Together tab turns into
+  control-and-status. That is a product change, not an implementation detail.
+- **Coarse position**, so the coarse deadband — the same tier as an embed.
+- **Android only for now.** MPRIS, SMTC and MediaRemote are the equivalents
+  elsewhere, so it generalises, but not for free.
+
+### The decisions, and the one bug that would have been undebuggable
+
+`MediaSessionDecisions` is pure, and it runs under `kotlinc` + JUnit here with
+no SDK — 19 tests, green before CI.
+
+**`pick` excludes our own package, and that is not an optimisation.** Comrade
+publishes a `MediaSession` for the foreground service that keeps a file session
+alive. A picker that did not exclude it would find Comrade, sync Comrade to
+Comrade, and feed every correction straight back into the player that produced
+it. From a bug report that reads as "it randomly jumps".
+
+The rest:
+
+- **Playing beats paused**, and `buffering` counts as playing — demoting a
+  stalling session would hand the session to a paused app in another tab the
+  moment the network hiccuped. Among equals the framework's own priority order
+  wins, because it puts the session the user last touched first.
+- **Speed is honoured.** A podcast at 1.5× advances half again as fast;
+  extrapolating it at 1.0 would drift half a second per second, which is worse
+  than not extrapolating at all.
+- **Extrapolation is capped** at two seconds past the last report, for the
+  reason §11b gives: an app that stopped reporting has stalled or been frozen.
+- **`ACTION_SEEK_TO` decides `Full` against `StartOnly`**, mapping onto the
+  three-value `PlayheadControl` §11 already introduced. An app that cannot seek
+  must not run the ladder.
+- **A skip ends the claim.** `sameTrack` compares what each side is playing, and
+  blank metadata is *not* a match — an app that publishes nothing has told us
+  nothing, and reading silence as agreement is the invention this design
+  refuses.
+- **Two different playback speeds are not something a seek can fix**, so the
+  session says so rather than chasing a gap that reopens as fast as it closes.
+
+### Not built
+
+The `NotificationListenerService` itself, the `MediaController` adapter over it,
+and the `TogetherManager` change that lets a session follow an external player
+instead of owning one. Same reason as §11b: the manager is concrete on
+`TogetherPlayer` throughout and is where the foreground-service contract lives,
+so it wants one deliberate refactor rather than two half ones.
+
+## 14. Both players, and the seam between them
+
+_Added 2026-08-08, on "we should have both"._
+
+Comrade keeps its own player **and** gains the ability to follow someone else's.
+That is not a compromise between §11b and §13; it is the only arrangement that
+makes either worth building. Comrade can genuinely play a file — with a sleeve,
+a video surface, an accurate playhead and the fine deadband — and it can
+genuinely never play a Spotify track. Picking one would either throw away the
+good case or refuse the common one.
+
+`SessionPlayer` is the seam. Three implementations sit behind it and each was
+separately blocked on `TogetherManager` being concrete on `TogetherPlayer`:
+
+| Implementation | Who holds the audio | What the screen draws |
+|---|---|---|
+| `TogetherPlayer` (`MediaPlayer`) | us | sleeve, video surface, scrubber |
+| YouTube embed (§11b) | us, in a `WebView` we host | the same, picture in our window |
+| External session (§13) | another app entirely | control and status |
+
+`TogetherPlayer` implements it today, unchanged in behaviour — the interface was
+derived from what the manager already used, so adopting it is `override`
+keywords and nothing else.
+
+**The mode is decided once, at the start, and never changes.**
+`PlaybackModeDecision.ownershipFor` answers it from the content kind and what
+this device can do, and `mayChangeMidSession` is a flat `false` with the reason
+on it: swapping the player under a live session means tearing one playhead down
+and standing another up, and the gap between them is a session that is neither
+following nor playing. The handover finishing is not an exception — `OURS` was
+already the answer there; the file simply arrived.
+
+Two rules in it are worth reading twice:
+
+- **A file we hold is always ours**, even when an external session is available.
+  Following another app for something we could open ourselves would trade the
+  sleeve, the surface and an accurate playhead for nothing.
+- **A file we do *not* hold is not `EXTERNAL`** — it is nothing yet. The
+  handover (§9a) exists precisely so it becomes ours, and claiming an external
+  player at that moment would start a session against whatever happened to be
+  playing on the phone, which is not what was invited.
+
+The seam is framework-free, which is what lets the mode decision be checked
+here rather than in CI: 74 Android tests across §11b, §13 and this section now
+compile and run under `kotlinc` with no SDK.
+
+**Still not built**, and now down to one thing rather than three: the
+`TogetherManager` change that holds a `SessionPlayer` instead of a
+`TogetherPlayer`, plus the two new implementations behind it. That file owns the
+foreground-service contract, which `.claude/rules/android.md` names as the most
+bug-prone area in the repo, so it wants one deliberate pass — but it is now a
+mechanical pass against a settled interface rather than a design question.
+

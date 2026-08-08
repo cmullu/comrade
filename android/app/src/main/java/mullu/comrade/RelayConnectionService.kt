@@ -539,16 +539,23 @@ object ChatEventRouter {
 
             is BridgeEvent.TogetherCorrection -> {
                 val correction = event.v1
+                // The two measured figures ride along with every verdict: how
+                // far apart the playheads are, and how wrong that could be.
+                // Carried rather than dropped because the second is what
+                // decides whether the first may be shown at all — see
+                // `TogetherDecisions.measurement`.
+                val driftMs = correction.driftMs
+                val qualityMs = correction.qualityMs.toLong()
                 when (val verdict = correction.verdict) {
                     is SyncVerdict.Hold -> Unit
                     is SyncVerdict.Adopt -> mullu.comrade.together.TogetherManager.onCorrection(
-                        "adopt", verdict.posMs.toLong(), 1f, verdict.playing,
+                        "adopt", verdict.posMs.toLong(), 1f, verdict.playing, driftMs, qualityMs,
                     )
                     is SyncVerdict.Nudge -> mullu.comrade.together.TogetherManager.onCorrection(
-                        "nudge", 0, verdict.rate.toFloat(), true,
+                        "nudge", 0, verdict.rate.toFloat(), true, driftMs, qualityMs,
                     )
                     is SyncVerdict.Seek -> mullu.comrade.together.TogetherManager.onCorrection(
-                        "seek", verdict.posMs.toLong(), 1f, true,
+                        "seek", verdict.posMs.toLong(), 1f, true, driftMs, qualityMs,
                     )
                 }
             }
@@ -564,9 +571,11 @@ object ChatEventRouter {
 
             // Core asking us to carry a signal ourselves, because the direct
             // peer channel belongs to the frontend. Straight to the manager,
-            // which owns the connection; if it has none the signal is dropped,
-            // and `togetherDirectReady(false)` is what puts traffic back on the
-            // relay — nothing times out behind this.
+            // which owns the connection; if it has none the signal is dropped.
+            // `togetherDirectReady(false)` is what puts traffic back on the
+            // relay immediately, and core stops trusting a declaration on its
+            // own after two heartbeats of silence — so a channel we lose
+            // without noticing costs twenty seconds, not the session.
             is BridgeEvent.TogetherOutbound ->
                 mullu.comrade.together.TogetherManager.onOutbound(event.json)
 

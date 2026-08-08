@@ -1051,8 +1051,10 @@ fun ConversationScreen(
                     // refuse. Only a route that actually differs earns the ask.
                     val libraryWouldMatter = target.recording != null &&
                         withContext(Dispatchers.IO) {
-                            val withoutCopy = ComradeCore.playRoute(target.plan, false)
-                            val withCopy = ComradeCore.playRoute(target.plan, true)
+                            val withoutCopy =
+                                ComradeCore.playRoute(target.plan, false, target.link)
+                            val withCopy =
+                                ComradeCore.playRoute(target.plan, true, target.link)
                             withoutCopy != null && withCopy != null && withoutCopy != withCopy
                         }
                     // "Not allowed to look" and "looked, not there" are different
@@ -1085,7 +1087,7 @@ fun ConversationScreen(
                         }
                     }
                     val route = withContext(Dispatchers.IO) {
-                        ComradeCore.playRoute(target.plan, found != null)
+                        ComradeCore.playRoute(target.plan, found != null, target.link)
                     }
                     if (route == null) {
                         commandNote = "Couldn't work out what to play — nothing was sent."

@@ -247,6 +247,235 @@ object TogetherDecisions {
     /** Whether a queued remote seek should now be applied (drag ended, nothing newer). */
     fun pendingRemoteToApply(state: ScrubState): Long? = if (state.scrubbing) null else state.pendingRemoteMs
 
+    // ── What the two measured numbers are allowed to say ────────────────────
+    //
+    // Mirrors `desktop/ui/player_view.mjs` — `TOGETHER_MS`, `READING_STALE_MS`,
+    // `driftLabel`, `qualityLabel`, `measurementLines` — against the same
+    // vectors, because the rule they encode is the one the whole design rests
+    // on and two frontends disagreeing about it is worse than neither showing
+    // it. What is *not* mirrored is the wording: these return decisions, and
+    // `ui/TogetherScreen.kt` turns them into localised strings, the same
+    // division `Status` already uses.
+
+    /** A gap smaller than this is not worth narrating even when we can see it. */
+    const val TOGETHER_MS: Long = 400
+
+    /**
+     * How long a measurement is worth showing after it was taken.
+     *
+     * Corrections cross the bridge **only** when the verdict is not `hold`, so
+     * the steady state emits nothing — and a screen that keeps the last pair
+     * therefore prints a gap that was closed minutes ago, underneath the word
+     * "Together". Two heartbeats, matching `READING_STALE_MS` on desktop and
+     * `together::TOGETHER_DIRECT_SILENCE_MS` in core, and derived the same way:
+     * two heartbeats of silence means at least one verdict said the gap was
+     * inside the deadband.
+     */
+    const val READING_STALE_MS: Long = 20_000
+
+    /** The floor on what a direct path may claim about itself, in ms. */
+    const val QUALITY_FLOOR_MS: Long = 50
+
+    /** Above this the path is a relay, and says so. */
+    const val QUALITY_DIRECT_MAX_MS: Long = 150
+
+    /**
+     * The gap, when it is bigger than our own ability to measure it.
+     *
+     * [Silent] is not "they are together" — it is "we have nothing honest to
+     * say", which covers both being genuinely in step and not being able to
+     * tell. [Quality] carries the difference; this must not try to.
+     */
+    sealed interface Drift {
+        data object Silent : Drift
+
+        /** Rendered to one decimal place, as `%.1f`. */
+        data class Gap(val ms: Long, val weAreAhead: Boolean) : Drift
+    }
+
+    /** How well we can measure, which is what makes a [Drift.Gap] mean anything. */
+    sealed interface Quality {
+        data object Unknown : Quality
+
+        /**
+         * @param ms floored at [QUALITY_FLOOR_MS] — under that the figure is
+         *   below what either player can report, so claiming it would be the
+         *   same invention the deadband exists to prevent.
+         * @param direct a peer channel or a mesh hop, rather than a relay.
+         * @param decimals 2 for a direct path, 1 for a relayed one — a relayed
+         *   `±0.62s` implies a precision the second digit does not have.
+         */
+        data class Known(val ms: Long, val direct: Boolean, val decimals: Int) : Quality
+    }
+
+    /** Both lines, or neither. */
+    data class Measurement(val drift: Drift, val quality: Quality)
+
+    /**
+     * What the readout may say, given a correction that arrived [ageMs] ago.
+     *
+     * One call rather than two because it is one measurement: a drift figure
+     * without its error is unreadable, and an error left on screen after the
+     * drift aged out would claim we are still measuring after we stopped
+     * hearing verdicts. So they age out as a pair.
+     *
+     * A session with no correction yet passes a large [ageMs] and gets blanks —
+     * the same answer as a stale reading, which is right: both mean there is no
+     * current number.
+     *
+     * @param driftMs signed; positive means this device is ahead.
+     */
+    fun measurement(driftMs: Long, qualityMs: Long, ageMs: Long): Measurement {
+        if (ageMs < 0 || ageMs >= READING_STALE_MS) {
+            return Measurement(Drift.Silent, Quality.Unknown)
+        }
+        return Measurement(driftOf(driftMs, qualityMs), qualityOf(qualityMs))
+    }
+
+    /** Reported only above our own error — see the desktop module's long note. */
+    private fun driftOf(driftMs: Long, qualityMs: Long): Drift {
+        val gap = kotlin.math.abs(driftMs)
+        val floor = maxOf(kotlin.math.abs(qualityMs), TOGETHER_MS)
+        return if (gap <= floor) Drift.Silent else Drift.Gap(gap, weAreAhead = driftMs > 0)
+    }
+
+    private fun qualityOf(qualityMs: Long): Quality = when {
+        qualityMs <= 0 -> Quality.Unknown
+        qualityMs <= QUALITY_FLOOR_MS -> Quality.Known(QUALITY_FLOOR_MS, direct = true, decimals = 2)
+        qualityMs <= QUALITY_DIRECT_MAX_MS -> Quality.Known(qualityMs, direct = true, decimals = 2)
+        else -> Quality.Known(qualityMs, direct = false, decimals = 1)
+    }
+
+    // ── Driving a player that only reports where it is once a second ────────
+    //
+    // A YouTube embed tells us its position through `onCurrentSecond`, which
+    // fires about once a second. `together_report_position` is called by the
+    // poll four times a second, and the drift ladder compares whatever it was
+    // last given against the peer. Handing it a reading up to a second old is
+    // how a session invents drift that is not there. Everything below is about
+    // that gap, and none of it imports anything — the JVM lane is the only lane
+    // that will check it before CI.
+
+    /**
+     * How far past its last tick a coarse playhead may be extrapolated.
+     *
+     * Beyond this we stop guessing and report the last thing we actually knew.
+     * The difference matters: a video that stalled, or a player the system
+     * froze when the app went to the background, sends no ticks at all — and an
+     * uncapped estimate would keep advancing a playhead that is standing still,
+     * confidently, forever. Reporting a stale-but-true position lets the next
+     * drift verdict see a real gap; reporting an invented one hides it.
+     *
+     * Two ticks, so a single late one costs nothing.
+     */
+    const val COARSE_EXTRAPOLATE_MAX_MS: Long = 2_000
+
+    /**
+     * Where a once-a-second player is *now*, between its ticks.
+     *
+     * Not thread-safe, like [EchoSuppressor] and for the same reason: it
+     * belongs to the thread that both observes the player and reports for it.
+     */
+    class CoarsePlayhead(private val maxExtrapolateMs: Long = COARSE_EXTRAPOLATE_MAX_MS) {
+        private var knownMs: Long = 0
+        private var knownAtMs: Long = 0
+        private var running: Boolean = false
+
+        /** The player said where it is. */
+        fun onTick(posMs: Long, nowMs: Long) {
+            knownMs = posMs.coerceAtLeast(0)
+            knownAtMs = nowMs
+        }
+
+        /**
+         * *We* moved it, and the estimate must move with it immediately.
+         *
+         * This is the one that would otherwise be a real bug rather than a
+         * rounding error. Waiting for the next tick means up to a second of
+         * reporting the position we just left — so the ladder sees the same gap
+         * it has already closed and corrects a second time. That is the
+         * sawtooth `AUDIT.md` already records for the sticky rate trim, in a
+         * different costume.
+         */
+        fun onSeek(posMs: Long, nowMs: Long) = onTick(posMs, nowMs)
+
+        /** Play or pause. A paused playhead does not advance. */
+        fun onPlaying(playing: Boolean, nowMs: Long) {
+            // Bank the elapsed time before the state changes, or a pause after
+            // 900 ms of un-ticked playback throws that 900 ms away.
+            knownMs = estimateMs(nowMs)
+            knownAtMs = nowMs
+            running = playing
+        }
+
+        /** Start again from nothing — a new video, or a released player. */
+        fun reset() {
+            knownMs = 0
+            knownAtMs = 0
+            running = false
+        }
+
+        /**
+         * Best estimate of the playhead at `nowMs`.
+         *
+         * A clock that steps backwards reads as "no time has passed" rather
+         * than as a negative advance, the same saturating choice
+         * `direct_path_live` makes in core.
+         */
+        fun estimateMs(nowMs: Long): Long {
+            if (!running) return knownMs
+            val elapsed = (nowMs - knownAtMs).coerceIn(0, maxExtrapolateMs)
+            return knownMs + elapsed
+        }
+    }
+
+    /**
+     * What an embedded player's state means to a session.
+     *
+     * A `String` rather than the library's enum on purpose: this file has no
+     * Android and no third-party imports, which is what lets the JVM lane run
+     * it — the same reason [planCorrection] takes a verdict `kind` as text.
+     */
+    sealed interface EmbedState {
+        /** Loaded but never started, or cued and waiting. Nothing to report. */
+        data object NotReady : EmbedState
+
+        data class Live(val playing: Boolean) : EmbedState
+
+        /** Reached the end, which is a pause the peer should hear about. */
+        data object Ended : EmbedState
+
+        /**
+         * Buffering. Deliberately **not** [Live] with `playing = false`.
+         *
+         * `docs/TOGETHER.md` §10 rules out reporting buffering to the peer, and
+         * this is where that rule is actually enforced: telling them "they
+         * paused" because our own video stalled is the worst ping-pong
+         * available here — they pause, which makes us re-evaluate, which makes
+         * them re-evaluate. A stall is ridden out locally and the next drift
+         * verdict closes the gap.
+         */
+        data object Stalled : EmbedState
+    }
+
+    /** Map the embed's reported state. Anything unrecognised is "not ready". */
+    fun embedState(state: String): EmbedState = when (state) {
+        "playing" -> EmbedState.Live(playing = true)
+        "paused" -> EmbedState.Live(playing = false)
+        "buffering" -> EmbedState.Stalled
+        "ended" -> EmbedState.Ended
+        else -> EmbedState.NotReady
+    }
+
+    /**
+     * Whether this state change is ours to tell the other person about.
+     *
+     * [EmbedState.Stalled] never is (see above), and [EmbedState.NotReady]
+     * never is — a player that has not started has no position worth sending.
+     */
+    fun embedStateIsWorthSending(state: EmbedState): Boolean =
+        state is EmbedState.Live || state is EmbedState.Ended
+
     // ── Picture ─────────────────────────────────────────────────────────────
 
     /**

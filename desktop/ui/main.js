@@ -4600,7 +4600,15 @@
       );
       route = await safeInvoke(
         "play_route",
-        { plan: target?.plan, foundLocalCopy: false },
+        {
+          plan: target?.plan,
+          foundLocalCopy: false,
+          // The link is what lets core tell a drivable service track from a
+          // signpost; `access` is omitted because this window connects to no
+          // service yet, and omitting it means "none" rather than a default.
+          link: target?.link ?? null,
+          access: null,
+        },
         { silent: true },
       );
     } catch {
@@ -4841,8 +4849,17 @@
       theyPaused: Boolean(s.theyPaused),
       correcting: Date.now() - (s.correctedAt || 0) < CATCHING_UP_MS,
     });
-    $("#together-drift").textContent = pv.driftLabel(s.driftMs, s.qualityMs) || "";
-    $("#together-path").textContent = pv.qualityLabel(s.qualityMs) || "";
+    // Both figures age out together once corrections stop arriving — see
+    // `measurementLines`. `correctedAt` is unset until the first one, and
+    // `Date.now() - 0` is comfortably past the staleness bound, so a session
+    // that has never been corrected shows blanks rather than zeroes.
+    const measured = pv.measurementLines({
+      driftMs: s.driftMs,
+      qualityMs: s.qualityMs,
+      ageMs: Date.now() - (s.correctedAt || 0),
+    });
+    $("#together-drift").textContent = measured.drift || "";
+    $("#together-path").textContent = measured.path || "";
   }
 
   /** Our own player moved. Send it only if the person did it, not if we did. */

@@ -38,7 +38,9 @@ pub mod runtime;
 // bridge depends on `comrade_ui` alone, exactly as it does for every DTO.
 pub use comrade_core::share::transport::{RefusalReason, RelayPolicy};
 pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
-pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict, TogetherContent};
+pub use comrade_core::together::{
+    MusicLink, PlayheadControl, Recording, ServiceAccess, StateChange, SyncVerdict, TogetherContent,
+};
 // The handoff wire types and the road decision, for the same reason: the desktop
 // shell takes a `HandoffSignal` as JSON and asks which road a size takes, and it
 // must get that answer from the core rather than keeping its own copy of the

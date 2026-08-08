@@ -1763,6 +1763,15 @@ sealed class TogetherContent with _$TogetherContent {
   const factory TogetherContent.youtube({
     required String videoId,
   }) = TogetherContent_Youtube;
+  const factory TogetherContent.service({
+    required MusicLink link,
+    Recording? recording,
+  }) = TogetherContent_Service;
+  const factory TogetherContent.stream({
+    required String url,
+    Recording? recording,
+    BigInt? durationMs,
+  }) = TogetherContent_Stream;
 }
 
 class TogetherCorrectionDto {

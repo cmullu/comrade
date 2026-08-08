@@ -63,6 +63,21 @@ object TogetherManager {
              * there is something to put on it.
              */
             val picture: TogetherDecisions.Picture = TogetherDecisions.Picture.None,
+            /**
+             * The last measured gap between the two playheads, signed —
+             * positive means this device is ahead — with the error on it and
+             * when it was taken.
+             *
+             * Kept raw rather than pre-rendered because whether any of it may
+             * be *shown* depends on how old it is by the time the screen draws,
+             * which only the screen knows. [correctedAtMs] of zero is the
+             * honest starting state: nothing measured yet, which
+             * [TogetherDecisions.measurement] reads as stale and shows as
+             * blank rather than as a reassuring zero.
+             */
+            val driftMs: Long = 0,
+            val qualityMs: Long = 0,
+            val correctedAtMs: Long = 0,
         ) : UiState
     }
 
@@ -194,8 +209,22 @@ object TogetherManager {
         refreshLive(playing = playing, status = if (playing) Status.Together else Status.TheyPaused)
     }
 
-    /** A drift correction. Emitted only when the verdict is not "hold". */
-    fun onCorrection(kind: String, posMs: Long, rate: Float, playing: Boolean) {
+    /**
+     * A drift correction. Emitted only when the verdict is not "hold".
+     *
+     * `driftMs` and `qualityMs` are the two measured figures the correction
+     * carries, and they are recorded even though nothing here renders them: the
+     * screen decides what they are worth saying, and the pair is worthless
+     * without knowing when it was taken.
+     */
+    fun onCorrection(
+        kind: String,
+        posMs: Long,
+        rate: Float,
+        playing: Boolean,
+        driftMs: Long = 0,
+        qualityMs: Long = 0,
+    ) {
         val p = player ?: return
         val plan = TogetherDecisions.planCorrection(
             kind,
@@ -205,7 +234,12 @@ object TogetherManager {
             TogetherDecisions.Local(p.positionMs, p.isPlaying, p.prepared),
         )
         run(p, plan)
-        refreshLive(status = Status.CatchingUp)
+        refreshLive(
+            status = Status.CatchingUp,
+            driftMs = driftMs,
+            qualityMs = qualityMs,
+            correctedAtMs = System.currentTimeMillis(),
+        )
     }
 
     fun onEnded(byPeer: Boolean) {
@@ -503,6 +537,9 @@ object TogetherManager {
         positionMs: Long? = null,
         status: Status? = null,
         picture: TogetherDecisions.Picture? = null,
+        driftMs: Long? = null,
+        qualityMs: Long? = null,
+        correctedAtMs: Long? = null,
     ) {
         val live = _state.value as? UiState.Live ?: return
         _state.value = live.copy(
@@ -510,6 +547,9 @@ object TogetherManager {
             positionMs = positionMs ?: live.positionMs,
             status = status ?: live.status,
             picture = picture ?: live.picture,
+            driftMs = driftMs ?: live.driftMs,
+            qualityMs = qualityMs ?: live.qualityMs,
+            correctedAtMs = correctedAtMs ?: live.correctedAtMs,
         )
     }
 
