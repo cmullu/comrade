@@ -34,7 +34,6 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -119,7 +118,7 @@ import mullu.comrade.ui.StarIcon
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
 import mullu.comrade.ui.TaskListScreen
-import mullu.comrade.ui.QueueMusicIcon
+import mullu.comrade.ui.PeopleHugIcon
 import mullu.comrade.ui.TimerIcon
 import mullu.comrade.ui.peerTitle
 import mullu.comrade.ui.purgeDecryptedMedia
@@ -437,7 +436,12 @@ private enum class MainTab(val label: String, val icon: ImageVector) {
     // a public feed is somewhere you go and listening with someone is something
     // you do *with* the person you are already talking to, which makes it a
     // daily surface and the feed a deliberate one.
-    Together("Together", QueueMusicIcon),
+    //
+    // 🫂 rather than a note over a list, since 2026-08-08 — when this tab stopped
+    // being a screen you arrived at and became the only way in. A playlist glyph
+    // named the medium; every other icon on this bar names the people it is for,
+    // and this feature is about the person more than the music.
+    Together("Together", PeopleHugIcon),
     Focus("Focus", TimerIcon),
     Tara("Tara", HeartIcon),
 }
@@ -834,15 +838,15 @@ private fun MainShell(
                                     }) {
                                         Icon(CallIcon, contentDescription = "Voice call")
                                     }
-                                    IconButton(onClick = {
-                                        togetherPeer = openChat.peer to callLabel
-                                        togetherPicker.launch(arrayOf("video/*", "audio/*"))
-                                    }) {
-                                        Icon(
-                                            Icons.Filled.PlayArrow,
-                                            contentDescription = stringResource(R.string.together_invite_action),
-                                        )
-                                    }
+                                    // No ▶ here any more. Listening together is
+                                    // one flow in the Together tab (🫂) — pick
+                                    // something, then pick who — because two
+                                    // entry points meant "how do I listen with
+                                    // someone" depended on which screen you were
+                                    // on, and the one in this header could only
+                                    // ever offer a file. The chat keeps `/play`,
+                                    // which reaches the same session by the same
+                                    // path.
                                     IconButton(onClick = {
                                         withCallPermissions(video = true) {
                                             CallManager.startOutgoingCall(
@@ -1147,7 +1151,19 @@ private fun MainShell(
                         // a session you could not leave without ending. Now the
                         // playing stays here and the rest of the app stays usable.
                         MainTab.Together -> mullu.comrade.ui.TogetherScreen(
-                            onPickFile = { togetherPicker.launch(arrayOf("video/*", "audio/*")) },
+                            // Two callbacks rather than one, because the picker's
+                            // result means different things: with a person named
+                            // it starts a session, and with an invitation on
+                            // screen it answers one. The launcher below reads the
+                            // session state to tell them apart, so the peer set
+                            // here is only ever used by the first case.
+                            onPickFileWith = { peer, label ->
+                                togetherPeer = peer to label
+                                togetherPicker.launch(arrayOf("video/*", "audio/*"))
+                            },
+                            onPickFileToJoin = {
+                                togetherPicker.launch(arrayOf("video/*", "audio/*"))
+                            },
                             modifier = content,
                         )
                     }
@@ -1164,7 +1180,17 @@ private fun MainShell(
         // missed one is a missed evening. A live session does not: it has a tab.
         if (togetherState is mullu.comrade.together.TogetherManager.UiState.Invited) {
             mullu.comrade.ui.TogetherScreen(
-                onPickFile = { togetherPicker.launch(arrayOf("video/*", "audio/*")) },
+                // An invitation is the only thing this overlay draws, so the
+                // "start with someone" route is unreachable from here — but it
+                // is passed rather than stubbed, because a screen that silently
+                // does nothing on a tap is worse than one that behaves.
+                onPickFileWith = { peer, label ->
+                    togetherPeer = peer to label
+                    togetherPicker.launch(arrayOf("video/*", "audio/*"))
+                },
+                onPickFileToJoin = {
+                    togetherPicker.launch(arrayOf("video/*", "audio/*"))
+                },
             )
         }
         // Call overlay — covers the app while a call is ringing/connected.

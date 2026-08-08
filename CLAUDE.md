@@ -107,6 +107,26 @@ type-checks here too.**
 .claude/scripts/android-typecheck.sh      # ~4 min cold, ~2 min warm
 ```
 
+**Then it moved once more the same day: Compose type-checks here as well.**
+
+```bash
+.claude/scripts/android-typecheck-compose.sh   # ~6 min cold, ~3 min warm
+```
+
+The Compose *compiler plugin* is a codegen pass, and everything a push to CI
+usually catches — a renamed parameter, a composable that does not exist at this
+Material3 version, a missing string id — is the **frontend's** answer, which
+needs only the AARs. So all 97 sources compile against real Compose 1.6.1 and
+Material3 1.2.0; codegen then ICEs on the first `@Composable` because the plugin
+jar will not load into a plain `kotlinc`, and **that crash is the expected end of
+a clean run** (kotlinc reports every resolution error before codegen starts). The
+script tells the two outcomes apart, so it cannot pass by crashing early.
+
+What it does **not** check: the plugin's own rules (`@Composable` call-context,
+`remember` restrictions), and anything at all about how the screen *looks*. Run
+it before pushing a Compose change; it is the slower of the two, so the plain
+lane stays the one for everything else.
+
 84 of the 87 sources under `mullu/comrade/` — `together/`, `transfer/`, `call/`,
 `handoff/`, `update/`, `voice/`, `RelayConnectionService`, `ComradeCore` — compile
 against a real `android.jar` (Robolectric's `android-all` for API 34), the **real**

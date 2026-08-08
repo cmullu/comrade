@@ -41,9 +41,16 @@ class PlaybackModeDecisionTest {
     }
 
     @Test
-    fun anHttpsStreamFollowsTheSameRuleAsAFile() {
+    fun anHttpsStreamIsAlwaysOursBecauseNobodyHoldsOne() {
+        // `haveOurCopy` is the wrong question here: both devices fetch the same
+        // public URL and the URL came with the invitation, so there is no state
+        // in which this is "not yet anything". It used to share the file's arm,
+        // which made every stream invitation look unplayable — true only while
+        // Android had no `joinStream`.
         assertEquals(PlaybackOwnership.OURS, ownership("stream", haveOurCopy = true))
-        assertNull(ownership("stream", haveOurCopy = false))
+        assertEquals(PlaybackOwnership.OURS, ownership("stream", haveOurCopy = false))
+        // And never somebody else's player, whatever is playing on the phone.
+        assertEquals(PlaybackOwnership.OURS, ownership("stream", haveOurCopy = false, external = true))
     }
 
     @Test

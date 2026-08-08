@@ -136,7 +136,17 @@ object PlaybackModeDecision {
         // Ours whenever we actually hold it. Following an external app for a
         // file we could open ourselves would trade the sleeve, the surface and
         // an accurate playhead for nothing.
-        "local_file", "stream" -> if (haveOurCopy) PlaybackOwnership.OURS else null
+        "local_file" -> if (haveOurCopy) PlaybackOwnership.OURS else null
+
+        // Always ours, and it stopped sharing the arm above on 2026-08-08 when
+        // `TogetherManager.joinStream` landed. `haveOurCopy` is the wrong
+        // question for a stream: nobody *holds* one, both devices fetch the same
+        // public URL, and the URL travelled with the invitation — so there is
+        // never a moment where this is "not yet anything" the way a file we have
+        // not been handed is. Grouping it with `local_file` made every stream
+        // invitation look unplayable, which was true only for as long as Android
+        // had no way to open one.
+        "stream" -> PlaybackOwnership.OURS
 
         // We host the WebView, so the embed is ours even though we do not
         // decode it — the picture lands in our window and the scrubber is ours

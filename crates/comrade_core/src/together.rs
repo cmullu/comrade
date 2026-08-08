@@ -543,6 +543,25 @@ impl TogetherContent {
         youtube_id_from_url(input).map(|video_id| Self::Youtube { video_id })
     }
 
+    /// A session on one public HTTPS media URL, or `None` if the text is not one.
+    ///
+    /// The sibling of [`Self::youtube`], and it exists for the same reason: one
+    /// parser, reached by every frontend, rather than three UIs each deciding
+    /// what counts as a playable link. [`direct_media_url`] is the whole test —
+    /// both halves of it, safety *and* "is there media at the end of this".
+    ///
+    /// Neither the recording nor the length is guessed from the URL. A filename
+    /// is not a title (the same position [`Self::LocalFile`] takes about
+    /// filenames), and a length is the player's to discover.
+    pub fn stream(input: &str) -> Option<Self> {
+        let url = input.trim();
+        direct_media_url(url).then(|| Self::Stream {
+            url: url.to_string(),
+            recording: None,
+            duration_ms: None,
+        })
+    }
+
     /// How long the content runs, when we know. A YouTube duration is the
     /// player's to report, not the inviter's to claim.
     pub fn duration_ms(&self) -> Option<u64> {
@@ -945,6 +964,58 @@ pub fn valid_stream_url(url: &str) -> bool {
     }
     host.bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+}
+
+/// What a path has to end in for us to believe it names media rather than a page
+/// about media.
+///
+/// Not a MIME negotiation and not a `HEAD` request: this runs on a device with no
+/// network guarantee, in a pure function, at the moment someone pastes a link.
+/// The extension is the only evidence available at that point.
+const STREAM_MEDIA_SUFFIXES: [&str; 12] = [
+    ".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".mp4", ".m4v", ".webm",
+    ".mkv",
+];
+
+/// Whether `url` names media a player can open, rather than a page that talks
+/// about it.
+///
+/// [`valid_stream_url`] answers "is this safe to hand a media element"; this
+/// answers the different question "is there any point". Both are needed and
+/// neither implies the other: `https://example.com/article` passes the safety
+/// check and would open a player on an HTML document, which fails as a decode
+/// error several seconds later and reads to the person who pasted it as the
+/// feature being broken.
+///
+/// **Refusing is the useful behaviour**, because the caller's fallback is to
+/// treat the text as a search query — which is the right answer for a page link
+/// and the wrong answer for an episode URL. So this is the line between the two,
+/// and it is deliberately drawn conservatively: a real media URL with an
+/// unlisted extension becomes a search that finds nothing, which is recoverable;
+/// a page treated as media is a player that hangs.
+///
+/// The query string is excluded before the suffix is checked, because the
+/// tracking parameters podcast hosts append (`…/ep12.mp3?token=…`) are exactly
+/// the shape §11a says is normal.
+pub fn direct_media_url(url: &str) -> bool {
+    if !valid_stream_url(url) {
+        return false;
+    }
+    // Everything after `?` or `#` belongs to the server, not to the filename.
+    let rest = url.split(['?', '#']).next().unwrap_or_default();
+    // The suffix has to be in the *path*, not in the host. `https://example.mp3`
+    // is a well-formed URL with a nonexistent TLD, and calling it media would
+    // route a typo into a player instead of into a search. `valid_stream_url`
+    // has already established the `https://` prefix, so the authority is
+    // whatever precedes the next `/`.
+    let path = match rest.get(8..).and_then(|after| after.find('/')) {
+        Some(slash) => &rest[8 + slash..],
+        None => return false,
+    };
+    // Compared lowercased: `EPISODE.MP3` is the same file as `episode.mp3`, and
+    // a case-sensitive check would send it down the search path instead.
+    let lowered = path.to_ascii_lowercase();
+    STREAM_MEDIA_SUFFIXES.iter().any(|s| lowered.ends_with(s))
 }
 
 /// Pull a video id out of a bare id or any of the usual link shapes
@@ -2737,6 +2808,67 @@ mod tests {
         assert!(valid_stream_url(
             "https://example.com/CaseSensitive/Path.mp3"
         ));
+    }
+
+    /// The line between "paste an episode" and "search for a song", which is
+    /// what [`direct_media_url`] exists to draw. Note `https://example.com`
+    /// among the refusals: it passes [`valid_stream_url`], and opening a player
+    /// on it is the hang this branch exists to avoid.
+    #[test]
+    fn only_a_url_that_names_media_becomes_a_stream() {
+        for url in [
+            "https://feeds.example.com/ep/42.mp3",
+            "https://cdn.example.co.uk:8443/a/b.m4a?token=abc-123&t=9",
+            "https://archive.org/download/item/side-a.flac",
+            "https://example.org/v/clip.webm#t=30",
+            // Case is the server's business; the suffix test must not care.
+            "https://example.com/EPISODE.MP3",
+        ] {
+            assert!(direct_media_url(url), "refused an episode: {url}");
+            assert!(matches!(
+                TogetherContent::stream(url),
+                Some(TogetherContent::Stream { .. })
+            ));
+        }
+        for url in [
+            // Safe, and there is no media at the end of it.
+            "https://example.com",
+            "https://example.com/episodes/42",
+            "https://example.com/show.html",
+            "https://example.com/feed.xml",
+            // A query string that merely mentions an extension is not one.
+            "https://example.com/watch?file=a.mp3",
+            // A *host* that ends in one is not one either — a well-formed URL
+            // with a nonexistent TLD, i.e. a typo, which belongs in a search
+            // rather than in a player.
+            "https://example.mp3",
+            "https://example.mp3?x=1",
+            // Everything valid_stream_url already refuses stays refused.
+            "http://example.com/ep.mp3",
+            "https://127.0.0.1/ep.mp3",
+            "https://example.com/a b.mp3",
+            "",
+        ] {
+            assert!(!direct_media_url(url), "accepted a non-episode: {url:?}");
+            assert!(TogetherContent::stream(url).is_none());
+        }
+    }
+
+    #[test]
+    fn a_pasted_stream_names_nothing_it_was_not_told() {
+        // A filename is not a title — the position `LocalFile` already takes —
+        // and a length is the player's to discover.
+        let Some(TogetherContent::Stream {
+            url,
+            recording,
+            duration_ms,
+        }) = TogetherContent::stream("  https://example.com/Kun-Faya-Kun.mp3  ")
+        else {
+            panic!("a real episode URL was refused");
+        };
+        assert_eq!(url, "https://example.com/Kun-Faya-Kun.mp3");
+        assert!(recording.is_none());
+        assert!(duration_ms.is_none());
     }
 
     #[test]

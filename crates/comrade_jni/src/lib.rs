@@ -1200,6 +1200,24 @@ impl Comrade {
         comrade_core::together::MATCH_CONFIDENT
     }
 
+    /// A session on one public HTTPS media URL, or `None` if the text is not
+    /// one — a podcast episode off its feed, an Internet Archive item, a Jamendo
+    /// track (`docs/TOGETHER.md` §11a).
+    ///
+    /// Exposed for the same reason [`Comrade::parse_music_link`] is: so a
+    /// frontend offering a "paste a link" field asks core what the text is
+    /// instead of growing its own idea of it. Refusing is the useful half — a
+    /// page *about* an episode comes back `None`, and the caller's fallback is
+    /// to treat the text as words to search for, which is the right answer for a
+    /// page link and the wrong one for an episode URL.
+    ///
+    /// Not on the `flutter_rust_bridge` surface (`api.rs`): `app/` has no
+    /// Together screen to call it from yet, and a bridge function nothing calls
+    /// still costs a regeneration.
+    pub fn together_stream_content(&self, input: String) -> Option<TogetherContent> {
+        comrade_core::together::TogetherContent::stream(&input)
+    }
+
     /// Invite `peer` to watch or listen to something together.
     ///
     /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.

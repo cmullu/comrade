@@ -617,4 +617,230 @@ class TogetherDecisionsTest {
         // flat, and been seen to go flat, before anything is called a stall.
         assertTrue(TogetherDecisions.STALL_AFTER_MS > TogetherDecisions.COARSE_EXTRAPOLATE_MAX_MS)
     }
+
+    // ── The clock under the scrubber ────────────────────────────────────────
+
+    @Test
+    fun theClockEarnsItsHourFieldRatherThanAlwaysShowingIt() {
+        assertEquals("0:00", TogetherDecisions.clock(0))
+        assertEquals("0:07", TogetherDecisions.clock(7_400))
+        assertEquals("3:07", TogetherDecisions.clock(187_000))
+        assertEquals("59:59", TogetherDecisions.clock(3_599_999))
+        // The one boundary worth pinning: the minute field pads only once there
+        // is an hour in front of it.
+        assertEquals("1:00:00", TogetherDecisions.clock(3_600_000))
+        assertEquals("1:02:33", TogetherDecisions.clock(3_753_000))
+    }
+
+    @Test
+    fun theClockTruncatesRatherThanRounding() {
+        // Never show a second the playhead has not reached — 2.9s is still 0:02.
+        assertEquals("0:02", TogetherDecisions.clock(2_900))
+    }
+
+    @Test
+    fun abrokenPlayerReadingIsUnremarkableRatherThanNegative() {
+        assertEquals("0:00", TogetherDecisions.clock(-5_000))
+    }
+
+    @Test
+    fun aLengthOfZeroIsNotALengthSoNothingIsClaimedAboutWhatIsLeft() {
+        // An embed before it loads, and an external session always. `0:00` here
+        // would be a claim that the track has ended.
+        assertNull(TogetherDecisions.remainingClock(positionMs = 0, durationMs = 0))
+        assertNull(TogetherDecisions.remainingClock(positionMs = 30_000, durationMs = -1))
+    }
+
+    @Test
+    fun whatIsLeftCountsDownAndSaysSo() {
+        assertEquals("-2:00", TogetherDecisions.remainingClock(60_000, 180_000))
+        // A playhead past the end (a peer's clamp, a longer local copy) reads as
+        // the end rather than as time owed.
+        assertEquals("-0:00", TogetherDecisions.remainingClock(200_000, 180_000))
+    }
+
+    // ── The library list ────────────────────────────────────────────────────
+
+    private fun track(
+        title: String,
+        artist: String = "",
+        album: String? = null,
+        durationMs: Long = 187_000,
+    ) = TogetherDecisions.Track(
+        uri = "content://media/external/audio/media/$title",
+        title = title,
+        artist = artist,
+        album = album,
+        durationMs = durationMs,
+        albumId = 1L,
+    )
+
+    @Test
+    fun aTrackSubtitleLeavesOutWhatTheFileNeverSaid() {
+        assertEquals(
+            "A. R. Rahman · Rockstar · 3:07",
+            TogetherDecisions.trackSubtitle(track("Kun Faya Kun", "A. R. Rahman", "Rockstar")),
+        )
+        // No tags at all: the length is the only true thing left, and there is
+        // no orphaned separator in front of it.
+        assertEquals("3:07", TogetherDecisions.trackSubtitle(track("track01")))
+        assertEquals(
+            "",
+            TogetherDecisions.trackSubtitle(track("track01", durationMs = 0)),
+        )
+    }
+
+    @Test
+    fun mediaStoresPlaceholderIsNotSomethingToShowSomeone() {
+        // `<unknown>` is a detail of the provider, not a fact about the file.
+        val row = track("track01", artist = TogetherDecisions.MEDIASTORE_UNKNOWN, album = "<unknown>")
+        assertEquals("3:07", TogetherDecisions.trackSubtitle(row))
+    }
+
+    @Test
+    fun everyWordHasToLandSomewhereButNotAllInTheSameField() {
+        // The behaviour worth having over MediaStore's own LIKE: this is how
+        // someone searches for music they already own.
+        val library = listOf(
+            track("Kun Faya Kun", "A. R. Rahman", "Rockstar"),
+            track("Nadaan Parindey", "A. R. Rahman", "Rockstar"),
+            track("Solaris", "Photek"),
+        )
+        assertEquals(
+            listOf("Kun Faya Kun"),
+            TogetherDecisions.filterTracks(library, "rahman kun").map { it.title },
+        )
+        assertEquals(
+            listOf("Kun Faya Kun", "Nadaan Parindey"),
+            TogetherDecisions.filterTracks(library, "rockstar").map { it.title },
+        )
+        assertTrue(TogetherDecisions.filterTracks(library, "rahman photek").isEmpty())
+    }
+
+    @Test
+    fun anEmptySearchChangesNeitherTheContentsNorTheOrder() {
+        val library = listOf(track("Zoo"), track("Apple"))
+        for (query in listOf("", "   ")) {
+            assertEquals(
+                "a filter that re-ranked would make the list jump under the finger",
+                listOf("Zoo", "Apple"),
+                TogetherDecisions.filterTracks(library, query).map { it.title },
+            )
+        }
+    }
+
+    @Test
+    fun searchingIgnoresCase() {
+        val library = listOf(track("Kun Faya Kun", "A. R. Rahman"))
+        assertEquals(1, TogetherDecisions.filterTracks(library, "RAHMAN").size)
+    }
+
+    // ── What is on offer ────────────────────────────────────────────────────
+
+    @Test
+    fun everySourceIsOfferedWhateverThePermissionSaysAndOnlyTheStepChanges() {
+        // A source that vanished on a refusal would leave no way back to it.
+        for (granted in listOf(true, false)) {
+            val sources = TogetherDecisions.sources(libraryGranted = granted)
+            assertEquals(3, sources.size)
+            assertEquals(
+                TogetherDecisions.Source.OnThisPhone(needsPermission = !granted),
+                sources.first(),
+            )
+            assertTrue(sources.contains(TogetherDecisions.Source.PickAFile))
+            assertTrue(sources.contains(TogetherDecisions.Source.FromALink))
+        }
+    }
+
+    // ── A pasted link ───────────────────────────────────────────────────────
+
+    @Test
+    fun aVideoLinkBeatsTheStreamCheckThatWouldAlsoAcceptIt() {
+        // The trap: `https://youtu.be/…` is a valid HTTPS URL too, so a stream
+        // check running first would point a MediaPlayer at a web page.
+        assertEquals(
+            TogetherDecisions.Link.Video("dQw4w9WgXcQ"),
+            TogetherDecisions.classifyLink(
+                videoId = "dQw4w9WgXcQ",
+                streamUrl = "https://youtu.be/dQw4w9WgXcQ",
+            ),
+        )
+    }
+
+    @Test
+    fun aMediaUrlIsAStreamAndEverythingElseIsSomethingToLookFor() {
+        assertEquals(
+            TogetherDecisions.Link.Stream("https://feeds.example.com/ep/42.mp3"),
+            TogetherDecisions.classifyLink(null, "https://feeds.example.com/ep/42.mp3"),
+        )
+        // Core said no to both. Words and a page link get the same answer,
+        // because they have the same next step.
+        assertEquals(TogetherDecisions.Link.NotPlayable, TogetherDecisions.classifyLink(null, null))
+        assertEquals(TogetherDecisions.Link.NotPlayable, TogetherDecisions.classifyLink("", ""))
+    }
+
+    // ── Who to ask ──────────────────────────────────────────────────────────
+
+    private fun listener(label: String, comrade: Boolean = false, online: Boolean = false) =
+        TogetherDecisions.Listener(npub = "npub_$label", label = label, comrade = comrade, online = online)
+
+    @Test
+    fun theListStartsWithTheComradeWhoIsActuallyThere() {
+        // Starting a session is asking for someone's attention now.
+        val all = listOf(
+            listener("Zara"),
+            listener("Bo", comrade = true),
+            listener("Ana", comrade = true, online = true),
+            listener("Yara", online = true),
+        )
+        assertEquals(
+            listOf("Ana", "Bo", "Yara", "Zara"),
+            TogetherDecisions.listenersFor(all, "").map { it.label },
+        )
+    }
+
+    @Test
+    fun theOrderIsStableBetweenOpeningsWithinEachGroup() {
+        // Two comrades, both offline, same standing: alphabetical, so the wrong
+        // person cannot end up under the finger from one opening to the next.
+        val all = listOf(listener("Bo", comrade = true), listener("Ana", comrade = true))
+        assertEquals(
+            listOf("Ana", "Bo"),
+            TogetherDecisions.listenersFor(all, "").map { it.label },
+        )
+    }
+
+    @Test
+    fun twoPeopleWithTheSameNameKeepAStableOrderToo() {
+        // The label is not unique — an alias can repeat — so the key falls
+        // through to the npub rather than to whatever order the store returned.
+        val first = TogetherDecisions.Listener("npub_a", "Ana", comrade = true, online = false)
+        val second = TogetherDecisions.Listener("npub_b", "Ana", comrade = true, online = false)
+        assertEquals(
+            listOf("npub_a", "npub_b"),
+            TogetherDecisions.listenersFor(listOf(second, first), "").map { it.npub },
+        )
+    }
+
+    @Test
+    fun searchingForAPersonWorksTheSameWayAsSearchingForATrack() {
+        val all = listOf(listener("Ana Iyer"), listener("Bo"))
+        assertEquals(
+            listOf("Ana Iyer"),
+            TogetherDecisions.listenersFor(all, "iyer ana").map { it.label },
+        )
+        assertTrue(TogetherDecisions.listenersFor(all, "zz").isEmpty())
+    }
+
+    // ── The scrubber's own precondition ─────────────────────────────────────
+
+    @Test
+    fun thereIsNothingToDragWhenNothingKnowsHowLongItIs() {
+        assertTrue(TogetherDecisions.scrubbable(durationMs = 180_000, external = false))
+        // An embed before it loads.
+        assertFalse(TogetherDecisions.scrubbable(durationMs = 0, external = false))
+        // Another app's session: a MediaSession carries no duration we can
+        // trust, so a thumb would land nowhere.
+        assertFalse(TogetherDecisions.scrubbable(durationMs = 180_000, external = true))
+    }
 }

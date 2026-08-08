@@ -484,7 +484,8 @@ reassuring pair of zeroes.
 | `comrade_jni`, `desktop/src-tauri` | The same calls over uniffi / flutter_rust_bridge / Tauri commands. `together_report_position` is the one that is **synchronous and skipped under contention**, because a player calls it several times a second from its UI thread — the trade `note_draft` already makes. |
 | `desktop/ui/together_sync.mjs` | Echo suppression, the verdict→player plan, and the status wording. Pure, 20 `node --test` cases. |
 | `android/…/together/LibraryResolver.kt` | Finds the listener's own copy via `MediaStore`, scored by the shared `match_score`; reads a picked file's tags so an invitation can name what it is. |
-| `android/…/together/` | `TogetherDecisions` (pure: echo ledger, scrubber rules, the two `MediaPlayer` footguns — 20 JVM tests mirroring the desktop vectors), `TogetherPlayer` (`MediaPlayer` + `SEEK_CLOSEST`), `TogetherManager` (session, audio focus, service control), `TogetherService` (foreground `mediaPlayback` + framework `MediaSession`). |
+| `android/…/together/MusicLibrary.kt` | **Lists** the phone's music for the Together tab to browse, with covers. Its sibling above **searches** for one named recording — the same provider, two different queries, and folding them together would mean one of the two doing the other's badly (§16). |
+| `android/…/together/` | `TogetherDecisions` (pure: echo ledger, scrubber rules, the two `MediaPlayer` footguns, and since §16 the transport clock, the library filter, the source list and both orderings — 75 JVM tests, the echo/verdict half mirroring the desktop vectors), `TogetherPlayer` (`MediaPlayer` + `SEEK_CLOSEST`), `TogetherManager` (session, audio focus, service control), `TogetherService` (foreground `mediaPlayback` + framework `MediaSession`). |
 
 Tests worth knowing about: `crates/comrade_ui/tests/two_peer_integration.rs`
 drives two real runtimes over one in-process relay and proves both halves —
@@ -843,6 +844,10 @@ fault, and painting it red would say otherwise. Android does not show these two
 figures yet; the plumbing to carry them into `UiState.Live` is the follow-up.
 
 ## 9b. Starting one — `/play`, and why it is one gesture
+
+> **Superseded in part by §16 (2026-08-08).** The chat header's ▶ described below
+> is gone, and the Together tab is now the deliberate way in; `/play` and the
+> route table are unchanged and still current.
 
 The protocol was finished long before the way in was. Getting a session going
 meant *finding* the feature — a panel on desktop, a button in the chat header on
@@ -1866,3 +1871,115 @@ The desktop half, where receiving is a `srcObject` and sending is not.
 the mic icon do not draw yet. The audio device module change, by contrast, *is*
 live for every call the moment this ships — which is the one part of §15 that
 wants a device before it is trusted.
+
+## 16. The tab, and why it became the only way in
+
+_Added 2026-08-08._
+
+§9b's table describes what a *route* does, and it stayed accurate. What it took
+for granted was the sentence above it: that starting a session means being in a
+conversation with the person you want to listen with, and either typing `/play`
+or reaching for the ▶ in that chat's header.
+
+That was backwards for music, and the ▶ is the thing that shows it. It could
+offer exactly one source — the file picker — because it was the file picker's
+button. So the answer to "listen to an album with a friend" was *open their chat,
+tap ▶, find the album in a system document browser by filename*, while the phone
+had a music library sitting right there that only the invitation path ever read.
+And there were two entry points for one intention, so which sources you could
+reach depended on which screen you happened to be on.
+
+So the ▶ is gone and the Together tab (🫂) is the whole flow: **pick something,
+pick someone.** Three sources, in the order they are offered
+(`TogetherDecisions.sources`):
+
+| Source | What it is | Needs |
+|---|---|---|
+| Music on this phone | `MediaStore`, listed with covers and searchable | the audio-library read |
+| Open a file | the picker, as before | nothing — SAF grants per file |
+| Paste a link | a YouTube video, or one public HTTPS media URL | nothing |
+
+Then the "who with?" sheet, which is comrades first and online first
+(`TogetherDecisions.listenersFor`) — starting a session is asking for someone's
+attention *now*, so the person who is there is the one to offer first. Contacts
+who are not comrades are still listed: an invitation is a DM like any other, and
+presence is a thing you opt into mutually rather than a precondition for asking.
+
+`/play` is untouched. It reaches the same session by the same path, and it
+remains the faster gesture when you are already talking to the person — which is
+the case it was designed for and the only one it was ever good at.
+
+### The alert, which did not exist
+
+`TogetherManager.onInvited` runs off a bridge event, so it has always worked with
+the app closed — and until now the only sign of an invitation was an overlay the
+person found the next time they opened Comrade. There is a notification now
+(`Notifier.notifyTogetherInvite`, `CHANNEL_TOGETHER`, `IMPORTANCE_HIGH`), cleared
+from the two points every route out of `Invited` passes through.
+
+It **names who and deliberately not what**. The title an invitation carries is a
+recording somebody chose or a URL's host, and either one on a lock screen other
+people can see is a disclosure nobody asked for. Who asked is what makes it
+actionable; the screen says the rest once the phone is unlocked.
+
+### The third source, at last: `TogetherContent::Stream`
+
+§11a worked out in August that a podcast episode is the best-syncing online
+source there is and named `TogetherContent::Stream` as the shape for it. Core has
+carried the variant, the guard and the tuning since; desktop grew the sending
+half (`stream_link.mjs`); **Android could neither start one nor accept one.** An
+invitation whose content was a `Stream` reached the phone, set `contentKind =
+"stream"`, and got offered a file picker for a file nobody has.
+
+Both halves are there now — `TogetherManager.startStream` and `joinStream` —
+and three things about them are decisions rather than plumbing.
+
+**Core sees the URL before the player does.** `together_start` runs
+`TogetherContent::admissible`, which for a `Stream` is `valid_stream_url`, so a
+URL naming the listener's own LAN, a literal address or a credential pair is
+refused before any request leaves the device. Opening the player first to learn
+its length would make that request *ahead of* the check that exists to prevent
+it, and would buy a `duration_ms` that a source both sides fetch from the same
+place does not need. `desktop/ui/main.js`'s `startStreamSession` made the same
+call for the same reason; this is the two frontends agreeing.
+
+**A stream invitation is never auto-joined**, and the reason is stronger than the
+YouTube one. Joining makes a request to a host the *other* person named — a
+decision about this device's network, and not one to take on somebody's behalf
+however confidently core validated the string. It also must not fall through to
+the library lookup: a stream that happens to name a recording this phone owns
+would otherwise open the local file and report a playhead for something else.
+
+**A URL that names no media is refused, and refusing is the useful half.**
+`valid_stream_url` answers "is this safe to hand a player"; the new
+`direct_media_url` answers the different question "is there any point".
+`https://example.com/episodes/42` passes the first and fails the second, and
+pointing a `MediaPlayer` at an HTML document is a hang the person who pasted it
+reads as the feature being broken. So the extension is checked (query string
+excluded — `…/ep12.mp3?token=…` is normal), and anything else becomes words to
+search for, which is recoverable. `TogetherContent::stream` is the one parser,
+reached from Kotlin through `together_stream_content`; the ordering against
+YouTube is `TogetherDecisions.classifyLink`, because `https://youtu.be/…` is a
+valid HTTPS URL too and a stream check running first would point a player at a
+web page.
+
+**Desktop still cannot tell a page link from an episode** before playing it — it
+hands any HTTPS URL to core and reports `COULD_NOT_PLAY` from the media element
+several seconds later. `direct_media_url` is in core and shared, so closing that
+is a small change in `stream_link.mjs`; it is not made here, and this paragraph
+is the record that Android is ahead rather than that the two agree.
+
+### What is checked before CI, and what is not
+
+The pure half is `TogetherDecisions` as always — the clock, the library filter
+and sort, the source list, the link ordering, the listener ordering, and the
+scrubber's precondition, all JVM-testable and all pinned. That is deliberate and
+it is why those decisions are *in* that file: `ui/TogetherScreen.kt` is 1,700
+lines of Compose and no test in this repo executes any of it.
+
+The type-checking is new though, and it is worth knowing the boundary moved:
+`.claude/scripts/android-typecheck-compose.sh` resolves the Compose half against
+the real Material3, which is what caught this screen's API mistakes before a
+push. It checks types and nothing else — **how it looks is still unverified by
+anything but a device**, and the 🫂 glyph in particular is hand-authored path
+data that no lane here can render.

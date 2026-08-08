@@ -79,6 +79,18 @@ object Notifier {
      */
     const val CHANNEL_UPDATES = "comrade_updates"
 
+    /**
+     * Someone asked you to listen or watch with them.
+     *
+     * Its own channel rather than sharing [CHANNEL_CALLS], because it is not a
+     * call: nothing is ringing and nothing is waiting on a timer at the other
+     * end. It is also not [CHANNEL_MESSAGES] — an invitation expires in the
+     * sense that the other person is sitting there, so it is worth an
+     * interruption where a message may not be, and someone who wants messages
+     * silent and this loud (or the reverse) can say so in one place.
+     */
+    const val CHANNEL_TOGETHER = "comrade_together"
+
     private const val GROUP_MESSAGES = "comrade_messages_group"
     private const val GROUP_COMRADES = "comrade_presence_group"
 
@@ -169,6 +181,15 @@ object Notifier {
                 // reasonably want off entirely — hence its own channel.
                 NotificationManager.IMPORTANCE_LOW,
             ).apply { description = "When a newer version of Comrade has been published" },
+        )
+        mgr.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_TOGETHER,
+                "Listen together",
+                // HIGH: the other person is waiting at the other end of this
+                // one, which is what separates it from "someone came online".
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply { description = "When someone asks you to listen or watch something with them" },
         )
     }
 
@@ -504,6 +525,55 @@ object Notifier {
             .build()
         NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
     }
+
+    /**
+     * Someone wants to listen or watch something with you.
+     *
+     * The alert the whole flow rests on: `TogetherManager.onInvited` runs off a
+     * bridge event whether or not anybody is looking at the app, and before this
+     * the only sign of an invitation was an overlay the person found later.
+     *
+     * **Names who, and deliberately not what.** The title an invitation carries
+     * is a recording the other person chose, or a URL's host — putting either in
+     * the shade would disclose what somebody is listening to on a lock screen
+     * that other people can see. Who asked is what makes it actionable; the
+     * screen says the rest once the phone is unlocked.
+     *
+     * Tapping lands on the Together tab, which is where the invitation is. Not
+     * their conversation: the two buttons that answer this are there and nowhere
+     * else, and a chat thread is one more tap away from the thing they came for.
+     */
+    @SuppressLint("MissingPermission") // guarded by canPost() / areNotificationsEnabled()
+    fun notifyTogetherInvite(context: Context, peer: String, peerLabel: String) {
+        if (!canPost(context)) return
+        val who = peerLabel.ifBlank { shortNpub(peer) }
+        val n = NotificationCompat.Builder(context, CHANNEL_TOGETHER)
+            .setSmallIcon(R.drawable.ic_notification_comrade)
+            .setContentTitle(context.getString(R.string.together_invite_notification_title, who))
+            .setContentText(context.getString(R.string.together_invite_notification_text))
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setContentIntent(openAppIntent(context, screen = TOGETHER_SCREEN))
+            .build()
+        NotificationManagerCompat.from(context).notify(TOGETHER_INVITE_ID, n)
+    }
+
+    /**
+     * Drop the invitation notice — it was answered, withdrawn, or the session
+     * has moved on.
+     *
+     * One id rather than one per peer, because there is only ever one session
+     * (`ComradeRuntime::together` keeps at most one), so a second invitation
+     * replaces the first in the shade exactly as it replaces it in the app.
+     */
+    fun clearTogetherInvite(context: Context) {
+        NotificationManagerCompat.from(context).cancel(TOGETHER_INVITE_ID)
+    }
+
+    private const val TOGETHER_INVITE_ID = 0xC0DE22
+
+    /** Matches the `MainTab` entry name `AppNavigation` resolves tabs against. */
+    private const val TOGETHER_SCREEN = "Together"
 
     /**
      * Drop the "is online" notice for `peer` — they went offline (or their
