@@ -50,6 +50,16 @@ import mullu.comrade.R
  */
 class TogetherService : Service() {
 
+    /**
+     * Whether this service has been re-announced as carrying a projection.
+     *
+     * A field rather than a parameter because [promote] is called again on every
+     * start command and from [onCreate], and each of those has to announce the
+     * *same* set of types — dropping `mediaProjection` from a later promotion
+     * while a capture is running is how a projection dies mid-session.
+     */
+    private var projecting = false
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateJob: Job? = null
     private var session: MediaSession? = null
@@ -93,6 +103,12 @@ class TogetherService : Service() {
         // Re-promote first, always: the obligation arms per *call* to
         // startForegroundService, so a redelivered intent that bailed early
         // would strand this instance and kill the process.
+        // Read **before** promoting: on Android 14 a MediaProjection may only
+        // begin while a foreground service already declaring `mediaProjection`
+        // is running, so the re-announce that adds the type has to land in the
+        // promotion below rather than after it. Sticky, because a later plain
+        // start must not silently drop the type from under a live capture.
+        if (intent?.getBooleanExtra(EXTRA_PROJECTION, false) == true) projecting = true
         promote(title = getString(R.string.together_notification_title), text = "")
         if (intent?.action == ACTION_LEAVE) {
             TogetherManager.leave()
@@ -134,7 +150,12 @@ class TogetherService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                if (projecting) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                },
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -169,9 +190,27 @@ class TogetherService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 4102
         const val ACTION_LEAVE = "mullu.comrade.together.LEAVE"
+        const val EXTRA_PROJECTION = "projection"
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, TogetherService::class.java))
+        }
+
+        /**
+         * Re-announce with `mediaProjection` **before** a projection starts.
+         *
+         * From Android 14 a projection may only begin while such a service is
+         * already running, and getting that order wrong throws at the point of
+         * capture rather than here — the same sequencing `CallManager.startScreenShare`
+         * depends on. This is a second `startForegroundService` to a live
+         * instance, which arms a fresh promotion deadline; `onStartCommand`
+         * promotes immediately, which is what keeps that safe.
+         */
+        fun startWithProjection(context: Context) {
+            context.startForegroundService(
+                Intent(context, TogetherService::class.java)
+                    .putExtra(EXTRA_PROJECTION, true),
+            )
         }
 
         fun stop(context: Context) {

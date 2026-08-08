@@ -1,5 +1,6 @@
 package mullu.comrade.ui
 
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -100,6 +101,32 @@ fun TogetherScreen(
     // only honest way to detect the grant, since coming back from settings
     // produces no callback of any kind.
     var followRefusal by remember { mutableStateOf<TogetherManager.FollowRefusal?>(null) }
+
+    // Streaming what this device is playing (docs/TOGETHER.md §15). Two system
+    // prompts in sequence, both hoisted out of the `when` for the same reason
+    // the library launcher is: a launcher created inside a branch is created and
+    // destroyed as the session changes state.
+    //
+    // RECORD_AUDIO first, and it is worth knowing *why* a feature that is not
+    // about the microphone asks for it: the media audio joins the outgoing
+    // stream on the capture path, so there has to be a capture running at all.
+    // A refusal is not fatal — the picture still goes.
+    val askToCapture = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        // Refused is a real answer: the picture streams with no sound, rather
+        // than nothing happening and the button looking broken.
+        TogetherManager.startStreamingFromConsent(context, result.resultCode, result.data)
+    }
+    val askToRecord = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        // Granted or not, go on to the capture consent — the two failures are
+        // independent and the picture does not depend on either.
+        val manager = context.getSystemService(MediaProjectionManager::class.java)
+        val intent = manager?.createScreenCaptureIntent()
+        if (intent != null) askToCapture.launch(intent)
+    }
     val askToReadLibrary = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -192,7 +219,9 @@ fun TogetherScreen(
                     }
                 }
 
-                is TogetherManager.UiState.Live -> LiveSession(s)
+                is TogetherManager.UiState.Live -> LiveSession(s) {
+                    askToRecord.launch(android.Manifest.permission.RECORD_AUDIO)
+                }
             }
 
             // Outside the `when` on purpose: the relay question can arrive while a
@@ -467,7 +496,7 @@ private fun ShareRelayConsent() {
 }
 
 @Composable
-private fun LiveSession(s: TogetherManager.UiState.Live) {
+private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
     // Hold the screen awake for a playing film and nothing else — two hours of
     // music must not burn the battery lighting up a screen with nothing on it.
     // The rule is TogetherDecisions.keepScreenOn, tested there; this only
@@ -634,6 +663,24 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
             Text(if (s.playing) "Pause" else "Play")
         }
         TextButton(onClick = { skip(SKIP_MS) }) { Text("+10s") }
+    }
+
+    // The third answer to §9a's question, beside "find your own copy" and "take
+    // mine": let them watch this one as it plays. Offered only by the side that
+    // holds the file and only for our own player — an embed is already on both
+    // screens, and an external session is somebody else's audio to send.
+    if (s.weLead && !s.embed && !s.external && !s.streaming) {
+        TextButton(onClick = onStream) { Text(stringResource(R.string.together_stream)) }
+        Text(stringResource(R.string.together_stream_note), style = MaterialTheme.typography.bodySmall)
+        // Before the system dialog, not after: it arrives with no explanation of
+        // its own, and a recording prompt nobody can account for is one people
+        // are right to refuse.
+        Text(stringResource(R.string.together_stream_consent), style = MaterialTheme.typography.bodySmall)
+    }
+    if (s.streaming) {
+        Text(stringResource(R.string.together_streaming), style = MaterialTheme.typography.bodyMedium)
+        // The one thing about the microphone that is not obvious from the icon.
+        Text(stringResource(R.string.together_mic_note), style = MaterialTheme.typography.bodySmall)
     }
 
     TextButton(onClick = { TogetherManager.leave() }) {

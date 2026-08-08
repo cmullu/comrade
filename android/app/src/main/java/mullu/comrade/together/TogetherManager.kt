@@ -1005,6 +1005,41 @@ object TogetherManager {
      * @return whether the picture started. The sound is best-effort and
      *   [PlaybackCapture.start] says so on its own.
      */
+    /**
+     * Begin streaming from the system's capture-consent result.
+     *
+     * The **ordering** is the reason this exists rather than the screen doing
+     * it: from Android 14 a `MediaProjection` may only begin while a foreground
+     * service already declaring `mediaProjection` is running, so the service is
+     * re-announced *before* the projection is fetched. Getting that round the
+     * wrong way throws at capture, far from the code that caused it — the same
+     * sequencing `CallManager.startScreenShare` depends on, kept in one place
+     * here so no caller can get it wrong.
+     *
+     * A refused dialog is not a failure: `resultCode` other than `RESULT_OK`
+     * streams the picture with no sound, which is a real thing to offer someone
+     * who does not want to grant a recording consent for a film they are only
+     * showing.
+     */
+    fun startStreamingFromConsent(context: Context, resultCode: Int, data: android.content.Intent?): Boolean {
+        appContext = context.applicationContext
+        val ctx = appContext ?: return false
+        val projection = if (resultCode == android.app.Activity.RESULT_OK && data != null) {
+            // Re-announce first. See above.
+            if (!disableServiceForTest) {
+                runCatching { TogetherService.startWithProjection(ctx) }
+                    .onFailure { Log.w(TAG, "could not re-announce for projection", it) }
+            }
+            val manager = ctx.getSystemService(android.media.projection.MediaProjectionManager::class.java)
+            runCatching { manager?.getMediaProjection(resultCode, data) }
+                .onFailure { Log.w(TAG, "projection refused by the system", it) }
+                .getOrNull()
+        } else {
+            null
+        }
+        return startStreaming(context, projection)
+    }
+
     fun startStreaming(context: Context, projection: android.media.projection.MediaProjection?): Boolean {
         appContext = context.applicationContext
         val ctx = appContext ?: return false

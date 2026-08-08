@@ -1824,12 +1824,36 @@ be: it holds no decoder and no playhead. The frames arrive already in step,
 because there is one playhead and it is the sender's. That is §15's claim about
 sync, and `TogetherManager.remoteVideo` is the whole of its implementation.
 
+### The gesture, and the ordering trap under it
+
+*"Let them watch mine"* sits on the live screen of the side that holds the file,
+next to §9a's other two answers rather than in a menu — and only for our own
+player, since an embed is already on both screens and an external session is
+somebody else's audio to send.
+
+**Two system prompts, in an order that matters.** `RECORD_AUDIO` first, because
+the media audio joins on the *capture* path and there has to be a capture running
+at all — a permission prompt for a feature that is not about the microphone,
+which is why the screen explains it rather than letting it arrive bare. Then the
+screen-capture consent. Both refusals are survivable and neither stops the
+picture: decline the recording consent and the other person still sees it,
+without its sound. Nothing about that is a failure path, so none of it is written
+as one.
+
+**The trap is Android 14's**, and it is the same one `CallService` records:
+a `MediaProjection` may only begin while a foreground service *already*
+declaring `mediaProjection` is running. So `TogetherService` now declares
+`mediaPlayback|mediaProjection`, is re-announced before the projection is
+fetched, and `promote` keeps announcing **both** types from then on — dropping
+the projection type from a later promotion is how a capture dies mid-session.
+The whole sequence lives in `TogetherManager.startStreamingFromConsent` rather
+than in the screen, so no caller can get the order wrong: the re-announce is a
+second `startForegroundService` to a live instance, which arms a fresh promotion
+deadline, and `onStartCommand` promoting immediately is what keeps that safe.
+
 ### Not built
 
-The desktop half, where receiving is a `srcObject` and sending is not. And the
-gesture: nothing user-reachable calls `startStreaming` yet, because it needs the
-`MediaProjection` consent flow and a place to offer the choice — which belongs
-with §9a's other two answers rather than bolted beside them.
+The desktop half, where receiving is a `srcObject` and sending is not.
 
 **Nothing in this section has run.** It type-checks against the real AAR, and
 `streaming` is never set true by any user-reachable path, so the renderer and
