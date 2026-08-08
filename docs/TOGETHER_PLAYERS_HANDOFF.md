@@ -61,7 +61,7 @@ Do not report a blocked lane as checked. Say plainly which half you verified.
 
 ---
 
-## Task A — `TogetherManager` holds a `SessionPlayer` (do this first)
+## Task A — `TogetherManager` holds a `SessionPlayer` — **DONE 2026-08-08**
 
 **Everything else is blocked on this**, and it is much smaller than it looks.
 Most of the manager already touches only interface members, so widening the type
@@ -99,10 +99,18 @@ interface:
 (player as? TogetherPlayer)?.attachSurface(surface)
 ```
 
-Same for `TogetherPlayer.Listener` — `openPlayer` (437–468) is the file path's
-construction and stays exactly as it is. Add a sibling per mode rather than
-generalising it; the callbacks (`onPrepared`, `onSeekComplete`, `onVideoSize`)
-are `MediaPlayer` semantics and do not survive being made abstract.
+`openPlayer` (~437–468) stays the **file path's** construction — add a sibling
+per mode rather than generalising it; the callbacks (`onPrepared`,
+`onSeekComplete`, `onVideoSize`) are `MediaPlayer` semantics and do not survive
+being made abstract.
+
+> **Correction, 2026-08-08.** This section originally said `openPlayer` "stays
+> exactly as it is". That was wrong. Its reuse arm — `val p = player ?:
+> TogetherPlayer(ctx)` — takes its type from the left operand, so widening the
+> field widens the local and `setListener`/`open` stop resolving. It narrows
+> with `as?` too. Two narrowing sites, not one. Left visible rather than edited
+> away, because "the plan was confident and the compiler disagreed" is the
+> useful part.
 
 **Do not** change `stopPlayback`, the audio-focus handling, or anything touching
 `startService`/`stopService` in this task. `.claude/rules/android.md` names the

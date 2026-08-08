@@ -974,6 +974,18 @@ is small; the content problem is the real constraint:
 >   would start a session against whatever happened to be playing.
 >   `docs/TOGETHER.md` §14. Remaining: the manager pass itself and the two new
 >   implementations — mechanical now, against a settled interface.
+> - **`TogetherManager.openPlayer` would drop a non-`TogetherPlayer` without
+>   releasing it.** The reuse arm is `(player as? TogetherPlayer) ?:
+>   TogetherPlayer(ctx).also { player = it }`, so if the field ever holds an
+>   embed or an external-session player when `openPlayer` runs, that player is
+>   overwritten without `release()`. **Unreachable today** — `openPlayer` is the
+>   only assignment to `player`, and `PlaybackModeDecision.mayChangeMidSession()`
+>   is a flat `false`. Recorded rather than papered over with a defensive
+>   `release()` on purpose: if the mode ever does change under a live session
+>   that is a bug which should be loud, and a silent teardown here would hide
+>   it. **Exit condition:** when the second `SessionPlayer` implementation
+>   lands, either release the outgoing player in that arm or assert the mode has
+>   not changed. The comment at the call site says the same.
 > - **A handed-over file still plays only once it is whole**, and core has been
 >   ready for it since the transfer landed. `ShareTracker::playable_at` and
 >   `runway_ms` are unit-tested and remain dead code — the gap is per-frontend and

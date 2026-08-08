@@ -1354,9 +1354,25 @@ The seam is framework-free, which is what lets the mode decision be checked
 here rather than in CI: 74 Android tests across §11b, §13 and this section now
 compile and run under `kotlinc` with no SDK.
 
-**Still not built**, and now down to one thing rather than three: the
-`TogetherManager` change that holds a `SessionPlayer` instead of a
-`TogetherPlayer`, plus the two new implementations behind it. The work list, the
+`TogetherManager` holds a `SessionPlayer` as of 2026-08-08. The widening was
+the three declarations expected, but there are **two** narrowing sites in the
+manager rather than one, and the second was missed by the plan:
+
+- `attachSurface` — expected, and correct. A surface is meaningful only to the
+  player that decodes into one; an embed draws into a `WebView` we host and an
+  external session draws in another app's window, so for those this is
+  correctly nothing rather than an override that has to pretend.
+- `openPlayer`'s **reuse arm** — not expected. `val p = player ?:
+  TogetherPlayer(ctx)` takes its type from the left operand, so widening the
+  field silently widened the local too and `setListener`/`open` stopped
+  resolving. Found with a compiler rather than by reading: a negative probe
+  against the real interface produces exactly the three unresolved references.
+
+Both are the file path's `MediaPlayer` semantics, which is what this section
+already says does not survive being made abstract — the plan simply did not
+notice that Kotlin's type inference would drag the local along with the field.
+
+**Still not built**: the two new implementations behind the seam. The work list, the
 exact call sites and the traps are in
 [`docs/TOGETHER_PLAYERS_HANDOFF.md`](TOGETHER_PLAYERS_HANDOFF.md). That file owns the
 foreground-service contract, which `.claude/rules/android.md` names as the most
