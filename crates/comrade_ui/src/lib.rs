@@ -37,7 +37,10 @@ pub mod runtime;
 // verdict and the state change straight to a player. Re-exported here so a
 // bridge depends on `comrade_ui` alone, exactly as it does for every DTO.
 pub use comrade_core::share::transport::{RefusalReason, RelayPolicy};
-pub use comrade_core::share::{ShareOffer, ShareSignal, TransferSignal};
+pub use comrade_core::share::{
+    ReadSample, ReadVerdict, ShareOffer, ShareSignal, TransferSignal, SHARE_PLAYABLE_RUNWAY_MS,
+    SHARE_STALL_FLOOR_MS,
+};
 pub use comrade_core::together::{
     MusicLink, PlayheadControl, Recording, ServiceAccess, StateChange, SyncVerdict, TogetherContent,
 };

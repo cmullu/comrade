@@ -1208,13 +1208,58 @@ things:
   playback and a range that runs past the received prefix is where the tracker's
   answer goes.
 
-Both need one shared decision that does not exist yet: **what to do when the
-runway runs out mid-playback.** §10 rules out reporting buffering to the peer,
-and that rule stands — a stall signalled as a remote pause is the worst ping-pong
-available here. So a starved reader pauses locally, and the next drift verdict is
-what closes the gap. Writing that down is the prerequisite for either frontend,
-because a stall handled two different ways on two devices is a session that
-argues with itself.
+Both need one shared decision, and it now exists in core rather than in either
+of them: `read_verdict` in `crates/comrade_core/src/share.rs`, with
+`ShareTracker::read_verdict_at` as the tracker-side spelling. It answers what a
+reader at a playhead should do — start, keep going, or hold for bytes — built
+**on** `playable_at` and `runway_ms` rather than beside them, so the two answers
+cannot drift apart (a test walks all 1024 arrangements of a ten-chunk file to
+keep them honest).
+
+The rule is two thresholds, not one. Starting costs `SHARE_PLAYABLE_RUNWAY_MS`,
+five seconds of *uninterrupted* audio. Continuing costs only
+`SHARE_STALL_FLOOR_MS`, one second — about one chunk at a typical music bitrate,
+and also the quantum the runway is measured in. The gap between them is the
+whole point: a reader that stopped and started at the same number would sit on
+it and chatter, and one that stopped only at exactly zero would run out inside
+the decoder rather than on a decision. And the end of a file plays at any runway
+at all, because a two-second runway with the last chunk inside it is not a
+transfer running behind — it is a track nearly over, and waiting for more would
+wait forever.
+
+§10's rule is kept by construction rather than by discipline: the verdict has
+three arms and none of them means "tell the peer", so there is nothing to send.
+What that leaves each frontend is one concrete instruction that is easy to get
+wrong. A hold is `together_report_position(pos, playing: false, latency)` — a
+heartbeat, which the peer's next `sync_verdict` reads as "they are not playing"
+and answers by holding rather than correcting. It is **not**
+`together_set_state(.., playing: false, ..)`: that is a command, it takes the
+next sequence number, and it pauses the other person, which is precisely the
+ping-pong §10 rules out.
+
+What the verdict cannot do belongs in the same breath, because a frontend built
+on a misreading of it will look buggy in a way that is not the frontend's fault.
+**It is not a prediction.** Every input is about bytes already here; nothing in
+it knows the transfer's throughput, and `Continue` on five seconds of runway is
+not a promise about the sixth. A transfer that stops dead still stalls — one
+second of playback later per second of runway that was banked. The answer only
+changes when a chunk arrives or the playhead moves, so a reader that asks once
+has learned nothing.
+
+`ComradeRuntime::share_read_verdict` exposes it, stateless and lock-free so it
+can be answered from inside a `MediaDataSource.readAt` or a `Range` handler —
+the only place either frontend needs it, and the place where anything that could
+block would deadlock. The division of labour is the transfer's usual one: the
+frontend owns the bitmap because it owns the bytes, and core owns the
+thresholds.
+
+**One thing this surfaced that is not about playback at all.** A session whose
+clock has converged sends no heartbeat while paused, and the peer ends a session
+after 45 s of silence — so any pause past the TTL ends the evening on both
+devices. That was already true for a user pause; a byte-starved hold now reaches
+it with nobody pressing anything. Recorded in `AUDIT.md`; it needs either a
+keepalive that is not a position claim, or an ending a session can come back
+from.
 
 ## 13. Following what the device is already playing
 
@@ -1354,9 +1399,27 @@ The seam is framework-free, which is what lets the mode decision be checked
 here rather than in CI: 74 Android tests across §11b, §13 and this section now
 compile and run under `kotlinc` with no SDK.
 
-**Still not built**, and now down to one thing rather than three: the
-`TogetherManager` change that holds a `SessionPlayer` instead of a
-`TogetherPlayer`, plus the two new implementations behind it. That file owns the
+`TogetherManager` holds a `SessionPlayer` as of 2026-08-08. The widening was
+the three declarations expected, but there are **two** narrowing sites in the
+manager rather than one, and the second was missed by the plan:
+
+- `attachSurface` — expected, and correct. A surface is meaningful only to the
+  player that decodes into one; an embed draws into a `WebView` we host and an
+  external session draws in another app's window, so for those this is
+  correctly nothing rather than an override that has to pretend.
+- `openPlayer`'s **reuse arm** — not expected. `val p = player ?:
+  TogetherPlayer(ctx)` takes its type from the left operand, so widening the
+  field silently widened the local too and `setListener`/`open` stopped
+  resolving. Found with a compiler rather than by reading: a negative probe
+  against the real interface produces exactly the three unresolved references.
+
+Both are the file path's `MediaPlayer` semantics, which is what this section
+already says does not survive being made abstract — the plan simply did not
+notice that Kotlin's type inference would drag the local along with the field.
+
+**Still not built**: the two new implementations behind the seam. The work list, the
+exact call sites and the traps are in
+[`docs/TOGETHER_PLAYERS_HANDOFF.md`](TOGETHER_PLAYERS_HANDOFF.md). That file owns the
 foreground-service contract, which `.claude/rules/android.md` names as the most
 bug-prone area in the repo, so it wants one deliberate pass — but it is now a
 mechanical pass against a settled interface rather than a design question.

@@ -90,7 +90,14 @@ object TogetherManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var pollJob: Job? = null
 
-    private var player: TogetherPlayer? = null
+    /**
+     * Whoever is holding this session's playback, behind the [SessionPlayer]
+     * seam (`docs/TOGETHER.md` §14) — our own [TogetherPlayer] today, an embed
+     * or an external session once those are built. Everything below drives it
+     * through the interface; the two places that genuinely need the concrete
+     * player ([openPlayer] and [attachSurface]) narrow it back and say why.
+     */
+    private var player: SessionPlayer? = null
     private val suppressor = TogetherDecisions.EchoSuppressor()
     private var scrub = TogetherDecisions.ScrubState(scrubbing = false, pendingRemoteMs = null)
     private var appContext: Context? = null
@@ -196,7 +203,7 @@ object TogetherManager {
         }
     }
 
-    private fun applyCommand(p: TogetherPlayer, posMs: Long, playing: Boolean) {
+    private fun applyCommand(p: SessionPlayer, posMs: Long, playing: Boolean) {
         // A remote seek must not yank the thumb out of a finger mid-drag.
         scrub = TogetherDecisions.onRemoteSeek(scrub, posMs)
         if (scrub.scrubbing) return
@@ -315,7 +322,7 @@ object TogetherManager {
     }
 
     /** Apply a plan, arming its expectations first so nothing echoes back out. */
-    private fun run(p: TogetherPlayer, plan: TogetherDecisions.Plan) {
+    private fun run(p: SessionPlayer, plan: TogetherDecisions.Plan) {
         val now = System.currentTimeMillis()
         plan.expect.forEach { (kind, pos) -> suppressor.expect(kind, pos, now) }
         for (op in plan.ops) {
@@ -440,7 +447,18 @@ object TogetherManager {
         // between being able to hand this file over and only being able to
         // receive one.
         openedPath = if (uri.scheme == null || uri.scheme == "file") uri.path else null
-        val p = player ?: TogetherPlayer(ctx).also { player = it }
+        // This is the **file** path's construction, deliberately concrete: the
+        // listener callbacks below are `MediaPlayer` semantics and do not
+        // survive being made abstract, so a new mode gets a sibling of this
+        // function rather than a generalisation of it (`docs/TOGETHER.md` §14).
+        // The reuse arm therefore narrows: today [player] is only ever a
+        // [TogetherPlayer], so `as?` never fails and this is the same reuse it
+        // has always been. When a second implementation can occupy that field,
+        // this arm needs to release what it is replacing before it overwrites
+        // it — mode is fixed for a session
+        // ([PlaybackModeDecision.mayChangeMidSession]), so that only happens if
+        // that rule is broken.
+        val p = (player as? TogetherPlayer) ?: TogetherPlayer(ctx).also { player = it }
         p.setListener(object : TogetherPlayer.Listener {
             override fun onPrepared(durationMs: Long) {
                 requestAudioFocus()
@@ -494,9 +512,15 @@ object TogetherManager {
      * Called by the screen as its surface is created and destroyed — which
      * happens on every rotation, independently of the session. The player holds
      * the last value, so the order the two arrive in does not matter.
+     *
+     * Narrowed rather than lifted onto [SessionPlayer]: a surface is meaningful
+     * only to the player that decodes into one. An embed draws into a `WebView`
+     * we host and an external session draws in another app's window, so for
+     * those this is correctly nothing at all rather than an override that has to
+     * pretend (`docs/TOGETHER.md` §14).
      */
     fun attachSurface(surface: android.view.Surface?) {
-        player?.attachSurface(surface)
+        (player as? TogetherPlayer)?.attachSurface(surface)
     }
 
     /** The one place a player callback becomes an outbound signal, or does not. */

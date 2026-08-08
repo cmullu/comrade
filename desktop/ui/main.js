@@ -4479,10 +4479,20 @@
 
   const togetherSyncReady = import("./together_sync.mjs");
   const playFlowReady = import("./play_flow.mjs");
+  const streamLinkReady = import("./stream_link.mjs");
   const playerViewReady = import("./player_view.mjs");
 
   /** How long after a correction the player still reads "Catching up…". */
   const CATCHING_UP_MS = 3000;
+
+  /**
+   * How long to wait for a stream URL to open before calling it a miss.
+   *
+   * Generous on purpose: a podcast host on the other side of the world behind a
+   * redirect chain is slow, not broken, and the cost of waiting is a status line
+   * rather than a wrong answer.
+   */
+  const STREAM_OPEN_TIMEOUT_MS = 15000;
 
   const $together = {
     panel: () => $("#together-panel"),
@@ -4541,6 +4551,9 @@
     state.together = Object.assign(state.together || {}, {
       file,
       objectUrl,
+      // Picking a file replaces a stream, and leaving the URL behind would tell
+      // the join and teardown paths this is still a session nobody can hand over.
+      streamUrl: null,
       durationMs: 0,
       suppressor: state.together?.suppressor || createEchoSuppressor({ now: () => performance.now() }),
     });
@@ -4619,6 +4632,20 @@
       showToast("Couldn't work out what to play — nothing was sent.", "warn");
       return;
     }
+    // A link to the media itself is neither a route nor a search: both devices
+    // fetch it, so there is nothing to look for and nothing to hand over. The
+    // decision is `stream_link.mjs`, which needs core's answer first — a Spotify
+    // URL is an https URL too, and only `parse_music_link` knows the difference.
+    const streamLink = await streamLinkReady;
+    const asStream = streamLink.planStream(plan.query, target);
+    if (asStream.kind === streamLink.NOT_HTTPS) {
+      showToast(asStream.message, "warn");
+      return;
+    }
+    if (asStream.kind === streamLink.STREAM) {
+      await startStreamSession(asStream);
+      return;
+    }
     const outcome = flow.planPlay(route, target);
     if (outcome.kind !== flow.PICK) {
       // Every other route is a sentence and nothing else. Said as info rather
@@ -4636,6 +4663,97 @@
     showTogetherPanel();
     showToast(outcome.message, "info");
     $("#together-file").click();
+  }
+
+  /**
+   * `/play <https://…>` — a session on a URL both devices fetch for themselves.
+   *
+   * The order of the two steps is the decision, and it is deliberate: **core
+   * sees the URL before the media element does.** `together_start` runs
+   * `TogetherContent::admissible`, which for a `Stream` is `valid_stream_url` —
+   * so a URL naming the listener's own router, a literal address or a credential
+   * pair is refused with a sentence, and no request is made from this machine at
+   * all. Loading it first to measure its length would make that request before
+   * the check that exists to prevent it, and would buy only a `duration_ms` that
+   * a source both sides fetch from the same place does not need.
+   *
+   * Nothing is transferred: the share/handover path (§9a) is for a file one of
+   * us holds, and neither of us holds this.
+   */
+  async function startStreamSession(link) {
+    const player = $together.player();
+    if (!player || !state.activeContact) return;
+    const streamLink = await streamLinkReady;
+    const { createEchoSuppressor } = await togetherSyncReady;
+    showTogetherPanel();
+    setTogetherStatus("Starting…");
+    let session;
+    try {
+      session = await safeInvoke("together_start", {
+        peer: state.activeContact,
+        contentJson: JSON.stringify(streamLink.streamContent(link.url)),
+      });
+    } catch {
+      // Toasted, and that includes core's own refusal of the URL — which is the
+      // only place a stream URL is judged.
+      setTogetherStatus("Ready to invite");
+      return;
+    }
+    // The file fields are cleared rather than left behind: a stream session has
+    // no local copy, and a stale `file` here is what would offer the last thing
+    // picked to someone who asked about this one.
+    if (state.together?.objectUrl) URL.revokeObjectURL(state.together.objectUrl);
+    state.together = Object.assign(state.together || {}, {
+      sessionId: session.session_id,
+      weLead: true,
+      file: null,
+      objectUrl: null,
+      streamUrl: link.url,
+      // Read off the URL for this window's own stage only; `streamContent` sends
+      // no recording, because a guess is not what the source said.
+      title: link.title,
+      durationMs: 0,
+      pendingInvite: null,
+      suppressor:
+        state.together?.suppressor || createEchoSuppressor({ now: () => performance.now() }),
+    });
+    player.src = link.url;
+    $together.leave().hidden = false;
+    setTogetherStatus("Invited — waiting for them");
+    await watchStreamLoad(player, { endSession: true });
+  }
+
+  /**
+   * Whether the element could open the URL at all, and what to say if not.
+   *
+   * A valid HTTPS URL that turns out to be a web page is the miss core cannot
+   * catch — no pure function knows what a server will return — so this is the
+   * frontend's half of the answer. The timeout is the other half: a host that
+   * accepts the connection and then says nothing would otherwise leave a session
+   * sitting on a player that never opens.
+   */
+  async function watchStreamLoad(player, { endSession }) {
+    const streamLink = await streamLinkReady;
+    const startedFor = state.together?.sessionId;
+    const opened = await new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      player.onloadedmetadata = () => finish(true);
+      player.onerror = () => finish(false);
+      setTimeout(() => finish(false), STREAM_OPEN_TIMEOUT_MS);
+    });
+    player.onloadedmetadata = null;
+    player.onerror = null;
+    // The session may have been left, replaced or ended while we waited, in
+    // which case this answer is about a player nobody is watching.
+    if (!state.together || state.together.sessionId !== startedFor) return;
+    if (opened) return;
+    showToast(streamLink.COULD_NOT_PLAY, "warn");
+    if (endSession) await handleTogetherLeave();
   }
 
   async function handleTogetherInvite() {
@@ -4673,7 +4791,11 @@
       setTogetherStatus("Together");
       // We have no copy of what they are playing: say so, which is what starts
       // the handover. If we *do* have one, the person picks it themselves.
-      if (!state.together?.file) {
+      //
+      // A stream is neither case and must not ask: there is nothing for them to
+      // send, because the URL is the whole of what we needed and this device is
+      // already fetching it for itself.
+      if (!state.together?.file && !state.together?.streamUrl) {
         setShareStatus("Asking them to send it…");
         await sendShareSignal({ step: "ask" });
       }
@@ -4689,18 +4811,39 @@
    */
   async function onTogetherInvited(p) {
     const { createEchoSuppressor } = await togetherSyncReady;
+    const streamLink = await streamLinkReady;
+    // Safe to point an element at, and this is the reason rather than an
+    // assumption: core runs `TogetherContent::admissible` on the way *in* and
+    // drops the invitation before this window hears about it, so a `Stream` URL
+    // that arrives here has been through the same `valid_stream_url` our own
+    // outgoing one was. No frontend re-checks it, by design.
+    const streamUrl = streamLink.streamUrlOf(p.content);
     state.together = Object.assign(state.together || {}, {
       sessionId: p.session_id,
       weLead: false,
       peerDurationMs: p.content?.duration_ms ?? 0,
+      streamUrl,
       suppressor: state.together?.suppressor || createEchoSuppressor({ now: () => performance.now() }),
     });
+    if (streamUrl) {
+      state.together.title = streamLink.streamTitle(streamUrl);
+      const player = $together.player();
+      if (player) {
+        player.src = streamUrl;
+        // Not `endSession`: they invited us and we have not answered yet, so
+        // leaving on their behalf is not ours to do. Say it did not open and
+        // let the person decide.
+        watchStreamLoad(player, { endSession: false });
+      }
+    }
     showTogetherPanel();
     $together.join().hidden = false;
     setTogetherStatus(
-      state.together.file
-        ? "They want to watch together"
-        : "They want to watch together — you don't have it, so they can send it",
+      streamUrl
+        ? "They want to listen to something online — join to open it"
+        : state.together.file
+          ? "They want to watch together"
+          : "They want to watch together — you don't have it, so they can send it",
     );
   }
 
@@ -4717,7 +4860,18 @@
   function onTogetherOver() {
     const player = $together.player();
     if (player) player.pause();
-    if (state.together) state.together.sessionId = null;
+    // A stream holds a connection to someone else's server for as long as the
+    // element holds the source, so the source goes when the session does. A
+    // local file's object URL is left alone — it is ours, and the panel can
+    // still invite it again without picking it twice.
+    if (player && state.together?.streamUrl) {
+      player.removeAttribute("src");
+      player.load();
+    }
+    if (state.together) {
+      state.together.sessionId = null;
+      state.together.streamUrl = null;
+    }
     $together.join().hidden = true;
     $together.leave().hidden = true;
     setTogetherStatus("Not in a session");
@@ -6102,6 +6256,16 @@
     // arrives by two routes (picked here, or handed over by the other device)
     // and only one of them ever waited for metadata.
     $("#together-player").addEventListener("loadedmetadata", applyTogetherPicture);
+    // A stream reaches the element by two routes — typed here, or carried by
+    // their invitation — and neither of them is the file picker, which was the
+    // only place a length was ever measured.
+    $("#together-player").addEventListener("loadedmetadata", async () => {
+      if (!state.together?.streamUrl) return;
+      const streamLink = await streamLinkReady;
+      const player = $together.player();
+      if (!state.together?.streamUrl || !player) return;
+      state.together.durationMs = streamLink.durationMsFrom(player.duration);
+    });
 
     // ── The Together tab's own transport ──────────────────────────────────
     //

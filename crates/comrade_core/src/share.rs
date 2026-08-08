@@ -65,6 +65,33 @@ pub const SHARE_CHUNK_BYTES: u32 = 16 * 1024;
 /// runway is the same trade every progressive player makes.
 pub const SHARE_PLAYABLE_RUNWAY_MS: u64 = 5_000;
 
+/// How little runway a reader that is *already playing* may run down to before
+/// it stops and waits.
+///
+/// Two numbers rather than one, deliberately. A reader that stopped and started
+/// at the same threshold would sit on it and chatter — stop, one chunk arrives,
+/// start, stop again — and a reader that only stopped at exactly zero would hit
+/// the end of its bytes inside the decoder rather than on a decision, which on
+/// Android is a `MediaDataSource.readAt` with nothing to return. So starting
+/// costs [`SHARE_PLAYABLE_RUNWAY_MS`] and continuing costs this, and the gap
+/// between them is the hysteresis.
+///
+/// A second's worth is about one [`SHARE_CHUNK_BYTES`] chunk of a typical music
+/// bitrate (16 KiB at 128 kbps is 1.02 s), which is also the quantum
+/// [`ShareTracker::runway_ms`] measures in — so this is "roughly one chunk of
+/// slack", not a tuned constant, and it has to stay well under
+/// [`SHARE_PLAYABLE_RUNWAY_MS`] or the hysteresis collapses back into one
+/// threshold.
+pub const SHARE_STALL_FLOOR_MS: u64 = 1_000;
+
+// Checked here rather than in a test because editing one of the two numbers is
+// exactly how the pair goes wrong, and a pair that has stopped being hysteresis
+// should not build. A floor of zero would stall inside the decoder instead of on
+// a decision; a floor at or near the start threshold is one threshold wearing two
+// names, and the reader chatters across it.
+const _: () = assert!(SHARE_STALL_FLOOR_MS > 0);
+const _: () = assert!(SHARE_STALL_FLOOR_MS * 2 < SHARE_PLAYABLE_RUNWAY_MS);
+
 /// What one side has and is willing to send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct ShareOffer {
@@ -202,18 +229,37 @@ impl ShareTracker {
         contiguous * self.offer.chunk_ms()
     }
 
+    /// Whether every chunk from `pos_ms` to the end of the file is already here.
+    ///
+    /// The difference between "short runway" and "short *file*": a runway of two
+    /// seconds with the end of the file inside it is not a transfer running
+    /// behind, it is a track that is nearly over, and waiting for more would wait
+    /// forever.
+    pub fn tail_complete_at(&self, pos_ms: u64) -> bool {
+        self.is_complete()
+            || (self.chunk_at_ms(pos_ms)..self.offer.chunk_count()).all(|i| self.has(i))
+    }
+
     /// Whether playback may start (or resume) at `pos_ms`.
     ///
     /// Either there is enough runway, or the rest of the file is here and the
     /// runway is simply all that remains — a track with two seconds left is
     /// playable even though two seconds is under the threshold.
     pub fn playable_at(&self, pos_ms: u64) -> bool {
-        if self.is_complete() {
-            return true;
-        }
-        let start = self.chunk_at_ms(pos_ms);
-        let tail_is_all_here = (start..self.offer.chunk_count()).all(|i| self.has(i));
-        tail_is_all_here || self.runway_ms(pos_ms) >= SHARE_PLAYABLE_RUNWAY_MS
+        self.tail_complete_at(pos_ms) || self.runway_ms(pos_ms) >= SHARE_PLAYABLE_RUNWAY_MS
+    }
+
+    /// What a reader at `pos_ms` should do, given what has arrived —
+    /// [`read_verdict`] over this tracker's own numbers.
+    ///
+    /// `playing` is whether sound is coming out *right now*, which is what picks
+    /// the threshold: see [`SHARE_STALL_FLOOR_MS`].
+    pub fn read_verdict_at(&self, pos_ms: u64, playing: bool) -> ReadVerdict {
+        read_verdict(&ReadSample {
+            playing,
+            runway_ms: self.runway_ms(pos_ms),
+            tail_complete: self.tail_complete_at(pos_ms),
+        })
     }
 
     /// What to ask for next, given where the listener is.
@@ -243,6 +289,115 @@ impl ShareTracker {
     fn first_gap_at_or_after(&self, start: u32) -> Option<u32> {
         (start..self.offer.chunk_count()).find(|i| !self.has(*i))
     }
+}
+
+// ── Playing it before it has all arrived ─────────────────────────────────────
+
+/// What a reader should do at the playhead it is at.
+///
+/// Three answers, and the fourth one is missing on purpose: **nothing here is
+/// ever sent to the other person.** `docs/TOGETHER.md` §10 rules out reporting
+/// buffering, because a stall signalled as a remote pause is the worst
+/// ping-pong available — one side stalls, pauses the other, and that pause makes
+/// the first re-evaluate. So there is no wire signal for [`Self::Hold`], and
+/// adding one is the change this enum exists to make people argue about first.
+///
+/// Internally tagged (`{"kind":"hold"}`) like
+/// [`crate::together::SyncVerdict`], so a frontend switches on `kind` and
+/// uniffi hands over a closed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReadVerdict {
+    /// The bytes are there to begin here — or to resume from a [`Self::Hold`].
+    ///
+    /// It is permission, not an instruction: it says the *transfer* is no longer
+    /// a reason not to play, and says nothing about whether the session wants
+    /// to. A player the person paused, or one a `pause` command from the peer
+    /// paused, stays paused.
+    Start,
+    /// Keep going. There is less here than starting would have needed, and more
+    /// than stopping for is worth — see [`SHARE_STALL_FLOOR_MS`].
+    Continue,
+    /// Stop the player **on this device only** and wait for bytes.
+    ///
+    /// Concretely, on a frontend: pause the local player and keep asking for
+    /// chunks. Do *not* express it as `together_set_state(.., playing: false,
+    /// ..)` — that is a command, it takes the next sequence number and it pauses
+    /// the other person, which is exactly the ping-pong §10 forbids. Report it
+    /// as position instead (`together_report_position(pos, false, latency)`),
+    /// which travels only as a heartbeat: the peer's next
+    /// [`sync_verdict`](crate::together::sync_verdict) sees a peer that is not
+    /// playing and holds rather than correcting, and when the bytes arrive and
+    /// this side plays again, the verdict after that closes the gap.
+    Hold,
+}
+
+/// The three facts [`read_verdict`] decides from, gathered by the caller.
+///
+/// A separate struct from [`ShareTracker`] because the tracker is not always on
+/// this side of the boundary: the desktop keeps a JS twin of it in
+/// `share_transfer.mjs` (it needs answers inside a synchronous event handler)
+/// and Android will keep one next to the file it is writing. Those are facts
+/// about their own bitmap, which is theirs to know; the thresholds are policy,
+/// which is not. This split is what lets a frontend hold the bytes and still not
+/// own the decision — the same division [`transport::chunks_to_send`] makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadSample {
+    /// Whether sound is coming out of this device right now.
+    ///
+    /// Not "does the session want to play" — this only picks which threshold
+    /// applies, because the cost of stopping a running player is a stutter and
+    /// the cost of not starting one is a wait.
+    pub playing: bool,
+    /// [`ShareTracker::runway_ms`] at the playhead.
+    pub runway_ms: u64,
+    /// [`ShareTracker::tail_complete_at`] at the playhead.
+    pub tail_complete: bool,
+}
+
+/// The whole starve policy, in one pure function so both frontends inherit the
+/// same answer instead of each inventing one.
+///
+/// The rule, in full:
+///
+/// 1. **Everything from here to the end of the file has arrived** — play, at any
+///    runway. Nothing more is coming, so waiting waits forever.
+/// 2. **At least [`SHARE_PLAYABLE_RUNWAY_MS`] of uninterrupted audio** — play.
+/// 3. **Already playing, and at least [`SHARE_STALL_FLOOR_MS`] left** — keep
+///    going. This is the whole of the hysteresis: what is too little to start on
+///    is not too little to carry on with.
+/// 4. **Otherwise hold** — locally, silently, as [`ReadVerdict::Hold`] says.
+///
+/// What it deliberately does **not** promise:
+///
+/// - **It is not a prediction.** Every input is about bytes that are *already
+///   here*; nothing in it knows the throughput of the transfer, and a
+///   [`ReadVerdict::Continue`] on five seconds of runway is not a claim that the
+///   sixth second will arrive in time. A transfer that stops dead still stalls,
+///   one second of playback later per second of runway. The only thing that
+///   makes the answer change is a chunk arriving (or the playhead moving), so a
+///   caller that never re-asks never learns.
+/// - **The runway it is given is quantised and approximate.** `runway_ms` counts
+///   whole chunks from the *start* of the chunk holding the playhead, so it
+///   over-states by up to a chunk, and `chunk_ms` assumes a constant bitrate
+///   which a VBR file is not. Being a chunk out costs a second of buffering,
+///   not correctness — which is also why the floor is about a chunk wide.
+/// - **It says nothing about sync.** Holding takes this device out of step with
+///   the other one by exactly as long as the hold; closing that gap is
+///   [`sync_verdict`](crate::together::sync_verdict)'s job on the next pass, and
+///   it can only do it once this side reports itself playing again.
+pub fn read_verdict(s: &ReadSample) -> ReadVerdict {
+    if s.tail_complete || s.runway_ms >= SHARE_PLAYABLE_RUNWAY_MS {
+        return if s.playing {
+            ReadVerdict::Continue
+        } else {
+            ReadVerdict::Start
+        };
+    }
+    if s.playing && s.runway_ms >= SHARE_STALL_FLOOR_MS {
+        return ReadVerdict::Continue;
+    }
+    ReadVerdict::Hold
 }
 
 // ── The wire: getting from "I don't have it" to a live connection ────────────
@@ -491,6 +646,180 @@ mod tests {
             t.playable_at(8_000),
             "there is nothing more coming; waiting for a runway would wait forever"
         );
+    }
+
+    // ── Starving mid-playback ───────────────────────────────────────────────
+
+    /// The whole point of two thresholds: what is too little to start on is not
+    /// too little to carry on with.
+    #[test]
+    fn a_reader_starts_on_a_full_runway_and_carries_on_over_a_shorter_one() {
+        let mut t = ten_seconds();
+        for i in 0..2 {
+            t.accept(i);
+        }
+        assert_eq!(
+            t.read_verdict_at(0, false),
+            ReadVerdict::Hold,
+            "two seconds is not enough to start on"
+        );
+        assert_eq!(
+            t.read_verdict_at(0, true),
+            ReadVerdict::Continue,
+            "but a player already running rides those two seconds out"
+        );
+        for i in 2..5 {
+            t.accept(i);
+        }
+        assert_eq!(t.read_verdict_at(0, false), ReadVerdict::Start);
+        assert_eq!(t.read_verdict_at(0, true), ReadVerdict::Continue);
+    }
+
+    /// The case §10 is about: the bytes ran out under a playing reader.
+    #[test]
+    fn a_starved_reader_holds_rather_than_stuttering_into_a_gap() {
+        let mut t = ten_seconds();
+        for i in [0, 1, 2, 3, 4, 6, 7, 8, 9] {
+            t.accept(i);
+        }
+        // Playing into the hole at chunk 5: the chunk under the playhead is not
+        // here at all, so there is nothing to decode however much lies beyond.
+        assert_eq!(t.runway_ms(5_000), 0);
+        assert_eq!(t.read_verdict_at(5_000, true), ReadVerdict::Hold);
+        // And past the hole there is a whole tail, so the same tracker says play.
+        assert_eq!(t.read_verdict_at(6_000, false), ReadVerdict::Start);
+    }
+
+    /// Without this the reader chatters: hold, one chunk lands, start, stop.
+    #[test]
+    fn a_reader_that_held_needs_the_full_runway_again_not_a_scrap() {
+        let mut t = ten_seconds();
+        t.accept(0);
+        assert_eq!(t.read_verdict_at(0, false), ReadVerdict::Hold);
+        for i in 1..3 {
+            t.accept(i);
+        }
+        assert_eq!(
+            t.read_verdict_at(0, false),
+            ReadVerdict::Hold,
+            "three seconds would start a player that stops again immediately"
+        );
+        for i in 3..5 {
+            t.accept(i);
+        }
+        assert_eq!(t.read_verdict_at(0, false), ReadVerdict::Start);
+    }
+
+    #[test]
+    fn the_last_seconds_of_a_file_are_played_even_though_the_runway_is_short() {
+        let mut t = ten_seconds();
+        t.accept(8);
+        t.accept(9);
+        assert!(t.runway_ms(8_000) < SHARE_PLAYABLE_RUNWAY_MS);
+        assert!(t.tail_complete_at(8_000));
+        assert_eq!(
+            t.read_verdict_at(8_000, false),
+            ReadVerdict::Start,
+            "nothing more is coming; holding here would hold forever"
+        );
+        assert_eq!(t.read_verdict_at(8_000, true), ReadVerdict::Continue);
+    }
+
+    /// `playable_at` is the older answer to the same question and the two must
+    /// not drift apart, so every arrangement of a ten-chunk file is checked
+    /// against it rather than a handful of chosen ones.
+    #[test]
+    fn starting_agrees_with_playable_at_for_every_arrangement_of_chunks() {
+        for bits in 0u32..1024 {
+            let mut t = ten_seconds();
+            for i in 0..10 {
+                if bits & (1 << i) != 0 {
+                    t.accept(i);
+                }
+            }
+            for pos in (0..10_000).step_by(1_000) {
+                assert_eq!(
+                    t.read_verdict_at(pos, false) == ReadVerdict::Start,
+                    t.playable_at(pos),
+                    "bits {bits:#012b} at {pos} ms"
+                );
+                // And a running player is never told to stop where a stopped one
+                // would have been allowed to start.
+                if t.playable_at(pos) {
+                    assert_eq!(t.read_verdict_at(pos, true), ReadVerdict::Continue);
+                }
+            }
+        }
+    }
+
+    /// Both thresholds are `>=`, and a frontend porting the rule needs to know
+    /// which side of each boundary it is on.
+    #[test]
+    fn each_threshold_is_an_exact_boundary_and_not_an_approximate_one() {
+        let at = |runway_ms, playing| {
+            read_verdict(&ReadSample {
+                playing,
+                runway_ms,
+                tail_complete: false,
+            })
+        };
+        assert_eq!(at(SHARE_PLAYABLE_RUNWAY_MS, false), ReadVerdict::Start);
+        assert_eq!(at(SHARE_PLAYABLE_RUNWAY_MS - 1, false), ReadVerdict::Hold);
+        assert_eq!(at(SHARE_STALL_FLOOR_MS, true), ReadVerdict::Continue);
+        assert_eq!(at(SHARE_STALL_FLOOR_MS - 1, true), ReadVerdict::Hold);
+        assert_eq!(
+            at(0, true),
+            ReadVerdict::Hold,
+            "nothing to decode is a hold"
+        );
+        assert_eq!(
+            at(0, false),
+            ReadVerdict::Hold,
+            "and an empty runway never starts anything"
+        );
+    }
+
+    /// A verdict is a decision about this device. There is no arm for telling
+    /// the peer, and the tags are what the desktop switches on.
+    #[test]
+    fn every_read_verdict_round_trips_and_none_of_them_names_the_peer() {
+        for (verdict, tag) in [
+            (ReadVerdict::Start, "start"),
+            (ReadVerdict::Continue, "continue"),
+            (ReadVerdict::Hold, "hold"),
+        ] {
+            let json = serde_json::to_string(&verdict).expect("serialises");
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["kind"], tag);
+            assert_eq!(
+                value.as_object().map(|o| o.len()),
+                Some(1),
+                "a verdict carries a decision and nothing to send: {json}"
+            );
+            let back: ReadVerdict = serde_json::from_str(&json).expect("parses");
+            assert_eq!(back, verdict);
+        }
+    }
+
+    /// The frontends call the free function with their own tracker's numbers,
+    /// so that path is pinned directly too.
+    #[test]
+    fn a_frontends_own_numbers_get_the_same_answer_as_the_tracker() {
+        let mut t = ten_seconds();
+        for i in 0..3 {
+            t.accept(i);
+        }
+        for (pos, playing) in [(0, false), (0, true), (2_000, true), (9_000, false)] {
+            assert_eq!(
+                read_verdict(&ReadSample {
+                    playing,
+                    runway_ms: t.runway_ms(pos),
+                    tail_complete: t.tail_complete_at(pos),
+                }),
+                t.read_verdict_at(pos, playing),
+                "at {pos} ms, playing {playing}"
+            );
+        }
     }
 
     // ── Receiver-driven fetching ────────────────────────────────────────────
