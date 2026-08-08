@@ -5148,10 +5148,16 @@ pub struct RuntimeHandles {
     /// deduped on one path is deduped on the other. Carried here because
     /// [`Self::together_receive_direct`] rebuilds that link.
     together_starts_seen: Arc<SeenSet>,
-    /// The share half of the same set, carried for the same reason. The direct
-    /// path never adds to it — it has no wrapper id to add — but the link it
-    /// rebuilds is the one the relay path also uses, and two sets would mean a
-    /// signal deduped on one path was not on the other.
+    /// Carried because [`Self::together_receive_direct`] has to build a whole
+    /// [`TogetherLink`] and that struct has this field — **not** for the reason
+    /// above it. The direct path passes `None` for the event id, having no
+    /// wrapper to key on, so it neither reads nor writes this set; unlike
+    /// `together_starts_seen`, nothing is actually shared through it today.
+    ///
+    /// It is the runtime's own set rather than a fresh one all the same, because
+    /// a fresh one would be a second share set with nothing to reveal that it
+    /// had diverged, and this is where an event id would first appear if that
+    /// channel ever grew one.
     together_shares_seen: Arc<SeenSet>,
 }
 
@@ -8081,14 +8087,29 @@ fn handle_together_envelope(
             });
         }
         TogetherSignal::Share { signal } => {
-            // The one signal here that a redelivery is not already harmless to:
-            // it carries no Lamport stamp to lose an ordering against, and the
-            // frontend it reaches is not idempotent — Android's `armSend` /
-            // `armReceive` overwrite the live `Session`, so a re-delivered `Ask`
-            // ends the transfer that was working (AUDIT.md Q18). Comrade replays
-            // gift-wraps deliberately (`inbox_since` widens the subscription
-            // floor back to the watermark on every reconnect), so this is a
-            // routine arrival, not a hostile one.
+            // The one signal here with no ordering of its own to make a
+            // redelivery harmless: no Lamport stamp to lose against, and no
+            // idempotent effect to fall back on. Comrade replays gift-wraps
+            // deliberately — `inbox_since` widens the subscription floor back to
+            // the watermark on every reconnect — so a second copy is a routine
+            // arrival and not a hostile one (AUDIT.md Q18).
+            //
+            // The frontends guard themselves as well, and the two are not
+            // redundant, because they reach different distances. Android's
+            // `ShareDecisions.decideArm` is the precise one: it refuses only
+            // while a *matching* transfer is live, so a redelivery arriving
+            // after the first copy achieved nothing still works. But it is
+            // consulted at the two arming points only — `FileTransfer.onTransport`
+            // has no redelivery guard of its own — and by then `offerOurCopy`
+            // has already hashed the whole file. This one is coarser, stops the
+            // copy earlier, and holds for every frontend rather than the one
+            // that implemented it.
+            //
+            // What the coarseness can cost is bounded by the age gate at the top
+            // of this function: nothing older than
+            // `TOGETHER_SIGNAL_MAX_AGE_SECS` reaches here at all, so this can
+            // only suppress a retry inside the same minute in which a retry was
+            // possible in the first place.
             //
             // Keyed by the wrapper's event id and nothing else, which is what
             // makes it safe over a negotiation: a second ICE candidate is a
