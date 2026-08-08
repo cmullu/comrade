@@ -504,9 +504,65 @@
     <string name="together_notification_title">Watching together</string>
     <string name="together_notification_with">With %1$s</string>
     <string name="together_leave">Leave</string>
-    <string name="together_title">Watch together</string>
-    <string name="together_invite_action">Watch together</string>
-    <string name="together_pick_file">Open a file you both have</string>
+
+    <!--
+      The Together tab's own screen. "Listen", not "watch", because music is what
+      this is for most of the time and a film is the special case — the reverse of
+      how the feature was worded when the only way in was a ▶ in a chat header.
+    -->
+    <string name="together_home_title">Listen together</string>
+    <string name="together_home_subtitle">Pick something, pick someone. You’ll both hear it at the same moment.</string>
+    <!--
+      The disclosure, up front rather than buried: nothing is uploaded and nothing
+      is transferred, because both devices play their own copy. That is the whole
+      design (docs/TOGETHER.md §1) and it is the thing people assume is untrue.
+    -->
+    <string name="together_home_note">Nothing is uploaded. You each play your own copy, and only the play, pause and position travel between you.</string>
+    <string name="together_source_phone">Music on this phone</string>
+    <string name="together_source_phone_note">Everything in your library</string>
+    <string name="together_source_phone_locked">Needs permission to look</string>
+    <string name="together_source_file">Open a file</string>
+    <string name="together_source_file_note">Anything on the device — music or video</string>
+    <string name="together_source_link">Paste a link</string>
+    <string name="together_source_link_note">A YouTube video, or a podcast episode</string>
+    <string name="together_back">Back</string>
+
+    <string name="together_library_search">Search your music</string>
+    <string name="together_library_loading">Reading your library…</string>
+    <string name="together_library_empty">No music on this phone yet.</string>
+    <string name="together_library_no_match">Nothing here matches that.</string>
+    <string name="together_library_why">To list your music, Comrade needs permission to read it. It looks at nothing else, and the file never leaves this phone.</string>
+    <string name="together_library_allow">Allow</string>
+    <!-- Android shows no dialog after a refusal, so Settings is the only route left. -->
+    <string name="together_library_refused">Comrade isn’t allowed to read your music. You can turn that on in Android’s app settings — or open a file by hand instead.</string>
+    <string name="together_library_truncated">Showing the first 2,000 tracks. Search to find the rest.</string>
+
+    <string name="together_link_explainer">A YouTube link plays for both of you. So does a direct link to an audio or video file — a podcast episode, an Internet Archive track — which you each fetch yourselves.</string>
+    <string name="together_link_placeholder">Paste a link</string>
+    <string name="together_link_go">Play this</string>
+    <!-- Names what would work rather than what was wrong. -->
+    <string name="together_link_refused">That isn’t something Comrade can play. A YouTube link works, or an https link that points straight at an audio or video file.</string>
+    <string name="together_could_not_play">That didn’t play. If it was a link, it may not point straight at an audio or video file.</string>
+
+    <string name="together_who_title">Who with?</string>
+    <string name="together_who_note">They’ll be asked, and nothing starts on their phone until they say yes.</string>
+    <string name="together_who_search">Search people</string>
+    <string name="together_who_loading">Looking…</string>
+    <string name="together_who_nobody">Nobody to ask yet — start a conversation first.</string>
+    <string name="together_who_no_match">No one here matches that.</string>
+    <string name="together_who_online">online</string>
+    <string name="together_start_failed">That couldn\'t be started. Try something else, or a different link.</string>
+
+    <string name="together_with">with %1$s</string>
+    <string name="together_play">Play</string>
+    <string name="together_pause">Pause</string>
+    <string name="together_back_ten">−10s</string>
+    <string name="together_forward_ten">+10s</string>
+
+    <string name="together_join_stream">Listen</string>
+    <string name="together_stream_join_note">Your phone fetches the same link theirs is playing. Nothing is copied between you.</string>
+    <string name="together_invite_notification_title">%1$s wants to listen with you</string>
+    <string name="together_invite_notification_text">Open Comrade to join</string>
     <string name="together_invited">%1$s wants to watch %2$s with you</string>
     <string name="together_join">Join</string>
     <string name="together_not_now">Not now</string>

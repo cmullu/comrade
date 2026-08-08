@@ -643,4 +643,250 @@ object TogetherDecisions {
      */
     fun keepScreenOn(picture: Picture, playing: Boolean): Boolean =
         playing && picture is Picture.Video
+
+    // ── Choosing something to play, and someone to play it with ─────────────
+    //
+    // The Together tab is the one place a session starts from, which means this
+    // is where "pick music" and "pick a person" have to be decided. All of it
+    // is here rather than in the composable for the reason the file header
+    // gives: `ui/TogetherScreen.kt` imports Android and Compose, so the JVM
+    // lane cannot see a single line of it, and CI is several minutes away.
+
+    /** How the clock is written under the scrubber. */
+    private const val MS_PER_SECOND = 1_000L
+    private const val SECONDS_PER_MINUTE = 60L
+    private const val MINUTES_PER_HOUR = 60L
+
+    /**
+     * A playhead as a clock — `3:07`, or `1:02:33` once it earns the hours.
+     *
+     * The hour field appears only when there is one, because a two-minute song
+     * showing `0:02:07` is the shape a transport control gets wrong and then
+     * nobody trusts. Truncated rather than rounded, so the label never shows a
+     * second the playhead has not reached.
+     *
+     * A negative reading is `0:00`: a player that reports one is broken, and the
+     * clock's job at that moment is to be unremarkable rather than to display a
+     * minus sign.
+     */
+    fun clock(ms: Long): String {
+        val total = (ms.coerceAtLeast(0)) / MS_PER_SECOND
+        val seconds = total % SECONDS_PER_MINUTE
+        val minutes = (total / SECONDS_PER_MINUTE) % MINUTES_PER_HOUR
+        val hours = total / (SECONDS_PER_MINUTE * MINUTES_PER_HOUR)
+        return if (hours > 0) {
+            "$hours:${pad(minutes)}:${pad(seconds)}"
+        } else {
+            "$minutes:${pad(seconds)}"
+        }
+    }
+
+    private fun pad(value: Long): String = if (value < 10) "0$value" else value.toString()
+
+    /**
+     * What goes on the right of the scrubber, or `null` when nothing honest can.
+     *
+     * A length of zero is not a length — it is what an embed reports before it
+     * loads and what an external session reports always — so this returns
+     * nothing rather than `0:00`, which would be a claim that the track has
+     * ended. That is the same rule the slider itself follows in
+     * `ui/TogetherScreen.kt`, stated once so the two cannot disagree.
+     *
+     * Counts **down**, and is written with a leading `-`. A remaining figure is
+     * what someone deciding whether to start the next thing actually wants, and
+     * the sign is what stops it reading as the total.
+     */
+    fun remainingClock(positionMs: Long, durationMs: Long): String? {
+        if (durationMs <= 0) return null
+        val left = (durationMs - positionMs).coerceIn(0, durationMs)
+        return "-${clock(left)}"
+    }
+
+    /**
+     * One row in the phone's own music library.
+     *
+     * No `Uri` and no `Context`: this is the shape the pure half reasons about,
+     * and `MusicLibrary` is what turns `MediaStore` rows into it. `uri` is
+     * carried as the string form for the same reason — a `android.net.Uri` here
+     * would put an Android import in the one file that must not have one.
+     */
+    data class Track(
+        val uri: String,
+        val title: String,
+        val artist: String,
+        val album: String?,
+        val durationMs: Long,
+        /** For artwork. `null` on a row `MediaStore` gave no album for. */
+        val albumId: Long?,
+    )
+
+    /**
+     * The line under a track's title — artist, album and length, minus whatever
+     * the file did not say.
+     *
+     * Joined with the separator rather than a template so a track with no artist
+     * does not read " · Unknown · 3:07". `MediaStore` writes the literal string
+     * `<unknown>` into the artist column for a file with no tag, which is a
+     * detail of the provider rather than a thing to show someone — so it is
+     * treated as absent here, where every caller inherits the answer.
+     */
+    fun trackSubtitle(track: Track): String = listOfNotNull(
+        track.artist.takeIf { it.isNotBlank() && it != MEDIASTORE_UNKNOWN },
+        track.album?.takeIf { it.isNotBlank() && it != MEDIASTORE_UNKNOWN },
+        track.durationMs.takeIf { it > 0 }?.let { clock(it) },
+    ).joinToString(SUBTITLE_SEPARATOR)
+
+    /** `MediaStore`'s placeholder for a tag the file does not carry. */
+    const val MEDIASTORE_UNKNOWN = "<unknown>"
+
+    const val SUBTITLE_SEPARATOR = " · "
+
+    /**
+     * The library, filtered by what has been typed into the search field.
+     *
+     * Every word has to appear *somewhere* in the row — title, artist or album —
+     * rather than the whole phrase appearing in one field. That is what makes
+     * "rahman kun" find "Kun Faya Kun" by A. R. Rahman, which is how people
+     * actually search for music they already own, and it is the one behaviour
+     * worth having over `MediaStore`'s own `LIKE`.
+     *
+     * Order is preserved: the caller sorted by title in the query, and a filter
+     * that also re-ranked would make the list jump under the finger as
+     * characters arrive.
+     */
+    fun filterTracks(tracks: List<Track>, query: String): List<Track> {
+        val words = query.trim().lowercase().split(' ').filter { it.isNotBlank() }
+        if (words.isEmpty()) return tracks
+        return tracks.filter { track ->
+            val haystack = buildString {
+                append(track.title.lowercase())
+                append(' ')
+                append(track.artist.lowercase())
+                append(' ')
+                append(track.album?.lowercase().orEmpty())
+            }
+            words.all { haystack.contains(it) }
+        }
+    }
+
+    /**
+     * What the Together tab can offer, given what it is allowed to do.
+     *
+     * Three sources, and the screen shows all three of them whatever the
+     * permission state is — what changes is the *step* each one takes. A source
+     * that vanished when a permission was refused would leave someone with no
+     * way back to it, which is the failure the invitation screen's
+     * `MediaLibraryAccess.next` already avoids for the same permission.
+     */
+    sealed interface Source {
+        /**
+         * The phone's own music. [needsPermission] when the library has not
+         * been granted — the browser then shows the ask rather than an empty
+         * list, because "no music on this phone" and "not allowed to look" are
+         * different sentences.
+         */
+        data class OnThisPhone(val needsPermission: Boolean) : Source
+
+        /** A file picked by hand. Needs no permission — SAF grants per file. */
+        data object PickAFile : Source
+
+        /** A pasted link: a video, or a public media URL. */
+        data object FromALink : Source
+    }
+
+    /**
+     * The sources, in the order they are offered.
+     *
+     * On-device first, deliberately: it is the one that needs no typing, no
+     * network and no account, and it is what "listen to music together" means
+     * most of the time. The link field is last because it is the only one that
+     * needs a keyboard.
+     */
+    fun sources(libraryGranted: Boolean): List<Source> = listOf(
+        Source.OnThisPhone(needsPermission = !libraryGranted),
+        Source.PickAFile,
+        Source.FromALink,
+    )
+
+    /**
+     * What a pasted link turns out to be.
+     *
+     * **The classification is core's, and this only orders the two answers it
+     * gives.** `play_query` knows the service hosts and `TogetherContent::stream`
+     * knows what a media URL is; a third opinion in Kotlin is exactly the drift
+     * `docs/CHAT_ACTIONS.md` §7 records for `/pay`. So the caller passes what
+     * core said and this decides which of them wins.
+     */
+    sealed interface Link {
+        /** A YouTube video, playable in the embed. */
+        data class Video(val videoId: String) : Link
+
+        /** One public HTTPS media URL both devices will fetch for themselves. */
+        data class Stream(val url: String) : Link
+
+        /**
+         * Neither — words, or a link to a page rather than to media.
+         *
+         * Deliberately one answer for both: the next step is the same, which is
+         * to look for it in the library, and a screen that told them apart would
+         * be claiming to know which it was.
+         */
+        data object NotPlayable : Link
+    }
+
+    /**
+     * Order the two answers core gave for the same text.
+     *
+     * A YouTube link wins, and the reason is the trap: `https://youtu.be/…` is a
+     * perfectly valid HTTPS URL, so a stream check that ran first would point a
+     * `MediaPlayer` at a web page and produce a blank screen instead of a video.
+     * `desktop/ui/stream_link.mjs` makes the same ordering for the same reason.
+     *
+     * @param videoId what `play_query` resolved a YouTube link to, or `null`
+     * @param streamUrl what `TogetherContent::stream` accepted, or `null`
+     */
+    fun classifyLink(videoId: String?, streamUrl: String?): Link = when {
+        !videoId.isNullOrBlank() -> Link.Video(videoId)
+        !streamUrl.isNullOrBlank() -> Link.Stream(streamUrl)
+        else -> Link.NotPlayable
+    }
+
+    /** Someone a session can be started with. */
+    data class Listener(val npub: String, val label: String, val comrade: Boolean, val online: Boolean)
+
+    /**
+     * Who to offer, and in what order.
+     *
+     * Comrades before everyone else and online before offline, because starting
+     * a session is asking for someone's attention *now* — the person who is
+     * there is the one it makes sense to ask. Alphabetical within each group so
+     * the list is stable between openings; a list that reorders itself is one
+     * where the wrong person gets tapped.
+     *
+     * The search is the same word-wise match [filterTracks] uses, over the one
+     * field a person has.
+     */
+    fun listenersFor(all: List<Listener>, query: String): List<Listener> {
+        val words = query.trim().lowercase().split(' ').filter { it.isNotBlank() }
+        return all
+            .filter { listener ->
+                words.isEmpty() || words.all { listener.label.lowercase().contains(it) }
+            }
+            .sortedWith(
+                compareByDescending<Listener> { it.comrade }
+                    .thenByDescending { it.online }
+                    .thenBy { it.label.lowercase() }
+                    .thenBy { it.npub },
+            )
+    }
+
+    /**
+     * Whether the scrubber may be dragged.
+     *
+     * Not the same question as whether to *draw* one. An external session
+     * reports no duration we can trust, so there is no distance for a thumb to
+     * express — and a scrubber that moves but lands nowhere is worse than none,
+     * which is the same judgement `ui/TogetherScreen.kt` already made for it.
+     */
+    fun scrubbable(durationMs: Long, external: Boolean): Boolean = !external && durationMs > 0
 }

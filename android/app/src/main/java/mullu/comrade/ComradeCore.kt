@@ -1143,6 +1143,16 @@ object ComradeCore {
     fun togetherMatchConfident(): Double =
         runCatching { ffi.togetherMatchConfident() }.getOrDefault(1.0)
 
+    /**
+     * A session on one public HTTPS media URL, or `null` if the text is not one.
+     *
+     * Core's parser, not ours — the same reason [parseMusicLinkTyped] exists.
+     * `null` covers both "not a link" and "a link with no media at the end of
+     * it", which the caller wants to treat the same way: as words to look for.
+     */
+    fun togetherStreamContentTyped(input: String): uniffi.comrade_core.TogetherContent? =
+        runCatching { ffi.togetherStreamContent(input) }.getOrNull()
+
     /** Invite `peer` to watch or listen to `content` together. */
     fun togetherStartTyped(peer: String, content: uniffi.comrade_core.TogetherContent) {
         rethrowing("Watch together") { runBlocking { ffi.togetherStart(peer, content) } }

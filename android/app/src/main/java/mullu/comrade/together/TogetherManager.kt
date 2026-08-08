@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import mullu.comrade.ComradeCore
+import mullu.comrade.Notifier
 import mullu.comrade.transfer.ShareReadPolicy
 
 /**
@@ -127,6 +128,20 @@ object TogetherManager {
             val driftMs: Long = 0,
             val qualityMs: Long = 0,
             val correctedAtMs: Long = 0,
+            /**
+             * What our own player was pointed at, so the screen can look for a
+             * cover to draw.
+             *
+             * A string rather than a `Uri` for the same reason
+             * [TogetherDecisions.Track] carries one: this is read by code that
+             * is easier to keep honest without Android types in it, and nothing
+             * here parses it — [MusicLibrary.artwork] is the only reader.
+             *
+             * Null for an embed and for an external session, which is not a gap
+             * to fill: an embed draws its own thumbnail inside the player, and
+             * another app's artwork is in another app's window.
+             */
+            val sourceUri: String? = null,
         ) : UiState
     }
 
@@ -162,6 +177,16 @@ object TogetherManager {
      * person decides, and the id is what [joinEmbed] needs when they do.
      */
     private var wantedVideoId: String? = null
+
+    /**
+     * The URL an invitation named, when it was a public media one.
+     *
+     * The sibling of [wantedVideoId], and kept for the same reason. Held as the
+     * whole [uniffi.comrade_core.TogetherContent] rather than the bare string so
+     * [joinStream] hands core back exactly the content it validated on the way
+     * in, rather than re-deriving something that has to match it.
+     */
+    private var wantedStream: uniffi.comrade_core.TogetherContent.Stream? = null
 
     /** The invitation's content kind, for [PlaybackModeDecision.ownershipFor]. */
     private var invitedKind: String = ""
@@ -278,6 +303,24 @@ object TogetherManager {
         _micEnabled.value = next
         capture?.micEnabled = next
     }
+
+    private val _openFailed = MutableStateFlow(false)
+
+    /**
+     * Whether the thing we opened refused to play.
+     *
+     * Added with the pasted-link source, and the reason is that source: a URL
+     * that is a web page rather than a file fails several seconds *after* the
+     * session opens, in a decoder callback, with nothing on screen changing. The
+     * player error was logged and nothing else, so the session sat at 0:00
+     * looking like the feature was broken.
+     *
+     * A flag rather than a message because the sentence is the screen's, and
+     * because there is only one useful thing to say — `MediaPlayer`'s
+     * `what/extra` pair does not distinguish "not media" from "server hung up"
+     * in any way worth putting in front of somebody.
+     */
+    val openFailed: StateFlow<Boolean> = _openFailed.asStateFlow()
     private var focusRequest: AudioFocusRequest? = null
 
     /**
@@ -288,6 +331,15 @@ object TogetherManager {
      */
     private var openedPath: String? = null
     private var openedDurationMs: Long = 0
+
+    /**
+     * What our own player was pointed at, whether or not we can read it back.
+     *
+     * Distinct from [openedPath], which is the narrower question "can we *send*
+     * this" and is therefore null for everything a picker handed us. This one is
+     * only for drawing a cover, which a `content://` URI answers perfectly well.
+     */
+    private var openedUri: String? = null
 
     /**
      * Set by tests that must not touch the foreground-service contract, exactly
@@ -317,14 +369,24 @@ object TogetherManager {
         durationMs: Long,
         contentKind: String,
         videoId: String?,
+        stream: uniffi.comrade_core.TogetherContent.Stream? = null,
     ) {
         appContext = context.applicationContext
         wanted = recording
         wantedMs = durationMs
         wantedVideoId = videoId
+        wantedStream = stream
         invitedKind = contentKind
         val youtube = videoId != null
-        val title = recording?.let { if (it.artist.isBlank()) it.title else "${it.artist} — ${it.title}" }.orEmpty()
+        // A stream's own recording when the inviter named one, and otherwise the
+        // host it comes from — which is what the URL discloses and the one thing
+        // about it worth reading before agreeing to fetch it. Never the whole
+        // URL: a 2 kB string does not belong in a sentence.
+        val streamTitle = stream?.let { s ->
+            s.recording?.let { titleOf(it) } ?: hostOf(s.url)
+        }
+        val title = streamTitle
+            ?: recording?.let { titleOf(it) }.orEmpty()
         _state.value = UiState.Invited(peer, peerLabel, title, youtube, contentKind)
 
         // A YouTube invitation is deliberately **not** auto-joined, even though
@@ -332,10 +394,38 @@ object TogetherManager {
         // Opening a video and starting to report a playhead is agreeing to watch
         // something with someone; the file path only ever does that when this
         // phone already held the recording, which is a much smaller claim.
-        if (recording == null || youtube) return
+        //
+        // A stream invitation is not auto-joined either, and the reason is
+        // stronger: joining one makes a request to a host the *other* person
+        // named. That is a decision about this device's network, and it is not
+        // ours to take on someone's behalf however confidently core validated the
+        // URL. It also must not fall through to the lookup below — a stream that
+        // happens to name a recording this phone owns would otherwise open the
+        // local file and report a playhead for something else entirely.
+        if (stream != null || recording == null || youtube) return
         val found = runCatching { LibraryResolver.resolve(context, recording, durationMs) }.getOrNull()
         if (found != null) join(context, found.uri)
     }
+
+    /** `Artist — Title`, or just the title when the file named no artist. */
+    private fun titleOf(recording: uniffi.comrade_core.Recording): String =
+        if (recording.artist.isBlank()) {
+            recording.title
+        } else {
+            "${recording.artist} — ${recording.title}"
+        }
+
+    /**
+     * The host a stream URL comes from, as something to read.
+     *
+     * Not the path and not the query: the host is the disclosure that matters
+     * before agreeing to fetch something, and the rest is length without
+     * meaning. `www.` is dropped because it is never the useful part of a name.
+     * Falls back to the empty string rather than to the raw URL — a screen with
+     * no title is better than one with 2 kB of query string in it.
+     */
+    private fun hostOf(url: String): String =
+        runCatching { Uri.parse(url).host.orEmpty().removePrefix("www.") }.getOrDefault("")
 
     /**
      * Look again for the invitation's recording, now that we may read the
@@ -571,6 +661,7 @@ object TogetherManager {
                 positionMs = 0,
                 durationMs = durationMs,
                 status = Status.WaitingForThem,
+                sourceUri = openedUri,
             )
             startService()
         }
@@ -611,6 +702,103 @@ object TogetherManager {
             embed = true,
         )
         startService()
+    }
+
+    /**
+     * Start a session on one public HTTPS media URL — a podcast episode off its
+     * feed, an Internet Archive item (`docs/TOGETHER.md` §11a).
+     *
+     * A sibling of [start] and [startEmbed] rather than a branch in either, the
+     * shape §14 asks for. It plays in the same `MediaPlayer` a local file does,
+     * so it inherits the fine deadband and the whole correction ladder — but
+     * nothing else about it is the file path: there is no copy to hand over, no
+     * length to report, and the source is a URL a peer will fetch rather than
+     * bytes either of us holds.
+     *
+     * **The order of the two steps is the decision, and it matches
+     * `desktop/ui/main.js`'s `startStreamSession`: core sees the URL before the
+     * media player does.** `together_start` runs `TogetherContent::admissible`,
+     * which for a `Stream` is `valid_stream_url` — so a URL naming this phone's
+     * own LAN, a literal address or a credential pair is refused before any
+     * request leaves the device. Opening the player first to learn its length
+     * would make that request ahead of the check that exists to prevent it, and
+     * would buy a `duration_ms` a source both sides fetch from the same place
+     * does not need.
+     *
+     * Throws whatever `together_start` throws, so the screen can say why. That
+     * is deliberate: a refused URL that silently did nothing is the failure this
+     * ordering exists to make visible.
+     */
+    fun startStream(
+        context: Context,
+        peer: String,
+        peerLabel: String,
+        content: uniffi.comrade_core.TogetherContent.Stream,
+    ) {
+        appContext = context.applicationContext
+        ComradeCore.togetherStartTyped(peer, content)
+        _state.value = UiState.Live(
+            peer = peer,
+            peerLabel = peerLabel,
+            // The host, not the URL — see [onInvited]. A feed that named a
+            // recording gets its name instead.
+            title = content.recording?.let { titleOf(it) } ?: hostOf(content.url),
+            weLead = true,
+            joined = false,
+            ready = true,
+            playing = false,
+            positionMs = 0,
+            // The player's to discover, like an embed's: `TogetherContent::Stream`
+            // carries `duration_ms: None` when nobody loaded the URL first, which
+            // is exactly the case the ordering above creates.
+            durationMs = 0,
+            status = Status.WaitingForThem,
+        )
+        startService()
+        openStreamPlayer(content.url)
+    }
+
+    /**
+     * Accept a stream invitation — fetch the same URL they are fetching.
+     *
+     * Nothing is transferred between the two devices: the handover path (§9a) is
+     * for a file one of us holds, and neither of us holds this. What makes it
+     * safe to point a player at a peer-supplied string is that core already ran
+     * `TogetherContent::admissible` on the way *in*, before this session existed;
+     * [wantedStream] is that validated content, kept rather than re-derived.
+     */
+    fun joinStream(context: Context) {
+        appContext = context.applicationContext
+        val invited = _state.value as? UiState.Invited ?: return
+        val content = wantedStream ?: return
+        runCatching { ComradeCore.togetherJoinTyped() }
+            .onFailure { Log.w(TAG, "join failed", it) }
+        _state.value = UiState.Live(
+            peer = invited.peer,
+            peerLabel = invited.peerLabel,
+            title = invited.title,
+            weLead = false,
+            joined = true,
+            ready = true,
+            playing = false,
+            positionMs = 0,
+            durationMs = 0,
+            status = Status.Together,
+        )
+        startService()
+        openStreamPlayer(content.url)
+    }
+
+    /**
+     * Point the file player at a URL, and take its length when it arrives.
+     *
+     * Shared by both ends of a stream session because both do exactly this. The
+     * length goes through [refreshLive] rather than into the [UiState.Live] that
+     * was just built, for the same reason an embed's does: it is not known until
+     * the player says, which is after the session opened.
+     */
+    private fun openStreamPlayer(url: String) {
+        openPlayer(Uri.parse(url)) { durationMs -> refreshLive(durationMs = durationMs) }
     }
 
     /** Accept a YouTube invitation. Nothing to look for and nothing to ask for. */
@@ -682,6 +870,7 @@ object TogetherManager {
         player?.release()
         player = p
         openedPath = null
+        openedUri = null
         openedDurationMs = 0
         runCatching { ComradeCore.togetherJoinTyped() }
             .onFailure { Log.w(TAG, "join failed", it) }
@@ -764,6 +953,7 @@ object TogetherManager {
                 positionMs = 0,
                 durationMs = durationMs,
                 status = Status.Together,
+                sourceUri = openedUri,
             )
             startService()
         }
@@ -867,6 +1057,7 @@ object TogetherManager {
         // between being able to hand this file over and only being able to
         // receive one.
         openedPath = if (uri.scheme == null || uri.scheme == "file") uri.path else null
+        openedUri = uri.toString()
         openPlayerWith(ctx, onReady) { it.open(uri) }
     }
 
@@ -898,6 +1089,10 @@ object TogetherManager {
             override fun onPrepared(durationMs: Long) {
                 requestAudioFocus()
                 openedDurationMs = durationMs
+                // Cleared here rather than where the player is constructed: a
+                // handover replaces the source mid-session, and the failure of
+                // the copy being replaced must not outlive the one that worked.
+                _openFailed.value = false
                 onReady(durationMs)
                 startPolling()
             }
@@ -912,6 +1107,11 @@ object TogetherManager {
 
             override fun onError(message: String) {
                 Log.w(TAG, "player: $message")
+                // Said on screen, not only in logcat. The session is left
+                // running: the other person may still be playing their own copy,
+                // and ending it from here would take the session away from them
+                // because *our* source failed.
+                _openFailed.value = true
             }
 
             override fun onVideoSize(width: Int, height: Int) {
@@ -946,6 +1146,7 @@ object TogetherManager {
     private fun openEmbed(videoId: String) {
         player?.release()
         openedPath = null
+        openedUri = null
         openedDurationMs = 0
         val p = YoutubeSessionPlayer(videoId)
         p.setListener(object : YoutubeSessionPlayer.Listener {
@@ -1303,7 +1504,9 @@ object TogetherManager {
         wanted = null
         wantedMs = 0
         wantedVideoId = null
+        wantedStream = null
         invitedKind = ""
+        _openFailed.value = false
         scrub = TogetherDecisions.ScrubState(scrubbing = false, pendingRemoteMs = null)
         abandonAudioFocus()
         stopService()
@@ -1354,12 +1557,20 @@ object TogetherManager {
     // ── The foreground service ──────────────────────────────────────────────
 
     private fun startService() {
+        // Before the `disableServiceForTest` bail, and outside it: an answered
+        // invitation must leave the shade whether or not this build runs the
+        // service, and every route out of `Invited` passes through here.
+        appContext?.let { Notifier.clearTogetherInvite(it) }
         if (disableServiceForTest) return
         val ctx = appContext ?: return
         TogetherService.start(ctx)
     }
 
     private fun stopService() {
+        // An invitation nobody answered goes with the session it belonged to —
+        // a "wants to listen with you" left in the shade after they gave up is
+        // an invitation to join something that is no longer there.
+        appContext?.let { Notifier.clearTogetherInvite(it) }
         if (disableServiceForTest) return
         val ctx = appContext ?: return
         TogetherService.stop(ctx)

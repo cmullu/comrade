@@ -74,6 +74,57 @@ val QueueMusicIcon: ImageVector = materialIcon(name = "Filled.QueueMusic") {
     }
 }
 
+/**
+ * 🫂 — two people holding each other. The Together tab.
+ *
+ * It replaced [QueueMusicIcon] there on 2026-08-08, and the reason is the same
+ * one that made the tab the only way into a session: a note over a list is a
+ * *playlist*, and the tab is not about the music. Every other bottom-nav glyph
+ * names the people it is for (a chat bubble, a heart) rather than the medium it
+ * uses, and this one now does too.
+ *
+ * Hand-authored rather than taken from a font, like every icon in this file —
+ * there is no Material Symbol for an embrace, so this is the emoji's silhouette
+ * reduced to what survives 24dp: two heads leaning until they nearly touch, over
+ * one body with a notch where the two of them meet. **The notch is the whole
+ * glyph.** Without it this is Material's "group", which is two people standing
+ * near each other; with it they are wrapped in each other's arms.
+ *
+ * Kept to a single mass rather than two overlapping figures with drawn-on arms:
+ * `materialPath` fills non-zero, so an arm laid across the far figure's torso
+ * unions with it and disappears, and the crossing limbs that survive that end up
+ * as noise at tab size.
+ */
+val PeopleHugIcon: ImageVector = materialIcon(name = "Filled.PeopleHug") {
+    // The left head.
+    materialPath {
+        moveTo(8.4f, 4.2f)
+        arcToRelative(2.8f, 2.8f, 0.0f, true, true, 0.0f, 5.6f)
+        arcToRelative(2.8f, 2.8f, 0.0f, true, true, 0.0f, -5.6f)
+        close()
+    }
+    // The right head.
+    materialPath {
+        moveTo(15.6f, 4.2f)
+        arcToRelative(2.8f, 2.8f, 0.0f, true, true, 0.0f, 5.6f)
+        arcToRelative(2.8f, 2.8f, 0.0f, true, true, 0.0f, -5.6f)
+        close()
+    }
+    // The embrace: shoulders out to both edges, and the notch between them.
+    materialPath {
+        moveTo(2.6f, 14.8f)
+        curveTo(2.6f, 12.6f, 5.2f, 11.4f, 8.4f, 11.4f)
+        curveTo(9.9f, 11.4f, 11.2f, 12.0f, 12.0f, 13.1f)
+        curveTo(12.8f, 12.0f, 14.1f, 11.4f, 15.6f, 11.4f)
+        curveTo(18.8f, 11.4f, 21.4f, 12.6f, 21.4f, 14.8f)
+        verticalLineTo(20.0f)
+        curveTo(21.4f, 20.6f, 20.9f, 21.1f, 20.3f, 21.1f)
+        horizontalLineTo(3.7f)
+        curveTo(3.1f, 21.1f, 2.6f, 20.6f, 2.6f, 20.0f)
+        close()
+    }
+}
+
 /** Material "article" (filled) — the public feed. */
 val ArticleIcon: ImageVector = materialIcon(name = "Filled.Article") {
     materialPath {
@@ -735,6 +786,62 @@ val StopIcon: ImageVector = materialIcon(name = "Filled.Stop") {
         horizontalLineToRelative(12.0f)
         verticalLineToRelative(12.0f)
         horizontalLineTo(6.0f)
+        close()
+    }
+}
+
+/**
+ * Material "pause" (filled) — the other half of `Icons.Filled.PlayArrow`, which
+ * `material-icons-core` ships without.
+ */
+val PauseIcon: ImageVector = materialIcon(name = "Filled.Pause") {
+    materialPath {
+        moveTo(6.0f, 19.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineTo(5.0f)
+        horizontalLineTo(6.0f)
+        verticalLineToRelative(14.0f)
+        close()
+        moveTo(14.0f, 5.0f)
+        verticalLineToRelative(14.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineTo(5.0f)
+        horizontalLineToRelative(-4.0f)
+        close()
+    }
+}
+
+/** Material "link" (filled) — playing something from a pasted URL. */
+val LinkIcon: ImageVector = materialIcon(name = "Filled.Link") {
+    materialPath {
+        moveTo(17.0f, 7.0f)
+        horizontalLineToRelative(-4.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineToRelative(4.0f)
+        curveToRelative(1.65f, 0.0f, 3.0f, 1.35f, 3.0f, 3.0f)
+        reflectiveCurveToRelative(-1.35f, 3.0f, -3.0f, 3.0f)
+        horizontalLineToRelative(-4.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineToRelative(4.0f)
+        curveToRelative(2.76f, 0.0f, 5.0f, -2.24f, 5.0f, -5.0f)
+        reflectiveCurveToRelative(-2.24f, -5.0f, -5.0f, -5.0f)
+        close()
+        moveTo(11.0f, 15.0f)
+        horizontalLineTo(7.0f)
+        curveToRelative(-1.65f, 0.0f, -3.0f, -1.35f, -3.0f, -3.0f)
+        reflectiveCurveToRelative(1.35f, -3.0f, 3.0f, -3.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineTo(7.0f)
+        horizontalLineTo(7.0f)
+        curveToRelative(-2.76f, 0.0f, -5.0f, 2.24f, -5.0f, 5.0f)
+        reflectiveCurveToRelative(2.24f, 5.0f, 5.0f, 5.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineToRelative(-2.0f)
+        close()
+        moveTo(8.0f, 11.0f)
+        horizontalLineToRelative(8.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineTo(8.0f)
         close()
     }
 }

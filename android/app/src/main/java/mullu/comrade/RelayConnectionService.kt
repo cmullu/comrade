@@ -539,7 +539,32 @@ object ChatEventRouter {
                     // place it arrives, and the manager needs it again when the
                     // person actually says yes.
                     videoId = (content as? TogetherContent.Youtube)?.videoId,
+                    // The whole validated content, for the same reason: core ran
+                    // `TogetherContent::admissible` on it before this event was
+                    // raised, and handing the manager that value rather than the
+                    // bare URL is what keeps the string a player is pointed at
+                    // the string core agreed to.
+                    stream = content as? TogetherContent.Stream,
                 )
+                // The alert the flow depends on. Everything above happens whether
+                // or not anyone is looking at the app, and until now nothing told
+                // them — an invitation that arrived while the phone was in a
+                // pocket was an overlay they found later, if at all.
+                //
+                // **Only if there is still an invitation to answer.** `onInvited`
+                // opens the session itself when this phone's own library holds a
+                // confident match, so by this line the state may already be
+                // `Live` — and "Ana wants to listen with you" for something
+                // already playing is an alert with nothing behind it.
+                if (mullu.comrade.together.TogetherManager.state.value
+                    is mullu.comrade.together.TogetherManager.UiState.Invited
+                ) {
+                    Notifier.notifyTogetherInvite(
+                        context,
+                        peer = invite.peer,
+                        peerLabel = peerLabel(invite.peer),
+                    )
+                }
             }
 
             is BridgeEvent.TogetherJoined -> mullu.comrade.together.TogetherManager.onJoined()

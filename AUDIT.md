@@ -1038,6 +1038,43 @@ is small; the content problem is the real constraint:
 > run between two real devices.** The wire, the clock filter, the drift verdict,
 > the tracker and the relay policy are unit-tested three ways over; the
 > `RTCPeerConnection` handling on both frontends is reviewed, not exercised.
+>
+> **Status (2026-08-08, the way in was the thing that was wrong).** The tab is
+> now the only way to start a session — `ui/TogetherScreen.kt`'s `PlayerHome`,
+> reached from `MainTab.Together` (`MainActivity.kt:444`) — and the ▶ that used
+> to live in the conversation header is gone. §8.2's v1 scope above is met and
+> then some: the phone's own music library is browsable
+> (`together/MusicLibrary.kt`), and `TogetherContent::Stream` is finally
+> reachable on Android in both directions (`TogetherManager.startStream` /
+> `joinStream`), which is the podcast source `docs/TOGETHER.md` §11a identified
+> in August and no frontend but desktop could use. There is a notification for an
+> invitation for the first time (`Notifier.notifyTogetherInvite`); before it, an
+> invitation arriving with the app closed was an overlay found later.
+>
+> Four gaps this leaves, recorded rather than implied:
+>
+> - **Desktop cannot tell a page link from an episode before playing it.**
+>   `together::direct_media_url` (`crates/comrade_core/src/together.rs:1000`) is
+>   the shared answer and Android asks it through `together_stream_content`;
+>   `desktop/ui/stream_link.mjs` still hands any HTTPS URL to core and reports
+>   `COULD_NOT_PLAY` from the media element seconds later. A small change in one
+>   tested module, deliberately not made here — Android is ahead, and pretending
+>   otherwise in a doc is the drift ADR-2 exists to stop.
+> - **`app/` has no Together surface at all.** The Flutter frontend matches the
+>   `BridgeEvent` variants and does nothing with them, so none of this exists
+>   there. Part of the parity gap `docs/FRONTEND_STRATEGY.md` §7 tracks, not new.
+> - **Nothing executes `ui/TogetherScreen.kt`.** 1,700 lines of Compose with no
+>   test in the repo running any of it. What is checked before CI is the pure
+>   half (`TogetherDecisions`, 75 JVM tests) and, since this change,
+>   *type* resolution for the Compose half
+>   (`.claude/scripts/android-typecheck-compose.sh`). How it looks is verified by
+>   nothing but a device, and the 🫂 glyph is hand-authored path data that no lane
+>   here can render.
+> - **A session's cover falls back to the note glyph below API 29.** `MediaStore`'s
+>   `loadThumbnail` is API 29+, and the legacy `albumart` provider is keyed on an
+>   album id a session does not carry (`UiState.Live.sourceUri` is what it has).
+>   The library *list* has both keys and draws covers on every version; only the
+>   player's sleeve is affected.
 
 ---
 
