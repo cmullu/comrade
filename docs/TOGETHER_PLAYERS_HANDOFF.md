@@ -76,6 +76,31 @@ arity, all of it — checked rather than assumed, against the exact version the
 build will resolve. Do this before writing an adapter against a library that only
 CI will ever link.
 
+> **Superseded, mostly, and by something better.** The `javap` trick was the
+> answer to "I cannot compile against this library". As of 2026-08-08 you can:
+>
+> ```bash
+> .claude/scripts/android-typecheck.sh
+> ```
+>
+> **84 of the 87 sources under `mullu/comrade/` type-check with no Android SDK** —
+> against a real `android.jar` (Robolectric's `android-all` for API 34), the real
+> generated uniffi bindings (`cargo` makes those; only `sdkmanager` was ever
+> missing) and the real AARs for WebRTC, Vosk and the YouTube player. Only the
+> files importing `androidx.compose` are left out.
+>
+> **This exists because the first push of Tasks B–D failed CI on one line.**
+> `refreshLive(durationMs = …)` against a function with no such parameter — a
+> typo, in a file the JUnit lane cannot see because `TogetherManager` imports
+> Android, costing a full push/build round trip to find. The script reproduces
+> that exact error, at that exact line, in about two minutes; it was checked by
+> putting the bug back and watching it go red, because a check that cannot fail
+> is not a check.
+>
+> It answers one question — does this Kotlin resolve and typecheck. `./gradlew
+> test` still needs the SDK, Compose is still CI-first, and `res/`/manifest
+> correctness is still CI's.
+
 Run them **before and after** every change to those files. Practically this
 decides how you should write the tasks below: put logic in a framework-free file
 and it is checked, put it in a file that touches Compose, `MediaPlayer` or a
@@ -86,7 +111,8 @@ service and CI is the first thing that ever builds it.
 | Rust (`fmt`, `clippy -D warnings`, `test --workspace`) | yes |
 | `node --test desktop/ui/*.test.mjs` | yes |
 | Android decision files via `kotlinc` | **yes — use it** |
-| Android via Gradle / anything with an Android import | no, CI first |
+| Android **type-check**, everything but Compose | **yes** — `.claude/scripts/android-typecheck.sh` |
+| Android via Gradle, and any Compose file | no, CI first |
 | Flutter (`analyze`, `test`, `dart format`) | installable, ~10 min |
 | `desktop/src-tauri` clippy | no — fails on missing GTK headers, not your bug |
 
@@ -432,12 +458,15 @@ Nothing in Tasks A–D. What the four tasks *revealed* rather than resolved:
   session that can, or an unusually careful one.
 - **The frb mirror for `ReadVerdict`**, with the first Dart consumer.
 - **The three open questions above**, all of which are owner decisions.
-- **Everything Android in this pass is CI-first.** `YoutubeSessionPlayer`,
-  `ExternalSessionPlayer`, `MediaSessionAccess`, `PartialFileDataSource`, the
-  Compose changes, the manifest entry and the Gradle dependency have **never been
-  compiled**. The decision layers under them have (94 tests), and that split is
-  the whole reason those layers exist — but do not read "94 green" as "the
-  feature builds".
+- **What is still CI-first, now that the boundary has moved.** `TogetherScreen`
+  (Compose), the manifest entry and the Gradle dependency resolution have never
+  been built here. Everything else added in this pass —
+  `YoutubeSessionPlayer`, `ExternalSessionPlayer`, `MediaSessionAccess`,
+  `MediaSessionListenerService`, `PartialFileDataSource`, `ShareReadPolicy` and
+  the `TogetherManager`/`FileTransfer`/`TogetherPlayer` changes — **type-checks
+  locally** via the script above, on top of the 94 JUnit tests. That still is not
+  "the feature works": nothing here has run a `MediaPlayer`, followed a real
+  `MediaSession` or drawn a frame.
 
 ## Branch note
 
