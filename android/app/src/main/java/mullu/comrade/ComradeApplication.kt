@@ -45,6 +45,14 @@ open class ComradeApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // Before anything can report the mesh running. `MeshRadio` needs an
+        // application context to reach `WifiManager`, and the status event that
+        // makes it take the multicast lock can arrive from the background
+        // service without an Activity ever existing — so the one place
+        // guaranteed to have run first is here.
+        MeshRadio.attach(this)
+
         Thread({
             val started = SystemClock.uptimeMillis()
             runCatching { ComradeCore.getVersion() }

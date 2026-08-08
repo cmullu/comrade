@@ -27,10 +27,12 @@
  * at-rest scheme, and both have a `clear` that the panic wipe calls.
  */
 
+pub mod ble;
 pub mod courier;
 pub mod mesh;
 pub mod outbox;
 
+pub use ble::{fragment, Fragment, Reassembler};
 pub use courier::{
     candidate_tags, epoch_day, open, recipient_tag, seal, seal_envelope, CarriedEnvelope,
     CourierSnapshot, CourierStore, DepositTier, Envelope, Opened,
