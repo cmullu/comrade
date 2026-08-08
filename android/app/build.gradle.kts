@@ -243,6 +243,29 @@ dependencies {
     // Offline "Hey Comrade" wake word + speech recognition (Apache-2.0, no cloud)
     implementation("com.alphacephei:vosk-android:0.3.47")
 
+    // Watch-together on a YouTube video (docs/TOGETHER.md §11b) — a WebView
+    // around the *official* IFrame player, so the embed stays the sanctioned
+    // one, with its controls and its ads. Apache-2.0, minSdk 17, and it declares
+    // only INTERNET/ACCESS_NETWORK_STATE, both of which this app already has.
+    //
+    // **12.1.2 and not 13.0.0, which is the latest.** The handoff notes named
+    // 13.0.0 as verified-present on Maven Central, and it is — but present is
+    // not the same as compatible, and its POM is the reason:
+    //
+    //   * `androidx.lifecycle:lifecycle-runtime-ktx:2.9.4`, which is compiled
+    //     against API 35, and AGP fails the build outright for a dependency that
+    //     needs a higher compileSdk than the one above (34).
+    //   * `org.jetbrains.kotlin:kotlin-stdlib:2.1.0`, whose metadata version the
+    //     1.9.22 compiler pinned in the root build file refuses with "compiled
+    //     with an incompatible version of Kotlin".
+    //
+    // 12.1.2 carries `lifecycle-runtime-ktx:2.6.0` and `kotlin-stdlib-jdk8:1.8.0`
+    // and has the identical API surface this code uses (checked class by class
+    // against both AARs, not assumed). Moving to 13.0.0 is a compileSdk-35 and
+    // Kotlin-2.x upgrade wearing a dependency bump's clothes, and it should be
+    // done as that or not at all.
+    implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:12.1.2")
+
     // Runtime support for the uniffi-generated bindings (see the codegen setup
     // above): JNA is how the generated Kotlin calls into libcomrade_jni.so,
     // and kotlinx-coroutines-core backs its `suspend fun`s. Coroutines was

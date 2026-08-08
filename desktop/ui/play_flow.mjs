@@ -127,12 +127,20 @@ export function planPlay(route, target) {
       return {
         kind: UNAVAILABLE,
         title,
-        // Corrected 2026-08-08: this used to say "on the phone app, not this
-        // window yet", which sent people to a phone that cannot do it either —
-        // `ChatCommands.playNote` there says "Comrade can't play YouTube here".
-        // Core carries a YouTube invitation and *neither* frontend has a player
-        // for one, so the honest sentence names no device.
-        message: "Comrade can't play YouTube yet — /play a file you both have.",
+        // Corrected twice on 2026-08-08, and the second correction reverses the
+        // first — worth reading in order, because the sentence is only ever as
+        // true as the other frontend.
+        //
+        // It first said "on the phone app, not this window yet", which sent
+        // people to a phone that refused the same thing. It was changed to name
+        // no device at all. Android then grew the embed (§11b), which makes
+        // "Comrade can't play YouTube" false — so it names the phone again, and
+        // this time truthfully.
+        //
+        // The rule this keeps landing on: name a device only while that device
+        // can actually do it. `ChatCommands.playNote`'s `PLAY_EMBED` arm on
+        // Android is the thing to check before touching this line.
+        message: "YouTube together works in the phone app — this window has no player for it yet.",
       };
 
     case "nothing":

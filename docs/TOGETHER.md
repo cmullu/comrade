@@ -1170,13 +1170,49 @@ green, before CI. The commands are in `CLAUDE.md`. That is the practical reason
 to keep decision logic in framework-free files, and it matters more now that the
 priority frontend is the one that cannot otherwise be built here.
 
-**Not built yet**: the player adapter around `YouTubePlayerView`, the Compose
-surface for it, and the `TogetherManager` change that lets a session hold an
-embed instead of a `MediaPlayer`. That last one is the real work — `TogetherPlayer`
-is concrete throughout the manager, so it needs a small interface both players
-satisfy, and the manager is also where the foreground-service contract lives,
-which `.claude/rules/android.md` names as the most bug-prone area in the repo.
-It is deliberately not half-done here.
+**Built 2026-08-08.** `YoutubeSessionPlayer` wraps `YouTubePlayerView` behind
+`SessionPlayer`, `TogetherScreen`'s sleeve hosts it, and `/play <youtube link>`
+opens a real session instead of the refusal it used to print. Three things about
+it are worth carrying forward rather than rediscovering.
+
+**The library version in the plan would have turned the branch red.** The notes
+named `androidyoutubeplayer:core:13.0.0` as *verified present on Maven Central*,
+and it is — but present is not compatible. Its POM pulls
+`lifecycle-runtime-ktx:2.9.4`, which is compiled against API 35 and makes AGP
+fail a `compileSdk = 34` build outright, and `kotlin-stdlib:2.1.0`, whose
+metadata the pinned 1.9.22 compiler refuses. **12.1.2** carries
+`lifecycle-runtime-ktx:2.6.0` and `kotlin-stdlib-jdk8:1.8.0` and has the
+identical API surface this code touches — checked class by class against both
+AARs with `javap` rather than assumed, which is a thing this sandbox *can* do for
+a dependency it cannot compile against. Moving to 13.0.0 is a compileSdk-35 and
+Kotlin-2.x upgrade wearing a dependency bump's clothes.
+
+**Ad breaks are handled, and the honest version of that is narrower than it
+sounds.** §9a flags the problem: a break is per-viewer, so one side gets a
+pre-roll and the session comes apart by exactly that much through no fault of the
+clock. `TogetherDecisions.StallWatch` observes one fact — *the player says it is
+playing and the position it reports is not advancing* — and the embed's
+`isPlaying` reports false while that holds. It does **not** claim to know the
+cause: an ad and an unlabelled stall look the same from here, and the code says
+so rather than putting "they're in an ad break" on screen over an inference.
+That costs nothing, because both causes want the same answer — stop telling the
+other device we are playing — and the poll expresses it as
+`together_report_position(pos, false, …)`, a heartbeat the peer's `sync_verdict`
+answers by *holding*. Never `together_set_state`, which would pause them for the
+length of our ad.
+
+What the wire cannot do is say *why*, and that is left open rather than papered
+over: a held peer sees a device that is not playing, which is indistinguishable
+from a pause. Telling the two apart needs a reason on the heartbeat, and that is
+a protocol change nobody has argued for yet.
+
+**Background playback stays off**, and the screen says so. `enableBackgroundPlayback`
+would keep an embed running when the app is backgrounded, which is a feature of
+*their* client on *their* subscription and not one this app may grant on their
+behalf. So the "this keeps playing when you leave the app" note — true of the
+file player, which the foreground service carries — is swapped for one that says
+YouTube pauses. A note that claimed otherwise would be the comment-shaped lie
+this repo's conventions call a bug, printed at the user instead of at a reader.
 
 ## 12. Playing a handed-over file before it has finished arriving
 
@@ -1208,13 +1244,118 @@ things:
   playback and a range that runs past the received prefix is where the tracker's
   answer goes.
 
-Both need one shared decision that does not exist yet: **what to do when the
-runway runs out mid-playback.** §10 rules out reporting buffering to the peer,
-and that rule stands — a stall signalled as a remote pause is the worst ping-pong
-available here. So a starved reader pauses locally, and the next drift verdict is
-what closes the gap. Writing that down is the prerequisite for either frontend,
-because a stall handled two different ways on two devices is a session that
-argues with itself.
+Both need one shared decision, and it now exists in core rather than in either
+of them: `read_verdict` in `crates/comrade_core/src/share.rs`, with
+`ShareTracker::read_verdict_at` as the tracker-side spelling. It answers what a
+reader at a playhead should do — start, keep going, or hold for bytes — built
+**on** `playable_at` and `runway_ms` rather than beside them, so the two answers
+cannot drift apart (a test walks all 1024 arrangements of a ten-chunk file to
+keep them honest).
+
+The rule is two thresholds, not one. Starting costs `SHARE_PLAYABLE_RUNWAY_MS`,
+five seconds of *uninterrupted* audio. Continuing costs only
+`SHARE_STALL_FLOOR_MS`, one second — about one chunk at a typical music bitrate,
+and also the quantum the runway is measured in. The gap between them is the
+whole point: a reader that stopped and started at the same number would sit on
+it and chatter, and one that stopped only at exactly zero would run out inside
+the decoder rather than on a decision. And the end of a file plays at any runway
+at all, because a two-second runway with the last chunk inside it is not a
+transfer running behind — it is a track nearly over, and waiting for more would
+wait forever.
+
+§10's rule is kept by construction rather than by discipline: the verdict has
+three arms and none of them means "tell the peer", so there is nothing to send.
+What that leaves each frontend is one concrete instruction that is easy to get
+wrong. A hold is `together_report_position(pos, playing: false, latency)` — a
+heartbeat, which the peer's next `sync_verdict` reads as "they are not playing"
+and answers by holding rather than correcting. It is **not**
+`together_set_state(.., playing: false, ..)`: that is a command, it takes the
+next sequence number, and it pauses the other person, which is precisely the
+ping-pong §10 rules out.
+
+What the verdict cannot do belongs in the same breath, because a frontend built
+on a misreading of it will look buggy in a way that is not the frontend's fault.
+**It is not a prediction.** Every input is about bytes already here; nothing in
+it knows the transfer's throughput, and `Continue` on five seconds of runway is
+not a promise about the sixth. A transfer that stops dead still stalls — one
+second of playback later per second of runway that was banked. The answer only
+changes when a chunk arrives or the playhead moves, so a reader that asks once
+has learned nothing.
+
+`ComradeRuntime::share_read_verdict` exposes it, stateless and lock-free so it
+can be answered from inside a `MediaDataSource.readAt` or a `Range` handler —
+the only place either frontend needs it, and the place where anything that could
+block would deadlock. The division of labour is the transfer's usual one: the
+frontend owns the bitmap because it owns the bytes, and core owns the
+thresholds.
+
+### Built on Android, 2026-08-08
+
+`PartialFileDataSource` is the `MediaDataSource` §12 predicted, and
+`TogetherPlayer.open(MediaDataSource)` genuinely was the one-line change. The
+player opens when the transfer is **armed** — before a byte moves, and before
+`Accept` goes out, so no wake-up for an early chunk is missed — and the decoder
+blocks inside `readAt` on chunks that have not landed. `ShareReadPolicy` is the
+Kotlin twin of `read_verdict`, in a file with **no imports at all** so it runs
+under `kotlinc` here; its neighbour `ShareDecisions` cannot, because it needs the
+generated uniffi types, which is precisely why the thresholds moved next door.
+
+`ShareTracker` was **not** missing on Android, contrary to the handoff's note —
+`ShareDecisions.Tracker` had shipped with the transfer and had `playableAt`. What
+it lacked was `tailCompleteAt` and the verdict, and `playableAt` is now built on
+the first of those rather than beside it, the same construction core uses so the
+two answers cannot drift.
+
+**Writing this uncovered a real ordering bug in code that had been correct
+until now.** `FileTransfer.onChunk` recorded the chunk in the tracker *before*
+writing its bytes to the file. Nothing read the partial file, so nothing could
+tell. The moment a decoder does, that order leaves a window where the bitmap says
+the bytes are there and the file still holds zeroes — and a decoder that reads
+zeroes does not stall, it produces a corrupt frame or gives up on the file
+entirely, neither of which looks like a transfer problem from a bug report. It
+now writes first and records second, which also gives the `synchronized` block in
+`readAt` a happens-before edge that publishes the bytes wherever the flag is
+visible. A read outside that monitor can only be *stale* — it can miss a chunk
+that arrived, costing one wait slice, and can never claim one that has not.
+
+Two smaller things the wiring forced, both of the kind that only appear once
+early playback works:
+
+- **Reopening the finished file reset the playhead to zero.** `MediaPlayer`
+  starts at the beginning, so a transfer *completing* threw the listener back to
+  the start of a track they were halfway through. The position is carried across
+  now, and the seek arms the echo suppressor — an unexplained `onSeekComplete` is
+  re-broadcast as the user having seeked, which would move the other person for
+  no reason anyone could explain.
+- **A hold is a local pause and nothing else.** `TogetherManager.applyShareVerdict`
+  pauses the player; the very next line of the poll reports
+  `together_report_position(pos, false, latency)`. Resuming is conditional on the
+  *session* wanting to play, because `Start` is permission and not an
+  instruction: a player the person paused stays paused however many bytes arrive.
+
+**Desktop has the numbers and not the plumbing.** `share_transfer.mjs` gained
+`STALL_FLOOR_MS`, `readVerdict`, `tailCompleteAt` and `readVerdictAt`, with core's
+vectors ported and a walk over all 1024 arrangements of a ten-chunk file
+asserting the verdict never disagrees with `playableAt`. The Tauri custom
+protocol with `Range` support that would actually feed a `<video>` element is not
+built.
+
+**The FFI is exposed for uniffi only.** `Comrade::share_read_verdict` is
+synchronous, stateless and lock-free — deliberately, since the only place Android
+would want it is inside `readAt`, where taking a lock on the runtime would
+deadlock against the transfer writing the chunk being waited for. The
+`#[frb(mirror(ReadVerdict))]` half is **not** added: `app/` has no together or
+share surface at all, so it would mean regenerating the whole bridge for a type
+no Dart code references, and regeneration cannot be verified in this sandbox
+without installing Flutter. It belongs with the first Dart consumer.
+
+**One thing this surfaced that is not about playback at all.** A session whose
+clock has converged sends no heartbeat while paused, and the peer ends a session
+after 45 s of silence — so any pause past the TTL ends the evening on both
+devices. That was already true for a user pause; a byte-starved hold now reaches
+it with nobody pressing anything. Recorded in `AUDIT.md`; it needs either a
+keepalive that is not a position claim, or an ending a session can come back
+from.
 
 ## 13. Following what the device is already playing
 
@@ -1300,13 +1441,52 @@ The rest:
 - **Two different playback speeds are not something a seek can fix**, so the
   session says so rather than chasing a gap that reopens as fast as it closes.
 
-### Not built
+### Built 2026-08-08
 
-The `NotificationListenerService` itself, the `MediaController` adapter over it,
-and the `TogetherManager` change that lets a session follow an external player
-instead of owning one. Same reason as §11b: the manager is concrete on
-`TogetherPlayer` throughout and is where the foreground-service contract lives,
-so it wants one deliberate refactor rather than two half ones.
+`MediaSessionListenerService` is the grant and nothing else — it overrides no
+callback, because `getActiveSessions` demands the component of an *enabled*
+notification listener and that API is the entire reason it exists. An empty body
+states that better than a comment could, and anyone adding an
+`onNotificationPosted` is changing what this app claims about itself rather than
+adding a feature.
+
+`MediaSessionAccess` is the boundary and `ExternalSessionPlayer` is the
+`SessionPlayer`. The division held: **every `PlaybackState.STATE_*` int is
+mapped in exactly one function**, and `MediaSessionDecisions` still imports
+nothing, so all of it runs under `kotlinc` here. `trackKey` joined it — which
+fields identify a track is a decision, not a read, and a blank title yields a
+blank key that `sameTrack` refuses, while a missing *artist* is a weaker key
+rather than silence (podcast apps routinely publish no artist, and refusing them
+would turn off sync for a whole category of app that works fine).
+
+**How a session starts is deliberately narrow.** Comrade follows; it does not
+start. There is no way to tell another app's session "play track X" — only to
+drive what is already loaded — so the entry point is the *invited* side: an
+invitation to content this device cannot play itself offers "follow what's
+playing here", and `PlaybackModeDecision.ownershipFor` is what decides whether
+that is available, asked by both the button and the action so the two cannot
+disagree. Starting a session *from* what this phone is playing would need a
+`TogetherContent` variant for "whatever is on now", which is a wire change and
+is not made here.
+
+The permission cannot be requested in-app, so the explainer comes *before* the
+settings screen and the grant is re-checked on the next tap — there is no
+callback when someone comes back from system settings, and pretending otherwise
+would be a button that looks broken. "Access not granted" and "granted, and
+nothing is playing" are separate refusals with separate sentences, because
+sending someone back to a settings screen they have already used is how a button
+teaches people it does nothing.
+
+The screen for one of these is control-and-status, as this section promised: no
+sleeve, no surface, and **no scrubber** — a `MediaSession` carries no duration
+worth trusting, and a bar with no end on it lies about where the end is.
+
+### Still not built
+
+A `TogetherContent` variant for "whatever this phone is playing", which is what
+starting a session from an external player would need. And the source-agnostic
+line holds in the code and the copy: no string, doc or listing here names
+ReVanced, Morphe or any patched client.
 
 ## 14. Both players, and the seam between them
 
@@ -1354,10 +1534,45 @@ The seam is framework-free, which is what lets the mode decision be checked
 here rather than in CI: 74 Android tests across §11b, §13 and this section now
 compile and run under `kotlinc` with no SDK.
 
-**Still not built**, and now down to one thing rather than three: the
-`TogetherManager` change that holds a `SessionPlayer` instead of a
-`TogetherPlayer`, plus the two new implementations behind it. That file owns the
-foreground-service contract, which `.claude/rules/android.md` names as the most
-bug-prone area in the repo, so it wants one deliberate pass — but it is now a
-mechanical pass against a settled interface rather than a design question.
+`TogetherManager` holds a `SessionPlayer` as of 2026-08-08. The widening was
+the three declarations expected, but there are **two** narrowing sites in the
+manager rather than one, and the second was missed by the plan:
+
+- `attachSurface` — expected, and correct. A surface is meaningful only to the
+  player that decodes into one; an embed draws into a `WebView` we host and an
+  external session draws in another app's window, so for those this is
+  correctly nothing rather than an override that has to pretend.
+- `openPlayer`'s **reuse arm** — not expected. `val p = player ?:
+  TogetherPlayer(ctx)` takes its type from the left operand, so widening the
+  field silently widened the local too and `setListener`/`open` stopped
+  resolving. Found with a compiler rather than by reading: a negative probe
+  against the real interface produces exactly the three unresolved references.
+
+Both are the file path's `MediaPlayer` semantics, which is what this section
+already says does not survive being made abstract — the plan simply did not
+notice that Kotlin's type inference would drag the local along with the field.
+
+**Both implementations landed 2026-08-08** — `YoutubeSessionPlayer` (§11b) and
+`ExternalSessionPlayer` (§13). The seam held: neither needed the interface
+widened for its own convenience, and the manager drives all three through it.
+
+One member was added, and it is worth saying why it is not an exception to that.
+`SessionPlayer.onPoll(nowMs)` is a default no-op that the session's poll calls
+before reading. `TogetherPlayer` ignores it, because a decoder always knows where
+it is. The other two are *told* where they are on somebody else's schedule — once
+a second for an embed, on state changes for an external session — and both need a
+clock that keeps running **when the reports stop**, because "the reports stopped"
+is itself the thing worth noticing. Without it a frozen player goes on claiming
+to play against the last position it happened to mention, and no correction can
+see it. A default rather than an abstract member, so the one implementation with
+nothing to do is not made to write an empty override saying otherwise.
+
+Two narrowing sites remain the file path's, and a third joined them for the
+embed: `attachSurface` and `openPlayer`'s reuse arm as before, plus
+`attachEmbedView`, which hands a `YouTubePlayerView` to a session that is holding
+one. All three are the same shape — a view belongs to the player that draws into
+it — and all three say so where they narrow.
+
+The work list, the exact call sites and the traps are in
+[`docs/TOGETHER_PLAYERS_HANDOFF.md`](TOGETHER_PLAYERS_HANDOFF.md).
 

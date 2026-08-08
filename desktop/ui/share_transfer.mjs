@@ -142,6 +142,41 @@ export const CHUNK_HEADER_BYTES = 4;
 /** How much contiguous playback to have in hand before starting. */
 export const PLAYABLE_RUNWAY_MS = 5000;
 
+/**
+ * How little may be left before a *running* reader stops. Mirrors
+ * `SHARE_STALL_FLOOR_MS`.
+ *
+ * The gap between this and [PLAYABLE_RUNWAY_MS] is the whole point rather than
+ * a spare knob: a reader that stopped and started at the same number would sit
+ * on it and chatter, and one that stopped only at exactly zero would run out
+ * inside the decoder rather than on a decision.
+ */
+export const STALL_FLOOR_MS = 1000;
+
+/**
+ * What a reader at the playhead should do — the JS twin of
+ * `comrade_core::share::read_verdict`.
+ *
+ * Ported rather than called over the bridge for the same reason the framing
+ * above is: the answer is wanted inside a synchronous `Range` handler, where
+ * there is nothing to await on. The Rust vectors are ported into
+ * `share_transfer.test.mjs` so the two cannot quietly disagree.
+ *
+ * Returns `"start"`, `"continue"` or `"hold"` — the same three arms, snake-cased
+ * the way `ReadVerdict`'s `kind` tag spells them.
+ *
+ * **A hold is local.** It means pause this device's player and keep asking for
+ * chunks; it must be reported as `together_report_position(pos, false, latency)`
+ * and never as `together_set_state(.., playing: false, ..)`, which is a command
+ * and would pause the other person — the ping-pong `docs/TOGETHER.md` §10 rules
+ * out.
+ */
+export function readVerdict({ playing, runwayMs, tailComplete }) {
+  if (tailComplete || runwayMs >= PLAYABLE_RUNWAY_MS) return playing ? "continue" : "start";
+  if (playing && runwayMs >= STALL_FLOOR_MS) return "continue";
+  return "hold";
+}
+
 /** Prefix `bytes` with its big-endian chunk index. */
 export function frameChunk(index, bytes) {
   const out = new Uint8Array(CHUNK_HEADER_BYTES + bytes.byteLength);
@@ -237,14 +272,44 @@ export function createTracker(offer) {
       return contiguous * chunkMs;
     },
     /**
+     * Whether everything from `posMs` to the end of the file is already here.
+     *
+     * Named for what it is rather than folded into [playableAt] because it is
+     * the arm that means "nothing more is coming": a two-second runway with the
+     * last chunk inside it is not a transfer running behind, it is a track
+     * nearly over, and waiting for more would wait forever.
+     */
+    tailCompleteAt(posMs) {
+      if (api.isComplete()) return true;
+      for (let i = api.chunkAtMs(posMs); i < count; i += 1) if (!have[i]) return false;
+      return true;
+    },
+    /**
      * Whether playback may start at `posMs` — either there is enough runway, or
      * the rest of the file is here and the runway is simply all that remains.
+     *
+     * Built **on** [tailCompleteAt] and [runwayMs] rather than beside them, the
+     * same construction `ShareTracker::playable_at` uses, so the two answers
+     * cannot drift apart.
      */
     playableAt(posMs) {
-      if (api.isComplete()) return true;
-      const start = api.chunkAtMs(posMs);
-      for (let i = start; i < count; i += 1) if (!have[i]) return api.runwayMs(posMs) >= PLAYABLE_RUNWAY_MS;
-      return true;
+      return api.tailCompleteAt(posMs) || api.runwayMs(posMs) >= PLAYABLE_RUNWAY_MS;
+    },
+    /**
+     * What a reader at `posMs` should do. The tracker-side spelling of
+     * [readVerdict], mirroring `ShareTracker::read_verdict_at`.
+     *
+     * `playing` is "is sound coming out of this device right now", not "does the
+     * session want to play" — it only picks which threshold applies, because the
+     * cost of stopping a running player is a stutter and the cost of not
+     * starting one is a wait.
+     */
+    readVerdictAt(posMs, playing) {
+      return readVerdict({
+        playing,
+        runwayMs: api.runwayMs(posMs),
+        tailComplete: api.tailCompleteAt(posMs),
+      });
     },
     nextRequest(posMs, maxCount) {
       if (api.isComplete() || maxCount <= 0) return null;

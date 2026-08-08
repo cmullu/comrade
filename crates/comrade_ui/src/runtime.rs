@@ -76,7 +76,9 @@ use comrade_core::seen::{content_key, SeenSet, CONTENT_KEY_PREFIX};
 use comrade_core::share::transport::{
     self as share_transport, IcePathKind, RefusalReason, RelayPolicy, TransferVerdict,
 };
-use comrade_core::share::ShareSignal;
+use comrade_core::share::{
+    read_verdict as share_read_verdict, ReadSample, ReadVerdict, ShareSignal,
+};
 
 /// Read a stored [`SharePrefs`] back into a policy.
 ///
@@ -3241,6 +3243,47 @@ impl ComradeRuntime {
             comrade_core::share::SHARE_CHUNK_BYTES,
             share_transport::SHARE_BUFFER_HIGH_WATER,
         )
+    }
+
+    /// What a player reading a file that is still arriving should do at the
+    /// playhead it is at: start, keep going, or hold for more bytes.
+    ///
+    /// The two numbers come from the caller's own tracker —
+    /// [`ShareTracker::runway_ms`](comrade_core::share::ShareTracker::runway_ms)
+    /// and
+    /// [`tail_complete_at`](comrade_core::share::ShareTracker::tail_complete_at),
+    /// or the desktop's JS twin of them — because the bytes live in the frontend
+    /// and the runtime keeps **no** transfer state ([`TogetherShareDto`] says
+    /// why: two state machines that have to agree about a connection only one of
+    /// them can see is the shape of both call bugs this repo has already fixed).
+    /// What the frontend does *not* get to own is the thresholds, and that is
+    /// what this call is: which bitmap has arrived is a fact about the frontend,
+    /// when it is enough to play is policy, and policy lives here.
+    ///
+    /// So this is neither async nor a `try_lock` skip like
+    /// [`Self::together_report_position`]. That one is skippable because it
+    /// *writes* session state and a dropped write only costs the next drift
+    /// verdict some accuracy; this one takes no lock at all, writes nothing, and
+    /// is a pure function of its arguments — a dropped answer would mean a
+    /// player with no instruction. Safe to call from a `MediaDataSource.readAt`
+    /// or a `Range` handler, which is where it is needed and where anything that
+    /// could block would deadlock.
+    ///
+    /// Acting on [`ReadVerdict::Hold`] means pausing the **local** player and
+    /// nothing else — never `together_set_state(.., playing: false, ..)`, which
+    /// is a command that pauses the other person. `docs/TOGETHER.md` §10, and
+    /// the variant's own documentation.
+    pub fn share_read_verdict(
+        &self,
+        runway_ms: u64,
+        tail_complete: bool,
+        playing: bool,
+    ) -> ReadVerdict {
+        share_read_verdict(&ReadSample {
+            playing,
+            runway_ms,
+            tail_complete,
+        })
     }
 
     /// Convenience: send a `Hangup` signal with `reason` (`normal`, `declined`,
@@ -14176,6 +14219,58 @@ mod tests {
             0,
             "a full channel must be told to wait, not to send one more"
         );
+    }
+
+    /// A file that is still arriving is playable before it is whole, and the
+    /// runtime is where the thresholds live — the frontend brings its own
+    /// tracker's numbers and gets the same answer core's tracker would give.
+    #[test]
+    fn a_partly_arrived_file_plays_and_holds_by_the_same_rule_core_uses() {
+        let rt = ComradeRuntime::new();
+        // Ten chunks, one second each — the same shape `share.rs` tests use.
+        let mut tracker = comrade_core::share::ShareTracker::new(comrade_core::share::ShareOffer {
+            total_bytes: 1000,
+            chunk_bytes: 100,
+            sha256: "a".repeat(64),
+            duration_ms: 10_000,
+        });
+        for i in 0..3 {
+            tracker.accept(i);
+        }
+        for (pos, playing) in [(0u64, false), (0, true), (3_000, true), (9_000, false)] {
+            assert_eq!(
+                rt.share_read_verdict(
+                    tracker.runway_ms(pos),
+                    tracker.tail_complete_at(pos),
+                    playing
+                ),
+                tracker.read_verdict_at(pos, playing),
+                "at {pos} ms, playing {playing}"
+            );
+        }
+        // Spelled out, because these are the two answers the frontends act on:
+        // three seconds is not enough to start on, and running out mid-playback
+        // is a local hold and nothing on the wire.
+        assert_eq!(
+            rt.share_read_verdict(3_000, false, false),
+            ReadVerdict::Hold
+        );
+        assert_eq!(rt.share_read_verdict(0, false, true), ReadVerdict::Hold);
+        assert_eq!(
+            rt.share_read_verdict(5_000, false, false),
+            ReadVerdict::Start
+        );
+    }
+
+    /// It has to be answerable from inside a `readAt` or a `Range` handler with
+    /// a session running and its lock held, which is exactly the shape that
+    /// froze calls on "Connecting…" twice before.
+    #[test]
+    fn the_read_verdict_answers_with_the_session_lock_held() {
+        let rt = ComradeRuntime::new();
+        let guard = rt.together.lock().unwrap();
+        assert_eq!(rt.share_read_verdict(0, false, true), ReadVerdict::Hold);
+        drop(guard);
     }
 
     /// Locking up ends the session for the same reason it sends a farewell

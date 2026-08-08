@@ -1128,6 +1128,26 @@ fun ConversationScreen(
                         clearDraft()
                         onPickTogetherFile(peer, label)
                     }
+                    // The third route that reaches a session, and the only one
+                    // that needs nothing from either device — no file, no
+                    // account, no library permission. The id comes from core's
+                    // own parse (`PlayPlan::OpenNow` sets `content`), never from
+                    // re-reading the link here: one parser, and it is the one
+                    // that already decided this was a video.
+                    if (route == PlayRoute.PLAY_EMBED) {
+                        val videoId =
+                            (target.content as? uniffi.comrade_core.TogetherContent.Youtube)?.videoId
+                        if (videoId == null) {
+                            // Core said embed and carried no id. Refuse rather
+                            // than open a player with nothing in it — the same
+                            // fail-closed call the grammar above makes.
+                            failed = "Couldn't work out which video that is — nothing was sent."
+                        } else {
+                            runCatching { TogetherManager.startEmbed(context, peer, label, videoId) }
+                                .onSuccess { clearDraft() }
+                                .onFailure { failed = it.message ?: "Could not start that." }
+                        }
+                    }
                     commandNote = when {
                         failed != null -> failed
                         route == PlayRoute.ASK_FOR_FILE && !mayLook -> ChatCommands.LIBRARY_UNSEEN

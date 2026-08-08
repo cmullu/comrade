@@ -23,8 +23,15 @@ object ShareDecisions {
     /** Bytes of header on a chunk message. Mirrors `CHUNK_FRAME_HEADER_BYTES`. */
     const val CHUNK_HEADER_BYTES = 4
 
-    /** Contiguous playback to have in hand before starting. */
-    const val PLAYABLE_RUNWAY_MS = 5_000L
+    /**
+     * Contiguous playback to have in hand before starting.
+     *
+     * Aliased rather than restated: the number belongs to [ShareReadPolicy],
+     * which is where the *pair* of thresholds lives and where the relationship
+     * between them is asserted. Two copies of a threshold is how the start and
+     * the stop rule end up disagreeing by a release.
+     */
+    const val PLAYABLE_RUNWAY_MS = ShareReadPolicy.PLAYABLE_RUNWAY_MS
 
     /** How many chunks to keep asking for at a time. */
     const val REQUEST_WINDOW = 64
@@ -145,16 +152,45 @@ object ShareDecisions {
         }
 
         /**
+         * Whether everything from `posMs` to the end of the file is here.
+         *
+         * Named rather than folded into [playableAt] because it is the arm that
+         * means *nothing more is coming*: a two-second runway with the last
+         * chunk inside it is not a transfer running behind, it is a track nearly
+         * over, and waiting for more would wait forever.
+         */
+        fun tailCompleteAt(posMs: Long): Boolean {
+            if (isComplete()) return true
+            for (i in chunkAtMs(posMs) until chunkCount) if (!have[i]) return false
+            return true
+        }
+
+        /**
          * Whether playback may start at `posMs` — either there is enough
          * runway, or the rest of the file is here and the runway is simply all
          * that remains. A track with two seconds left is playable.
+         *
+         * Built **on** [tailCompleteAt] and [runwayMs] rather than beside them,
+         * the same construction `ShareTracker::playable_at` uses, so this and
+         * [readVerdictAt] cannot drift apart.
          */
-        fun playableAt(posMs: Long): Boolean {
-            if (isComplete()) return true
-            val start = chunkAtMs(posMs)
-            for (i in start until chunkCount) if (!have[i]) return runwayMs(posMs) >= PLAYABLE_RUNWAY_MS
-            return true
-        }
+        fun playableAt(posMs: Long): Boolean =
+            tailCompleteAt(posMs) || runwayMs(posMs) >= PLAYABLE_RUNWAY_MS
+
+        /**
+         * What a reader at `posMs` should do. The tracker-side spelling of
+         * [ShareReadPolicy.verdict], mirroring `ShareTracker::read_verdict_at`.
+         *
+         * The thresholds are not this class's to hold: they live next door in a
+         * file with no imports at all, so the rule runs under `kotlinc` before
+         * CI ever sees it.
+         */
+        fun readVerdictAt(posMs: Long, playing: Boolean): ShareReadPolicy.Verdict =
+            ShareReadPolicy.verdict(
+                playing = playing,
+                runwayMs = runwayMs(posMs),
+                tailComplete = tailCompleteAt(posMs),
+            )
 
         /** What to ask for next, given where the listener is. */
         fun nextRequest(posMs: Long, maxCount: Int): Request? {

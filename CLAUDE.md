@@ -60,9 +60,11 @@ Run `/verify` to execute only the lanes your changes actually touched.
 `flutter`, `dart`, `maturin`, and the Android SDK (`sdkmanager`, `adb`) are
 **not installed**. `cargo`, `node`, `python3`, `java`, and `gradle` are.
 
-So Dart and Android changes cannot be compiled or tested here — CI is the first
-place they build. When you touch `app/` or `android/`, say so plainly rather
-than implying you verified it. Reason from the code and keep diffs tight.
+So Dart changes cannot be compiled or tested here — CI is the first place they
+build. Android is **no longer** in that category except for Compose: see
+`.claude/scripts/android-typecheck.sh` below. When you touch `app/`, or a
+Compose file under `android/`, say so plainly rather than implying you verified
+it. Reason from the code and keep diffs tight.
 
 **Flutter is the one of these you can install**, and for a change to the frb
 bridge you should: `.claude/rules/flutter.md` has the commands, the pinned
@@ -94,11 +96,33 @@ java -cp "/tmp/kout:$CP:/tmp/kotlinc/lib/kotlin-stdlib.jar" \
 
 This is the whole argument for keeping decision logic in files with no
 framework imports, restated as a capability rather than a style preference: that
-half of Android is checkable before CI, and the half that touches Compose,
-`MediaPlayer` or a foreground service is not. Put new logic on the checkable
-side. It does **not** need `gradle`, and Gradle's own `test` task still cannot
-run here — Kotlin compile depends on `generateUniffiBindings`, which needs the
-Android SDK.
+half of Android is checkable before CI. Put new logic on the checkable side. It
+does **not** need `gradle`, and Gradle's own `test` task still cannot run here —
+Kotlin compile depends on `generateUniffiBindings`, which needs the Android SDK.
+
+**And the boundary moved again on 2026-08-08: everything that is not Compose now
+type-checks here too.**
+
+```bash
+.claude/scripts/android-typecheck.sh      # ~4 min cold, ~2 min warm
+```
+
+84 of the 87 sources under `mullu/comrade/` — `together/`, `transfer/`, `call/`,
+`handoff/`, `update/`, `voice/`, `RelayConnectionService`, `ComradeCore` — compile
+against a real `android.jar` (Robolectric's `android-all` for API 34), the **real**
+generated uniffi bindings (`cargo` produces those; only `sdkmanager` was ever
+missing), and the real AARs for WebRTC, Vosk and the YouTube player. Only the
+files importing `androidx.compose` are left out, because the Compose compiler
+plugin is the part not worth reproducing.
+
+It was written *after* CI caught `refreshLive(durationMs = …)` on a function
+with no such parameter — a one-line typo that cost a full push/build round trip,
+in a file the JUnit lane cannot see because `TogetherManager` imports Android.
+**Run it before pushing anything under `android/`.** It is not a build, a test
+run or a lint: it answers "does this Kotlin resolve", which is what CI was being
+asked at several minutes a go. `res/` correctness and `./gradlew test` are still
+CI's — `R` is generated here from the resource files, so a missing string id
+still fails, but a malformed manifest does not.
 
 **`desktop/src-tauri` is a fourth blocked lane, and it fails in a way that looks
 like your bug.** `cargo clippy` there exits **101** before compiling a single
@@ -175,7 +199,11 @@ Not `fix(media): add fallback array`.
 
 Committed under `.claude/`, so every session — terminal or cloud — gets it:
 `settings.json` (permissions, hooks, plugins), `rules/` (per-language, loaded by
-path glob), `skills/verify`, `agents/comrade-reviewer`, `hooks/`.
+path glob), `skills/verify`, `agents/comrade-reviewer`, `hooks/`, `scripts/`.
+
+`.gitignore` excludes `.claude/*` and re-includes those by name, so **a new
+shared directory under `.claude/` is invisible until it is added to that
+allow-list** — which looks exactly like having forgotten to `git add` it.
 
 The `caveman` plugin is enabled repo-wide and pinned to a commit; it compresses
 prose while leaving code, commands, errors and paths byte-exact. Declaring a

@@ -476,6 +476,100 @@ object TogetherDecisions {
     fun embedStateIsWorthSending(state: EmbedState): Boolean =
         state is EmbedState.Live || state is EmbedState.Ended
 
+    // ── When the player says it is playing and the video is not ─────────────
+    //
+    // `docs/TOGETHER.md` §9a: an ad break is per-viewer. One side gets a
+    // pre-roll, the other does not, and the session comes apart by exactly the
+    // length of the break through no fault of the clock. Nothing in the drift
+    // ladder can see it — from core's side the stalled device simply reports a
+    // playhead that is not where it should be, and the correction it gets back
+    // is a seek *forward past the ad*, which the embed refuses, which produces
+    // the next correction. A screen saying "catching up…" while nothing catches
+    // up is the visible symptom.
+
+    /**
+     * How long a claimed-playing playhead may stand still before we stop
+     * claiming.
+     *
+     * Three ticks of a once-a-second player. Deliberately one tick past
+     * [COARSE_EXTRAPOLATE_MAX_MS], so the estimate has already gone flat — and
+     * been *seen* to go flat — before anything is called a stall: a single late
+     * tick then costs nothing, which is the same allowance the extrapolation cap
+     * makes for the same reason.
+     */
+    const val STALL_AFTER_MS: Long = 3_000
+
+    /**
+     * Whether this device's own playhead is actually moving.
+     *
+     * **What this can and cannot know, stated plainly, because the useful case
+     * is an inference.** It observes one fact: the player reports itself
+     * playing and the position it reports is not advancing. On an embed, one
+     * cause of that is an ad break — the ad is what the player is playing, and
+     * it is not the video. Another is a stall the player did not label
+     * `buffering`. This does not tell them apart and must not claim to; what it
+     * asserts is exactly the fact it measured.
+     *
+     * That is enough, because **both causes want the same answer**: stop telling
+     * the other device we are playing. A hold reported as position rather than
+     * as a command is what keeps them from running away — the same instruction
+     * §12 gives a byte-starved reader, and for the same reason.
+     *
+     * Not thread-safe, like [CoarsePlayhead] and [EchoSuppressor]: it belongs to
+     * the thread that observes the player.
+     */
+    class StallWatch(private val afterMs: Long = STALL_AFTER_MS) {
+        private var lastPosMs: Long = UNSET
+        private var movedAtMs: Long = 0
+        private var stalled: Boolean = false
+
+        /** Whether the playhead is standing still as of the last sample. */
+        val isStalled: Boolean get() = stalled
+
+        /**
+         * Feed one observation. Returns whether the playhead is stalled.
+         *
+         * `posMs` must be the player's **raw** reported position, not
+         * [CoarsePlayhead.estimateMs] — an estimate advances between ticks by
+         * construction, so watching it would mean watching our own arithmetic
+         * rather than the player, and nothing would ever look stalled until the
+         * extrapolation cap hit.
+         */
+        fun onSample(posMs: Long, playing: Boolean, nowMs: Long): Boolean {
+            // A paused player standing still is not a stall, it is a pause, and
+            // the peer is being told about that through the ordinary path.
+            if (!playing) {
+                lastPosMs = posMs
+                movedAtMs = nowMs
+                stalled = false
+                return false
+            }
+            if (lastPosMs == UNSET || kotlin.math.abs(posMs - lastPosMs) > EPSILON_MS) {
+                lastPosMs = posMs
+                movedAtMs = nowMs
+                stalled = false
+                return false
+            }
+            // A clock that stepped backwards reads as no elapsed time rather
+            // than as an instant stall — the same saturating choice
+            // `direct_path_live` makes in core.
+            if (nowMs - movedAtMs >= afterMs) stalled = true
+            return stalled
+        }
+
+        /** A new video, a seek we caused, or a released player. */
+        fun reset() {
+            lastPosMs = UNSET
+            movedAtMs = 0
+            stalled = false
+        }
+
+        private companion object {
+            /** No sample yet. `0` would be a real position on a fresh video. */
+            const val UNSET = Long.MIN_VALUE
+        }
+    }
+
     // ── Picture ─────────────────────────────────────────────────────────────
 
     /**
@@ -507,6 +601,19 @@ object TogetherDecisions {
      */
     fun pictureOf(width: Int, height: Int): Picture =
         if (width > 0 && height > 0) Picture.Video(width, height) else Picture.None
+
+    /**
+     * The picture an embed session has, known before anything loads.
+     *
+     * Unlike a file, this is not a decoder report and does not need to be: the
+     * IFrame player draws into a frame the library fixes at 16:9
+     * (`SixteenByNineFrameLayout`), and there is always a picture — nobody
+     * invites you to a YouTube video with no video track. Stating it as a
+     * constant is what lets [keepScreenOn] and [aspectRatioOf] treat both
+     * sources with one rule instead of growing a second argument that means
+     * "unless it is an embed".
+     */
+    val EMBED_PICTURE: Picture.Video = Picture.Video(16, 9)
 
     /**
      * The shape to give the video surface, or `null` when there is no picture.

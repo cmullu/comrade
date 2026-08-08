@@ -192,4 +192,53 @@ class MediaSessionDecisionsTest {
         assertFalse(MediaSessionDecisions.speedsAgree(1.0f, 1.5f))
         assertFalse(MediaSessionDecisions.speedsAgree(1.0f, 1.25f))
     }
+
+    // ── Building the key the comparison runs on ─────────────────────────────
+
+    @Test
+    fun aKeyIsTheTwoFieldsEveryAppFillsIn() {
+        assertEquals(
+            "Kun Faya Kun — A. R. Rahman",
+            MediaSessionDecisions.trackKey("Kun Faya Kun", "A. R. Rahman"),
+        )
+        // Built the same way on both devices, so the same song on two apps that
+        // pad their metadata differently still matches.
+        assertTrue(
+            MediaSessionDecisions.sameTrack(
+                MediaSessionDecisions.trackKey("  Kun Faya Kun ", "A. R. Rahman"),
+                MediaSessionDecisions.trackKey("kun faya kun", " a. r. rahman  "),
+            ),
+        )
+    }
+
+    @Test
+    fun aMissingArtistIsNotSilence() {
+        // Podcast apps routinely publish an episode title and no artist. That is
+        // a weaker key, not an absent one, and refusing it would turn off sync
+        // for a whole category of app that works fine.
+        assertEquals("Episode 12", MediaSessionDecisions.trackKey("Episode 12", null))
+        assertEquals("Episode 12", MediaSessionDecisions.trackKey("Episode 12", "   "))
+        assertTrue(
+            MediaSessionDecisions.sameTrack(
+                MediaSessionDecisions.trackKey("Episode 12", null),
+                MediaSessionDecisions.trackKey("Episode 12", ""),
+            ),
+        )
+    }
+
+    @Test
+    fun aMissingTitleIsSilenceAndNeverMatches() {
+        for (blank in listOf(null, "", "  ")) {
+            assertEquals("$blank", "", MediaSessionDecisions.trackKey(blank, "A. R. Rahman"))
+        }
+        // And the blank key is refused downstream, so the two halves agree: an
+        // app that publishes no title cannot be followed, however much else it
+        // publishes.
+        assertFalse(
+            MediaSessionDecisions.sameTrack(
+                MediaSessionDecisions.trackKey(null, "A. R. Rahman"),
+                MediaSessionDecisions.trackKey(null, "A. R. Rahman"),
+            ),
+        )
+    }
 }
