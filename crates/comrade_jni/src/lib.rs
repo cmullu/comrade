@@ -517,8 +517,11 @@ impl Comrade {
     // that. A scan callback blocking behind a relay round trip would stall the
     // BLE stack itself.
 
-    /// Tell the core whether a platform BLE service is scanning and
-    /// advertising. Until this is true, Bluetooth is not offered as a route.
+    /// Tell the core whether **at least one BLE peer is linked** — not merely
+    /// whether the radio is on. Until this is true, Bluetooth is not offered as
+    /// a route, because a running radio with nobody in range is not one: every
+    /// outbox flush would spend an attempt against a transport that cannot
+    /// deliver, and eight of those mark the message failed.
     pub fn ble_set_active(&self, active: bool) {
         self.inner.blocking_read().ble_router().set_active(active);
     }

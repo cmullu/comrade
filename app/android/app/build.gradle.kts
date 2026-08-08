@@ -440,21 +440,13 @@ dependencies {
     // every import in CallManager and the texture renderer compiles unchanged.
     implementation("io.github.webrtc-sdk:android:125.6422.07")
 
-    // Watch-together on a YouTube video (docs/TOGETHER.md §11b).
-    //
-    // **Here as well as in `android/app/build.gradle.kts`, and that is the
-    // trap.** `stagePreservedServices` above copies every non-Compose Kotlin
-    // file out of `android/` and compiles it here, so a third-party dependency
-    // used by any preserved service has to be declared in *both* builds. Adding
-    // it in one produces `Unresolved reference` against a package name in a file
-    // nobody edited, in a build directory, which reads as anything but a missing
-    // dependency.
-    //
-    // Same version as the Compose app deliberately: the staged sources are the
-    // same sources, and two versions is one API difference away from this build
-    // failing on code the other one compiles. (12.1.2 rather than 13.0.0 for the
-    // reason that file gives — 13 needs compileSdk 35 and a Kotlin 2.x stdlib,
-    // which `android/` does not have.)
+    // YouTube playback for Together sessions. Needed here, not just in
+    // `android/`, because `YoutubeSessionPlayer` imports no Compose and so is
+    // staged by `stagePreservedServices` like every other native service —
+    // which is the rule working correctly, not an oversight to filter around.
+    // A preserved service brings its dependencies with it; the version is kept
+    // in lockstep with `android/app/build.gradle.kts` so the two frontends
+    // cannot drift into different player behaviour.
     implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:12.1.2")
 
     testImplementation("junit:junit:4.13.2")

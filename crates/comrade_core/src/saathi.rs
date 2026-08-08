@@ -670,6 +670,24 @@ mod tests {
         assert!(!stale_record.is_connecting());
     }
 
+    /// How long the mesh-formation tests wait for real mDNS discovery plus a
+    /// gossipsub graft.
+    ///
+    /// Shared by both, and generous on purpose. These run on whatever CI
+    /// machine is free, alongside every other job in the workflow, and the
+    /// thing being waited on is *deliverability* — a multicast round trip, a
+    /// dial, a Noise handshake and a subscription exchange — not just a packet
+    /// arriving. Locally that completes in well under a second; on a loaded
+    /// shared runner it has taken over twenty.
+    ///
+    /// Raising this weakens nothing: the assertions after the wait are
+    /// unchanged, and a genuine failure to form a mesh still fails, just
+    /// later. Twenty seconds was previously enough only because the wait was
+    /// the *weaker* discovery condition; tightening the condition to
+    /// deliverability narrowed a margin that was already environment-dependent
+    /// enough for this gate to have its own CI job.
+    const MESH_FORMATION_TIMEOUT: Duration = Duration::from_secs(45);
+
     /// Two engines started in-process must discover each other over real mDNS
     /// multicast, proving the `Discovered`/`Expired` swarm-event handlers
     /// actually drive `peer_count` end to end (not just the plumbing).
@@ -693,14 +711,14 @@ mod tests {
             }
         }
 
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(MESH_FORMATION_TIMEOUT, async {
             tokio::join!(
                 wait_until_deliverable(a.reach_stream()),
                 wait_until_deliverable(b.reach_stream()),
             )
         })
         .await
-        .expect("engines should reach each other over mDNS + gossipsub within 20s");
+        .expect("engines should reach each other over mDNS + gossipsub");
 
         // `>= 1`, not `== 1`: mDNS discovery is machine-wide, so any other
         // engine alive on this host — another test running concurrently, a real
@@ -751,7 +769,7 @@ mod tests {
                 rx.changed().await.expect("driver alive");
             }
         }
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(MESH_FORMATION_TIMEOUT, async {
             tokio::join!(
                 wait_for_peers(&alice, 2),
                 wait_for_peers(&bob, 2),

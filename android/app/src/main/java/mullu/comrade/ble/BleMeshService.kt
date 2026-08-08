@@ -73,10 +73,13 @@ import mullu.comrade.ComradeCore
  * the battery is a mesh nobody leaves on, and a mesh nobody leaves on does not
  * deliver anything.
  *
- * **Unverified.** Nothing in this file has been compiled or run — this
- * environment has no Android SDK and no radios. It is written from the
- * platform contracts and kept structurally close to the patterns already proven
- * in `call/`; treat it as unproven until it runs on two real phones.
+ * **Type-checked, not run.** `.claude/scripts/android-typecheck.sh` compiles
+ * this file against a real `android.jar`, so the platform API calls below
+ * resolve and typecheck. That is all it proves. No CI runner has a Bluetooth
+ * adapter, so nothing here has ever *executed*: whether two phones actually
+ * find each other, negotiate an MTU and exchange a packet is unproven until it
+ * runs on hardware. Written from the platform contracts and kept structurally
+ * close to the patterns already proven in `call/`.
  */
 object BleMeshService {
     private const val TAG = "BleMeshService"
@@ -122,6 +125,22 @@ object BleMeshService {
         @Volatile var characteristic: BluetoothGattCharacteristic? = null,
         @Volatile var mtu: Int = 23,
     )
+
+    /**
+     * Tell the core whether there is anybody to write to.
+     *
+     * The BLE equivalent of `MeshReach.deliverable`, and drawn for the same
+     * reason the WiFi one was: a scanning radio with an empty room is not a
+     * route. A link only counts once its packet characteristic has been
+     * discovered — a half-open GATT connection cannot carry anything.
+     *
+     * Called on every event that can change the answer, so the core's routing
+     * never plans around a peer that has walked away.
+     */
+    private fun publishReach() {
+        val reachable = links.values.any { it.characteristic != null } || inbound.isNotEmpty()
+        runCatching { ComradeCore.bleSetActive(reachable) }
+    }
 
     /** Whether the radio is currently running, for diagnostics and tests. */
     @Volatile
@@ -186,9 +205,13 @@ object BleMeshService {
             jobs += scope.launch { scanDutyCycle(app) }
             jobs += scope.launch { pumpOutbound() }
             isRunning = true
-            // Only now is Bluetooth a route the router may plan around.
-            ComradeCore.bleSetActive(true)
-            Log.i(TAG, "Bluetooth mesh up")
+            // Deliberately *not* `bleSetActive(true)` here. The radio being up
+            // is not the same as having somewhere to write, and the core treats
+            // "BLE is a route" as a reason to spend an outbox attempt — eight of
+            // which fail the message. `publishReach` reports the truth as links
+            // come and go.
+            publishReach()
+            Log.i(TAG, "Bluetooth mesh up — looking for peers")
         }.onFailure {
             Log.e(TAG, "could not start the Bluetooth mesh", it)
             stop()
@@ -247,6 +270,7 @@ object BleMeshService {
             } else {
                 inbound.remove(device.address)
             }
+            publishReach()
         }
 
         @SuppressLint("MissingPermission")
@@ -357,6 +381,7 @@ object BleMeshService {
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     links.remove(gatt.device.address)
                     runCatching { gatt.close() }
+                    publishReach()
                 }
             }
         }
@@ -379,6 +404,9 @@ object BleMeshService {
                 return
             }
             links[gatt.device.address]?.characteristic = characteristic
+            // *Now* there is somewhere to write — not when the TCP-equivalent
+            // connection opened.
+            publishReach()
         }
 
         override fun onCharacteristicChanged(
