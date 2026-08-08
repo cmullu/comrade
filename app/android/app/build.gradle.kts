@@ -440,6 +440,15 @@ dependencies {
     // every import in CallManager and the texture renderer compiles unchanged.
     implementation("io.github.webrtc-sdk:android:125.6422.07")
 
+    // YouTube playback for Together sessions. Needed here, not just in
+    // `android/`, because `YoutubeSessionPlayer` imports no Compose and so is
+    // staged by `stagePreservedServices` like every other native service —
+    // which is the rule working correctly, not an oversight to filter around.
+    // A preserved service brings its dependencies with it; the version is kept
+    // in lockstep with `android/app/build.gradle.kts` so the two frontends
+    // cannot drift into different player behaviour.
+    implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:12.1.2")
+
     testImplementation("junit:junit:4.13.2")
 }
 
