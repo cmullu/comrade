@@ -44,9 +44,14 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFramePlayerOptions
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
 import mullu.comrade.R
 import mullu.comrade.together.LibraryResolver
 import mullu.comrade.together.MediaLibraryAccess
+import mullu.comrade.together.MediaSessionAccess
+import mullu.comrade.together.PlaybackModeDecision
+import mullu.comrade.together.PlaybackOwnership
 import mullu.comrade.together.ShareTransfer
 import mullu.comrade.together.TogetherDecisions
 import mullu.comrade.together.TogetherManager
@@ -83,6 +88,13 @@ fun TogetherScreen(
     // every composition rather than only while an invitation is showing.
     var libraryAsked by remember { mutableStateOf(false) }
     var libraryMissed by remember { mutableStateOf(false) }
+    // Following another app is a *special access*: there is no dialog to launch
+    // and no result to receive, only a system settings screen the user may or
+    // may not have acted on. So the state here is the refusal to explain, and it
+    // is re-asked on the next tap rather than watched for — which is also the
+    // only honest way to detect the grant, since coming back from settings
+    // produces no callback of any kind.
+    var followRefusal by remember { mutableStateOf<TogetherManager.FollowRefusal?>(null) }
     val askToReadLibrary = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -116,17 +128,34 @@ fun TogetherScreen(
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = onPickFile) { Text(stringResource(R.string.together_join)) }
-                        // The case `together` otherwise assumes away: you do not
-                        // have it. Their copy comes straight from their device —
-                        // never through a server of ours.
-                        TextButton(onClick = { TogetherManager.askForTheirCopy(context) }) {
-                            Text(stringResource(R.string.together_ask_for_copy))
+                        // A video needs neither a file nor a permission, so
+                        // "Join" is a single unconditional tap; a file still
+                        // sends someone to the picker, because that is genuinely
+                        // the next step.
+                        if (s.youtube) {
+                            Button(onClick = { TogetherManager.joinEmbed(context) }) {
+                                Text(stringResource(R.string.together_join_video))
+                            }
+                        } else {
+                            Button(onClick = onPickFile) { Text(stringResource(R.string.together_join)) }
+                            // The case `together` otherwise assumes away: you do
+                            // not have it. Their copy comes straight from their
+                            // device — never through a server of ours. Absent
+                            // for a video: there is no file either side holds,
+                            // so the offer would be one nobody could accept.
+                            TextButton(onClick = { TogetherManager.askForTheirCopy(context) }) {
+                                Text(stringResource(R.string.together_ask_for_copy))
+                            }
                         }
                         TextButton(onClick = { TogetherManager.leave() }) {
                             Text(stringResource(R.string.together_not_now))
                         }
                     }
+                    FollowWhatIsPlaying(
+                        invited = s,
+                        refusal = followRefusal,
+                        onTry = { followRefusal = TogetherManager.followExternal(context) },
+                    )
                     // Only when a lookup could find anything: a YouTube invitation
                     // names no recording, and a blank title means none was carried.
                     val couldLook = !s.youtube && s.title.isNotBlank()
@@ -257,6 +286,120 @@ private fun VideoSurface(picture: TogetherDecisions.Picture.Video, modifier: Mod
 }
 
 /**
+ * The third way to accept an invitation: follow the app this phone is already
+ * playing in.
+ *
+ * `docs/TOGETHER.md` §13. Offered only for content Comrade cannot play itself —
+ * [PlaybackModeDecision.ownershipFor] is what says so, and the manager asks it
+ * rather than this screen guessing from the kind string.
+ *
+ * **The copy names no service and no client, and that is a rule rather than an
+ * oversight.** The feature drives whatever published a media session; naming a
+ * particular app — especially a patched one — would convert a neutral tool into
+ * a targeted one regardless of what the code does. §13 explains why that
+ * distinction matters, and it applies to strings, docs and store listing alike.
+ */
+@Composable
+private fun FollowWhatIsPlaying(
+    invited: TogetherManager.UiState.Invited,
+    refusal: TogetherManager.FollowRefusal?,
+    onTry: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // A video plays here and a file is opened here, so neither wants this. Asked
+    // of the same decision the manager will apply, so the button and the action
+    // cannot disagree about when it is available.
+    val couldFollow = PlaybackModeDecision.ownershipFor(
+        contentKind = invited.contentKind,
+        haveOurCopy = false,
+        externalSessionAvailable = true,
+    ) == PlaybackOwnership.EXTERNAL
+    if (!couldFollow) return
+
+    TextButton(onClick = onTry) { Text(stringResource(R.string.together_follow)) }
+
+    when (refusal) {
+        // The explainer comes *before* the settings screen, not after: the
+        // permission cannot be requested in-app, so the system screen arrives
+        // with no context of its own and a notification-access prompt with no
+        // explanation is one people are right to refuse.
+        TogetherManager.FollowRefusal.NeedsAccess -> {
+            Text(
+                stringResource(R.string.together_follow_explainer),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = {
+                runCatching { context.startActivity(MediaSessionAccess.settingsIntent()) }
+            }) {
+                Text(stringResource(R.string.together_follow_grant))
+            }
+        }
+        // Granted, and there is simply nothing to follow. A different sentence
+        // on purpose: sending someone back to a settings screen they have
+        // already used is the refusal that teaches people the button is broken.
+        TogetherManager.FollowRefusal.NothingPlaying -> Text(
+            stringResource(R.string.together_follow_nothing_playing),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        // The invitation went away underneath us; the screen is about to change
+        // anyway, so it says nothing.
+        TogetherManager.FollowRefusal.NoInvitation, null -> Unit
+    }
+}
+
+/**
+ * The YouTube embed, hosted in our own window.
+ *
+ * **The standard player, with its controls and its ads, and that is a term of
+ * use rather than a default nobody changed.** YouTube's API Services Terms
+ * prohibit hiding the player or stripping ads; `docs/TOGETHER.md` §11a records
+ * why the ReVanced/InnerTube route is declined and what the ad-free answer
+ * actually is (§11a's `Stream` sources). So `controls(1)`, and no custom UI.
+ *
+ * `enableAutomaticInitialization` is switched off because the automatic path
+ * binds the view to a `LifecycleOwner` and releases the player when that owner
+ * stops — which is a Compose screen here, and a session must not end because a
+ * screen was disposed. [TogetherManager] owns the player's lifetime instead,
+ * exactly as it owns the `MediaPlayer`'s, and `onRelease` below hands the view
+ * back rather than tearing the session down.
+ */
+@Composable
+private fun EmbedSurface(modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier.fillMaxSize(),
+        factory = { ctx ->
+            YouTubePlayerView(ctx).apply {
+                enableAutomaticInitialization = false
+                initialize(
+                    object : com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.AbstractYouTubePlayerListener() {},
+                    // Network events handled: the library re-loads the player
+                    // when connectivity comes back, which is the difference
+                    // between a session that survives a tunnel and one that
+                    // needs the app restarting.
+                    true,
+                    IFramePlayerOptions.Builder()
+                        .controls(1)
+                        // Autoplay off: the session decides when playback
+                        // starts, so both people start together rather than one
+                        // of them starting on arrival.
+                        .autoplay(0)
+                        .rel(0)
+                        .build(),
+                )
+                TogetherManager.attachEmbedView(this)
+            }
+        },
+        // Not tidiness, and the same shape as `surfaceDestroyed` above: a
+        // released `WebView` the session still holds is a player being driven
+        // into a dead page.
+        onRelease = { view ->
+            TogetherManager.attachEmbedView(null)
+            view.release()
+        },
+    )
+}
+
+/**
  * The one question this feature asks before spending someone else's bandwidth.
  *
  * Modal because it is genuinely blocking — the transfer sits still until it is
@@ -302,7 +445,11 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
     // have a picture. One block, so an album gets a cover and a film gets a
     // screen without two layouts to keep in step — the same shape the desktop
     // player uses.
-    Box(
+    //
+    // Absent entirely when another app holds the playback (docs/TOGETHER.md
+    // §13): there is nothing of ours to draw, and an empty sleeve over somebody
+    // else's music would be a picture of a player Comrade does not have.
+    if (!s.external) Box(
         modifier = Modifier
             .fillMaxWidth()
             .then(
@@ -315,15 +462,18 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
         contentAlignment = Alignment.Center,
     ) {
         val video = s.picture as? TogetherDecisions.Picture.Video
-        if (video == null) {
-            Icon(
+        when {
+            // The embed draws itself, controls and all, inside the same sleeve
+            // the file path uses — so a video has one owner of the aspect ratio
+            // whichever player is behind it.
+            s.embed -> EmbedSurface()
+            video == null -> Icon(
                 QueueMusicIcon,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(72.dp),
             )
-        } else {
-            VideoSurface(video)
+            else -> VideoSurface(video)
         }
     }
 
@@ -356,12 +506,22 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
         Text(it, style = MaterialTheme.typography.bodySmall)
     }
 
+    // Control-and-status, and the honest limit of it, while another app plays.
+    if (s.external) {
+        Text(stringResource(R.string.together_follow_note), style = MaterialTheme.typography.bodySmall)
+    }
+
     // While a finger is on the slider the poll must not move it — the decision
     // is TogetherDecisions.pollMayMoveSlider, and the manager honours it; this
     // only has to report the drag boundaries.
+    //
+    // No slider at all for a followed app: a `MediaSession` carries no duration
+    // we can trust, so the track would be a bar with no end on it — a scrubber
+    // that lies about where the end is, which is worse than no scrubber. Play,
+    // pause and the two skips all still work, because those need no length.
     var dragging by remember { mutableFloatStateOf(-1f) }
     val max = s.durationMs.coerceAtLeast(1L).toFloat()
-    Slider(
+    if (!s.external) Slider(
         value = if (dragging >= 0f) dragging else s.positionMs.toFloat().coerceIn(0f, max),
         onValueChange = {
             if (dragging < 0f) TogetherManager.onScrubStart()
@@ -385,7 +545,11 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val skip = { delta: Long ->
-            val target = (s.positionMs + delta).coerceIn(0L, s.durationMs.coerceAtLeast(0L))
+            // Clamped at the top only when a length is known: an external
+            // session reports none, and clamping to zero there would turn every
+            // skip into "back to the start".
+            val ceiling = if (s.durationMs > 0) s.durationMs else Long.MAX_VALUE
+            val target = (s.positionMs + delta).coerceIn(0L, ceiling)
             TogetherManager.setState(target, s.playing)
         }
         TextButton(onClick = { skip(-SKIP_MS) }) { Text("−10s") }
@@ -404,7 +568,17 @@ private fun LiveSession(s: TogetherManager.UiState.Live) {
 
     // The honest limits, on screen rather than in a doc nobody reads.
     Text(stringResource(R.string.together_accuracy_note), style = MaterialTheme.typography.bodySmall)
-    Text(stringResource(R.string.together_background_note), style = MaterialTheme.typography.bodySmall)
+    // The background promise is true of our own player and false of an embed —
+    // YouTube pauses a backgrounded one, and turning that off is a feature of
+    // their client rather than something this app may grant on their behalf. A
+    // note that claimed otherwise would be the kind of comment-shaped lie the
+    // repo's conventions call a bug, printed at the user instead.
+    Text(
+        stringResource(
+            if (s.embed) R.string.together_embed_background_note else R.string.together_background_note,
+        ),
+        style = MaterialTheme.typography.bodySmall,
+    )
 }
 
 /**

@@ -219,6 +219,37 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- Watch/listen together against a player Comrade does not own
+             (docs/TOGETHER.md §13). Declared purely so the *component* exists
+             and can be enabled: MediaSessionManager.getActiveSessions only
+             answers a caller that names an enabled notification listener, and
+             that API is the whole reason this is here. The class overrides
+             nothing — no notification is read, kept or posted through it.
+
+             A special access, not a runtime permission: there is no dialog and
+             no requestPermissions for it. The user grants it in system settings,
+             which is why MediaSessionAccess reads the secure setting to find out
+             rather than calling checkSelfPermission — that would answer
+             "granted" for this declaration alone and the feature would silently
+             find nothing.
+
+             exported + BIND_NOTIFICATION_LISTENER_SERVICE is the same shape
+             ComradeInteractionService uses above: the intent-filter is how the
+             system finds it, and the permission is what makes sure only the
+             system may bind it. Confirmed *not* on Play's restricted-permissions
+             list (unlike the Accessibility API, which is gated), so no
+             declaration form — which is not the same as approved, and general
+             policy still applies. -->
+        <service
+            android:name=".together.MediaSessionListenerService"
+            android:exported="true"
+            android:label="@string/together_follow_service_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- Downloads an on-device model (speech / companion) in the
              background with progress in the notification bar, so the transfer
              survives the app being backgrounded — see ModelDownloadService. -->

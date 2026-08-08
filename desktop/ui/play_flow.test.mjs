@@ -171,12 +171,21 @@ test("a refusal names the missing account, not a DRM lecture", () => {
   assert.doesNotMatch(m, /won't play|can't play|DRM/i);
 });
 
-test("a refusal never sends someone to a device that cannot do it either", () => {
-  // This is the bug the assertion exists for. Desktop said "YouTube together is
-  // on the phone app, not this window yet" while Android's own sentence was
-  // "Comrade can't play YouTube here" — so the message sent people to a phone
-  // that refuses the same thing. Neither frontend has a YouTube player; core
-  // carries the invitation and nothing renders it.
+test("a refusal points at the phone only because the phone can now do it", () => {
+  // The assertion this replaces said the opposite, and the history is the point.
+  // Desktop used to say "YouTube together is on the phone app, not this window
+  // yet" while Android's own sentence was "Comrade can't play YouTube here" — a
+  // message that sent people to a device which refused the same thing. So it was
+  // changed to name no device.
+  //
+  // Android has the embed as of 2026-08-08 (docs/TOGETHER.md §11b), so naming
+  // the phone is now true and refusing to name it would be withholding the
+  // answer. The invariant was never "don't mention the phone" — it was **only
+  // name a device that can actually do it**, and that is what is pinned here:
+  // if the Android embed is ever removed, this sentence has to change back, and
+  // this test is where that gets noticed.
   const m = planPlay("play_embed", { ...song, service: "youtube" }).message;
-  assert.doesNotMatch(m, /phone|android|mobile|the app\b/i);
+  assert.match(m, /phone/i, "the phone can play it, so say so");
+  assert.match(m, /this window/i, "and say what this window cannot do");
+  assert.doesNotMatch(m, /can't play YouTube|cannot play YouTube/i, "Comrade can — elsewhere");
 });

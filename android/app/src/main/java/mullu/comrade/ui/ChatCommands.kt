@@ -312,10 +312,16 @@ object ChatCommands {
         // the playhead.
         PlayRoute.PLAY_ON_SERVICE ->
             "Playing \"$query\" together on ${serviceLabel(service)}."
-        // Core can carry a YouTube invitation, but this app has no player for
-        // one, so sending it would invite someone to something we cannot join.
-        PlayRoute.PLAY_EMBED ->
-            "Comrade can't play YouTube here — only a file from this phone."
+        // Reworded 2026-08-08, when the embed landed. This used to refuse —
+        // "Comrade can't play YouTube here" — because core could carry the
+        // invitation and nothing on this side could play it. It can now, and the
+        // sentence has to change with it or the app tells people it cannot do
+        // the thing it just did (docs/TOGETHER.md §11b).
+        //
+        // The one route to "play something neither of us has" that needs no
+        // account on either side, which is worth saying in the note: the query
+        // is a link, so there is nothing about a local copy to explain.
+        PlayRoute.PLAY_EMBED -> "Watching that together — neither of you needs a copy."
         PlayRoute.NOTHING -> "Name a song, or paste a link."
     }
 

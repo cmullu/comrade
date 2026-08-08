@@ -81,9 +81,9 @@ use comrade_ui::{
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
     JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
     MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto,
-    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
-    ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto,
-    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadSample,
+    ReadVerdict, ReadingDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto, TaskState,
+    TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1261,6 +1261,39 @@ impl Comrade {
         handles
             .attachment_handoff_send(&peer, &transfer_id, signal)
             .await
+    }
+
+    /// What a reader sitting at a playhead should do about the bytes it has:
+    /// start, keep going, or hold and wait for more.
+    ///
+    /// The frontend owns the bitmap because it owns the bytes, and core owns
+    /// the thresholds — the same division [`Self::share_relay_policy`] and
+    /// `chunks_to_send` already make. So this takes the two facts a caller can
+    /// see about its own file and hands back the policy answer.
+    ///
+    /// **Synchronous, stateless and lock-free**, which is not incidental: the
+    /// only place Android wants it is inside `MediaDataSource.readAt`, called by
+    /// the decoder on its own thread, where anything that took a lock on the
+    /// runtime would deadlock against the transfer writing the chunk being
+    /// waited for. `blocking_read` is deliberately absent — there is nothing to
+    /// read.
+    ///
+    /// **A `Hold` is local.** Pause this device's player and keep asking for
+    /// chunks; report it as `together_report_position(pos, false, latency)` and
+    /// never as `together_set_state(.., playing: false, ..)`, which is a command
+    /// that would pause the other person too — the ping-pong `docs/TOGETHER.md`
+    /// §10 rules out.
+    pub fn share_read_verdict(
+        &self,
+        runway_ms: u64,
+        tail_complete: bool,
+        playing: bool,
+    ) -> ReadVerdict {
+        comrade_ui::share_read_verdict(&ReadSample {
+            playing,
+            runway_ms,
+            tail_complete,
+        })
     }
 
     /// What this device does when the only path a transfer could take is

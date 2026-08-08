@@ -71,6 +71,23 @@ object ShareTransfer {
         },
     )
 
+    /**
+     * The bytes as they land, for a player that should start now rather than
+     * when the transfer finishes (`docs/TOGETHER.md` §12). Null unless this
+     * device is receiving.
+     */
+    fun streamingSource(): mullu.comrade.transfer.PartialFileDataSource? = engine.streamingSource()
+
+    /**
+     * What a reader at `posMs` should do about the bytes that have arrived, or
+     * `null` when nothing is being received and the question does not apply.
+     *
+     * Core owns the thresholds and this side owns the bitmap — the transfer's
+     * usual division of labour, and the reason the answer is
+     * [mullu.comrade.transfer.ShareReadPolicy]'s rather than this file's.
+     */
+    fun readVerdictAt(posMs: Long, playing: Boolean) = engine.readVerdictAt(posMs, playing)
+
     /** What the screen shows about the handover, if anything. */
     val status: String? get() = engine.status
 
@@ -140,6 +157,17 @@ object ShareTransfer {
     private fun acceptTheirCopy(context: Context, offer: ShareOffer) {
         if (engine.armReceive(context, offer) == null) return
         engine.note("They can send it — ${offer.totalBytes.toLong() / 1_048_576} MB.")
+        // Open the player on the partial file *now*, before a byte has moved.
+        // This is what makes §12 real rather than a note in a doc: the session
+        // starts on the head of the file and the decoder blocks on the rest,
+        // which is what core's `playable_at`/`runway_ms` have been ready for
+        // since the transfer landed.
+        //
+        // Ordered before `Accept` deliberately — the first chunk can arrive as
+        // soon as they hear it, and a source armed afterwards would miss the
+        // wake-ups for whatever landed in between and wait out a full timeout
+        // slice for bytes it already had.
+        TogetherManager.onSharedFileStreaming()
         send(ShareSignal.Accept)
     }
 

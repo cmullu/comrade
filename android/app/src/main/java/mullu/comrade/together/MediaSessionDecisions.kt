@@ -156,6 +156,33 @@ object MediaSessionDecisions {
     }
 
     /**
+     * Build the key [sameTrack] compares, from a session's own metadata.
+     *
+     * Here rather than at the `MediaMetadata` boundary because it is a decision,
+     * not a read: which fields identify a track, and what an app that publishes
+     * half of them has told us. Title and artist, because those are the two
+     * fields every app fills — album is patchy, and a media id is the *app's*
+     * identifier, so two people on two different apps would never match on one
+     * even when they are listening to the same song.
+     *
+     * **A blank title yields a blank key, and a blank key never matches**
+     * ([sameTrack] refuses it). That is the whole rule about silence stated
+     * once: an app publishing nothing has told us nothing, and reading that as
+     * agreement is the invention this design refuses. A missing *artist* is not
+     * silence, though — plenty of podcast apps omit it — so a title alone is a
+     * usable key, just a weaker one.
+     *
+     * Case and surrounding space are [sameTrack]'s to ignore; this only has to
+     * put the two fields together the same way on both devices.
+     */
+    fun trackKey(title: String?, artist: String?): String {
+        val t = title?.trim().orEmpty()
+        if (t.isEmpty()) return ""
+        val a = artist?.trim().orEmpty()
+        return if (a.isEmpty()) t else "$t — $a"
+    }
+
+    /**
      * Whether a difference in playback speed makes the session a lie.
      *
      * Nothing can fix this: if they are at 1.5× and we are at 1.0×, no seek

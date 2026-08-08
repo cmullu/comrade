@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import mullu.comrade.ComradeCore
+import mullu.comrade.transfer.ShareReadPolicy
 
 /**
  * The live watch-together session on this device: one player, one peer, one
@@ -43,6 +44,16 @@ object TogetherManager {
             val peerLabel: String,
             val title: String,
             val youtube: Boolean,
+            /**
+             * The `TogetherContent` variant's tag, as
+             * [PlaybackModeDecision.ownershipFor] takes it — `local_file` ·
+             * `youtube` · `service` · `stream`.
+             *
+             * Carried rather than reduced to booleans because the mode decision
+             * is core's shape and this screen should be asking it, not
+             * re-deriving it from two flags that happen to line up today.
+             */
+            val contentKind: String,
         ) : UiState
 
         data class Live(
@@ -61,8 +72,34 @@ object TogetherManager {
              * Known only after the decoder reports it, so it starts as
              * [TogetherDecisions.Picture.None] and the surface appears when
              * there is something to put on it.
+             *
+             * An embed session is the exception and sets it up front
+             * ([TogetherDecisions.EMBED_PICTURE]) — there is no decoder of ours
+             * to ask, and there is always a picture.
              */
             val picture: TogetherDecisions.Picture = TogetherDecisions.Picture.None,
+            /**
+             * Whether the picture is drawn by a `WebView` we host rather than by
+             * our own decoder.
+             *
+             * The screen needs it because the two draw with completely different
+             * views — a `SurfaceView` the decoder writes into, against the
+             * IFrame player with its own controls — and because an embed has no
+             * file to hand over, so the handover affordances have nothing to
+             * offer. Nothing else branches on it: the session, the ladder and
+             * the readout are the same for both.
+             */
+            val embed: Boolean = false,
+            /**
+             * Whether another app entirely is holding the playback and Comrade
+             * is only following it (`docs/TOGETHER.md` §13).
+             *
+             * The screen draws control-and-status for one of these: there is no
+             * sleeve, no surface and no scrubber, because there is nothing of
+             * ours to render, the picture is in somebody else's window, and a
+             * `MediaSession` carries no length to scrub against.
+             */
+            val external: Boolean = false,
             /**
              * The last measured gap between the two playheads, signed —
              * positive means this device is ahead — with the error on it and
@@ -105,6 +142,17 @@ object TogetherManager {
     /** What the peer named, kept so the library can be searched for it. */
     private var wanted: uniffi.comrade_core.Recording? = null
     private var wantedMs: Long = 0
+
+    /**
+     * The video an invitation named, when it was a YouTube one.
+     *
+     * Kept for the same reason [wanted] is: the invitation arrives before the
+     * person decides, and the id is what [joinEmbed] needs when they do.
+     */
+    private var wantedVideoId: String? = null
+
+    /** The invitation's content kind, for [PlaybackModeDecision.ownershipFor]. */
+    private var invitedKind: String = ""
     private var focusRequest: AudioFocusRequest? = null
 
     /**
@@ -142,14 +190,23 @@ object TogetherManager {
         peerLabel: String,
         recording: uniffi.comrade_core.Recording?,
         durationMs: Long,
-        youtube: Boolean,
+        contentKind: String,
+        videoId: String?,
     ) {
         appContext = context.applicationContext
         wanted = recording
         wantedMs = durationMs
+        wantedVideoId = videoId
+        invitedKind = contentKind
+        val youtube = videoId != null
         val title = recording?.let { if (it.artist.isBlank()) it.title else "${it.artist} — ${it.title}" }.orEmpty()
-        _state.value = UiState.Invited(peer, peerLabel, title, youtube)
+        _state.value = UiState.Invited(peer, peerLabel, title, youtube, contentKind)
 
+        // A YouTube invitation is deliberately **not** auto-joined, even though
+        // this device could certainly play it and no library lookup is needed.
+        // Opening a video and starting to report a playhead is agreeing to watch
+        // something with someone; the file path only ever does that when this
+        // phone already held the recording, which is a much smaller claim.
         if (recording == null || youtube) return
         val found = runCatching { LibraryResolver.resolve(context, recording, durationMs) }.getOrNull()
         if (found != null) join(context, found.uri)
@@ -309,12 +366,39 @@ object TogetherManager {
      * session does not restart, it simply stops being one-sided.
      */
     fun onSharedFileReady(path: String) {
+        // On the session's own scope, like [onSharedFileStreaming] and for the
+        // same reason: the caller is the transfer, finishing on
+        // `Dispatchers.IO`, and [player] is otherwise only touched from here.
+        // That was survivable while this ran once at the very end of a transfer
+        // and nothing else held the player; it is not, now that a partial-file
+        // player is live at exactly this moment.
+        scope.launch { openFinishedFile(path) }
+    }
+
+    private fun openFinishedFile(path: String) {
         if (appContext == null) return
         val live = _state.value as? UiState.Live
+        // Where the partial file had got to, if it was already playing
+        // (`docs/TOGETHER.md` §12). Reopening resets a `MediaPlayer` to zero, so
+        // without this the transfer *finishing* would throw the listener back to
+        // the start of the track they were already halfway through — a
+        // regression that only appears once early playback works, which is
+        // exactly the kind that ships.
+        val resumeAtMs = player?.positionMs ?: 0
+        val wasPlaying = player?.isPlaying ?: false
         openPlayer(Uri.fromFile(java.io.File(path))) { durationMs ->
             openedPath = path
             openedDurationMs = durationMs
             if (live != null) _state.value = live.copy(ready = true, durationMs = durationMs)
+            if (resumeAtMs > TogetherDecisions.EPSILON_MS) {
+                // Armed, not silent: reopening produces a real `onSeekComplete`,
+                // and an unexplained one is re-broadcast as the user having
+                // seeked — which would move the other person to a position they
+                // are already at, for no reason anyone could explain.
+                suppressor.expect("seek", resumeAtMs, System.currentTimeMillis())
+                player?.seekTo(resumeAtMs)
+            }
+            if (wasPlaying) player?.play()
         }
         // Whatever they are doing now is what we should be doing. No command is
         // sent: the next heartbeat's drift verdict closes the gap, and a
@@ -364,6 +448,177 @@ object TogetherManager {
                 status = Status.WaitingForThem,
             )
             startService()
+        }
+    }
+
+    /**
+     * Start a session on a YouTube video — the one route to "play something
+     * neither of us has" that needs no account on either side.
+     *
+     * A sibling of [start] rather than a branch inside it, the same shape §14
+     * asks of [openEmbed] and [openPlayer], because almost nothing is shared:
+     * there is no file to remember, no length to report (the player discovers
+     * that), and no handover to offer.
+     */
+    fun startEmbed(context: Context, peer: String, peerLabel: String, videoId: String) {
+        appContext = context.applicationContext
+        openEmbed(videoId)
+        runCatching {
+            ComradeCore.togetherStartTyped(peer, uniffi.comrade_core.TogetherContent.Youtube(videoId))
+        }.onFailure { Log.w(TAG, "could not invite them to a video", it) }
+        _state.value = UiState.Live(
+            peer = peer,
+            peerLabel = peerLabel,
+            // The video's own title is the embed's to know and it does not tell
+            // us, so the screen shows the peer and the player shows the title —
+            // rather than this inventing one from an eleven-character id.
+            title = "",
+            weLead = true,
+            joined = false,
+            ready = true,
+            playing = false,
+            positionMs = 0,
+            // Not the inviter's to claim: `TogetherContent::duration_ms` returns
+            // `None` for a video, and the scrubber grows when the player says.
+            durationMs = 0,
+            status = Status.WaitingForThem,
+            picture = TogetherDecisions.EMBED_PICTURE,
+            embed = true,
+        )
+        startService()
+    }
+
+    /** Accept a YouTube invitation. Nothing to look for and nothing to ask for. */
+    fun joinEmbed(context: Context) {
+        appContext = context.applicationContext
+        val invited = _state.value as? UiState.Invited ?: return
+        val videoId = wantedVideoId ?: return
+        openEmbed(videoId)
+        runCatching { ComradeCore.togetherJoinTyped() }
+            .onFailure { Log.w(TAG, "join failed", it) }
+        _state.value = UiState.Live(
+            peer = invited.peer,
+            peerLabel = invited.peerLabel,
+            title = invited.title,
+            weLead = false,
+            joined = true,
+            ready = true,
+            playing = false,
+            positionMs = 0,
+            durationMs = 0,
+            status = Status.Together,
+            picture = TogetherDecisions.EMBED_PICTURE,
+            embed = true,
+        )
+        startService()
+    }
+
+    /**
+     * Accept an invitation by following whatever this phone is **already**
+     * playing — Spotify, a podcast app, VLC, whatever is installed.
+     *
+     * `docs/TOGETHER.md` §13. Comrade holds no player at all in this mode: it
+     * reads the other app's published `MediaSession` and drives its transport,
+     * which is what a car head unit does. That reaches every service at once
+     * instead of one integration per vendor, and it needs no client id, no OAuth
+     * and no vendored SDK.
+     *
+     * Returns why it could not start, or `null` when a session opened — the
+     * screen needs to tell those apart, because "turn the permission on" and
+     * "press play in your music app first" are different next steps and offering
+     * the wrong one is worse than offering none.
+     *
+     * **The mode is [PlaybackModeDecision]'s to decide, not this function's.**
+     * A file we hold is always ours even with an external session running, and a
+     * file we do *not* hold is nothing yet rather than external — claiming an
+     * external player there would start a session against whatever happened to
+     * be on the phone, which is not what was invited.
+     */
+    fun followExternal(context: Context): FollowRefusal? {
+        appContext = context.applicationContext
+        val invited = _state.value as? UiState.Invited ?: return FollowRefusal.NoInvitation
+        if (!MediaSessionAccess.hasAccess(context)) return FollowRefusal.NeedsAccess
+        val ownership = PlaybackModeDecision.ownershipFor(
+            contentKind = invitedKind,
+            // This branch exists precisely because we do not hold it. If we did,
+            // the file path would already have started and this would be the
+            // wrong answer — see the rule above.
+            haveOurCopy = false,
+            externalSessionAvailable = MediaSessionAccess.anySession(
+                context,
+                android.os.SystemClock.elapsedRealtime(),
+            ),
+        )
+        if (ownership != PlaybackOwnership.EXTERNAL) return FollowRefusal.NothingPlaying
+
+        val p = ExternalSessionPlayer(context)
+        p.setListener(externalListener)
+        if (!p.bind()) return FollowRefusal.NothingPlaying
+        player?.release()
+        player = p
+        openedPath = null
+        openedDurationMs = 0
+        runCatching { ComradeCore.togetherJoinTyped() }
+            .onFailure { Log.w(TAG, "join failed", it) }
+        _state.value = UiState.Live(
+            peer = invited.peer,
+            peerLabel = invited.peerLabel,
+            title = invited.title,
+            weLead = false,
+            joined = true,
+            ready = true,
+            playing = p.isPlaying,
+            positionMs = p.positionMs,
+            // A `MediaSession` carries no length we can trust, so the screen
+            // shows a position without a bound rather than a bound we invented.
+            durationMs = 0,
+            status = Status.Together,
+            // Nothing of ours to draw: the picture, if any, is in another app's
+            // window. §14 calls this the price of reaching every service at once.
+            external = true,
+        )
+        startService()
+        return null
+    }
+
+    /** Why following what is playing could not start. Each needs a different sentence. */
+    enum class FollowRefusal {
+        /** Not holding an invitation any more. */
+        NoInvitation,
+
+        /** Notification-listener access has not been granted. Send them to settings. */
+        NeedsAccess,
+
+        /** Granted, and nothing is playing to follow. Tell them to press play. */
+        NothingPlaying,
+    }
+
+    private val externalListener = object : ExternalSessionPlayer.Listener {
+        override fun onStateChanged(posMs: Long, playing: Boolean) {
+            ComradeCore.togetherSetStateTyped(posMs, playing, 0)
+            refreshLive(playing = playing, positionMs = posMs)
+        }
+
+        /**
+         * They skipped, or the app moved on. The claim ends rather than
+         * following into a different song and calling it "together".
+         */
+        override fun onTrackChanged(trackKey: String) {
+            refreshLive(status = Status.LostTrack)
+        }
+
+        /**
+         * Nothing to be done about it, so the screen says so and the session
+         * stops claiming — a seek cannot hold two different playback speeds
+         * together, because the gap reopens as fast as it closes.
+         */
+        override fun onSpeedsDisagree(ours: Float, theirs: Float) {
+            Log.i(TAG, "speeds disagree: ours $ours, theirs $theirs")
+            refreshLive(status = Status.LostTrack)
+        }
+
+        override fun onLost() {
+            refreshLive(status = Status.LostTrack)
         }
     }
 
@@ -441,12 +696,67 @@ object TogetherManager {
 
     // ── Player plumbing ─────────────────────────────────────────────────────
 
+    /**
+     * Open the file **as it arrives**, so the session starts on the head of it
+     * instead of waiting for the whole thing (`docs/TOGETHER.md` §12).
+     *
+     * Called when the transfer is armed rather than when it finishes. The player
+     * is the ordinary one; only the bytes are different, and the two things that
+     * make it work are elsewhere — `PartialFileDataSource` blocks the decoder on
+     * chunks that have not landed, and [applyShareVerdict] below holds the
+     * playhead when it should not be moving.
+     *
+     * A no-op when nothing is being received, which is every session where both
+     * sides already have the file.
+     */
+    fun onSharedFileStreaming() {
+        // Hopped onto the session's own scope rather than run inline: the caller
+        // is the transfer, which arms a receive on `Dispatchers.IO`, and [player]
+        // is otherwise only ever touched from here — by the poll, by every
+        // incoming command and by every correction. One more thread writing it
+        // would make a field that is currently single-threaded by construction
+        // into one that merely looks that way.
+        scope.launch { openStreamingPlayer() }
+    }
+
+    private fun openStreamingPlayer() {
+        val ctx = appContext ?: return
+        val source = ShareTransfer.streamingSource() ?: return
+        val live = _state.value as? UiState.Live
+        // The path stays null: a partial file in the cache is not something this
+        // device can turn round and offer to somebody else, and `openedPath` is
+        // exactly the flag that decides whether it tries.
+        openedPath = null
+        openPlayerWith(
+            ctx,
+            onReady = { durationMs ->
+                if (live != null) _state.value = live.copy(ready = true, durationMs = durationMs)
+            },
+            feed = { it.open(source) },
+        )
+    }
+
     private fun openPlayer(uri: Uri, onReady: (Long) -> Unit) {
         val ctx = appContext ?: return
         // Remember the readable path, if there is one: it is the difference
         // between being able to hand this file over and only being able to
         // receive one.
         openedPath = if (uri.scheme == null || uri.scheme == "file") uri.path else null
+        openPlayerWith(ctx, onReady) { it.open(uri) }
+    }
+
+    /**
+     * The file path's player, wherever its bytes come from.
+     *
+     * `feed` is the only difference between a file on this device and one still
+     * arriving over the wire (`docs/TOGETHER.md` §12) — everything else, the
+     * listener included, is `MediaPlayer` semantics that both share.
+     */
+    private fun openPlayerWith(
+        ctx: Context,
+        onReady: (Long) -> Unit,
+        feed: (TogetherPlayer) -> Unit,
+    ) {
         // This is the **file** path's construction, deliberately concrete: the
         // listener callbacks below are `MediaPlayer` semantics and do not
         // survive being made abstract, so a new mode gets a sibling of this
@@ -483,7 +793,76 @@ object TogetherManager {
                 refreshLive(picture = TogetherDecisions.pictureOf(width, height))
             }
         })
-        p.open(uri)
+        feed(p)
+    }
+
+    /**
+     * The **embed** path's construction, and a sibling of [openPlayer] rather
+     * than a generalisation of it (`docs/TOGETHER.md` §14).
+     *
+     * Nothing here is shared with the file path: there is no `Uri`, no surface,
+     * no readable path to offer in a handover, and the callbacks are IFrame
+     * semantics rather than `MediaPlayer` ones. Trying to fold the two together
+     * would mean an abstraction over two sets of events that do not correspond.
+     *
+     * Whatever was playing is released first. The mode never changes mid-session
+     * ([PlaybackModeDecision.mayChangeMidSession]), so in practice this only
+     * ever replaces a *previous* session's player — but leaving the old one to
+     * be garbage-collected would leave its `WebView` running audio in a window
+     * nothing draws.
+     */
+    private fun openEmbed(videoId: String) {
+        player?.release()
+        openedPath = null
+        openedDurationMs = 0
+        val p = YoutubeSessionPlayer(videoId)
+        p.setListener(object : YoutubeSessionPlayer.Listener {
+            override fun onPrepared(durationMs: Long) {
+                requestAudioFocus()
+                refreshLive(durationMs = durationMs)
+                startPolling()
+            }
+
+            /**
+             * Straight out, with no echo suppression — and that is not an
+             * oversight.
+             *
+             * The suppressor exists because a `MediaPlayer` reports back the
+             * seeks and pauses *we* asked it for, so an apply would otherwise
+             * re-broadcast itself between two devices. The IFrame player does
+             * the same for state, which is why an apply arms nothing here: this
+             * fires on the embed's own transitions, and [YoutubeSessionPlayer]
+             * has already dropped the ones that are not worth sending
+             * (`buffering`, `unstarted`) before it calls.
+             */
+            override fun onStateChanged(posMs: Long, playing: Boolean) {
+                ComradeCore.togetherSetStateTyped(posMs, playing, 0)
+                refreshLive(playing = playing, positionMs = posMs)
+            }
+
+            override fun onError(message: String) {
+                Log.w(TAG, "embed: $message")
+            }
+        })
+        player = p
+        // Nothing starts until the screen hands over a view: the session exists
+        // before there is anywhere to draw it, exactly as a file session exists
+        // before the surface arrives.
+        startPolling()
+    }
+
+    /**
+     * Hand the embed the view the screen built, or take it away.
+     *
+     * The twin of [attachSurface], narrowed for the same reason and with the
+     * same lifetime: the view is destroyed and rebuilt on every rotation while
+     * the session must survive both. For a file session this is correctly
+     * nothing at all.
+     */
+    fun attachEmbedView(
+        view: com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView?,
+    ) {
+        (player as? YoutubeSessionPlayer)?.attach(view)
     }
 
     /**
@@ -547,6 +926,12 @@ object TogetherManager {
         pollJob = scope.launch {
             while (true) {
                 val p = player ?: break
+                // Before the read, not after: a player that is told where it is
+                // on somebody else's schedule needs a clock that keeps running
+                // when the reports stop, and this poll is it. See
+                // [SessionPlayer.onPoll].
+                p.onPoll(System.currentTimeMillis())
+                applyShareVerdict(p)
                 ComradeCore.togetherReportPosition(p.positionMs, p.isPlaying, p.outputLatencyMs)
                 if (TogetherDecisions.pollMayMoveSlider(scrub)) {
                     refreshLive(positionMs = p.positionMs)
@@ -556,9 +941,54 @@ object TogetherManager {
         }
     }
 
+    /**
+     * Hold the playhead when the bytes ran out, and let it go when they arrive.
+     *
+     * `docs/TOGETHER.md` §12. A no-op in every session where this device is not
+     * *receiving* a file — [ShareTransfer.readVerdictAt] answers `null` and
+     * nothing here runs.
+     *
+     * **The whole trap is in what a hold is expressed as.** It pauses the local
+     * player and nothing else: the very next line of the poll reports
+     * `together_report_position(pos, playing = false, latency)`, a heartbeat,
+     * which the peer's next `sync_verdict` reads as "they are not playing" and
+     * answers by holding rather than correcting. It is **not**
+     * `together_set_state(.., playing: false, ..)` — that is a command, it takes
+     * the next sequence number, and it would pause the other person because our
+     * download fell behind. That is precisely the ping-pong §10 rules out, and
+     * it is the single easiest thing to get wrong here.
+     *
+     * Resuming is deliberately conditional on the *session* wanting to play.
+     * `Start` is permission, not an instruction: a player the person paused, or
+     * one a `pause` command from the peer paused, must stay paused however many
+     * bytes arrive.
+     */
+    private fun applyShareVerdict(p: SessionPlayer) {
+        val verdict = ShareTransfer.readVerdictAt(p.positionMs, p.isPlaying) ?: return
+        val wantsToPlay = (_state.value as? UiState.Live)?.playing ?: false
+        when (verdict) {
+            ShareReadPolicy.Verdict.HOLD -> if (p.isPlaying) p.pause()
+            ShareReadPolicy.Verdict.START -> if (wantsToPlay && !p.isPlaying) p.play()
+            // Already running with enough in hand. Nothing to do — and nothing
+            // to say, which is the point of there being no fourth arm.
+            ShareReadPolicy.Verdict.CONTINUE -> Unit
+        }
+    }
+
     private fun refreshLive(
         playing: Boolean? = null,
         positionMs: Long? = null,
+        /**
+         * Only an embed passes this.
+         *
+         * A file session knows its length the moment the decoder prepares, and
+         * sets it when the [UiState.Live] is built — so this parameter did not
+         * exist until a player turned up whose length arrives *after* the
+         * session opens. A YouTube duration is the player's to report and
+         * `TogetherContent::duration_ms` returns `None` for one, so the scrubber
+         * starts at zero and grows when the embed says.
+         */
+        durationMs: Long? = null,
         status: Status? = null,
         picture: TogetherDecisions.Picture? = null,
         driftMs: Long? = null,
@@ -569,6 +999,7 @@ object TogetherManager {
         _state.value = live.copy(
             playing = playing ?: live.playing,
             positionMs = positionMs ?: live.positionMs,
+            durationMs = durationMs ?: live.durationMs,
             status = status ?: live.status,
             picture = picture ?: live.picture,
             driftMs = driftMs ?: live.driftMs,
@@ -585,6 +1016,8 @@ object TogetherManager {
         suppressor.clear()
         wanted = null
         wantedMs = 0
+        wantedVideoId = null
+        invitedKind = ""
         scrub = TogetherDecisions.ScrubState(scrubbing = false, pendingRemoteMs = null)
         abandonAudioFocus()
         stopService()

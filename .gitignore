@@ -66,6 +66,7 @@ dist/
 !.claude/skills/
 !.claude/agents/
 !.claude/hooks/
+!.claude/scripts/
 !.claude/user-settings.template.json
 
 # RustRover

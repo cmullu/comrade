@@ -174,6 +174,12 @@ class FileTransfer(private val wiring: Wiring) {
         var pc: PeerConnection? = null
         var channel: DataChannel? = null
         var tracker: ShareDecisions.Tracker? = null
+        /**
+         * The receiver's partial file, handed to a player that started before
+         * the transfer finished (`docs/TOGETHER.md` §12). Null until somebody
+         * asks for one — a transfer nobody is listening to still just downloads.
+         */
+        var streaming: PartialFileDataSource? = null
         val pendingIce = mutableListOf<IceCandidate>()
         var remoteSet = false
         var judged = false
@@ -303,11 +309,52 @@ class FileTransfer(private val wiring: Wiring) {
         end()
     }
 
+    /**
+     * A source over the bytes as they land, for a player that should start now
+     * rather than when the transfer finishes (`docs/TOGETHER.md` §12).
+     *
+     * `null` unless this device is *receiving*: the sender already has the file
+     * and opens it normally, and a transfer that has not been armed has no
+     * bitmap to read. One per session — asking twice hands back the same source,
+     * because two of them over one file would each block on the other's notify.
+     */
+    fun streamingSource(): PartialFileDataSource? {
+        val s = session ?: return null
+        if (s.role != Role.RECEIVER) return null
+        s.streaming?.let { return it }
+        val path = s.path ?: return null
+        val tracker = s.tracker ?: return null
+        return PartialFileDataSource(
+            path = path,
+            totalBytes = s.offer.totalBytes.toLong(),
+            chunkBytes = s.offer.chunkBytes.toInt(),
+            tracker = tracker,
+        ).also { s.streaming = it }
+    }
+
+    /**
+     * What a reader at `posMs` should do about the bytes that have arrived, or
+     * `null` when nothing is being received and the question does not apply.
+     *
+     * The policy is [ShareReadPolicy]'s and the bitmap is this engine's, which
+     * is the division `docs/TOGETHER.md` §12 sets out: the frontend owns the
+     * bytes, core owns the thresholds.
+     */
+    fun readVerdictAt(posMs: Long, playing: Boolean): ShareReadPolicy.Verdict? {
+        val s = session ?: return null
+        if (s.role != Role.RECEIVER) return null
+        return s.tracker?.readVerdictAt(posMs, playing)
+    }
+
     /** Tear everything down. Safe to call twice, and from any thread. */
     fun end() {
         val s = session ?: return
         session = null
         s.stopped = true
+        // Before the channel closes, so anything blocked in `readAt` is woken by
+        // the teardown rather than left to time out on its own.
+        runCatching { s.streaming?.close() }
+        s.streaming = null
         runCatching { s.channel?.close() }
         runCatching { s.pc?.close() }
         progress = null
@@ -456,7 +503,9 @@ class FileTransfer(private val wiring: Wiring) {
         ) {
             return
         }
-        if (!tracker.accept(index)) return
+        // A duplicate is not an error — a re-ask after a timeout can deliver
+        // both — and it must not be counted twice.
+        if (tracker.has(index)) return
         val range = ShareDecisions.chunkRange(
             s.offer.totalBytes.toLong(),
             s.offer.chunkBytes.toInt(),
@@ -473,6 +522,22 @@ class FileTransfer(private val wiring: Wiring) {
             end()
             return
         }
+        // **Written first, recorded second, and the order is load-bearing now
+        // that a player can be reading this file while it arrives.**
+        //
+        // `accept` is what makes the chunk visible to
+        // [PartialFileDataSource.contiguousFrom], which runs on the decoder's
+        // thread. Recording before the write — which is what this did while
+        // nothing read the partial file — leaves a window where the bitmap says
+        // the bytes are there and the file still holds zeroes, and a decoder
+        // that reads zeroes does not stall, it produces a corrupt frame or gives
+        // up on the file. Publishing after the write closes it, and pairs with
+        // the monitor in `readAt` to make the bytes visible wherever the flag is.
+        if (!tracker.accept(index)) return
+        // A player may be sitting inside `readAt` waiting for exactly this
+        // chunk. Waking is all that happens on this thread — see
+        // [PartialFileDataSource.onChunkArrived].
+        s.streaming?.onChunkArrived()
         progress = tracker.fraction()
         status = "Receiving — ${(tracker.fraction() * 100).toInt()}%"
         if (tracker.isComplete()) {
@@ -509,6 +574,18 @@ class FileTransfer(private val wiring: Wiring) {
             return
         }
         progress = 1f
+        // **Deliberately not closed here**, and the reason is a bug this had for
+        // about ten minutes. A player may be reading this source right now; the
+        // caller is about to reopen the finished file and that reopen releases
+        // it. Closing first makes `readAt` answer `-1` in the gap, which the
+        // decoder reads as end-of-stream — so it fires `onCompletion`, which the
+        // session broadcasts as "they stopped", to a peer whose evening was
+        // going fine. The transfer *finishing* would have looked like the other
+        // person pausing.
+        //
+        // Leaving it open costs nothing: every chunk is present by this line, so
+        // the source serves the whole file like any other. [end] still closes it,
+        // which is the teardown case where nothing is going to reopen anything.
         wiring.onReceived(path)
     }
 
