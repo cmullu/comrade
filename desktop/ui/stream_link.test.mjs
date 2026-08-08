@@ -1,0 +1,420 @@
+/**
+ * `/play <a link>` — that it reaches core, and that core stays the one judge.
+ *
+ * Two kinds of test live here. Most are ordinary vectors for the classifier.
+ * The last section reads `crates/comrade_core/src/together.rs` and runs **core's
+ * own stream-URL vectors through this window's classifier**, in the manner of
+ * `together_parity.test.mjs`: a podcast URL core accepts must not be quietly
+ * re-routed into a word search here, and a hostile one must not be altered on
+ * its way to the check that refuses it. Those vectors are the shared,
+ * executable form of the rule — Android and Flutter can mirror the same list
+ * from the same place when they build their own way in.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+import {
+  COULD_NOT_PLAY,
+  NOT_HTTPS,
+  STREAM,
+  WORDS,
+  durationMsFrom,
+  planStream,
+  streamContent,
+  streamTitle,
+  streamUrlOf,
+} from "./stream_link.mjs";
+
+/** What `play_query` returns for text it could not resolve to a link. */
+const UNRESOLVED = { plan: "find_locally", service: null, link: null, content: null };
+
+const EPISODE = "https://feeds.example.com/ep/42.mp3";
+
+// ── Telling a link from a phrase ─────────────────────────────────────────────
+
+test("a direct media link is handed to core as a stream, not searched for", () => {
+  // The whole point: before this, `/play https://…/ep.mp3` went down the
+  // `ask_for_file` route and offered a file picker titled with the URL.
+  const plan = planStream(EPISODE, UNRESOLVED);
+  assert.equal(plan.kind, STREAM);
+  assert.equal(plan.url, EPISODE);
+});
+
+test("words are words", () => {
+  for (const q of ["kun faya kun", "Solaris", "the daily", "  ", "", null, undefined]) {
+    assert.equal(planStream(q, UNRESOLVED).kind, WORDS, JSON.stringify(q));
+  }
+});
+
+test("a colon in a title does not make it a URL", () => {
+  // `re:zero` matches "scheme followed by colon" and nothing else. Requiring
+  // the `//` is what keeps a search for it a search.
+  for (const q of ["re:zero", "blade:runner", "mission:impossible"]) {
+    assert.equal(planStream(q, UNRESOLVED).kind, WORDS, q);
+  }
+});
+
+test("a link with a space in it is a phrase, not a link", () => {
+  const plan = planStream("https://example.com/a.mp3 is great", UNRESOLVED);
+  assert.equal(plan.kind, WORDS);
+});
+
+test("the scheme is read without regard to case, like core reads it", () => {
+  // `valid_stream_url` is case-insensitive on the scheme and case-*sensitive*
+  // on the path. Both halves matter: refusing this would be a mis-route, and
+  // lowercasing the path would break servers that mean it.
+  const plan = planStream("HTTPS://example.com/CaseSensitive/Path.MP3", UNRESOLVED);
+  assert.equal(plan.kind, STREAM);
+  assert.equal(plan.url, "HTTPS://example.com/CaseSensitive/Path.MP3");
+});
+
+// ── The service links this must not steal ────────────────────────────────────
+
+test("a service link stays with the route core resolved it to", () => {
+  // The trap this test exists for: `https://open.spotify.com/track/…` is a
+  // perfectly valid *stream* URL by core's rules, so a classifier that looked
+  // only at the scheme would start a session pointing a media element at a
+  // Spotify web page. `parse_music_link` is what knows better, and it already
+  // ran — so its answer decides.
+  const spotify = {
+    plan: "name_only",
+    link: { spotify: { track_id: "4uLU6hMCjMI75M1A2tKUQC" } },
+    content: null,
+  };
+  assert.equal(
+    planStream("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC", spotify).kind,
+    WORDS,
+  );
+});
+
+test("a YouTube link stays with the embed route", () => {
+  const youtube = {
+    plan: "open_now",
+    link: { youtube: { video_id: "dQw4w9WgXcQ" } },
+    content: { kind: "youtube", video_id: "dQw4w9WgXcQ" },
+  };
+  assert.equal(planStream("https://youtu.be/dQw4w9WgXcQ", youtube).kind, WORDS);
+});
+
+test("content core already resolved is never re-read as a stream", () => {
+  // `content` set means core says a session can open on it as it stands. Even
+  // with no link — a shape that does not exist today — that answer wins.
+  const resolved = { plan: "open_now", link: null, content: { kind: "youtube", video_id: "x" } };
+  assert.equal(planStream(EPISODE, resolved).kind, WORDS);
+});
+
+test("a query core never resolved does not become a stream on a guess", () => {
+  // Without `play_query`'s answer we cannot tell a podcast host from Spotify's,
+  // and inventing that answer here is the duplicate parser this file refuses.
+  for (const target of [null, undefined]) {
+    assert.equal(planStream(EPISODE, target).kind, WORDS);
+  }
+});
+
+// ── Schemes that must not travel ─────────────────────────────────────────────
+
+test("a scheme that is not https is refused here, by name", () => {
+  const cases = [
+    ["http://feeds.example.com/ep.mp3", "http"],
+    ["ftp://example.com/a.mp3", "ftp"],
+    ["file:///etc/passwd", "file"],
+    ["file:/etc/passwd", "file"],
+    ["javascript:alert(1)", "javascript"],
+    ["JavaScript:alert(1)", "javascript"],
+    ["data:audio/mp3;base64,AAAA", "data"],
+    ["blob:https://example.com/1234", "blob"],
+    ["vbscript:msgbox(1)", "vbscript"],
+  ];
+  for (const [url, scheme] of cases) {
+    const plan = planStream(url, UNRESOLVED);
+    assert.equal(plan.kind, NOT_HTTPS, url);
+    assert.equal(plan.scheme, scheme, url);
+    assert.match(plan.message, new RegExp(`${scheme}:`), url);
+    // Refused *here*, so it never reaches core and never reaches an element.
+    assert.equal(plan.url, undefined, url);
+  }
+});
+
+test("a refusal never echoes the link back into the sentence", () => {
+  // The message lands in a toast that sets `textContent`, so this is not an
+  // injection today — it is the rule that keeps it from becoming one, and it
+  // stops a 2 kB URL being pasted back at the person who typed it.
+  const plan = planStream("javascript:alert(document.cookie)", UNRESOLVED);
+  assert.doesNotMatch(plan.message, /alert|document\.cookie/);
+});
+
+// ── Nothing is tidied on the way to core ─────────────────────────────────────
+
+test("the URL handed to core is byte-identical to what was typed", () => {
+  // A frontend that cleaned up a URL would hand core a different string from
+  // the one the person read, and `valid_stream_url`'s injection rules are
+  // written against the string that reaches the element. Only the outer
+  // whitespace of a paste is dropped.
+  const hostile = [
+    'https://example.com/a"onerror=x.mp3',
+    "https://example.com/<script>.mp3",
+    "https://example.com/a%2zb.mp3",
+    "https://user:pass@example.com/a.mp3",
+    "https://example.com@evil.test/a.mp3",
+    "https://192.168.1.1/admin",
+    // A control character, not a space: a space would make this a phrase.
+    // Core refuses this one; the point is that we hand it over intact.
+    "https://example.com/a\u0000b.mp3",
+  ];
+  for (const url of hostile) {
+    const plan = planStream(`  ${url}  `, UNRESOLVED);
+    assert.equal(plan.kind, STREAM, url);
+    assert.equal(plan.url, url, url);
+  }
+});
+
+test("core is left to refuse what core refuses", () => {
+  // These are all things `valid_stream_url` says no to. This window passing
+  // them on is correct — the refusal comes back from `together_start` and
+  // nothing has been played. What would be wrong is a second, drifting copy of
+  // that check here that one day says yes where core says no.
+  for (const url of ["https:///a.mp3", "https://localhost/a.mp3", "https://router/reboot"]) {
+    assert.equal(planStream(url, UNRESOLVED).kind, STREAM, url);
+  }
+});
+
+// ── The wire shape ───────────────────────────────────────────────────────────
+
+test("the content sent is core's Stream shape and nothing more", () => {
+  const content = streamContent(EPISODE);
+  assert.deepEqual(Object.keys(content).sort(), [
+    "duration_ms",
+    "kind",
+    "recording",
+    "url",
+  ]);
+  assert.equal(content.kind, "stream");
+  assert.equal(content.url, EPISODE);
+});
+
+test("a guessed title is never sent as if the source had said it", () => {
+  // `streamTitle` reads a name off the end of a URL for our own stage. Putting
+  // that guess in `recording` would print it on the other person's screen as
+  // the name of the thing, which we do not know.
+  const content = streamContent("https://feeds.example.com/the-daily-2026.mp3");
+  assert.equal(content.recording, null);
+  assert.ok(streamTitle("https://feeds.example.com/the-daily-2026.mp3"));
+});
+
+test("a length we do not know is not invented", () => {
+  // Null because the element has not opened it yet, and honest rather than a
+  // zero — a zero would make the other side's length warning fire on every
+  // stream session.
+  assert.equal(streamContent(EPISODE).duration_ms, null);
+});
+
+test("the content is JSON the command can carry", () => {
+  const round = JSON.parse(JSON.stringify(streamContent(EPISODE)));
+  assert.deepEqual(round, {
+    kind: "stream",
+    url: EPISODE,
+    recording: null,
+    duration_ms: null,
+  });
+});
+
+// ── How long it runs ─────────────────────────────────────────────────────────
+
+test("a length the element could not measure is zero, not a number", () => {
+  // `Infinity` is what a live radio stream reports and `NaN` is what an element
+  // reports before it has opened anything. Either one reaching the scrubber
+  // draws a thumb at a fraction of an unknown whole, and either one reaching
+  // the position report is a number core has to defend itself against.
+  for (const bad of [Infinity, -Infinity, NaN, null, undefined, "", "abc", 0, -5]) {
+    assert.equal(durationMsFrom(bad), 0, String(bad));
+  }
+});
+
+test("a length the element did measure survives the trip", () => {
+  assert.equal(durationMsFrom(12.34), 12340);
+  assert.equal(durationMsFrom(3600), 3_600_000);
+});
+
+// ── Reading an invitation ────────────────────────────────────────────────────
+
+test("an invitation carrying a stream gives up its URL", () => {
+  assert.equal(streamUrlOf({ kind: "stream", url: EPISODE }), EPISODE);
+});
+
+test("no other content kind is read as a stream", () => {
+  for (const content of [
+    null,
+    undefined,
+    {},
+    { kind: "local_file", duration_ms: 1000 },
+    { kind: "youtube", video_id: "dQw4w9WgXcQ" },
+    { kind: "service", link: { spotify: { track_id: "x" } } },
+    { kind: "stream" },
+    { kind: "stream", url: "" },
+    { kind: "stream", url: "   " },
+    { kind: "stream", url: 42 },
+    { kind: "stream", url: { toString: () => EPISODE } },
+  ]) {
+    assert.equal(streamUrlOf(content), null, JSON.stringify(content));
+  }
+});
+
+// ── The title, which is ours alone ───────────────────────────────────────────
+
+test("a title reads like the episode rather than like a URL", () => {
+  assert.equal(streamTitle("https://feeds.example.com/the-daily-2026.mp3"), "the daily 2026");
+  assert.equal(streamTitle("https://archive.org/download/item/track%2001.flac"), "track 01");
+});
+
+test("a segment that names nothing falls back to the host", () => {
+  // "42" on a stage tells nobody anything; "feeds.example.com" does.
+  assert.equal(streamTitle("https://feeds.example.com/ep/42.mp3"), "feeds.example.com");
+  assert.equal(streamTitle("https://www.example.com"), "example.com");
+  assert.equal(streamTitle("https://mp3l.jamendo.com/?trackid=1214935&format=mp31"), "mp3l.jamendo.com");
+});
+
+test("a title never carries what a label cannot hold", () => {
+  // Display-only, so unlike the URL this is tidied: control characters out, and
+  // a bounded length so a 2 kB URL cannot become a 2 kB heading.
+  const noisy = streamTitle("https://example.com/a\u0000b\u001fc.mp3");
+  assert.doesNotMatch(noisy, /[\u0000-\u001f]/);
+  const long = streamTitle(`https://example.com/${"a".repeat(500)}.mp3`);
+  assert.ok(long.length <= 61, `title was ${long.length} long`);
+});
+
+test("a title never throws, whatever the URL is", () => {
+  for (const url of [
+    "",
+    "   ",
+    null,
+    undefined,
+    "https://",
+    "https://example.com/%E0%A4",
+    "https://example.com/%",
+    "https://user:pass@example.com/x.mp3",
+    `https://example.com/${"%C0".repeat(50)}`,
+  ]) {
+    assert.doesNotThrow(() => streamTitle(url), String(url));
+  }
+  // A truncated escape keeps the raw text rather than losing the title.
+  assert.equal(streamTitle("https://example.com/ep%.mp3"), "ep%");
+});
+
+// ── Vocabulary (docs/TOGETHER.md §7) ─────────────────────────────────────────
+
+test("no sentence here claims two players are synced", () => {
+  const sentences = [
+    COULD_NOT_PLAY,
+    planStream("http://example.com/a.mp3", UNRESOLVED).message,
+    planStream("javascript:alert(1)", UNRESOLVED).message,
+  ];
+  for (const s of sentences) {
+    assert.ok(s, "a refusal with no sentence is the bug /play already had");
+    assert.doesNotMatch(s, /\bsynced\b|\bin sync\b/i, s);
+  }
+});
+
+test("a failure to play says nothing is running, not that something is", () => {
+  assert.doesNotMatch(COULD_NOT_PLAY, /playing|together now/i);
+});
+
+// ── Core's own vectors, run through this window ──────────────────────────────
+
+const RUST = readFileSync(
+  new URL("../../crates/comrade_core/src/together.rs", import.meta.url),
+  "utf8",
+);
+
+/**
+ * The string literals inside a named `#[test] fn` in the Rust source.
+ *
+ * Crude, and honest about it in the manner of `together_parity.test.mjs`: if
+ * the test is renamed or reshaped this throws rather than silently checking an
+ * empty list.
+ */
+function rustVectors(fnName, least) {
+  const start = RUST.indexOf(`fn ${fnName}(`);
+  assert.notEqual(start, -1, `could not find "fn ${fnName}" in together.rs — renamed?`);
+  const body = RUST.slice(start, RUST.indexOf("\n    }", start));
+  const found = [...body.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+    .map((m) => unescapeRust(m[1]))
+    // The `assert!` message is a literal too, and it is the only one with a
+    // `{` in it. Vectors are URLs or the empty string.
+    .filter((s) => !s.includes("{"));
+  assert.ok(
+    found.length >= least,
+    `expected at least ${least} vectors in ${fnName}, found ${found.length}`,
+  );
+  return found;
+}
+
+function unescapeRust(s) {
+  return s.replace(/\\(.)/g, (_, c) =>
+    ({ n: "\n", t: "\t", r: "\r", "0": "\u0000" })[c] ?? c,
+  );
+}
+
+test("the content we build is the shape core declared", () => {
+  // `together_start` takes JSON and deserialises `TogetherContent`, so a field
+  // renamed in Rust is a runtime "invalid content" error rather than a build
+  // failure — this window is not the one the compiler checks. The variant is
+  // `#[serde(tag = "kind", rename_all = "snake_case")]`, hence `kind: "stream"`
+  // beside the declared fields.
+  const start = RUST.indexOf("\n    Stream {");
+  assert.notEqual(start, -1, "could not find the Stream variant in together.rs — renamed?");
+  const block = RUST.slice(start, RUST.indexOf("\n    },", start));
+  const declared = [...block.matchAll(/^\s{8}(\w+):\s/gm)].map((m) => m[1]);
+  assert.deepEqual(declared.sort(), ["duration_ms", "recording", "url"]);
+  assert.deepEqual(
+    Object.keys(streamContent(EPISODE)).filter((k) => k !== "kind").sort(),
+    declared,
+  );
+});
+
+test("every URL core calls an ordinary episode is offered to core as one", () => {
+  // The mis-route this guards: desktop deciding a real podcast URL is words,
+  // and answering a paste with a file picker. Includes `https://example.com`,
+  // which has no path and no extension — so a "must end in .mp3" rule here
+  // would fail this test, which is why there is no such rule.
+  for (const url of rustVectors("an_ordinary_episode_url_is_accepted", 4)) {
+    assert.equal(planStream(url, UNRESOLVED).kind, STREAM, url);
+  }
+});
+
+test("nothing core refuses is altered on its way to the refusal", () => {
+  // Whatever this window decides about a hostile vector, it must not hand core
+  // a *different* string — a cleaned-up URL is one that passes the check and
+  // then plays something else.
+  const hostile = rustVectors("a_stream_url_refuses_everything_that_is_not_a_public_https_name", 15);
+  let refusedHere = 0;
+  for (const url of hostile) {
+    const plan = planStream(url, UNRESOLVED);
+    if (plan.kind === STREAM) assert.equal(plan.url, url, url);
+    if (plan.kind === NOT_HTTPS) refusedHere += 1;
+  }
+  // The scheme cases — `http:`, `file:`, `javascript:`, `data:`, `ftp:` — are
+  // the ones this window is entitled to answer without a round trip.
+  assert.ok(refusedHere >= 5, `only ${refusedHere} hostile schemes refused here`);
+});
+
+test("a URL longer than core will take is still core's to refuse", () => {
+  // `STREAM_URL_MAX_LEN` lives in one place. A length rule copied here would be
+  // the copy that drifts, so the long one goes to core and comes back refused.
+  const max = Number(
+    RUST.match(/pub const STREAM_URL_MAX_LEN\s*:\s*usize\s*=\s*([0-9_]+)\s*;/)?.[1].replace(/_/g, ""),
+  );
+  assert.ok(max > 0, "could not find STREAM_URL_MAX_LEN in together.rs — renamed?");
+  const long = `https://example.com/${"a".repeat(max)}`;
+  assert.equal(planStream(long, UNRESOLVED).kind, STREAM);
+});
+
+test("the vector reader itself still works", () => {
+  // Guards the guard: every assertion above would pass vacuously if this
+  // stopped finding anything.
+  assert.throws(() => rustVectors("a_test_that_does_not_exist", 1), /could not find/);
+  assert.throws(
+    () => rustVectors("an_ordinary_episode_url_is_accepted", 999),
+    /expected at least/,
+  );
+});
