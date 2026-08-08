@@ -3678,6 +3678,10 @@ const _: fn() = || {
         crate::api::TogetherContent::Youtube { video_id } => {
             let _: String = video_id;
         }
+        crate::api::TogetherContent::Service { link, recording } => {
+            let _: crate::api::MusicLink = link;
+            let _: Option<crate::api::Recording> = recording;
+        }
     }
     {
         let TogetherCorrectionDto = None::<crate::api::TogetherCorrectionDto>.unwrap();
@@ -5146,6 +5150,14 @@ impl SseDecode for crate::api::TogetherContent {
                 let mut var_videoId = <String>::sse_decode(deserializer);
                 return crate::api::TogetherContent::Youtube {
                     video_id: var_videoId,
+                };
+            }
+            2 => {
+                let mut var_link = <crate::api::MusicLink>::sse_decode(deserializer);
+                let mut var_recording = <Option<crate::api::Recording>>::sse_decode(deserializer);
+                return crate::api::TogetherContent::Service {
+                    link: var_link,
+                    recording: var_recording,
                 };
             }
             _ => {
@@ -6749,6 +6761,12 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherContent> {
             crate::api::TogetherContent::Youtube { video_id } => {
                 [1.into_dart(), video_id.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::TogetherContent::Service { link, recording } => [
+                2.into_dart(),
+                link.into_into_dart().into_dart(),
+                recording.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -8155,6 +8173,11 @@ impl SseEncode for crate::api::TogetherContent {
             crate::api::TogetherContent::Youtube { video_id } => {
                 <i32>::sse_encode(1, serializer);
                 <String>::sse_encode(video_id, serializer);
+            }
+            crate::api::TogetherContent::Service { link, recording } => {
+                <i32>::sse_encode(2, serializer);
+                <crate::api::MusicLink>::sse_encode(link, serializer);
+                <Option<crate::api::Recording>>::sse_encode(recording, serializer);
             }
             _ => {
                 unimplemented!("");

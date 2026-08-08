@@ -680,8 +680,23 @@ object ComradeCore {
     fun playRoute(
         plan: uniffi.comrade_ui.PlayPlan,
         foundLocalCopy: Boolean,
+        link: uniffi.comrade_core.MusicLink? = null,
+        access: uniffi.comrade_core.ServiceAccess = serviceAccess(),
     ): uniffi.comrade_ui.PlayRoute? =
-        runCatching { ffi.playRoute(plan, foundLocalCopy) }.getOrNull()
+        runCatching { ffi.playRoute(plan, foundLocalCopy, link, access) }.getOrNull()
+
+    /**
+     * What this device is signed in to and may drive playback on.
+     *
+     * Hard-coded to nothing, because nothing here connects to a service yet —
+     * the Spotify App Remote integration is the follow-up (`docs/TOGETHER.md`
+     * §11). Stated as a function returning honest `false`s rather than left for
+     * a caller to pass, so that when the integration lands there is exactly one
+     * place that learns the answer, and until then no call site can accidentally
+     * claim an account this app does not have.
+     */
+    fun serviceAccess(): uniffi.comrade_core.ServiceAccess =
+        uniffi.comrade_core.ServiceAccess(spotify = false, appleMusic = false)
 
     /** Name a piece of work. [peer] of null is a note to self — no relay. */
     fun assignTaskTyped(peer: String?, text: String): TaskInfo =

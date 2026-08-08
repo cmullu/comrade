@@ -92,15 +92,32 @@ export function planPlay(route, target) {
           : "Pick the file and I'll start it with them.",
       };
 
-    // DRM audio no third-party client may decode. Saying where it lives is the
-    // whole of what we can honestly offer.
+    // No account connected here that could drive it. Reworded 2026-08-08: the
+    // old sentence said the service "won't play in here", which named the wrong
+    // reason. Decoding their bytes is out and always will be, but driving
+    // playback inside their own client on this listener's own subscription is
+    // precisely what their SDKs exist for — see `docs/TOGETHER.md` §11. What is
+    // missing is the connection, and that is a thing that can be fixed.
     case "open_elsewhere":
       return {
         kind: ELSEWHERE,
         title,
         message: service
-          ? `${service} won't play in here. Open it there — or /play a file you both have.`
+          ? `No ${service} account connected here. Open it there — or /play a file you both have.`
           : "I can't play that one here. /play a file you both have and I'll sync it.",
+      };
+
+    // The account is connected and the track is drivable, so this is a real
+    // session on this listener's own subscription. No player is wired to it in
+    // this window yet, and the sentence says which half is missing rather than
+    // implying the whole feature is absent.
+    case "play_on_service":
+      return {
+        kind: UNAVAILABLE,
+        title,
+        message: service
+          ? `${service} together isn't wired into this window yet.`
+          : "That service isn't wired into this window yet.",
       };
 
     // A YouTube embed is drivable in a webview, and this window has no iframe

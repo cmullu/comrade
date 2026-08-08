@@ -3,6 +3,7 @@ package mullu.comrade.ui
 import mullu.comrade.ComradeCore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.comrade_core.AppAction
@@ -318,25 +319,43 @@ class ChatCommandsTest {
     }
 
     @Test
-    fun everyPlayRouteSaysSomethingAndOnlyOneClaimsItStarted() {
-        // Three of the five routes are refusals, and a refusal naming the wrong
+    fun everyPlayRouteSaysSomethingAndOnlyTheTwoThatPlayClaimTheyDid() {
+        // Three of the six routes are refusals, and a refusal naming the wrong
         // reason sends someone looking for a file picker when the real problem
-        // is DRM. So each route gets its own sentence, and none may be blank.
+        // is that no account is connected. So each route gets its own sentence,
+        // and none may be blank.
+        val started = setOf(PlayRoute.START_TOGETHER, PlayRoute.PLAY_ON_SERVICE)
         for (route in PlayRoute.entries) {
             val note = ChatCommands.playNote(route, MusicService.SPOTIFY, "Kun Faya Kun")
             assertTrue("$route", note.isNotBlank())
-            if (route != PlayRoute.START_TOGETHER) {
+            if (route !in started) {
                 assertFalse("$route", note.contains("Playing"))
             }
         }
-        assertTrue(
-            ChatCommands.playNote(PlayRoute.START_TOGETHER, null, "Kun Faya Kun")
-                .contains("Kun Faya Kun"),
-        )
+        for (route in started) {
+            assertTrue(
+                "$route",
+                ChatCommands.playNote(route, MusicService.SPOTIFY, "Kun Faya Kun")
+                    .contains("Kun Faya Kun"),
+            )
+        }
     }
 
     @Test
-    fun aDrmRefusalNamesTheServiceThatRefused() {
+    fun theServiceRouteNamesWhereItIsPlayingAndTheRefusalNamesWhatIsMissing() {
+        // The two Spotify sentences must not read alike: one is a live session
+        // on this listener's own subscription, the other is "you have no account
+        // here". Before 2026-08-08 the refusal blamed DRM, which was the wrong
+        // reason — driving their client is exactly what their SDK is for.
+        val playing = ChatCommands.playNote(PlayRoute.PLAY_ON_SERVICE, MusicService.SPOTIFY, "x")
+        val refused = ChatCommands.playNote(PlayRoute.OPEN_ELSEWHERE, MusicService.SPOTIFY, "x")
+        assertTrue(playing.contains("Spotify"))
+        assertTrue(refused.contains("Spotify"))
+        assertNotEquals(playing, refused)
+    }
+
+    @Test
+    fun aServiceRefusalNamesTheServiceItCannotReach() {
         assertTrue(
             ChatCommands.playNote(PlayRoute.OPEN_ELSEWHERE, MusicService.SPOTIFY, "x")
                 .contains("Spotify"),

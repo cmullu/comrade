@@ -101,10 +101,13 @@ worse than asking.
 
 **Links.** `parse_music_link` recognises Spotify, Apple Music and YouTube URLs
 and reduces them to what they identify — offline, metadata-only, no account and
-no audio. Only a YouTube link is *playable in place* (`playable_in_place`),
-through the embed player; for the other two the honest answer is "this tells you
-what to open", and a UI that blurred the two would be promising something the app
-cannot do.
+no audio. Whether a link can then be *played* is not a property of the link:
+`playhead_control(&ServiceAccess)` answers it against what this device is signed
+in to, because the same Spotify URL is a session on a phone with Premium behind
+it and a signpost on one without. YouTube is `Full` either way, needing no
+account at all. **§11 is the long version, and it is the section to read before
+touching any of this** — the predicate it replaced (`playable_in_place`, a
+property of the URL) encoded a conclusion that was wrong.
 
 A YouTube id is the asymmetric case and is named rather than hidden: it *is*
 fully disclosing, because it is publicly resolvable. It is also validated in
@@ -889,7 +892,10 @@ implies we are about to play something we cannot.
 - **Group watch.** Two-party is what makes the arbitration analysis tractable
   and provable. N-way is a different problem, and nobody asked for it.
 - **Streaming anything between peers.** §1. This is the constraint the whole
-  design exists inside, not a limitation to be engineered around later.
+  design exists inside, not a limitation to be engineered around later — and
+  note that §11 does not soften it. A service session moves no audio between
+  peers either; each side streams from the vendor on its own subscription,
+  which is the same shape as each side opening its own file.
 - **Resuming a session across a restart.** A playhead is a claim about right
   now. "Pick up where we left off" is a media-player feature, and this app does
   not own the player — and persisting a session would reopen §6's replay hole.
@@ -898,3 +904,176 @@ implies we are about to play something we cannot.
   makes the first re-evaluate. A stall is ridden out locally and the next drift
   verdict closes the gap. This will occasionally look worse than it could; it is
   much better than the alternative.
+
+## 11. Online tracks — what Spotify Jam actually does, and what we can copy
+
+_Added 2026-08-08, after the owner asked for "something like Spotify Jam, should
+work with online tracks as well"._
+
+### The thing worth knowing first
+
+**Spotify Jam does not share audio.** Every participant's own Spotify client
+streams the track from Spotify's servers on their own subscription; what travels
+between them is a queue and playback events carrying track-millisecond
+timestamps, over Spotify's own infrastructure, with clock alignment on top.
+It is a shared remote control, not a shared pipe.
+
+That is worth sitting with, because it means **§1 was never the thing standing
+between us and a Jam**. The clock-not-a-pipe model in this document *is* the Jam
+model. Sync was never the hard part for anyone; Spotify's advantage is that it
+owns the catalogue, so "the same track" resolves trivially on both ends and both
+ends are already licensed to play it.
+
+So the gap is not the engine. It is: **can each device independently play the
+thing the invitation names?**
+
+### How the third-party ones close that gap
+
+JQBX and Vertigo are Jam-alikes built by people who own no catalogue at all, and
+they close it the only way available: each participant connects **their own**
+account, and the app drives **their own** client.
+
+- **Spotify, in a browser** — the Web Playback SDK is a player you instantiate in
+  a page; it exposes `seek(position_ms)` and a `player_state_changed` event.
+  Premium-only, per participant.
+- **Spotify, on Android** — the App Remote SDK connects to the *installed
+  Spotify app* and drives it: `PlayerApi.seekTo`, `PlayerState.playbackPosition`.
+  Premium-only again.
+- **Apple Music** — Vertigo offers it, and it is a weaker deal (below).
+
+None of this is a hack around DRM and none of it decodes anyone's bytes. Driving
+playback inside a vendor's own client is exactly what these SDKs are *for*.
+
+**This repo had that wrong, and the correction is the substance of this
+section.** `MusicLink::playable_in_place` answered "only YouTube", on the
+reasoning that Spotify and Apple Music serve DRM audio no third-party client may
+decode. The decode half is true and unchanged. What does not follow is that we
+cannot *drive* them — and because the old predicate was a property of the *link*,
+it could not express the thing that actually decides the answer, which is what
+the **device** is signed in to. The same Spotify URL is a full session on a phone
+with Premium behind it and a signpost on one without.
+
+### What replaced it
+
+`MusicLink::playhead_control(&ServiceAccess) -> PlayheadControl`, and three
+values rather than two, because the middle one is real:
+
+| | Signed in | Not signed in |
+|---|---|---|
+| YouTube | `Full` (embed needs no account at all) | `Full` |
+| Spotify | `Full` — seek and position both reach the player | `None` |
+| Apple Music | `StartOnly` | `None` |
+
+`Full` runs the drift ladder. `StartOnly` means it can be started and never
+*placed*: the two devices agree on "now" and then drift with nothing able to pull
+them back — which is what §9a already calls the honest degradation of a deep
+link. `None` means the honest offer is a link to open, not a player.
+
+**Apple Music is never `Full`, signed in or not**, and that is a finding rather
+than caution: MusicKit exposes no precise scheduling, so there is no call that
+places a playhead at a named moment. Its terms also restrict synchronising
+MusicKit content with other content, which at minimum wants a legal read before
+anyone ships it. `PlayheadControl::corrects()` is what keeps that from becoming a
+UI bug — a ladder running against a player that cannot seek emits verdicts
+nothing applies and a screen that says "catching up…" while nothing catches up.
+For now `play_route` sends `StartOnly` to `OpenElsewhere`: opening a session that
+cannot be held is a bigger promise than we can keep.
+
+**Premium, not sign-in, is the real gate on Spotify.** Both SDKs refuse to play
+on a free account, so a frontend that reports `spotify: true` for a free account
+opens a session and leaves the other person waiting for a track that will never
+start. `ServiceAccess` says this on itself.
+
+### What travels, and what it costs
+
+`TogetherContent::Service { link, recording }` — a public catalogue id and,
+optionally, what it is. Fully disclosing, exactly like the YouTube variant and
+for the same reason: the id is publicly resolvable, so the invitation says
+precisely what is being played. `recording` rides along so a device that *cannot*
+reach the service can fall back to looking for its own copy (§9a) rather than
+failing.
+
+The privacy cost is the one §9's YouTube note already states, and it applies
+here identically and must be disclosed the same way: **both devices contact the
+vendor**, who learns each IP, the track, and — because sync-play works — that two
+IPs paused at the same moments. That correlation is unavoidable by construction.
+It is the first time this app would contact a third party during ordinary
+listening, so it ships **off by default, behind one disclosure that says this**.
+
+### The session syncs coarsely, and why
+
+A `Service` session takes the same `SyncTuning` as a YouTube embed: no rate trim
+(not expressible through either SDK) and the coarse deadband. The deciding
+detail is that **`PlayerState.playbackPosition` is not continuously updated** —
+the Android SDK reports it on state changes, not on a tick (spotify/android-sdk
+issue 143), so a follower's position has to be interpolated between events. A
+deadband tuned for an HTML5 element on a local file would thrash against that
+reporting granularity rather than against any real drift.
+
+### What is built, and what is not
+
+**Built and tested here**: the whole model above — `ServiceAccess`,
+`PlayheadControl`, `MusicLink::playhead_control`, `TogetherContent::Service` and
+its tuning, `play_route`'s new `PlayOnService` branch — plus the FFI surface for
+all of it (uniffi and a regenerated frb bridge) and the three frontends' routing
+and wording brought in line.
+
+**Not built**: the actual account connection. No frontend authenticates to
+anything, so every frontend passes `ServiceAccess::none()` and behaviour is
+byte-for-byte what it was — a Spotify link still routes to "open it there", it
+just now says *"no Spotify account connected here"* instead of blaming DRM,
+because that is the true reason and it is a fixable one.
+
+What each frontend needs next, in the order that makes them useful:
+
+1. **Desktop** — OAuth (PKCE, no client secret in a shipped binary), the Web
+   Playback SDK in the webview, `ServiceAccess { spotify: true }` once a Premium
+   account is live. The CSP consequence needs the same care §9 demands of
+   YouTube: the SDK is Spotify-hosted JavaScript, so this is a `script-src`
+   widening in the origin where `withGlobalTauri` exposes every registered
+   command — the exact thing the YouTube note refuses. **It must run in a
+   sandboxed child frame with its own origin**, not in the main window.
+2. **Android** — App Remote against the installed Spotify app, which needs no
+   webview and no CSP argument at all. This is the cheaper and safer of the two,
+   and it should land first.
+3. **Both** — the token lifecycle. A token expires mid-album and a subscription
+   can be downgraded, so `ServiceAccess` has to be able to go back to `false`
+   during a session, and the session has to survive it becoming a signpost.
+
+## 12. Playing a handed-over file before it has finished arriving
+
+_Also from the 2026-08-08 request: "even when one person has the file it should
+be streamed."_
+
+Today it is not streamed, and the honest statement of where that stands is that
+**core has been ready for this since the transfer landed, and neither frontend
+uses it**. `ShareTracker::playable_at(pos_ms)` answers "may playback start here",
+and `runway_ms(pos_ms)` answers "how many milliseconds of *uninterrupted* audio
+are available from here" — a gap ends the runway however much lies beyond it,
+because audio after a hole is a stutter waiting to happen. Both are unit-tested;
+both are dead code.
+
+What is missing is per-frontend, and the two frontends need genuinely different
+things:
+
+- **Android** wants `MediaDataSource` (API 23+, and `minSdk` is 26). Its
+  `readAt(position, buffer, offset, size)` is called by the decoder on demand, so
+  a source backed by the tracker can hand over the bytes it has and block on the
+  ones it does not. This is the closer of the two to working: `TogetherPlayer`
+  already owns a `MediaPlayer`, and `setDataSource(MediaDataSource)` is a
+  one-line change to how it is fed.
+- **Desktop** cannot use a `blob:` URL, and that is the whole reason it waits
+  today: a blob is a fixed-length snapshot and cannot grow. The clean answer is
+  **not** MSE — that needs a fragmented container we do not control — but a Tauri
+  custom protocol serving the partial file with `Range` support, pointed at by
+  the `<video>` element's `src`. The element then does ordinary progressive
+  playback and a range that runs past the received prefix is where the tracker's
+  answer goes.
+
+Both need one shared decision that does not exist yet: **what to do when the
+runway runs out mid-playback.** §10 rules out reporting buffering to the peer,
+and that rule stands — a stall signalled as a remote pause is the worst ping-pong
+available here. So a starved reader pauses locally, and the next drift verdict is
+what closes the gap. Writing that down is the prerequisite for either frontend,
+because a stall handled two different ways on two devices is a session that
+argues with itself.

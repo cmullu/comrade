@@ -470,6 +470,31 @@ pub enum TogetherContent {
     /// what is being watched. That asymmetry is a property of the two sources,
     /// and the inviting UI should name it rather than hide it.
     Youtube { video_id: String },
+    /// A recording on a streaming service, which **each side plays from their
+    /// own subscription**.
+    ///
+    /// This is the shape every working listen-together product has, Spotify's
+    /// own Jam included: no audio is shared, each participant's client streams
+    /// the track itself, and only control events travel. It is also the only
+    /// shape available to us — §1 rules out moving the bytes, and the platforms
+    /// rule it out harder.
+    ///
+    /// Whether a session on one of these can actually be *held* together is not
+    /// a property of the link. It depends on what each device can drive, which
+    /// is [`ServiceAccess`] and [`MusicLink::playhead_control`] — a Spotify
+    /// track is a full session on two devices with signed-in Premium accounts
+    /// and a bare "here's where to open it" on a device with neither.
+    ///
+    /// Fully disclosing, like [`Self::Youtube`] and for the same reason: the id
+    /// is publicly resolvable, so the invitation says exactly what is being
+    /// played.
+    Service {
+        link: MusicLink,
+        /// What it is, when the inviting side could name it — so the other
+        /// device can look for its own copy if it cannot reach the service.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recording: Option<Recording>,
+    },
 }
 
 impl TogetherContent {
@@ -491,6 +516,20 @@ impl TogetherContent {
     pub fn duration_ms(&self) -> Option<u64> {
         match self {
             Self::LocalFile { duration_ms, .. } => Some(*duration_ms),
+            // Both of these are the player's to report, not the inviter's to
+            // claim — and for a service track the two devices may legitimately
+            // be handed different masters of the same recording.
+            Self::Youtube { .. } | Self::Service { .. } => None,
+        }
+    }
+
+    /// What the invitation names, when it names anything — so a device that
+    /// cannot reach the source can look for its own copy instead.
+    pub fn recording(&self) -> Option<&Recording> {
+        match self {
+            Self::LocalFile { recording, .. } | Self::Service { recording, .. } => {
+                recording.as_ref()
+            }
             Self::Youtube { .. } => None,
         }
     }
@@ -509,7 +548,11 @@ impl TogetherContent {
                 min_deadband_ms: TOGETHER_DEADBAND_FINE_MS,
                 can_rate_trim: true,
             },
-            Self::Youtube { .. } => SyncTuning {
+            // A third-party player we drive through an SDK: no rate trim is
+            // expressible, and the position it reports is event-driven rather
+            // than continuous, so the deadband has to be wide enough not to
+            // thrash against its own reporting granularity.
+            Self::Youtube { .. } | Self::Service { .. } => SyncTuning {
                 min_deadband_ms: TOGETHER_DEADBAND_COARSE_MS,
                 can_rate_trim: false,
             },
@@ -551,15 +594,119 @@ impl MusicLink {
         }
     }
 
-    /// Whether this link can be *played* by us, as opposed to merely naming
-    /// something the listener must already have.
+    /// How well this device could hold a playhead on this link, given what it
+    /// is signed in to.
     ///
-    /// Only YouTube can, and only through its embed player. Spotify and Apple
-    /// Music serve DRM-protected audio that no third-party client may decode, so
-    /// for those the honest answer is "this tells you what to open", not "press
-    /// play". A UI that blurs the two would be promising something it cannot do.
-    pub fn playable_in_place(&self) -> bool {
-        matches!(self, Self::Youtube { .. })
+    /// **This used to be a property of the link, and that was the mistake.**
+    /// `playable_in_place` answered "only YouTube", reasoning that Spotify and
+    /// Apple Music serve DRM audio no third-party client may decode. The decode
+    /// part is true and unchanged — we never touch their bytes. What does not
+    /// follow is that we cannot *drive* them: both vendors ship SDKs whose whole
+    /// purpose is letting another app control playback happening inside their
+    /// own client, on the listener's own subscription. That is how every
+    /// third-party listen-together product works, and how Spotify's own Jam
+    /// works — nobody shares audio, each participant streams the track from
+    /// their own client, and only control events travel.
+    ///
+    /// So the answer depends on the device, not the URL, and it has three values
+    /// rather than two — see [`PlayheadControl`].
+    pub fn playhead_control(&self, access: &ServiceAccess) -> PlayheadControl {
+        match self {
+            // The embed player needs no account at all, which is what keeps it
+            // the only source that works for two strangers.
+            Self::Youtube { .. } => PlayheadControl::Full,
+            // Web Playback SDK in a webview, App Remote against the installed
+            // app on Android. Both expose a seek and a position, so the whole
+            // correction ladder short of a rate trim is available.
+            Self::Spotify { .. } => {
+                if access.spotify {
+                    PlayheadControl::Full
+                } else {
+                    PlayheadControl::None
+                }
+            }
+            // Deliberately never `Full`, even signed in. MusicKit offers no
+            // precise scheduling, so there is no call that places a playhead at
+            // a named moment — and its terms restrict synchronising MusicKit
+            // content with other content, which at minimum needs a legal read
+            // before anyone tries. `StartOnly` is what §9a already calls the
+            // honest degradation: we started together, and nothing can pull us
+            // back afterwards.
+            Self::AppleMusic { .. } => {
+                if access.apple_music {
+                    PlayheadControl::StartOnly
+                } else {
+                    PlayheadControl::None
+                }
+            }
+        }
+    }
+}
+
+/// What this device is signed in to, and may therefore drive playback on.
+///
+/// Answered by the frontend, because only it knows: an OAuth token on desktop,
+/// a connected `SpotifyAppRemote` on Android. Never persisted here and never
+/// inferred — a device that has not said is a device that cannot.
+///
+/// **Premium is the real gate on Spotify**, not sign-in: both SDKs refuse to
+/// play on a free account. A frontend must report `false` for a free account
+/// rather than `true`-and-hope, or the session opens and the other person waits
+/// for a track that will never start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ServiceAccess {
+    /// A signed-in Spotify **Premium** account this device may drive.
+    #[serde(default)]
+    pub spotify: bool,
+    /// A signed-in Apple Music subscription.
+    #[serde(default)]
+    pub apple_music: bool,
+}
+
+impl ServiceAccess {
+    /// Nothing connected — what every device reports until a frontend says
+    /// otherwise, and what a frontend with no integration reports forever.
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
+/// How tightly a source's playhead can be held.
+///
+/// Three values because the middle one is real and pretending it is not is how
+/// a UI ends up claiming a precision it does not have. A deep link into someone
+/// else's subscription genuinely does start two people together and genuinely
+/// cannot pull them back afterwards, and saying so is better than either
+/// refusing it or dressing it up as a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayheadControl {
+    /// Play, pause and *seek* all reach the player, and it reports where it is.
+    /// A full session: the drift ladder applies, at whatever tuning the source
+    /// supports.
+    Full,
+    /// It can be started, and that is all. The two devices agree on "now" and
+    /// then drift with nothing able to close the gap — so a session must not
+    /// claim to be holding them together, and must not emit corrections it
+    /// cannot apply.
+    StartOnly,
+    /// Not drivable at all. The honest offer is a link to open, not a player.
+    None,
+}
+
+impl PlayheadControl {
+    /// Whether a session on this source should run the drift ladder at all.
+    ///
+    /// Load-bearing rather than cosmetic: emitting corrections to a player that
+    /// cannot seek produces a stream of verdicts nothing applies, and a screen
+    /// that says "catching up…" forever while nothing catches up.
+    pub fn corrects(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Whether a session can be opened on this source at all.
+    pub fn playable(&self) -> bool {
+        !matches!(self, Self::None)
     }
 }
 
@@ -2221,18 +2368,127 @@ mod tests {
                 video_id: "dQw4w9WgXcQ".into()
             }
         );
-        assert!(link.playable_in_place());
-        // The other two name something you must already have; saying otherwise
-        // would promise a thing this app cannot do.
-        assert!(!MusicLink::Spotify {
-            track_id: "x".into()
+        // The embed needs no account, so it is the one source that works
+        // between two people who share nothing but a link.
+        assert_eq!(
+            link.playhead_control(&ServiceAccess::none()),
+            PlayheadControl::Full
+        );
+    }
+
+    // ── What a device can actually drive ────────────────────────────────────
+
+    fn spotify() -> MusicLink {
+        MusicLink::Spotify {
+            track_id: "6habFhsOp2NvshLv26DqMb".into(),
         }
-        .playable_in_place());
-        assert!(!MusicLink::AppleMusic {
+    }
+
+    fn apple() -> MusicLink {
+        MusicLink::AppleMusic {
             storefront: "in".into(),
-            track_id: "1".into()
+            track_id: "1440931493".into(),
         }
-        .playable_in_place());
+    }
+
+    /// The correction this whole model turns on: it is the *device* that decides
+    /// whether a service track is playable, not the URL. This is how Spotify's
+    /// own Jam works and how every third-party clone of it works — each
+    /// participant plays the track from their own client on their own
+    /// subscription, and only control events travel.
+    #[test]
+    fn a_service_track_is_playable_exactly_when_this_device_is_signed_in() {
+        assert_eq!(
+            spotify().playhead_control(&ServiceAccess::none()),
+            PlayheadControl::None,
+            "no account is no session, and must not read as one",
+        );
+        assert_eq!(
+            spotify().playhead_control(&ServiceAccess {
+                spotify: true,
+                apple_music: false,
+            }),
+            PlayheadControl::Full,
+        );
+    }
+
+    /// Apple Music is never `Full`, signed in or not. MusicKit exposes no way to
+    /// place a playhead at a named moment, so a session on it could be started
+    /// and never held — and a correction ladder running against a player that
+    /// cannot seek produces verdicts nothing applies.
+    #[test]
+    fn apple_music_can_be_started_and_never_placed() {
+        let connected = ServiceAccess {
+            spotify: false,
+            apple_music: true,
+        };
+        assert_eq!(
+            apple().playhead_control(&connected),
+            PlayheadControl::StartOnly
+        );
+        assert!(!apple().playhead_control(&connected).corrects());
+        assert!(apple().playhead_control(&connected).playable());
+        assert_eq!(
+            apple().playhead_control(&ServiceAccess::none()),
+            PlayheadControl::None
+        );
+    }
+
+    #[test]
+    fn one_service_being_connected_says_nothing_about_the_other() {
+        // The two are separate subscriptions and separate SDKs; a shared
+        // boolean here would open a Spotify session on an Apple Music account.
+        let only_spotify = ServiceAccess {
+            spotify: true,
+            apple_music: false,
+        };
+        assert_eq!(
+            apple().playhead_control(&only_spotify),
+            PlayheadControl::None
+        );
+        let only_apple = ServiceAccess {
+            spotify: false,
+            apple_music: true,
+        };
+        assert_eq!(
+            spotify().playhead_control(&only_apple),
+            PlayheadControl::None
+        );
+    }
+
+    #[test]
+    fn only_a_full_playhead_runs_the_drift_ladder() {
+        // `corrects()` gates the ladder, so a source that cannot seek must not
+        // pass it — otherwise the screen says "catching up…" forever while
+        // nothing catches up.
+        assert!(PlayheadControl::Full.corrects());
+        assert!(!PlayheadControl::StartOnly.corrects());
+        assert!(!PlayheadControl::None.corrects());
+        assert!(PlayheadControl::Full.playable());
+        assert!(PlayheadControl::StartOnly.playable());
+        assert!(!PlayheadControl::None.playable());
+    }
+
+    #[test]
+    fn a_service_session_syncs_as_coarsely_as_an_embed() {
+        // Both are third-party players driven through an SDK: no rate trim is
+        // expressible and the reported position is event-driven rather than
+        // continuous, so the deadband must not be the local-file one.
+        let service = TogetherContent::Service {
+            link: spotify(),
+            recording: None,
+        };
+        assert_eq!(
+            service.tuning(),
+            TogetherContent::Youtube {
+                video_id: "dQw4w9WgXcQ".into()
+            }
+            .tuning(),
+        );
+        assert!(!service.tuning().can_rate_trim);
+        // And it claims no duration: the two devices may be handed different
+        // masters of the same recording.
+        assert_eq!(service.duration_ms(), None);
     }
 
     #[test]

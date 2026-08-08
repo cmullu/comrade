@@ -471,6 +471,10 @@ pub enum _TogetherContent {
     Youtube {
         video_id: String,
     },
+    Service {
+        link: MusicLink,
+        recording: Option<Recording>,
+    },
 }
 
 #[frb(mirror(SyncVerdict))]

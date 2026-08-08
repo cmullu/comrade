@@ -73,7 +73,7 @@ use comrade_core::crypto::KeyProfile;
 use comrade_core::handoff::{AttachmentRoute, HandoffSignal};
 use comrade_core::share::transport::RelayPolicy;
 use comrade_core::share::ShareSignal;
-use comrade_core::together::{MusicLink, Recording, TogetherContent};
+use comrade_core::together::{MusicLink, Recording, ServiceAccess, TogetherContent};
 use comrade_state::AppWorkspace;
 use comrade_ui::{
     AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
@@ -906,10 +906,23 @@ impl Comrade {
     /// What to do about a `/play`, once the caller has searched its own library.
     ///
     /// `found_local_copy` is only consulted for [`PlayPlan::FindLocally`]; see
-    /// [`comrade_ui::play_route`] for why a local file does not make a DRM link
-    /// playable. Pure, so it takes no lock.
-    pub fn play_route(&self, plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
-        comrade_ui::play_route(plan, found_local_copy)
+    /// [`comrade_ui::play_route`] for why a local file does not make a service
+    /// link a local session.
+    ///
+    /// `link` and `access` are what decide a service track: the same Spotify URL
+    /// is a session on a device with a Premium account signed in and a signpost
+    /// on one without, and nothing in the URL distinguishes them. A frontend
+    /// with no service integration passes
+    /// [`comrade_core::together::ServiceAccess::none`] and gets exactly today's
+    /// behaviour. Pure, so it takes no lock.
+    pub fn play_route(
+        &self,
+        plan: PlayPlan,
+        found_local_copy: bool,
+        link: Option<MusicLink>,
+        access: ServiceAccess,
+    ) -> PlayRoute {
+        comrade_ui::play_route(plan, found_local_copy, link, access)
     }
 
     /// Name a piece of work. `peer` of `None` is a note to self, which never

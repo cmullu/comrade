@@ -839,6 +839,61 @@ is small; the content problem is the real constraint:
 >   lanes, because every one of them asserts about values rather than pixels. A
 >   screenshot test on the emulator lanes is the honest fix and is not built.
 >
+> - ~~**Online tracks cannot be played together at all.**~~ **Model built
+>   2026-08-08; no frontend connects to a service yet.** The owner asked for
+>   "something like Spotify Jam, should work with online tracks as well", and the
+>   research changed what the answer is. **Jam shares no audio**: each
+>   participant's own Spotify client streams the track on their own subscription,
+>   and only queue and playback events travel. That is this document's own
+>   clock-not-a-pipe model, so §8.2's constraint was never what stood in the way
+>   — the gap is that we own no catalogue, so "both sides can play this" does not
+>   come for free.
+>
+>   The third-party Jam-alikes (JQBX, Vertigo) close that gap by connecting each
+>   participant's **own** account and driving each participant's **own** client —
+>   Spotify's Web Playback SDK in a browser, its App Remote SDK against the
+>   installed Android app. Neither decodes anyone's bytes; driving a vendor's
+>   client is what those SDKs are for. Which makes
+>   `MusicLink::playable_in_place` wrong in a way worth naming: it was a property
+>   of the **link**, and the thing that actually decides is what the **device** is
+>   signed in to. The same Spotify URL is a session on a phone with Premium behind
+>   it and a signpost on one without, and no amount of looking at the URL tells
+>   those two phones apart.
+>
+>   Replaced by `playhead_control(&ServiceAccess) -> PlayheadControl`
+>   (`crates/comrade_core/src/together.rs:613`) with three values, because the
+>   middle one is real: `Full` runs the drift ladder, `StartOnly` can be started
+>   and never *placed*, `None` is a signpost. **Apple Music is never `Full`**,
+>   signed in or not — MusicKit exposes no precise scheduling, and its terms
+>   restrict synchronising its content with other content. `corrects()` is what
+>   stops that becoming a UI bug: a ladder against a player that cannot seek emits
+>   verdicts nothing applies and a screen that says "catching up…" forever.
+>   `TogetherContent::Service` carries it on the wire at the same coarse tuning as
+>   an embed, because `PlayerState.playbackPosition` is event-driven rather than
+>   continuous (spotify/android-sdk#143) and a local-file deadband would thrash
+>   against the reporting granularity rather than against drift.
+>
+>   **What is not built is the account connection**, so every frontend passes
+>   `ServiceAccess::none()` and behaviour is unchanged — a Spotify link still
+>   routes to "open it there". What changed is that it now says *"no Spotify
+>   account connected here"* rather than blaming DRM, because that is the true
+>   reason and it is fixable. Android's App Remote should land first: it needs no
+>   webview and therefore no CSP argument, whereas the desktop Web Playback SDK is
+>   Spotify-hosted JavaScript and **must** run in a sandboxed child frame rather
+>   than the origin where `withGlobalTauri` exposes every command — the same line
+>   `docs/TOGETHER.md` §9 holds for YouTube. Full plan: §11 there.
+> - **A handed-over file still plays only once it is whole**, and core has been
+>   ready for it since the transfer landed. `ShareTracker::playable_at` and
+>   `runway_ms` are unit-tested and remain dead code — the gap is per-frontend and
+>   the two need different things: Android a `MediaDataSource` (its `readAt` can
+>   block on bytes not yet arrived), desktop a Tauri custom protocol with `Range`
+>   rather than MSE, because a `blob:` URL cannot grow and a fragmented container
+>   is not ours to require. Both first need one shared decision that does not
+>   exist: what a starved reader does mid-playback. §10's rule stands — a stall is
+>   never signalled to the peer — so it pauses locally and the next drift verdict
+>   closes the gap, and writing that down is the prerequisite for either frontend.
+>   `docs/TOGETHER.md` §12.
+>
 > And the limit no test count can cover: **no session and no transfer has ever
 > run between two real devices.** The wire, the clock filter, the drift verdict,
 > the tracker and the relay policy are unit-tested three ways over; the

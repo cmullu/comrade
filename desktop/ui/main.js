@@ -4600,7 +4600,15 @@
       );
       route = await safeInvoke(
         "play_route",
-        { plan: target?.plan, foundLocalCopy: false },
+        {
+          plan: target?.plan,
+          foundLocalCopy: false,
+          // The link is what lets core tell a drivable service track from a
+          // signpost; `access` is omitted because this window connects to no
+          // service yet, and omitting it means "none" rather than a default.
+          link: target?.link ?? null,
+          access: null,
+        },
         { silent: true },
       );
     } catch {

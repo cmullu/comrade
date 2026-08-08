@@ -28,6 +28,7 @@ test("every route this window can be handed produces an outcome", () => {
     "start_together",
     "open_elsewhere",
     "play_embed",
+    "play_on_service",
     "nothing",
   ]) {
     const plan = planPlay(route, song);
@@ -117,7 +118,7 @@ test("nothing usable asks for something usable", () => {
 });
 
 test("no refusal ever claims we will play it", () => {
-  for (const route of ["open_elsewhere", "play_embed", "nothing"]) {
+  for (const route of ["open_elsewhere", "play_embed", "play_on_service", "nothing"]) {
     const m = planPlay(route, song).message;
     assert.doesNotMatch(m, /I'll start it|starting|playing it now/i, route);
   }
@@ -144,4 +145,24 @@ test("a title that is only whitespace is no title", () => {
 
 test("an artist with nothing in it does not leave a dangling dash", () => {
   assert.equal(playTitle({ recording: { title: "Solaris", artist: "  " } }), "Solaris");
+});
+
+test("the two Spotify sentences do not read alike", () => {
+  // One is "you have no account here", the other is "the account works and this
+  // window has no player for it". Collapsing them would send someone to fix the
+  // wrong thing — which is what the old DRM wording did.
+  const spotify = { ...song, service: "spotify" };
+  const refused = planPlay("open_elsewhere", spotify).message;
+  const unwired = planPlay("play_on_service", spotify).message;
+  assert.notEqual(refused, unwired);
+  assert.match(refused, /Spotify/);
+  assert.match(unwired, /Spotify/);
+});
+
+test("a refusal names the missing account, not a DRM lecture", () => {
+  // The reason had been wrong since it was written: their SDKs exist precisely
+  // so another app can drive playback in their client. What we lack is the
+  // connection, and that is fixable — so the sentence must not imply otherwise.
+  const m = planPlay("open_elsewhere", { ...song, service: "spotify" }).message;
+  assert.doesNotMatch(m, /won't play|can't play|DRM/i);
 });

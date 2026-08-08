@@ -115,8 +115,8 @@ use comrade_core::together::{
     command_apply, describe_state_change, direct_path_live, direct_signal_admissible,
     heartbeat_interval_ms, parse_together_envelope, projected_peer_pos_ms, session_is_live_at,
     signal_is_fresh, sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandApply,
-    CommandStamp, StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope,
-    TogetherSignal, CLOCK_BURST_PROBES,
+    CommandStamp, PlayheadControl, StateChange, SyncSample, SyncVerdict, TogetherContent,
+    TogetherEnvelope, TogetherSignal, CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
@@ -655,8 +655,19 @@ pub enum PlayRoute {
     /// Music). All we can honestly do is say where to open it.
     OpenElsewhere,
     /// A YouTube embed, which can be driven in place by a frontend that has a
-    /// webview to drive it in.
+    /// webview to drive it in. Needs no account on either side, which is what
+    /// keeps it the one source that works between two strangers.
     PlayEmbed,
+    /// A streaming-service track this device is signed in to and can drive —
+    /// play it there, on the listener's own subscription, and hold the session
+    /// against it.
+    ///
+    /// Distinct from [`Self::PlayEmbed`] because the mechanism is different
+    /// (a vendor SDK against an authenticated account, not a public embed) and
+    /// so is the failure: an expired token or a downgraded subscription turns
+    /// this back into [`Self::OpenElsewhere`] at any moment, whereas an embed
+    /// either exists or does not.
+    PlayOnService,
     /// Nothing usable in the query.
     Nothing,
 }
@@ -667,13 +678,34 @@ pub enum PlayRoute {
 /// `found_local_copy` is the frontend's answer to "is a copy of this on *this*
 /// device, above the confidence bar" — and it is consulted **only** for
 /// [`PlayPlan::FindLocally`]. A caller that has a local file of a Spotify track
-/// still gets [`PlayRoute::OpenElsewhere`]: the plan is about what the *query*
-/// named, and a link to DRM audio does not become playable because something
-/// with a similar title happens to be on the phone.
-pub fn play_route(plan: PlayPlan, found_local_copy: bool) -> PlayRoute {
+/// still gets a service route or [`PlayRoute::OpenElsewhere`]: the plan is about
+/// what the *query* named, and a link does not become a local file because
+/// something with a similar title happens to be on the phone.
+///
+/// `link` is the service link the query resolved to, when it was one, and
+/// `access` is what this device is signed in to. Together they answer the
+/// question `PlayPlan::NameOnly` could not: a Spotify link is
+/// [`PlayRoute::PlayOnService`] on a device with a Premium account behind it and
+/// [`PlayRoute::OpenElsewhere`] on one without, and no amount of looking at the
+/// URL distinguishes those two devices.
+pub fn play_route(
+    plan: PlayPlan,
+    found_local_copy: bool,
+    link: Option<comrade_core::together::MusicLink>,
+    access: comrade_core::together::ServiceAccess,
+) -> PlayRoute {
     match plan {
         PlayPlan::Empty => PlayRoute::Nothing,
-        PlayPlan::NameOnly => PlayRoute::OpenElsewhere,
+        PlayPlan::NameOnly => match link.as_ref().map(|l| l.playhead_control(&access)) {
+            // Signed in and drivable: a real session, on their own subscription.
+            Some(PlayheadControl::Full) => PlayRoute::PlayOnService,
+            // `StartOnly` deliberately lands here rather than opening a session
+            // that cannot be held. Apple Music can be started and never placed,
+            // so a session on it would emit corrections nothing applies and a
+            // screen that says "catching up…" while nothing catches up. Saying
+            // "open it there" is the smaller promise and the true one.
+            _ => PlayRoute::OpenElsewhere,
+        },
         PlayPlan::OpenNow => PlayRoute::PlayEmbed,
         PlayPlan::FindLocally => {
             if found_local_copy {
@@ -14918,51 +14950,142 @@ mod tests {
         assert_eq!(t.service, Some(MusicService::Spotify));
     }
 
+    fn no_accounts() -> comrade_core::together::ServiceAccess {
+        comrade_core::together::ServiceAccess::none()
+    }
+
+    fn spotify_link() -> comrade_core::together::MusicLink {
+        comrade_core::together::MusicLink::Spotify {
+            track_id: "6habFhsOp2NvshLv26DqMb".into(),
+        }
+    }
+
     #[test]
     fn a_local_copy_is_what_turns_a_query_into_a_session() {
         // The only branch the library answer decides.
         assert_eq!(
-            play_route(PlayPlan::FindLocally, true),
+            play_route(PlayPlan::FindLocally, true, None, no_accounts()),
             PlayRoute::StartTogether
         );
         // Asking beats guessing: below the confidence bar we do not open a file
         // on somebody's behalf.
         assert_eq!(
-            play_route(PlayPlan::FindLocally, false),
+            play_route(PlayPlan::FindLocally, false, None, no_accounts()),
             PlayRoute::AskForFile
         );
     }
 
     #[test]
-    fn a_local_file_does_not_make_a_drm_link_playable() {
+    fn a_local_file_does_not_make_a_service_link_a_local_session() {
         // The plan describes what the *query* named. Someone with a similarly
-        // titled mp3 on their phone has not acquired the right to decode a
-        // Spotify stream, and a `/play <spotify url>` that quietly started a
-        // session on a different file would put the two of them on different
-        // audio while the UI claimed otherwise.
+        // titled mp3 on their phone has not been handed the Spotify track, and a
+        // `/play <spotify url>` that quietly started a session on a different
+        // file would put the two of them on different audio while the UI claimed
+        // otherwise.
         for found in [true, false] {
             assert_eq!(
-                play_route(PlayPlan::NameOnly, found),
+                play_route(
+                    PlayPlan::NameOnly,
+                    found,
+                    Some(spotify_link()),
+                    no_accounts()
+                ),
                 PlayRoute::OpenElsewhere,
                 "found={found}",
             );
             assert_eq!(
-                play_route(PlayPlan::OpenNow, found),
+                play_route(PlayPlan::OpenNow, found, None, no_accounts()),
                 PlayRoute::PlayEmbed,
                 "found={found}",
             );
             assert_eq!(
-                play_route(PlayPlan::Empty, found),
+                play_route(PlayPlan::Empty, found, None, no_accounts()),
                 PlayRoute::Nothing,
                 "found={found}"
             );
         }
     }
 
+    /// The Jam model, at the routing layer: the same link is a session on a
+    /// device with the subscription behind it and a signpost on one without.
     #[test]
-    fn every_plan_routes_somewhere_and_only_one_route_starts_a_session() {
+    fn the_same_link_routes_differently_on_two_devices() {
+        let signed_in = comrade_core::together::ServiceAccess {
+            spotify: true,
+            apple_music: false,
+        };
+        assert_eq!(
+            play_route(PlayPlan::NameOnly, false, Some(spotify_link()), signed_in),
+            PlayRoute::PlayOnService,
+        );
+        assert_eq!(
+            play_route(
+                PlayPlan::NameOnly,
+                false,
+                Some(spotify_link()),
+                no_accounts()
+            ),
+            PlayRoute::OpenElsewhere,
+        );
+    }
+
+    /// Apple Music is signed in and still does not open a session, because
+    /// `StartOnly` cannot be held — a ladder running against a player with no
+    /// seek emits verdicts nothing applies.
+    #[test]
+    fn a_playhead_that_cannot_be_placed_does_not_open_a_session() {
+        let apple = comrade_core::together::MusicLink::AppleMusic {
+            storefront: "in".into(),
+            track_id: "1440931493".into(),
+        };
+        let signed_in = comrade_core::together::ServiceAccess {
+            spotify: false,
+            apple_music: true,
+        };
+        assert_eq!(
+            play_route(PlayPlan::NameOnly, false, Some(apple), signed_in),
+            PlayRoute::OpenElsewhere,
+        );
+    }
+
+    /// A `NameOnly` plan whose link went missing must not fall through to a
+    /// player. The two travel together everywhere in the real call path; this
+    /// pins what happens if a caller ever separates them.
+    #[test]
+    fn a_service_plan_with_no_link_is_a_signpost_not_a_session() {
+        for access in [
+            no_accounts(),
+            comrade_core::together::ServiceAccess {
+                spotify: true,
+                apple_music: true,
+            },
+        ] {
+            assert_eq!(
+                play_route(PlayPlan::NameOnly, false, None, access),
+                PlayRoute::OpenElsewhere,
+            );
+        }
+    }
+
+    #[test]
+    fn every_plan_routes_somewhere_and_only_one_route_starts_a_local_session() {
         // A plan falling through to a route that opens a player would open one
         // on a query nobody resolved.
+        let every_access = [
+            no_accounts(),
+            comrade_core::together::ServiceAccess {
+                spotify: true,
+                apple_music: false,
+            },
+            comrade_core::together::ServiceAccess {
+                spotify: false,
+                apple_music: true,
+            },
+            comrade_core::together::ServiceAccess {
+                spotify: true,
+                apple_music: true,
+            },
+        ];
         for plan in [
             PlayPlan::OpenNow,
             PlayPlan::FindLocally,
@@ -14970,10 +15093,15 @@ mod tests {
             PlayPlan::Empty,
         ] {
             for found in [true, false] {
-                let route = play_route(plan, found);
-                if route == PlayRoute::StartTogether {
-                    assert_eq!(plan, PlayPlan::FindLocally, "only a library hit starts one");
-                    assert!(found, "and only when a copy was actually found");
+                for access in every_access {
+                    let route = play_route(plan, found, Some(spotify_link()), access);
+                    if route == PlayRoute::StartTogether {
+                        assert_eq!(plan, PlayPlan::FindLocally, "only a library hit starts one");
+                        assert!(found, "and only when a copy was actually found");
+                    }
+                    if route == PlayRoute::PlayOnService {
+                        assert!(access.spotify, "a service route needs the account");
+                    }
                 }
             }
         }

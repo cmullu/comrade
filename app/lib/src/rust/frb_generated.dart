@@ -3755,6 +3755,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return TogetherContent_Youtube(
           videoId: dco_decode_String(raw[1]),
         );
+      case 2:
+        return TogetherContent_Service(
+          link: dco_decode_box_autoadd_music_link(raw[1]),
+          recording: dco_decode_opt_box_autoadd_recording(raw[2]),
+        );
       default:
         throw Exception('unreachable');
     }
@@ -5319,6 +5324,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 1:
         final var_videoId = sse_decode_String(deserializer);
         return TogetherContent_Youtube(videoId: var_videoId);
+      case 2:
+        final var_link = sse_decode_box_autoadd_music_link(deserializer);
+        final var_recording =
+            sse_decode_opt_box_autoadd_recording(deserializer);
+        return TogetherContent_Service(
+            link: var_link, recording: var_recording);
       default:
         throw UnimplementedError('');
     }
@@ -6671,6 +6682,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case TogetherContent_Youtube(videoId: final videoId):
         sse_encode_i_32(1, serializer);
         sse_encode_String(videoId, serializer);
+      case TogetherContent_Service(
+          link: final link,
+          recording: final recording
+        ):
+        sse_encode_i_32(2, serializer);
+        sse_encode_box_autoadd_music_link(link, serializer);
+        sse_encode_opt_box_autoadd_recording(recording, serializer);
     }
   }
 
