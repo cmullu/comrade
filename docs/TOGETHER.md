@@ -1308,3 +1308,56 @@ instead of owning one. Same reason as §11b: the manager is concrete on
 `TogetherPlayer` throughout and is where the foreground-service contract lives,
 so it wants one deliberate refactor rather than two half ones.
 
+## 14. Both players, and the seam between them
+
+_Added 2026-08-08, on "we should have both"._
+
+Comrade keeps its own player **and** gains the ability to follow someone else's.
+That is not a compromise between §11b and §13; it is the only arrangement that
+makes either worth building. Comrade can genuinely play a file — with a sleeve,
+a video surface, an accurate playhead and the fine deadband — and it can
+genuinely never play a Spotify track. Picking one would either throw away the
+good case or refuse the common one.
+
+`SessionPlayer` is the seam. Three implementations sit behind it and each was
+separately blocked on `TogetherManager` being concrete on `TogetherPlayer`:
+
+| Implementation | Who holds the audio | What the screen draws |
+|---|---|---|
+| `TogetherPlayer` (`MediaPlayer`) | us | sleeve, video surface, scrubber |
+| YouTube embed (§11b) | us, in a `WebView` we host | the same, picture in our window |
+| External session (§13) | another app entirely | control and status |
+
+`TogetherPlayer` implements it today, unchanged in behaviour — the interface was
+derived from what the manager already used, so adopting it is `override`
+keywords and nothing else.
+
+**The mode is decided once, at the start, and never changes.**
+`PlaybackModeDecision.ownershipFor` answers it from the content kind and what
+this device can do, and `mayChangeMidSession` is a flat `false` with the reason
+on it: swapping the player under a live session means tearing one playhead down
+and standing another up, and the gap between them is a session that is neither
+following nor playing. The handover finishing is not an exception — `OURS` was
+already the answer there; the file simply arrived.
+
+Two rules in it are worth reading twice:
+
+- **A file we hold is always ours**, even when an external session is available.
+  Following another app for something we could open ourselves would trade the
+  sleeve, the surface and an accurate playhead for nothing.
+- **A file we do *not* hold is not `EXTERNAL`** — it is nothing yet. The
+  handover (§9a) exists precisely so it becomes ours, and claiming an external
+  player at that moment would start a session against whatever happened to be
+  playing on the phone, which is not what was invited.
+
+The seam is framework-free, which is what lets the mode decision be checked
+here rather than in CI: 74 Android tests across §11b, §13 and this section now
+compile and run under `kotlinc` with no SDK.
+
+**Still not built**, and now down to one thing rather than three: the
+`TogetherManager` change that holds a `SessionPlayer` instead of a
+`TogetherPlayer`, plus the two new implementations behind it. That file owns the
+foreground-service contract, which `.claude/rules/android.md` names as the most
+bug-prone area in the repo, so it wants one deliberate pass — but it is now a
+mechanical pass against a settled interface rather than a design question.
+

@@ -36,7 +36,7 @@ import android.view.Surface
  * more accurate than either absolute figure. A true measurement needs an
  * `AudioTrack` we own — i.e. a Media3 migration — and is the honest follow-up.
  */
-class TogetherPlayer(private val context: Context) {
+class TogetherPlayer(private val context: Context) : SessionPlayer {
 
     interface Listener {
         fun onPrepared(durationMs: Long)
@@ -64,7 +64,7 @@ class TogetherPlayer(private val context: Context) {
     private var surface: Surface? = null
 
     /** `seekTo` before `prepare()` throws — every caller checks this first. */
-    var prepared: Boolean = false
+    override var prepared: Boolean = false
         private set
 
     fun setListener(listener: Listener?) {
@@ -89,13 +89,13 @@ class TogetherPlayer(private val context: Context) {
             .onFailure { Log.w(TAG, "could not attach surface", it) }
     }
 
-    val positionMs: Long
+    override val positionMs: Long
         get() = if (prepared) (player?.currentPosition ?: 0).toLong() else 0L
 
-    val durationMs: Long
+    override val durationMs: Long
         get() = if (prepared) (player?.duration ?: 0).toLong() else 0L
 
-    val isPlaying: Boolean
+    override val isPlaying: Boolean
         get() = runCatching { player?.isPlaying == true }.getOrDefault(false)
 
     fun open(uri: Uri) {
@@ -142,12 +142,12 @@ class TogetherPlayer(private val context: Context) {
         }
     }
 
-    fun play() {
+    override fun play() {
         if (!prepared) return
         runCatching { player?.start() }.onFailure { Log.w(TAG, "start failed", it) }
     }
 
-    fun pause() {
+    override fun pause() {
         if (!prepared) return
         runCatching { player?.pause() }.onFailure { Log.w(TAG, "pause failed", it) }
     }
@@ -156,7 +156,7 @@ class TogetherPlayer(private val context: Context) {
      * Seek to an exact position, not to the nearest keyframe — see the class
      * comment. This is the single call that decides whether the feature works.
      */
-    fun seekTo(posMs: Long) {
+    override fun seekTo(posMs: Long) {
         if (!prepared) return
         runCatching {
             player?.seekTo(posMs, MediaPlayer.SEEK_CLOSEST)
@@ -172,7 +172,7 @@ class TogetherPlayer(private val context: Context) {
      * [TogetherDecisions.planCorrection] and tested there; this is the second
      * line of it.
      */
-    fun setRate(rate: Float) {
+    override fun setRate(rate: Float) {
         if (!prepared || !isPlaying) return
         runCatching {
             val mp = player ?: return
@@ -180,7 +180,7 @@ class TogetherPlayer(private val context: Context) {
         }.onFailure { Log.w(TAG, "rate trim failed", it) }
     }
 
-    fun release() {
+    override fun release() {
         // Drop the surface before the player goes: the view may outlive this,
         // and a released player still holding it is the crash above.
         runCatching { player?.setSurface(null) }
@@ -199,7 +199,7 @@ class TogetherPlayer(private val context: Context) {
      * constant, because a wrong number applied confidently is worse than an
      * absent one the arithmetic knows to ignore.
      */
-    val outputLatencyMs: Long
+    override val outputLatencyMs: Long
         get() {
             val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return 0
             val frames = am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: return 0

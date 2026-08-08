@@ -956,6 +956,24 @@ is small; the content problem is the real constraint:
 >   the session syncs to the foreground service's own `MediaSession` and feeds
 >   corrections back into the player that produced them, which from a bug report
 >   reads as "it randomly jumps". `docs/TOGETHER.md` §13.
+> - **`TogetherManager` being concrete on `TogetherPlayer` was blocking three
+>   features at once**, and the seam is now in. The owner's answer to "media
+>   session sync means Comrade stops having a player" was *both*, which is the
+>   right one: Comrade can genuinely play a file well and can genuinely never
+>   play a Spotify track, so picking one would throw away the good case or
+>   refuse the common one. `SessionPlayer` is the interface — derived from what
+>   the manager already used, so `TogetherPlayer` adopting it is `override`
+>   keywords and no behaviour change — and `PlaybackModeDecision` decides once,
+>   at session start, which implementation a session gets. `mayChangeMidSession`
+>   is a flat `false`: swapping the player under a live session leaves a gap
+>   that is neither following nor playing. Two rules in it earn their tests — a
+>   file we hold is always ours even when an external session exists (following
+>   would trade the sleeve, the surface and an accurate playhead for nothing),
+>   and a file we do *not* hold is **not** external but *nothing yet*, because
+>   the handover exists to make it ours and claiming an external player there
+>   would start a session against whatever happened to be playing.
+>   `docs/TOGETHER.md` §14. Remaining: the manager pass itself and the two new
+>   implementations — mechanical now, against a settled interface.
 > - **A handed-over file still plays only once it is whole**, and core has been
 >   ready for it since the transfer landed. `ShareTracker::playable_at` and
 >   `runway_ms` are unit-tested and remain dead code — the gap is per-frontend and
