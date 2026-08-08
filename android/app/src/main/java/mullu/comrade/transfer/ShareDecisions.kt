@@ -174,6 +174,70 @@ object ShareDecisions {
             // Hex from a peer, so case is theirs to choose and not a difference.
             a.sha256.trim().equals(b.sha256.trim(), ignoreCase = true)
 
+    // ── Whose negotiation is this? ──────────────────────────────────────────
+
+    /** Where a `ShareSignal.Transport` belongs. */
+    enum class TransportRoute {
+        /** The file engine, which has a session for it. */
+        FILE,
+
+        /** A live stream (`docs/TOGETHER.md` §15). The SDP is the intent. */
+        STREAM,
+
+        /** Nobody's. The transfer it was answering is already over. */
+        DROP,
+    }
+
+    /** Where to send a transport signal, and whether an expectation survives it. */
+    data class TransportPlan(
+        val route: TransportRoute,
+        /** Whether this side is still owed a late file offer after this signal. */
+        val stillExpecting: Boolean,
+    )
+
+    /**
+     * Route one `Transport` signal, refining §15's rule rather than contradicting
+     * it.
+     *
+     * §15 reads: a transport offer arriving with no armed transfer cannot be a
+     * file, because nothing asked for one — so it is a stream. **That inference
+     * is exactly right when nothing was ever armed**, and it is the reason
+     * streaming needs no new wire type. There is one case it does not cover:
+     * this side *did* ask for a file, accepted it, and then gave up. The
+     * sender's `Accept` may have sat at a relay for hours; when it lands, the
+     * sender negotiates in good faith and sends an offer that **is** a file
+     * offer, to a device that is no longer armed. Handing that to the stream
+     * receiver opens an unasked-for live audio and video connection on a device
+     * whose user was told their file did not arrive.
+     *
+     * So the missing state is "we accepted a file and are no longer armed", and
+     * in it a transport belongs to nobody.
+     *
+     * The expectation is discharged rather than sticky, and that is the part
+     * worth getting right: exactly one offer is owed per `Accept`, so consuming
+     * it means a host who reacts to a failed handover by streaming instead is
+     * still heard. Holding it for the rest of the session would trade one
+     * surprise for one silently broken feature.
+     *
+     * @param fileEngineArmed whether a file transfer has a session right now.
+     * @param expectingLateFileOffer whether this side sent an `Accept` whose
+     *   negotiation never arrived, and has since torn the transfer down.
+     * @param isOffer whether this signal is the offer itself — the only one that
+     *   would start a session on the far side of a mis-route, and the one that
+     *   settles what was owed.
+     */
+    fun transportPlan(
+        fileEngineArmed: Boolean,
+        expectingLateFileOffer: Boolean,
+        isOffer: Boolean,
+    ): TransportPlan = when {
+        // The engine owns the negotiation, so nothing is owed any more.
+        fileEngineArmed -> TransportPlan(TransportRoute.FILE, stillExpecting = false)
+        expectingLateFileOffer ->
+            TransportPlan(TransportRoute.DROP, stillExpecting = !isOffer)
+        else -> TransportPlan(TransportRoute.STREAM, stillExpecting = false)
+    }
+
     // ── Noticing that the chunks stopped ────────────────────────────────────
 
     /** What a receiver that has not seen a chunk for a while should do. */

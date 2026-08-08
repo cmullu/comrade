@@ -99,8 +99,25 @@ object ShareTransfer {
 
     // ── Entry points ────────────────────────────────────────────────────────
 
+    /**
+     * Whether this session accepted a file offer whose negotiation never
+     * arrived, and has since torn the transfer down.
+     *
+     * Scoped to the together session and to nothing smaller: the file engine's
+     * own teardowns — a watchdog giving up, a write that failed — are exactly
+     * the case this has to survive, so [FileTransfer.end] deliberately does not
+     * touch it. Only [ask] and [end], the two ends of a session's file
+     * conversation, do. See [ShareDecisions.transportPlan].
+     */
+    @Volatile private var expectingLateFileOffer = false
+
     /** We joined a session for something we do not have. Ask for it. */
     fun ask() {
+        // Cleared at the near end as well as the far one. `end` is reached from
+        // `TogetherManager.onEnded`, which is reached from one bridge event; if
+        // that event is ever missed, a stale expectation would swallow the next
+        // session's first stream offer, and this is the cheap second answer.
+        expectingLateFileOffer = false
         runCatching { ComradeCore.togetherShareTyped(ShareSignal.Ask) }
             .onFailure { Log.w(TAG, "ask failed", it) }
         engine.note("Asking them to send it…")
@@ -124,12 +141,35 @@ object ShareTransfer {
             // it costs no new signal, no `frb` regeneration and no version skew
             // — an older build drops an offer it has no session for, which is
             // exactly what it does today.
-            is ShareSignal.Transport ->
-                if (engine.active) {
-                    io.launch { engine.onTransport(context, signal.signal) }
-                } else {
-                    io.launch { StreamTransfer.onTransport(context, signal.signal) }
+            //
+            // The one case that rule does not cover is a file this side asked
+            // for, accepted, and then gave up on: the sender's `Accept` can sit
+            // at a relay for hours, and the offer it eventually produces really
+            // is a file offer. [ShareDecisions.transportPlan] carries the
+            // refinement and the argument for it.
+            is ShareSignal.Transport -> {
+                val plan = ShareDecisions.transportPlan(
+                    fileEngineArmed = engine.active,
+                    expectingLateFileOffer = expectingLateFileOffer,
+                    isOffer = signal.signal is TransferSignal.Offer,
+                )
+                expectingLateFileOffer = plan.stillExpecting
+                when (plan.route) {
+                    ShareDecisions.TransportRoute.FILE ->
+                        io.launch { engine.onTransport(context, signal.signal) }
+                    ShareDecisions.TransportRoute.STREAM ->
+                        io.launch { StreamTransfer.onTransport(context, signal.signal) }
+                    ShareDecisions.TransportRoute.DROP -> {
+                        Log.i(TAG, "dropped a transport signal for a stopped transfer")
+                        // Not silent, because the person is still looking at the
+                        // sentence that said it never arrived, and "they did try,
+                        // just too late" is a different fact. Deliberately
+                        // promises no remedy: whether there is a way to ask again
+                        // from here is the screen's business, not this file's.
+                        engine.note("They started sending it, but this had already stopped waiting.")
+                    }
                 }
+            }
         }
     }
 
@@ -139,8 +179,17 @@ object ShareTransfer {
     /** They said no. That is a real outcome, and the far side is told. */
     fun refuseShareConsent() = engine.refuseConsent()
 
-    /** Tear everything down. Safe to call twice, and from any thread. */
-    fun end() = engine.end()
+    /**
+     * Tear everything down. Safe to call twice, and from any thread.
+     *
+     * The session is over, so a file offer still in flight is owed to nobody —
+     * and leaving the expectation set would make the *next* session drop a
+     * genuine stream offer.
+     */
+    fun end() {
+        expectingLateFileOffer = false
+        engine.end()
+    }
 
     // ── Sender ──────────────────────────────────────────────────────────────
 
@@ -203,6 +252,11 @@ object ShareTransfer {
             // position to avoid.
             TogetherManager.onSharedFileStreaming()
         }
+        // Set with the `Accept` and not before it, because the `Accept` is what
+        // makes a file offer owed: [FileTransfer.beginNegotiation] runs on the
+        // far side only in answer to one. An offer arriving from here on is a
+        // file offer even if this transfer is gone by the time it lands.
+        expectingLateFileOffer = true
         // Sent either way, so a lost `Accept` is recovered by their next `Ask`.
         // Their side is already armed, and [FileTransfer.beginNegotiation]
         // refuses to build a second connection for the same session.

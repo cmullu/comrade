@@ -245,6 +245,83 @@ class ShareDecisionsTest {
         )
     }
 
+    // ── Whose negotiation is this? ──────────────────────────────────────────
+
+    private fun route(
+        fileEngineArmed: Boolean = false,
+        expectingLateFileOffer: Boolean = false,
+        isOffer: Boolean = true,
+    ) = ShareDecisions.transportPlan(fileEngineArmed, expectingLateFileOffer, isOffer)
+
+    @Test
+    fun `an armed transfer keeps its own negotiation`() {
+        assertEquals(ShareDecisions.TransportRoute.FILE, route(fileEngineArmed = true).route)
+        assertFalse(
+            "the engine owns it now, so nothing is still owed",
+            route(fileEngineArmed = true, expectingLateFileOffer = true).stillExpecting,
+        )
+    }
+
+    /**
+     * §15's rule, unchanged: with nothing armed and nothing ever accepted, an
+     * offer cannot be a file, because nobody asked for one.
+     */
+    @Test
+    fun `an offer nobody asked for is a stream`() {
+        assertEquals(ShareDecisions.TransportRoute.STREAM, route().route)
+        assertEquals(
+            "and so is everything else on a connection nobody else claims",
+            ShareDecisions.TransportRoute.STREAM,
+            route(isOffer = false).route,
+        )
+    }
+
+    /**
+     * The seam this exists for. The receiver accepted a file, the sender's
+     * `Accept` sat at a relay while it was offline, the transfer gave up — and
+     * the offer that finally arrives is a *file* offer. Routing it to the stream
+     * receiver opens an unasked-for live audio and video connection on a device
+     * whose user was told their file never came.
+     */
+    @Test
+    fun `a file offer that arrives after the transfer gave up is nobody's`() {
+        assertEquals(
+            ShareDecisions.TransportRoute.DROP,
+            route(expectingLateFileOffer = true).route,
+        )
+        assertEquals(
+            "and neither are the candidates trailing it",
+            ShareDecisions.TransportRoute.DROP,
+            route(expectingLateFileOffer = true, isOffer = false).route,
+        )
+    }
+
+    /**
+     * Discharged, not sticky. Exactly one offer is owed per `Accept`, so a host
+     * who answers a failed handover by streaming instead is still heard —
+     * holding the expectation for the rest of the session would trade one
+     * surprise for one silently broken feature.
+     */
+    @Test
+    fun `giving up on one file does not deafen the session to streams`() {
+        val late = route(expectingLateFileOffer = true, isOffer = true)
+        assertEquals(ShareDecisions.TransportRoute.DROP, late.route)
+        assertFalse("the offer settles what was owed", late.stillExpecting)
+        // Which is what makes the next one route normally.
+        assertEquals(
+            ShareDecisions.TransportRoute.STREAM,
+            route(expectingLateFileOffer = late.stillExpecting).route,
+        )
+    }
+
+    @Test
+    fun `waiting on the offer survives the signals that are not it`() {
+        assertTrue(
+            "an answer or a candidate is not what was owed, so it settles nothing",
+            route(expectingLateFileOffer = true, isOffer = false).stillExpecting,
+        )
+    }
+
     // ── A stalled transfer must end, not hang (Q19) ─────────────────────────
 
     private fun stall(
