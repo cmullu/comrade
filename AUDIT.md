@@ -710,10 +710,9 @@ is small; the content problem is the real constraint:
 >   stored inside the vault as `comrade_storage::SharePrefs` and seeded into the
 >   in-memory cell on unlock; an unrecognised stored value reads as
 >   `DirectOnly`, never as permission.
-> - **Playable-early is computed and unused.** `ShareTracker::playable_at` and
->   `runway_ms` are tested on all three sides, but desktop plays only once the
->   file is whole (a `blob:` URL cannot grow; progressive playback needs MSE and
->   a fragmented container) and Android opens it only after the hash checks out.
+> - ~~**Playable-early is computed and unused.**~~ **Policy landed 2026-08-08**
+>   (`share::read_verdict`); the two players still do not use it. Superseded by
+>   the entry further down.
 > - **The Flutter app has no together surface** — all six events are dropped
 >   one variant at a time in `rust_comrade_repository.dart` so that building one
 >   is a compile error rather than a silent no-op.
@@ -986,17 +985,42 @@ is small; the content problem is the real constraint:
 >   it. **Exit condition:** when the second `SessionPlayer` implementation
 >   lands, either release the outgoing player in that arm or assert the mode has
 >   not changed. The comment at the call site says the same.
-> - **A handed-over file still plays only once it is whole**, and core has been
->   ready for it since the transfer landed. `ShareTracker::playable_at` and
->   `runway_ms` are unit-tested and remain dead code — the gap is per-frontend and
->   the two need different things: Android a `MediaDataSource` (its `readAt` can
->   block on bytes not yet arrived), desktop a Tauri custom protocol with `Range`
->   rather than MSE, because a `blob:` URL cannot grow and a fragmented container
->   is not ours to require. Both first need one shared decision that does not
->   exist: what a starved reader does mid-playback. §10's rule stands — a stall is
->   never signalled to the peer — so it pauses locally and the next drift verdict
->   closes the gap, and writing that down is the prerequisite for either frontend.
+> - **The shared decision a starved reader needs now exists; the two players
+>   still do not.** `ShareTracker::playable_at` and `runway_ms` are no longer
+>   dead: `share::read_verdict` (`crates/comrade_core/src/share.rs:389`) is the
+>   whole starve policy in one pure function, with `ShareTracker::read_verdict_at`
+>   (`share.rs:257`) as the tracker-side spelling. The rule is **hysteresis** —
+>   `SHARE_PLAYABLE_RUNWAY_MS` (5 s) to start, `SHARE_STALL_FLOOR_MS` (1 s,
+>   `share.rs:85`) to keep going — because a reader that stopped and started at
+>   the same number would sit on it and chatter; and the whole tail of a file
+>   plays at any runway, since a short *file* is not a slow transfer. §10 holds by
+>   construction rather than by discipline: no variant means "tell the peer", and
+>   a test pins that a verdict serialises to a decision and nothing sendable. The
+>   `Hold` variant documents the trap that §10 implied and nobody had written
+>   down — a stall is `together_report_position(pos, false, …)` and **never**
+>   `together_set_state(.., playing: false, ..)`, which is a command that takes a
+>   sequence number and pauses the other person.
+>   `ComradeRuntime::share_read_verdict` (`comrade_ui/src/runtime.rs:3243`) is
+>   stateless and lock-free so it can be answered from inside a
+>   `MediaDataSource.readAt` or a `Range` handler — the shape that has deadlocked
+>   this repo twice. The bitmap stays in the frontend, which owns the bytes; only
+>   the thresholds are central. Eleven tests, including a 1024-bitmap cross-check
+>   that `Start` and `playable_at` cannot drift apart; the two named tests were
+>   confirmed to fail with the stall floor deleted. **Unchanged: neither frontend
+>   plays a partial file**, and `ReadVerdict` crosses no FFI bridge yet.
 >   `docs/TOGETHER.md` §12.
+> - **A pause longer than the session TTL ends the evening, and a byte-starved
+>   hold now reaches that without anyone pressing anything.** `together_tick`
+>   sends no heartbeat for a session that is not playing once its clock has
+>   converged (`comrade_ui/src/runtime.rs:6538` —
+>   `s.joined && (s.local_playing || s.clock.len() < CLOCK_BURST_PROBES)`), and
+>   the peer ends a session after `TOGETHER_SESSION_TTL_SECS` (45 s) of silence.
+>   So **any** pause past 45 s ends it on both devices — already true for a user
+>   pause, and now reachable by a transfer that stalls while the reader correctly
+>   holds locally. Found while writing the starve policy, not introduced by it.
+>   Either the TTL needs a keepalive that is not a position claim, or the ending
+>   needs to be something a session can come back from. Verified by reading both
+>   sides, not by a test — there is no test that runs a session past its TTL.
 >
 > And the limit no test count can cover: **no session and no transfer has ever
 > run between two real devices.** The wire, the clock filter, the drift verdict,

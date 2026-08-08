@@ -205,7 +205,7 @@ does.
 
 ---
 
-## Task D — play a handed-over file before it finishes arriving (independent)
+## Task D — play a handed-over file before it finishes arriving — **core half DONE 2026-08-08**
 
 Not blocked by Task A; can run in parallel. §12.
 
@@ -213,11 +213,22 @@ Core has been ready since the transfer landed: `ShareTracker::playable_at` and
 `runway_ms` are tested and are dead code. Android wants a `MediaDataSource`
 (API 23+, `minSdk` is 26) whose `readAt` blocks on bytes not yet arrived.
 
-**Decide the shared rule first**, because a stall handled two ways on two
-devices is a session that argues with itself: §10 says a stall is never
-signalled to the peer, so a starved reader pauses locally and the next drift
-verdict closes the gap. Write that into §12 before either frontend implements
-it.
+~~**Decide the shared rule first**~~ — **done.** `share::read_verdict` and
+`ComradeRuntime::share_read_verdict` are the policy; §12 has the numbers and the
+reasoning. What remains:
+
+- **FFI**: `ReadVerdict` crosses no bridge yet. Fieldless `uniffi::Enum` +
+  serde-internally-tagged, re-exported from `comrade_ui`; exposing
+  `share_read_verdict` needs an `#[frb(mirror(ReadVerdict))]` beside
+  `_SyncVerdict` in `api.rs`, plus regeneration.
+- **The numbers**, for a renderer that reimplements the tracker: start at
+  `runway_ms >= 5000`, continue at `>= 1000`, both `>=`; play at any runway once
+  every chunk from the playhead to EOF has arrived; otherwise hold locally.
+  `desktop/ui/share_transfer.mjs` already has `PLAYABLE_RUNWAY_MS` and needs the
+  floor plus a `readVerdict` twin. Android has no tracker yet, and the pure part
+  belongs in a framework-free file so it runs before CI.
+- **The trap to hold**: a hold is `together_report_position(pos, false, …)`,
+  never `together_set_state(.., playing: false, ..)`.
 
 ---
 
