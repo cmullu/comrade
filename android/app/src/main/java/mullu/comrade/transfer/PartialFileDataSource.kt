@@ -60,8 +60,10 @@ class PartialFileDataSource(
     private val waitSliceMs: Long = 200,
     /** The whole patience of one read. Past this the decoder is told "no bytes
      *  right now" rather than held indefinitely — a transfer that has genuinely
-     *  died must surface as a stalled player, not as a wedged thread. */
-    private val readTimeoutMs: Long = 30_000,
+     *  died must surface as a stalled player, not as a wedged thread. The number
+     *  lives in [ShareReadPolicy] so the transfer's stall watchdog can be tested
+     *  to give up before this expires. */
+    private val readTimeoutMs: Long = ShareReadPolicy.READ_PATIENCE_MS,
 ) : MediaDataSource() {
 
     /** The one object the two threads share, and only to wake each other. */

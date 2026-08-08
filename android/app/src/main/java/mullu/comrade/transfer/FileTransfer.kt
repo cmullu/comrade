@@ -8,6 +8,7 @@ import java.nio.ByteBuffer
 import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -87,8 +88,11 @@ import uniffi.comrade_core.TransferSignal
  * ports). Which paths may carry a transfer is core's. Which *signals* carry the
  * negotiation is the caller's. This file is the wiring.
  *
- * One instance carries one transfer at a time, exactly as the single `object`
- * did: [armSend] or [armReceive] replaces whatever came before.
+ * One instance carries one transfer at a time. Arming a *different* one replaces
+ * what came before, teardown and all; arming the **same** one again does
+ * nothing, because gift-wraps are replayed on reconnect by design and a second
+ * copy of a signal must not end the transfer the first one started
+ * (`AUDIT.md` Q18, and [ShareDecisions.decideArm] for which is which).
  */
 class FileTransfer(private val wiring: Wiring) {
 
@@ -175,6 +179,20 @@ class FileTransfer(private val wiring: Wiring) {
         var channel: DataChannel? = null
         var tracker: ShareDecisions.Tracker? = null
         /**
+         * Receiver: the destination, opened once and held. Reopening per 16 KiB
+         * chunk was ~44,800 open/`setLength`/seek/write/close cycles for a
+         * 700 MB film, each close forcing a flush (`AUDIT.md` P8). Closed in
+         * [end] only, beside [streaming].
+         */
+        var sink: RandomAccessFile? = null
+        /**
+         * Sender: the bytes, opened once and held, for the same reason as
+         * [sink]. `ContentUriSource` already assumes this — one descriptor
+         * serving every positional read is what makes a `content://` handoff
+         * possible without staging a second copy.
+         */
+        var source: Source? = null
+        /**
          * The receiver's partial file, handed to a player that started before
          * the transfer finished (`docs/TOGETHER.md` §12). Null until somebody
          * asks for one — a transfer nobody is listening to still just downloads.
@@ -194,6 +212,24 @@ class FileTransfer(private val wiring: Wiring) {
         /** Sender: the half-open range the receiver last asked for. */
         var cursorNext = 0
         var cursorEnd = 0
+
+        /**
+         * Receiver: when a chunk last landed, and how many times the watchdog
+         * has asked again since. `@Volatile` because the WebRTC callback thread
+         * writes them and the watchdog coroutine reads them.
+         */
+        @Volatile var lastChunkAtMs: Long = 0
+        @Volatile var reasks: Int = 0
+        /** The watchdog itself, cancelled by [end] so it cannot outlive this. */
+        var stallWatch: Job? = null
+
+        /** What [ShareDecisions.decideArm] compares an arriving offer against. */
+        fun identity() = ShareDecisions.TransferIdentity(
+            sending = role == Role.SENDER,
+            sha256 = offer.sha256,
+            totalBytes = offer.totalBytes.toLong(),
+            chunkBytes = offer.chunkBytes.toInt(),
+        )
     }
 
     @Volatile private var session: Session? = null
@@ -231,20 +267,38 @@ class FileTransfer(private val wiring: Wiring) {
     /**
      * We hold the file and have told them so. Nothing is negotiated until they
      * accept — this only records what we would send.
+     *
+     * Returns what it did about whatever was already armed, so the caller can
+     * tell a fresh handover from a signal it has already acted on and avoid
+     * overwriting a live transfer's status with the opening line of a new one.
      */
-    fun armSend(offer: ShareOffer, openSource: () -> Source) {
+    fun armSend(offer: ShareOffer, openSource: () -> Source): ShareDecisions.ArmDecision {
+        val decision = decideArm(offer, sending = true)
+        if (decision == ShareDecisions.ArmDecision.REDELIVERY) return decision
+        if (decision == ShareDecisions.ArmDecision.REPLACE) end()
         session = Session(Role.SENDER, offer, openSource, path = null)
+        return decision
     }
 
     /**
      * They hold the file and we have agreed to take it. Stage a place for it and
      * drop whatever an earlier transfer left behind.
      *
-     * Returns the staging path, or null when the offer's hash is not a hash — a
-     * caller with no name must refuse the transfer, not invent one.
+     * Returns what it did, or null when the offer cannot be staged at all — a
+     * hash that is not a hash, or a destination this device cannot open. A
+     * caller with nowhere to put the bytes must refuse the transfer rather than
+     * discover it at the first chunk.
+     *
+     * On [ShareDecisions.ArmDecision.REDELIVERY] it returns **before** touching
+     * the filesystem, which is the load-bearing half: the staged file is the
+     * live transfer's partial download, and deleting it is exactly the damage
+     * `AUDIT.md` Q18 is about.
      */
-    fun armReceive(context: Context, offer: ShareOffer): String? {
+    fun armReceive(context: Context, offer: ShareOffer): ShareDecisions.ArmDecision? {
         val name = wiring.stagedName(offer.sha256) ?: return null
+        val decision = decideArm(offer, sending = false)
+        if (decision == ShareDecisions.ArmDecision.REDELIVERY) return decision
+        if (decision == ShareDecisions.ArmDecision.REPLACE) end()
         val dir = wiring.stagingDir(context)
         dir.mkdirs()
         val target = File(dir, name)
@@ -253,15 +307,43 @@ class FileTransfer(private val wiring: Wiring) {
         // until the next one needs the space.
         purgeStaging(context, target)
         val s = Session(Role.RECEIVER, offer, openSource = null, path = target.absolutePath)
+        // Opened and sized once, here, rather than per chunk (AUDIT P8). Failing
+        // now is the honest place to fail: a destination that cannot be created
+        // or cannot be grown to the full length is a transfer that was never
+        // going to finish, and saying so before an `Accept` is sent costs the
+        // sender nothing.
+        s.sink = runCatching {
+            RandomAccessFile(target, "rw").apply { setLength(offer.totalBytes.toLong()) }
+        }.getOrElse {
+            Log.w(TAG, "could not stage ${target.name}", it)
+            return null
+        }
         s.tracker = ShareDecisions.Tracker(
             offer.totalBytes.toLong(),
             offer.chunkBytes.toInt(),
             offer.durationMs.toLong(),
         )
+        s.lastChunkAtMs = System.currentTimeMillis()
         session = s
         progress = 0f
-        return target.absolutePath
+        return decision
     }
+
+    /**
+     * Whether an arriving offer is a new transfer or one this device has already
+     * acted on. The rule is [ShareDecisions.decideArm]'s and tested there; this
+     * only supplies the two identities.
+     */
+    private fun decideArm(offer: ShareOffer, sending: Boolean): ShareDecisions.ArmDecision =
+        ShareDecisions.decideArm(
+            session?.identity(),
+            ShareDecisions.TransferIdentity(
+                sending = sending,
+                sha256 = offer.sha256,
+                totalBytes = offer.totalBytes.toLong(),
+                chunkBytes = offer.chunkBytes.toInt(),
+            ),
+        )
 
     /** Drop every staged file except `keep`, which is the live one. */
     private fun purgeStaging(context: Context, keep: File?) {
@@ -351,10 +433,21 @@ class FileTransfer(private val wiring: Wiring) {
         val s = session ?: return
         session = null
         s.stopped = true
+        // Before anything else: a watchdog that outlived the session it watches
+        // would end the *next* transfer on the last one's silence.
+        s.stallWatch?.cancel()
+        s.stallWatch = null
         // Before the channel closes, so anything blocked in `readAt` is woken by
         // the teardown rather than left to time out on its own.
         runCatching { s.streaming?.close() }
         s.streaming = null
+        // The two handles held for the life of the transfer (AUDIT P8). Nulled
+        // as well as closed so a second [end] — or a chunk that arrives during
+        // one — finds nothing to act on rather than a closed handle to throw on.
+        runCatching { s.sink?.close() }
+        s.sink = null
+        runCatching { s.source?.close() }
+        s.source = null
         runCatching { s.channel?.close() }
         runCatching { s.pc?.close() }
         progress = null
@@ -434,39 +527,74 @@ class FileTransfer(private val wiring: Wiring) {
         // "never relay bulk" true rather than merely intended; the cursor is
         // already recorded, so the pump picks it up when the verdict lands.
         if (!s.judged) return
-        val open = s.openSource ?: return
-        val source = runCatching { open() }.getOrNull() ?: return
-        try {
-            while (!s.stopped && s.cursorNext < s.cursorEnd) {
-                val budget = ComradeCore.shareChunksToSend(channel.bufferedAmount())
-                if (budget <= 0) return // wait for the drain callback
-                var sent = 0
-                while (sent < budget && s.cursorNext < s.cursorEnd) {
-                    val index = s.cursorNext
-                    val range = ShareDecisions.chunkRange(
-                        s.offer.totalBytes.toLong(),
-                        s.offer.chunkBytes.toInt(),
-                        index,
-                    ) ?: return
-                    val bytes = runCatching { source.read(range.first, range.second) }.getOrNull()
-                        ?: return
-                    channel.send(
-                        DataChannel.Buffer(
-                            ByteBuffer.wrap(ShareDecisions.frameChunk(index, bytes)),
-                            true,
-                        ),
-                    )
-                    s.cursorNext += 1
-                    sent += 1
-                    // Re-check inside the batch: `bufferedAmount` moves as we
-                    // write, and a batch sized against a stale reading is how
-                    // the ceiling gets overshot on a slow link.
-                    if (ComradeCore.shareChunksToSend(channel.bufferedAmount()) <= 0) return
-                }
-            }
-        } finally {
-            runCatching { source.close() }
+        // Opened once and held for the transfer (AUDIT P8), which also means a
+        // `content://` grant is taken at the start rather than re-taken per
+        // drain event. [end] closes it.
+        val source = s.source ?: run {
+            val open = s.openSource ?: return abandonSend(s, "Couldn't find the file to send.")
+            runCatching { open() }.getOrElse {
+                Log.w(TAG, "could not open the file to send", it)
+                return abandonSend(
+                    s,
+                    "Couldn't open that file any more — it may have moved, or the app that " +
+                        "shared it withdrew permission.",
+                )
+            }.also { s.source = it }
         }
+        while (!s.stopped && s.cursorNext < s.cursorEnd) {
+            val budget = ComradeCore.shareChunksToSend(channel.bufferedAmount())
+            if (budget <= 0) return // wait for the drain callback
+            var sent = 0
+            while (sent < budget && s.cursorNext < s.cursorEnd) {
+                val index = s.cursorNext
+                val range = ShareDecisions.chunkRange(
+                    s.offer.totalBytes.toLong(),
+                    s.offer.chunkBytes.toInt(),
+                    index,
+                ) ?: return abandonSend(s, "They asked for a piece that isn't in this file.")
+                val bytes = runCatching { source.read(range.first, range.second) }.getOrElse {
+                    Log.w(TAG, "could not read chunk $index", it)
+                    return abandonSend(s, "Couldn't read the rest of that file — it may have moved.")
+                }
+                channel.send(
+                    DataChannel.Buffer(
+                        ByteBuffer.wrap(ShareDecisions.frameChunk(index, bytes)),
+                        true,
+                    ),
+                )
+                s.cursorNext += 1
+                sent += 1
+                // Re-check inside the batch: `bufferedAmount` moves as we
+                // write, and a batch sized against a stale reading is how
+                // the ceiling gets overshot on a slow link.
+                if (ComradeCore.shareChunksToSend(channel.bufferedAmount()) <= 0) return
+            }
+        }
+    }
+
+    /**
+     * Stop sending, and leave a sentence behind. `AUDIT.md` Q19.
+     *
+     * These paths used to be bare `return`s on a **live** connection, so a file
+     * that could no longer be read froze both progress bars with nothing said on
+     * either device — the connection was fine, and nothing else ended a
+     * transfer.
+     *
+     * **Nothing goes on the wire, and that is a gap rather than a choice.**
+     * [Wiring.sendRefuse] takes a `RefusalReason`, whose every variant is a fact
+     * about relay policy; none of them means "I cannot read the file", and the
+     * enum is core's over `uniffi`. So what the far side gets is the channel
+     * closing, and what turns that into a sentence over there is its own stall
+     * watchdog. A precise wire reason needs a variant that does not exist yet.
+     */
+    private fun abandonSend(s: Session, why: String) {
+        // A teardown already in flight is not another failure to report: `end`
+        // closes the source under a read in progress, and the throw that causes
+        // arrives here.
+        if (s.stopped) return
+        Log.w(TAG, "send abandoned: $why")
+        status = why
+        end()
     }
 
     // ── Receiver ────────────────────────────────────────────────────────────
@@ -475,7 +603,10 @@ class FileTransfer(private val wiring: Wiring) {
         override fun onBufferedAmountChange(previous: Long) = Unit
 
         override fun onStateChange() {
-            if (s.channel?.state() == DataChannel.State.OPEN) requestNext(s, 0)
+            if (s.channel?.state() == DataChannel.State.OPEN) {
+                requestNext(s, 0)
+                startStallWatch(s)
+            }
         }
 
         override fun onMessage(buffer: DataChannel.Buffer) {
@@ -485,9 +616,52 @@ class FileTransfer(private val wiring: Wiring) {
         }
     }
 
+    /**
+     * Notice that the chunks stopped, ask once more, then end it. `AUDIT.md` Q19.
+     *
+     * The only thing that used to end a transfer was the connection failing, and
+     * the receiver only ever re-asked from inside [onChunk] — so a sender that
+     * quietly stopped reading its file left this side asking nothing, forever,
+     * on a connection that was perfectly healthy.
+     *
+     * Bounded, on the model of [judgePath]: how long counts as stopped and how
+     * many times to ask again are [ShareDecisions.stallAction]'s and tested
+     * there, and the loop exits the moment this session is no longer the live
+     * one. [end] cancels it as well, so it cannot outlive what it watches.
+     */
+    private fun startStallWatch(s: Session) {
+        if (s.stallWatch != null) return
+        s.lastChunkAtMs = System.currentTimeMillis()
+        s.stallWatch = io.launch {
+            while (true) {
+                delay(STALL_TICK_MS)
+                // Complete is the third exit and not an afterthought:
+                // [finishReceive] deliberately does *not* tear the session down
+                // — a player may still be reading the source — so without this
+                // the last chunk would be followed by silence, and the watchdog
+                // would report a finished transfer as a stalled one.
+                if (s.stopped || session !== s || s.tracker?.isComplete() == true) return@launch
+                val idle = System.currentTimeMillis() - s.lastChunkAtMs
+                when (ShareDecisions.stallAction(idle, s.reasks)) {
+                    ShareDecisions.StallAction.WAIT -> Unit
+                    ShareDecisions.StallAction.REASK -> {
+                        s.reasks += 1
+                        Log.i(TAG, "no chunk for ${idle}ms; asking again")
+                        requestNext(s, wiring.playheadMs())
+                    }
+                    ShareDecisions.StallAction.GIVE_UP -> {
+                        Log.w(TAG, "no chunk for ${idle}ms; giving up")
+                        status = "They stopped sending — the file didn't finish arriving."
+                        end()
+                        return@launch
+                    }
+                }
+            }
+        }
+    }
+
     private fun onChunk(s: Session, message: ByteArray) {
         val tracker = s.tracker ?: return
-        val path = s.path ?: return
         val frame = ShareDecisions.parseChunkFrame(message) ?: return
         val (index, payload) = frame
         // A peer can put anything on this channel. A wrong index writes bytes
@@ -511,14 +685,21 @@ class FileTransfer(private val wiring: Wiring) {
             s.offer.chunkBytes.toInt(),
             index,
         ) ?: return
+        // One handle for the whole receive, opened and sized in [armReceive]
+        // (AUDIT P8). `RandomAccessFile.write` is a bare `write(2)` with no
+        // buffer above it, so the bytes are on the file the moment this returns
+        // — which is what the ordering argued for below needs, and what the
+        // per-chunk `.use { }` was paying a flush for anyway.
+        val sink = s.sink ?: return
         runCatching {
-            RandomAccessFile(path, "rw").use {
-                it.setLength(s.offer.totalBytes.toLong())
-                it.seek(range.first)
-                it.write(payload)
-            }
+            sink.seek(range.first)
+            sink.write(payload)
         }.onFailure {
+            Log.w(TAG, "could not write chunk $index", it)
             status = "Couldn't write the file."
+            // Which drops the handle: a write that failed leaves it at an
+            // unknown position, and [end] is the only teardown, so there is
+            // nothing left that could write again.
             end()
             return
         }
@@ -534,6 +715,11 @@ class FileTransfer(private val wiring: Wiring) {
         // up on the file. Publishing after the write closes it, and pairs with
         // the monitor in `readAt` to make the bytes visible wherever the flag is.
         if (!tracker.accept(index)) return
+        // Progress, which is what the stall watchdog is watching for. The re-ask
+        // count goes back to zero with it: a link that delivers, pauses and
+        // delivers again gets the same patience the second time as the first.
+        s.lastChunkAtMs = System.currentTimeMillis()
+        s.reasks = 0
         // A player may be sitting inside `readAt` waiting for exactly this
         // chunk. Waking is all that happens on this thread — see
         // [PartialFileDataSource.onChunkArrived].
@@ -816,6 +1002,14 @@ class FileTransfer(private val wiring: Wiring) {
 
         /** How many one-second looks to take before giving up on ICE settling. */
         private const val RETRY_WHILE_UNSETTLED = 10
+
+        /**
+         * How often the receiver's stall watchdog looks. The *thresholds* are
+         * [ShareDecisions.STALL_AFTER_MS] and [ShareDecisions.STALL_REASKS];
+         * this is only the granularity, matching [judgePath]'s own one-second
+         * pace so the two loops read the same way.
+         */
+        private const val STALL_TICK_MS = 1000L
 
         /**
          * The whole-file hash, streamed.

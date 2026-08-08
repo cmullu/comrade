@@ -43,6 +43,19 @@ object ShareReadPolicy {
     const val STALL_FLOOR_MS: Long = 1_000
 
     /**
+     * The whole patience of one `readAt` before the decoder is told "no bytes
+     * right now" — [PartialFileDataSource]'s `readTimeoutMs` default.
+     *
+     * Named here rather than left a literal on that class so the transfer's own
+     * stall watchdog can be *shown* to give up first — `ShareDecisionsTest`
+     * asserts the inequality rather than letting it survive as a coincidence. A
+     * decoder whose read expires before the transfer has admitted failure leaves
+     * the player stalled with nothing said on either device, which is the whole
+     * of `AUDIT.md` Q19 reproduced one layer down.
+     */
+    const val READ_PATIENCE_MS: Long = 30_000
+
+    /**
      * The three answers, and there is deliberately no fourth.
      *
      * None of them means "tell the peer", which is how §10's rule is kept by

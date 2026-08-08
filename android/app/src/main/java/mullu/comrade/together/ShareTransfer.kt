@@ -155,8 +155,15 @@ object ShareTransfer {
             sha256 = sha,
             durationMs = durationMs.toULong(),
         )
-        engine.armSend(offer) { FileTransfer.PathSource(localPath) }
-        engine.note("Waiting for them to accept…")
+        val armed = engine.armSend(offer) { FileTransfer.PathSource(localPath) }
+        // Not on a redelivery: overwriting "Sending — 40%" with the opening line
+        // of a handover that is already half done is a sentence that is not true.
+        if (armed != ShareDecisions.ArmDecision.REDELIVERY) {
+            engine.note("Waiting for them to accept…")
+        }
+        // Answered either way. A re-delivered `Ask` is also how a lost `Offer`
+        // gets a second chance — the engine kept the transfer, so this costs
+        // nothing — and their side drops the duplicate by the same rule.
         runCatching { ComradeCore.togetherShareTyped(ShareSignal.Offer(offer)) }
             .onFailure { Log.w(TAG, "offer failed", it) }
     }
@@ -168,19 +175,37 @@ object ShareTransfer {
      * *asked* for the file, so the offer is the answer to its own question.
      */
     private fun acceptTheirCopy(context: Context, offer: ShareOffer) {
-        if (engine.armReceive(context, offer) == null) return
-        engine.note("They can send it — ${offer.totalBytes.toLong() / 1_048_576} MB.")
-        // Open the player on the partial file *now*, before a byte has moved.
-        // This is what makes §12 real rather than a note in a doc: the session
-        // starts on the head of the file and the decoder blocks on the rest,
-        // which is what core's `playable_at`/`runway_ms` have been ready for
-        // since the transfer landed.
-        //
-        // Ordered before `Accept` deliberately — the first chunk can arrive as
-        // soon as they hear it, and a source armed afterwards would miss the
-        // wake-ups for whatever landed in between and wait out a full timeout
-        // slice for bytes it already had.
-        TogetherManager.onSharedFileStreaming()
+        // Null means there is nowhere to put the bytes — a name that could not be
+        // made safe, or a staging file this device could not create at the full
+        // length. Said rather than returned silently: an unexplained stop is the
+        // failure `AUDIT.md` Q19 is about, and this is one more way to reach it.
+        val armed = engine.armReceive(context, offer) ?: run {
+            engine.note("Couldn't make room for the file on this device.")
+            return
+        }
+        if (armed != ShareDecisions.ArmDecision.REDELIVERY) {
+            engine.note("They can send it — ${offer.totalBytes.toLong() / 1_048_576} MB.")
+            // Open the player on the partial file *now*, before a byte has
+            // moved. This is what makes §12 real rather than a note in a doc:
+            // the session starts on the head of the file and the decoder blocks
+            // on the rest, which is what core's `playable_at`/`runway_ms` have
+            // been ready for since the transfer landed.
+            //
+            // Ordered before `Accept` deliberately — the first chunk can arrive
+            // as soon as they hear it, and a source armed afterwards would miss
+            // the wake-ups for whatever landed in between and wait out a full
+            // timeout slice for bytes it already had.
+            //
+            // And **not on a re-delivered offer**: reopening the player resets a
+            // `MediaPlayer` to zero, so a replayed gift-wrap would throw the
+            // listener back to the start of what they are already halfway
+            // through — the same regression `openFinishedFile` carries a resume
+            // position to avoid.
+            TogetherManager.onSharedFileStreaming()
+        }
+        // Sent either way, so a lost `Accept` is recovered by their next `Ask`.
+        // Their side is already armed, and [FileTransfer.beginNegotiation]
+        // refuses to build a second connection for the same session.
         send(ShareSignal.Accept)
     }
 

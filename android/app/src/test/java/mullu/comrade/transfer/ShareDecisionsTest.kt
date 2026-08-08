@@ -167,6 +167,138 @@ class ShareDecisionsTest {
         assertTrue("a track with two seconds left is playable", t.playableAt(1000))
     }
 
+    // ── A re-delivered signal must not rebuild a live transfer (Q18) ────────
+
+    private fun identity(
+        sending: Boolean = false,
+        sha: String = "a".repeat(64),
+        totalBytes: Long = 700_000_000,
+        chunkBytes: Int = 16 * 1024,
+    ) = ShareDecisions.TransferIdentity(sending, sha, totalBytes, chunkBytes)
+
+    @Test
+    fun `with nothing in flight an offer simply arms`() {
+        assertEquals(
+            ShareDecisions.ArmDecision.START,
+            ShareDecisions.decideArm(null, identity()),
+        )
+    }
+
+    /**
+     * The bug this exists for: gift-wraps are replayed on every reconnect, and
+     * acting on the second copy tore down the transfer that was working and left
+     * its `PeerConnection`, `DataChannel` and open file behind.
+     */
+    @Test
+    fun `the same offer arriving twice does not restart the transfer that is running`() {
+        assertEquals(
+            ShareDecisions.ArmDecision.REDELIVERY,
+            ShareDecisions.decideArm(identity(), identity()),
+        )
+    }
+
+    @Test
+    fun `a hash in the other case is still the same file, not a new one`() {
+        assertEquals(
+            "hex from a peer, so case is theirs to choose",
+            ShareDecisions.ArmDecision.REDELIVERY,
+            ShareDecisions.decideArm(identity(sha = "A".repeat(64)), identity(sha = "a".repeat(64))),
+        )
+    }
+
+    @Test
+    fun `a genuinely different file replaces the one in flight rather than being dropped`() {
+        assertEquals(
+            ShareDecisions.ArmDecision.REPLACE,
+            ShareDecisions.decideArm(identity(sha = "a".repeat(64)), identity(sha = "b".repeat(64))),
+        )
+        assertEquals(
+            "same hash, different length, so one of them is lying about something",
+            ShareDecisions.ArmDecision.REPLACE,
+            ShareDecisions.decideArm(identity(), identity(totalBytes = 12)),
+        )
+        assertEquals(
+            "and a shape this device cannot be mid-transfer on",
+            ShareDecisions.ArmDecision.REPLACE,
+            ShareDecisions.decideArm(identity(), identity(chunkBytes = 4096)),
+        )
+    }
+
+    @Test
+    fun `the same file moving the other way is a different transfer`() {
+        assertEquals(
+            ShareDecisions.ArmDecision.REPLACE,
+            ShareDecisions.decideArm(identity(sending = true), identity(sending = false)),
+        )
+    }
+
+    /**
+     * Which way the ambiguous case falls, asserted rather than left to be
+     * rediscovered: two offers that agree on a hash that survived sanitising as
+     * nothing read as one transfer seen twice.
+     */
+    @Test
+    fun `an offer that cannot be told apart from the live one is treated as a repeat`() {
+        assertEquals(
+            ShareDecisions.ArmDecision.REDELIVERY,
+            ShareDecisions.decideArm(identity(sha = ""), identity(sha = "")),
+        )
+    }
+
+    // ── A stalled transfer must end, not hang (Q19) ─────────────────────────
+
+    @Test
+    fun `a transfer that is still delivering is left alone`() {
+        assertEquals(
+            ShareDecisions.StallAction.WAIT,
+            ShareDecisions.stallAction(idleMs = 0, reasksSoFar = 0),
+        )
+        assertEquals(
+            ShareDecisions.StallAction.WAIT,
+            ShareDecisions.stallAction(ShareDecisions.STALL_AFTER_MS - 1, reasksSoFar = 0),
+        )
+    }
+
+    @Test
+    fun `chunks stopping asks again once, then gives up rather than hanging`() {
+        assertEquals(
+            ShareDecisions.StallAction.REASK,
+            ShareDecisions.stallAction(ShareDecisions.STALL_AFTER_MS, reasksSoFar = 0),
+        )
+        assertEquals(
+            "the re-ask gets its own window, or it would be judged before it could be answered",
+            ShareDecisions.StallAction.WAIT,
+            ShareDecisions.stallAction(ShareDecisions.STALL_AFTER_MS, reasksSoFar = 1),
+        )
+        assertEquals(
+            ShareDecisions.StallAction.GIVE_UP,
+            ShareDecisions.stallAction(2 * ShareDecisions.STALL_AFTER_MS, reasksSoFar = 1),
+        )
+    }
+
+    @Test
+    fun `asking again is bounded, so a dead sender is not polled forever`() {
+        assertEquals(
+            ShareDecisions.StallAction.GIVE_UP,
+            ShareDecisions.stallAction(idleMs = 600_000, reasksSoFar = ShareDecisions.STALL_REASKS),
+        )
+    }
+
+    /**
+     * The ordering that makes the fix visible to a person: the transfer must
+     * admit it has stopped *before* the decoder's own read expires, or the
+     * player stalls first and nothing on either device says why — which is Q19
+     * reproduced one layer down.
+     */
+    @Test
+    fun `the transfer gives up before a reader waiting on it runs out of patience`() {
+        val worstCaseMs = ShareDecisions.STALL_AFTER_MS * (ShareDecisions.STALL_REASKS + 1)
+        assertTrue(
+            "$worstCaseMs is not inside ${ShareReadPolicy.READ_PATIENCE_MS}",
+            worstCaseMs < ShareReadPolicy.READ_PATIENCE_MS,
+        )
+    }
+
     // ── Refusals say something a person can act on ──────────────────────────
 
     private fun verdict(

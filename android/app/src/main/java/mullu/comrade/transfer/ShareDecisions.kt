@@ -37,6 +37,27 @@ object ShareDecisions {
     const val REQUEST_WINDOW = 64
 
     /**
+     * How long the receiver waits with no chunk before it decides the sender has
+     * stopped. See [stallAction] for what it does about it.
+     *
+     * Wide enough that a slow link between two 16 KiB chunks is not mistaken for
+     * a dead one, and narrow enough that the whole bounded sequence finishes
+     * inside [ShareReadPolicy.READ_PATIENCE_MS] — a test asserts that inequality
+     * rather than leaving it to survive as a coincidence.
+     */
+    const val STALL_AFTER_MS: Long = 8_000
+
+    /**
+     * How many times a stalled receive asks again before giving up.
+     *
+     * One. A request is two integers on an open channel: if the first re-ask
+     * does not produce a chunk, the sender is not busy, it is gone — and more
+     * attempts only lengthen the time a person spends watching a bar that will
+     * never move.
+     */
+    const val STALL_REASKS: Int = 1
+
+    /**
      * The file name an incoming transfer lands under, from the offer's hash.
      *
      * Pure and here rather than beside the file I/O so it can be tested, because
@@ -52,6 +73,113 @@ object ShareDecisions {
             .filter { it.isDigit() || it in 'a'..'f' }
             .take(64)
         return if (safe.isEmpty()) "incoming.bin" else "$safe.bin"
+    }
+
+    // ── Telling a re-delivered signal from a new transfer ───────────────────
+
+    /**
+     * What identifies one transfer: what is being moved, in what shape, and
+     * which end of it this device is.
+     *
+     * The hash is the strong half — two offers of the same file agree on it by
+     * construction, since it is a SHA-256 of the bytes. The two sizes come along
+     * because a hash that did not survive sanitising (see [incomingFileName])
+     * would otherwise match anything, and [sending] because the same file moving
+     * the other way is a different transfer, not the same one seen twice.
+     */
+    data class TransferIdentity(
+        val sending: Boolean,
+        val sha256: String,
+        val totalBytes: Long,
+        val chunkBytes: Int,
+    )
+
+    /** What arming should do to the transfer that is already live, if any. */
+    enum class ArmDecision {
+        /** Nothing was running. Build it. */
+        START,
+
+        /** Something else was running. Tear that down first, then build. */
+        REPLACE,
+
+        /** This exact transfer is already running. Leave it alone. */
+        REDELIVERY,
+    }
+
+    /**
+     * Whether an arriving offer starts a transfer, replaces one, or is a signal
+     * this device has already acted on. `AUDIT.md` Q18.
+     *
+     * Comrade replays gift-wraps on purpose — `inbox_since` widens the
+     * subscription floor back to the persisted watermark on every reconnect, so
+     * a device that was offline loses nothing and a device that was not sees
+     * recent envelopes twice. Nothing upstream de-duplicates a `Share`, so this
+     * is where the second copy has to stop.
+     *
+     * **Erring restrictive, deliberately.** Anything that cannot be told apart
+     * from the live transfer is treated as a redelivery and ignored, including
+     * the two offers that agree on an unusable hash and a size. The two mistakes
+     * are not symmetric: ignoring a genuine retry costs a wait that the stall
+     * watchdog ([stallAction]) already ends — once a transfer is actually dead
+     * the session is gone, so the very same offer arms fresh — while acting on a
+     * duplicate ends a transfer that was working and leaks the `PeerConnection`,
+     * `DataChannel` and open file behind it, which nothing recovers.
+     */
+    fun decideArm(live: TransferIdentity?, incoming: TransferIdentity): ArmDecision {
+        if (live == null) return ArmDecision.START
+        return if (isSameTransfer(live, incoming)) ArmDecision.REDELIVERY else ArmDecision.REPLACE
+    }
+
+    private fun isSameTransfer(a: TransferIdentity, b: TransferIdentity): Boolean =
+        a.sending == b.sending &&
+            a.totalBytes == b.totalBytes &&
+            a.chunkBytes == b.chunkBytes &&
+            // Hex from a peer, so case is theirs to choose and not a difference.
+            a.sha256.trim().equals(b.sha256.trim(), ignoreCase = true)
+
+    // ── Noticing that the chunks stopped ────────────────────────────────────
+
+    /** What a receiver that has not seen a chunk for a while should do. */
+    enum class StallAction {
+        /** Not long enough yet. */
+        WAIT,
+
+        /** Ask again — a request or a chunk can be lost without the connection
+         *  noticing, and one more request is cheap. */
+        REASK,
+
+        /** Asking again did not help. End it, and say so. */
+        GIVE_UP,
+    }
+
+    /**
+     * The receiver's stall policy, from the two facts a watchdog can see.
+     * `AUDIT.md` Q19.
+     *
+     * The only condition that used to end a transfer was the connection itself
+     * failing, so a sender that quietly stopped reading its file — a revoked
+     * `content://` grant, removable storage pulled — froze both progress bars
+     * with no error on either device. This is what turns that silence into a
+     * sentence.
+     *
+     * Each re-ask buys its own [STALL_AFTER_MS] window, so the deadline widens
+     * with `reasksSoFar` rather than the answer flipping from `REASK` to
+     * `GIVE_UP` on the very next tick, before the re-ask could possibly have
+     * been answered.
+     *
+     * It is **not** a claim that the sender is gone: a link slow enough to leave
+     * eight seconds between chunks is indistinguishable from one that stopped,
+     * from here. It is the point at which continuing to say nothing is worse
+     * than being wrong.
+     */
+    fun stallAction(
+        idleMs: Long,
+        reasksSoFar: Int,
+        maxReasks: Int = STALL_REASKS,
+    ): StallAction {
+        val attempts = reasksSoFar.coerceAtLeast(0)
+        if (idleMs < STALL_AFTER_MS * (attempts + 1)) return StallAction.WAIT
+        return if (attempts < maxReasks) StallAction.REASK else StallAction.GIVE_UP
     }
 
     /** Prefix `bytes` with its big-endian chunk index. */
