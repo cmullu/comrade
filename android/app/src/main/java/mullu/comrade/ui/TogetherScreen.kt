@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -83,7 +84,7 @@ fun TogetherScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by TogetherManager.state.collectAsState()
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
 
     // An invitation is the one moment reading the library is obviously worth
     // something, so it is the one place besides `/play` that asks. Two separate
@@ -339,7 +340,7 @@ private fun FollowWhatIsPlaying(
     refusal: TogetherManager.FollowRefusal?,
     onTry: () -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     // A video plays here and a file is opened here, so neither wants this. Asked
     // of the same decision the manager will apply, so the button and the action
     // cannot disagree about when it is available.

@@ -147,6 +147,14 @@ is that no lane accumulates lint debt while the others hold.
   `-D warnings` locally is **not** proof of a clean one in CI — this has already
   turned a branch red on `manual_checked_ops`, a lint that did not exist in the
   image. Run `rustup update stable` before trusting a clippy run.
+- **`app/` compiles `android/`'s Kotlin, so a new dependency is needed twice.**
+  `app/android/app/build.gradle.kts`'s `stagePreservedServices` copies every
+  non-Compose `.kt` file out of `android/app/src/main/java` and builds it into
+  the Flutter app. Add a third-party dependency to `android/` alone and the
+  Flutter Android APK lane fails with `Unresolved reference` against a *package
+  name*, in a file nobody edited, under `app/build/app/preserved/` — which reads
+  as anything but a missing dependency. Keep the versions identical in both:
+  the staged sources are the same sources.
 - **`app/` breaks on a new `BridgeEvent` variant, and so does `android/`.** Both
   match it exhaustively — the Kotlin `when` in `RelayConnectionService.kt` and
   the Dart `switch` in `rust_comrade_repository.dart`. The Kotlin one fails the
