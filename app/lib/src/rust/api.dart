@@ -1767,6 +1767,11 @@ sealed class TogetherContent with _$TogetherContent {
     required MusicLink link,
     Recording? recording,
   }) = TogetherContent_Service;
+  const factory TogetherContent.stream({
+    required String url,
+    Recording? recording,
+    BigInt? durationMs,
+  }) = TogetherContent_Stream;
 }
 
 class TogetherCorrectionDto {

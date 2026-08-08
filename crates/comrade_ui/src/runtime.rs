@@ -114,9 +114,9 @@ use comrade_core::tara::{
 use comrade_core::together::{
     command_apply, describe_state_change, direct_path_live, direct_signal_admissible,
     heartbeat_interval_ms, parse_together_envelope, projected_peer_pos_ms, session_is_live_at,
-    signal_is_fresh, sync_verdict, valid_youtube_id, ClockEcho, ClockFilter, CommandApply,
-    CommandStamp, PlayheadControl, StateChange, SyncSample, SyncVerdict, TogetherContent,
-    TogetherEnvelope, TogetherSignal, CLOCK_BURST_PROBES,
+    signal_is_fresh, sync_verdict, ClockEcho, ClockFilter, CommandApply, CommandStamp,
+    PlayheadControl, StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope,
+    TogetherSignal, CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, VaultCallback, VaultEngine, VaultMessage,
@@ -6180,10 +6180,13 @@ impl RuntimeHandles {
         content: TogetherContent,
     ) -> Result<TogetherSessionDto, UiError> {
         let vault = self.vault.clone().ok_or(UiError::VaultLocked)?;
-        if let TogetherContent::Youtube { video_id } = &content {
-            if !valid_youtube_id(video_id) {
-                return Err(UiError::Engine("not a YouTube video link".into()));
-            }
+        // The same predicate the receiving side runs, so a thing we would refuse
+        // to accept is a thing we refuse to send — and so a new content variant
+        // cannot slip past one arm while satisfying the other.
+        if !content.admissible() {
+            return Err(UiError::Engine(
+                "that link isn't something Comrade will play".into(),
+            ));
         }
         let peer_pk = parse_pubkey(peer)?;
         let peer_npub = to_npub(peer);
@@ -7767,13 +7770,13 @@ fn handle_together_envelope(
             tracing::debug!(session = %env.session_id, "dropping duplicate together invite");
             return;
         }
-        // A peer-supplied video id ends up in an `<iframe src>`. Refuse a
-        // malformed one here so no frontend has to remember to.
-        if let TogetherContent::Youtube { video_id } = &content {
-            if !valid_youtube_id(video_id) {
-                tracing::warn!(peer = %peer_npub, "dropping together invite with a bad video id");
-                return;
-            }
+        // A peer-supplied id or URL ends up in a `src` attribute. Refuse it here
+        // so no frontend has to remember to — `TogetherContent::admissible` is
+        // the one place that decides, and it matches exhaustively so a new
+        // variant cannot inherit a yes.
+        if !content.admissible() {
+            tracing::warn!(peer = %peer_npub, "dropping together invite we will not play");
+            return;
         }
         *guard = Some(TogetherSession {
             id: env.session_id.clone(),

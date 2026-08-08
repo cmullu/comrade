@@ -495,6 +495,38 @@ pub enum TogetherContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recording: Option<Recording>,
     },
+    /// One public HTTPS URL that both sides fetch for themselves — a podcast
+    /// episode off its RSS feed, an Internet Archive item, a Jamendo track.
+    ///
+    /// **The best-syncing online source there is, and it took the longest to
+    /// notice.** The work went to streaming services first because that is what
+    /// "listen to something online together" sounds like, and the whole time the
+    /// tightest answer was the one with no account, no vendor SDK and no terms
+    /// question in it. A podcast is an ordinary MP3 the publisher wants clients
+    /// to fetch; nothing is transferred between peers, because both devices pull
+    /// the same public URL themselves.
+    ///
+    /// It also **syncs four times tighter than a service track ever can**. This
+    /// plays in a plain media element, which reports an accurate position and
+    /// takes any `playbackRate` — so it earns the fine deadband and the whole
+    /// correction ladder, where a vendor SDK reporting position only on state
+    /// changes is stuck with the coarse one. See [`Self::tuning`].
+    ///
+    /// Fully disclosing, and more so than the other two: the URL names not only
+    /// what is being played but where it came from.
+    Stream {
+        /// Validated by [`valid_stream_url`] on the way out **and** on the way
+        /// in. Not a nicety — this string ends up in a media element's `src` on
+        /// the strength of a peer having sent it, so the guard belongs here
+        /// rather than in three UIs that each have to remember.
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recording: Option<Recording>,
+        /// When the feed said. `None` is normal and costs nothing but the
+        /// length-disagreement warning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
 }
 
 impl TogetherContent {
@@ -516,6 +548,7 @@ impl TogetherContent {
     pub fn duration_ms(&self) -> Option<u64> {
         match self {
             Self::LocalFile { duration_ms, .. } => Some(*duration_ms),
+            Self::Stream { duration_ms, .. } => *duration_ms,
             // Both of these are the player's to report, not the inviter's to
             // claim — and for a service track the two devices may legitimately
             // be handed different masters of the same recording.
@@ -523,13 +556,45 @@ impl TogetherContent {
         }
     }
 
+    /// Whether this content may be acted on at all — checked on the way **out**
+    /// and again on the way **in**.
+    ///
+    /// One predicate rather than a check at each call site, because the two used
+    /// to be separate `if let` arms that each named `Youtube` and nothing else:
+    /// a variant carrying a peer-chosen string could be added, wired through
+    /// three frontends, and reach a `src` attribute without either arm noticing.
+    /// A `match` here means a new variant has to say which side of this line it
+    /// is on.
+    ///
+    /// Deliberately not an error type. There is exactly one reason a peer's
+    /// invitation is refused here — it carried something we will not put in a
+    /// player — and the sender's copy of the same check is what turns it into a
+    /// message for the person who typed it.
+    pub fn admissible(&self) -> bool {
+        match self {
+            // Nothing peer-chosen reaches a URL: a duration is a number and a
+            // recording is only ever text in a label.
+            Self::LocalFile { .. } => true,
+            // Eleven characters into an `<iframe src>`.
+            Self::Youtube { video_id } => valid_youtube_id(video_id),
+            // A catalogue id, used to *look something up*, never concatenated
+            // into a request by this crate. The frontends that resolve it are
+            // the ones that must escape it, and `MusicLink`'s shape — separate
+            // storefront and id fields, not a URL — is what keeps that possible.
+            Self::Service { .. } => true,
+            // A whole URL the other person chose, going into a media element.
+            // The strict one.
+            Self::Stream { url, .. } => valid_stream_url(url),
+        }
+    }
+
     /// What the invitation names, when it names anything — so a device that
     /// cannot reach the source can look for its own copy instead.
     pub fn recording(&self) -> Option<&Recording> {
         match self {
-            Self::LocalFile { recording, .. } | Self::Service { recording, .. } => {
-                recording.as_ref()
-            }
+            Self::LocalFile { recording, .. }
+            | Self::Service { recording, .. }
+            | Self::Stream { recording, .. } => recording.as_ref(),
             Self::Youtube { .. } => None,
         }
     }
@@ -544,7 +609,12 @@ impl TogetherContent {
     /// be wide enough not to thrash.
     pub fn tuning(&self) -> SyncTuning {
         match self {
-            Self::LocalFile { .. } => SyncTuning {
+            // A plain media element on an HTTPS URL is the same player as one on
+            // a local file — accurate position, any `playbackRate` — so it earns
+            // the same ladder. This is the whole practical argument for the
+            // `Stream` variant: it is the only *online* source that syncs as
+            // tightly as a file on disk.
+            Self::LocalFile { .. } | Self::Stream { .. } => SyncTuning {
                 min_deadband_ms: TOGETHER_DEADBAND_FINE_MS,
                 can_rate_trim: true,
             },
@@ -780,6 +850,101 @@ pub fn valid_youtube_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The longest URL a peer may hand us for [`TogetherContent::Stream`].
+///
+/// A bound rather than a limit that matters: real episode URLs with tracking
+/// query strings run long, and the point is only that a session invitation
+/// cannot carry a megabyte of string into three UIs' DOM.
+pub const STREAM_URL_MAX_LEN: usize = 2048;
+
+/// Whether `url` is something we will hand to a media element on a peer's word.
+///
+/// The strictest validator in this module, and deliberately so: unlike a YouTube
+/// id — eleven characters of a known alphabet — this is a whole URL that the
+/// *other person* chose, and it ends up as a media element's `src`. The
+/// device will then make a request to wherever it points, with the user's
+/// network position and cookies-for-that-origin, because that is what a media
+/// element does.
+///
+/// Six rules, each of them a thing a hostile invitation would otherwise buy:
+///
+/// - **HTTPS only.** `http:` is a downgrade a peer must not be able to choose,
+///   `file:` reads the listener's disk, `javascript:` and `data:` are script
+///   execution in whichever frontend is least careful about where it puts the
+///   string. The same HTTPS-only line `media-http` already holds.
+/// - **No credentials in the authority.** `https://user:pass@host/` is a
+///   phishing shape and some fetchers hand the credentials on through a
+///   redirect.
+/// - **A real host, with a dot in it.** This is what stops
+///   `https://router/reboot` — a peer-supplied URL that resolves on the
+///   listener's *LAN*, not ours. Combined with the literal-IP refusal below it
+///   is a blunt instrument, and it is the right blunt instrument: a session
+///   invitation has no business naming a host that only exists inside somebody
+///   else's house.
+/// - **No literal IP addresses**, for the same reason and because a name is
+///   what makes the disclosure meaningful. "Play this from 10.0.0.7" tells the
+///   listener nothing about what they are fetching.
+/// - **No control characters, spaces, quotes or angle brackets.** Any frontend
+///   that ever builds an attribute by concatenation is an injection otherwise,
+///   and this is the "do it where no UI can forget" argument the MIME branch
+///   already makes.
+/// - **Bounded length** ([`STREAM_URL_MAX_LEN`]).
+///
+/// What this deliberately does **not** do is resolve the name or follow the
+/// request. A DNS answer can point inside the listener's network whatever the
+/// name looks like, and this runs on a device with no network guarantee at all.
+/// The honest statement is that this refuses the *stated* private target, not
+/// every possible one — closing the rest belongs to whatever actually makes the
+/// request, not to a pure function.
+pub fn valid_stream_url(url: &str) -> bool {
+    if url.len() > STREAM_URL_MAX_LEN {
+        return false;
+    }
+    // Case-insensitive on the scheme only: the path is a peer's to case as they
+    // like, and lowercasing it would corrupt URLs that are case-sensitive.
+    let Some(rest) = url
+        .get(..8)
+        .filter(|p| p.eq_ignore_ascii_case("https://"))
+        .map(|_| &url[8..])
+    else {
+        return false;
+    };
+    if rest
+        .bytes()
+        .any(|b| b.is_ascii_control() || matches!(b, b' ' | b'"' | b'\'' | b'<' | b'>' | b'\\'))
+    {
+        return false;
+    }
+    // The authority ends at the first `/`, `?` or `#`; everything after is the
+    // server's business and not ours to judge.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // Credentials, and also the case where a peer tries to hide the real host
+    // behind an `@` — the authority is what a browser resolves, so the part
+    // *after* the last `@` is what actually matters and we refuse the shape
+    // outright rather than parsing it.
+    if authority.contains('@') {
+        return false;
+    }
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    if host.is_empty() || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    // A bracketed IPv6 literal, refused with the IPv4 ones below.
+    if host.starts_with('[') {
+        return false;
+    }
+    // A dotted host that parses as an address is a literal, not a name.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    // A name with no dot is a LAN name — `router`, `nas`, `localhost`.
+    if !host.contains('.') {
+        return false;
+    }
+    host.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
 }
 
 /// Pull a video id out of a bare id or any of the usual link shapes
@@ -2467,6 +2632,111 @@ mod tests {
         assert!(PlayheadControl::Full.playable());
         assert!(PlayheadControl::StartOnly.playable());
         assert!(!PlayheadControl::None.playable());
+    }
+
+    // ── A public URL both sides fetch for themselves ────────────────────────
+
+    #[test]
+    fn a_stream_syncs_as_tightly_as_a_local_file() {
+        // The point of the variant. A podcast episode is an ordinary media
+        // element on an HTTPS URL, so it reports an accurate position and takes
+        // any rate — the fine ladder, not the coarse one a vendor SDK forces.
+        let stream = TogetherContent::Stream {
+            url: "https://feeds.example.com/ep/42.mp3".into(),
+            recording: None,
+            duration_ms: Some(3_600_000),
+        };
+        assert_eq!(
+            stream.tuning(),
+            TogetherContent::local_file(3_600_000, None).tuning(),
+        );
+        assert!(stream.tuning().can_rate_trim);
+        assert_eq!(stream.duration_ms(), Some(3_600_000));
+    }
+
+    #[test]
+    fn a_feed_that_did_not_say_how_long_costs_only_the_warning() {
+        let stream = TogetherContent::Stream {
+            url: "https://feeds.example.com/ep/42.mp3".into(),
+            recording: None,
+            duration_ms: None,
+        };
+        assert_eq!(stream.duration_ms(), None);
+    }
+
+    #[test]
+    fn an_ordinary_episode_url_is_accepted() {
+        for url in [
+            "https://feeds.example.com/ep/42.mp3",
+            "https://archive.org/download/item/track%2001.flac",
+            "https://cdn.example.co.uk:8443/a/b.m4a?token=abc-123&t=9",
+            "https://example.com",
+            "https://sub.domain.example.org/x#t=30",
+        ] {
+            assert!(valid_stream_url(url), "refused a real one: {url}");
+        }
+    }
+
+    /// Each case here is a thing a hostile invitation would otherwise buy,
+    /// because this string becomes a media element's `src` on the strength of a
+    /// peer having sent it.
+    #[test]
+    fn a_stream_url_refuses_everything_that_is_not_a_public_https_name() {
+        for url in [
+            // Scheme: a downgrade, the listener's disk, and two flavours of
+            // script execution in whichever frontend is least careful.
+            "http://feeds.example.com/ep.mp3",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:audio/mp3;base64,AAAA",
+            "ftp://example.com/a.mp3",
+            "//example.com/a.mp3",
+            "",
+            // Credentials, and the `@` trick that hides the real host.
+            "https://user:pass@example.com/a.mp3",
+            "https://example.com@evil.test/a.mp3",
+            // Hosts that only exist inside the listener's house.
+            "https://localhost/a.mp3",
+            "https://router/reboot",
+            "https://127.0.0.1/a.mp3",
+            "https://10.0.0.7/a.mp3",
+            "https://192.168.1.1/admin",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/a.mp3",
+            // Malformed authorities.
+            "https:///a.mp3",
+            "https://.example.com/a.mp3",
+            "https://example.com./a.mp3",
+            // Injection shapes, for the frontend that builds an attribute by
+            // concatenation.
+            "https://example.com/a\"onerror=x.mp3",
+            "https://example.com/<script>.mp3",
+            "https://example.com/a b.mp3",
+            "https://example.com/a\nb.mp3",
+            "https://exa mple.com/a.mp3",
+        ] {
+            assert!(!valid_stream_url(url), "accepted a hostile one: {url:?}");
+        }
+    }
+
+    #[test]
+    fn a_stream_url_is_bounded() {
+        let long = format!("https://example.com/{}", "a".repeat(STREAM_URL_MAX_LEN));
+        assert!(!valid_stream_url(&long));
+        // And a realistically long one with tracking junk still passes.
+        let real = format!("https://cdn.example.com/ep.mp3?{}", "k=v&".repeat(200));
+        assert!(real.len() < STREAM_URL_MAX_LEN);
+        assert!(valid_stream_url(&real));
+    }
+
+    #[test]
+    fn the_scheme_is_matched_without_regard_to_case_and_the_path_is_not() {
+        assert!(valid_stream_url("HTTPS://example.com/A.MP3"));
+        // The path's case is the server's business — this must not normalise it
+        // and it must not refuse it.
+        assert!(valid_stream_url(
+            "https://example.com/CaseSensitive/Path.mp3"
+        ));
     }
 
     #[test]

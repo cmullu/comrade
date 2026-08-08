@@ -2826,6 +2826,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt dco_decode_box_autoadd_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_u_64(raw);
+  }
+
+  @protected
   BridgeEvent dco_decode_bridge_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     switch (raw[0]) {
@@ -3517,6 +3523,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_64(raw);
+  }
+
+  @protected
   List<String>? dco_decode_opt_list_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_list_String(raw);
@@ -3759,6 +3771,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return TogetherContent_Service(
           link: dco_decode_box_autoadd_music_link(raw[1]),
           recording: dco_decode_opt_box_autoadd_recording(raw[2]),
+        );
+      case 3:
+        return TogetherContent_Stream(
+          url: dco_decode_String(raw[1]),
+          recording: dco_decode_opt_box_autoadd_recording(raw[2]),
+          durationMs: dco_decode_opt_box_autoadd_u_64(raw[3]),
         );
       default:
         throw Exception('unreachable');
@@ -4205,6 +4223,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int sse_decode_box_autoadd_u_16(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_u_16(deserializer));
+  }
+
+  @protected
+  BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_64(deserializer));
   }
 
   @protected
@@ -5063,6 +5087,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_64(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -5330,6 +5365,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_decode_opt_box_autoadd_recording(deserializer);
         return TogetherContent_Service(
             link: var_link, recording: var_recording);
+      case 3:
+        final var_url = sse_decode_String(deserializer);
+        final var_recording =
+            sse_decode_opt_box_autoadd_recording(deserializer);
+        final var_durationMs = sse_decode_opt_box_autoadd_u_64(deserializer);
+        return TogetherContent_Stream(
+            url: var_url, recording: var_recording, durationMs: var_durationMs);
       default:
         throw UnimplementedError('');
     }
@@ -5773,6 +5815,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_16(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_64(self, serializer);
   }
 
   @protected
@@ -6486,6 +6534,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_64(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_list_String(
       List<String>? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -6689,6 +6747,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_i_32(2, serializer);
         sse_encode_box_autoadd_music_link(link, serializer);
         sse_encode_opt_box_autoadd_recording(recording, serializer);
+      case TogetherContent_Stream(
+          url: final url,
+          recording: final recording,
+          durationMs: final durationMs
+        ):
+        sse_encode_i_32(3, serializer);
+        sse_encode_String(url, serializer);
+        sse_encode_opt_box_autoadd_recording(recording, serializer);
+        sse_encode_opt_box_autoadd_u_64(durationMs, serializer);
     }
   }
 

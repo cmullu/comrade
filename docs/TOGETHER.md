@@ -114,6 +114,12 @@ fully disclosing, because it is publicly resolvable. It is also validated in
 core on send **and** receive, because a peer-supplied string ends up in an
 `<iframe src>` and no UI should have to remember that.
 
+That check is now `TogetherContent::admissible`, which **matches exhaustively**
+rather than testing one variant. It replaced two separate `if let … Youtube`
+arms, one on send and one on receive, and the reason is §11a: a new variant
+carrying a peer-chosen string could otherwise be added, wired through three
+frontends, and reach a `src` attribute without either arm noticing.
+
 ## 3. The clock, and why "< 300 ms" is not a target we can hold
 
 To compare two playheads you must know how far apart the two *clocks* are.
@@ -1039,6 +1045,79 @@ What each frontend needs next, in the order that makes them useful:
 3. **Both** — the token lifecycle. A token expires mid-album and a subscription
    can be downgraded, so `ServiceAccess` has to be able to go back to `false`
    during a session, and the session has to survive it becoming a signpost.
+
+## 11a. The online source nobody asked about, which syncs best of all
+
+_Added 2026-08-08, after "how do apps like BlackHole and Echo work, where do
+they stream media from?"_
+
+**How that category actually works**, because it is worth being precise rather
+than vague. BlackHole took audio from JioSaavn's undocumented endpoints and from
+YouTube; Spotify appeared in it only for *metadata and playlist import*, which is
+the pattern across all of them — Spotify's public Web API hands out track names
+and never audio bytes, so the catalogue and the sound come from different places.
+ViMusic and InnerTune use YouTube's private **InnerTube** API (`youtubei/v1`), the
+internal endpoint youtube.com's own frontend calls, plus stream-URL extraction of
+the yt-dlp/NewPipe kind. Echo ships no sources at all and says so on itself:
+*"This application hosts zero content… the user manages any external sources."*
+
+None of them hold a licence; they impersonate a first-party client against a
+private API. The practical consequences are as instructive as the legal one: they
+break whenever the internal API shifts, and they get removed — BlackHole's GitHub
+repository and F-Droid listing are both gone. §9 already declined this chain and
+that has not changed.
+
+**But looking at it surfaced the source this design had been walking past.**
+
+A podcast episode is an ordinary MP3 over HTTPS, named by an RSS feed the
+publisher wants clients to fetch. So are Internet Archive items, Jamendo tracks,
+Free Music Archive tracks. There is no DRM, no account, no vendor SDK, no terms
+question, and nothing is transferred between peers — **both devices pull the same
+public URL themselves**, which is the same shape as both opening their own file.
+
+That is `TogetherContent::Stream`, and it is the best-syncing online source
+available to this app by some distance:
+
+| Source | Deadband | Why |
+|---|---|---|
+| Local file | fine (250 ms) | accurate position, any `playbackRate` |
+| **HTTPS stream** | **fine (250 ms)** | **it is the same media element** |
+| YouTube embed | coarse (1200 ms) | discrete rates, coarse position |
+| Service track | coarse (1200 ms) | position reported on state change, not on a tick |
+
+A podcast session therefore holds **four times tighter than a Spotify session
+ever can**, and needs no account on either side. The catalogue is the only thing
+it gives up.
+
+### The URL is the dangerous part, and it is guarded in core
+
+Unlike a YouTube id — eleven characters of a known alphabet — this is a whole URL
+the *other person* chose, and it becomes a media element's `src`. The device then
+makes a request to wherever it points, from the listener's network position,
+because that is what a media element does.
+
+`valid_stream_url` runs on the way out **and** on the way in, and holds six
+lines: HTTPS only (no `http:` downgrade a peer can force, no `file:`, no
+`javascript:`, no `data:`); no credentials in the authority and no `@` at all,
+which also kills `https://example.com@evil.test/`; a host with a dot in it, which
+is what refuses `https://router/reboot` — a URL that resolves inside the
+*listener's* house rather than ours; no literal IP addresses, v4 or bracketed v6,
+which takes `127.0.0.1`, `192.168.1.1` and `169.254.169.254` with it; no control
+characters, spaces, quotes, backslashes or angle brackets, for the frontend that
+one day builds an attribute by concatenation; and a length bound.
+
+**What it does not do is resolve the name**, and that limit is stated rather than
+papered over: DNS can point a perfectly ordinary-looking name inside the
+listener's network, and a pure function on a device with no network guarantee
+cannot see that. This refuses the *stated* private target. Closing the rest
+belongs to whatever actually makes the request.
+
+The check moved into `TogetherContent::admissible`, which **matches
+exhaustively**, replacing two separate `if let … Youtube` arms that each guarded
+one variant. Those arms were the real hazard: a new variant carrying a
+peer-chosen string could be added, wired through three frontends, and reach a
+`src` attribute without either of them noticing. Now a new variant has to say
+which side of the line it is on.
 
 ## 12. Playing a handed-over file before it has finished arriving
 

@@ -3682,6 +3682,15 @@ const _: fn() = || {
             let _: crate::api::MusicLink = link;
             let _: Option<crate::api::Recording> = recording;
         }
+        crate::api::TogetherContent::Stream {
+            url,
+            recording,
+            duration_ms,
+        } => {
+            let _: String = url;
+            let _: Option<crate::api::Recording> = recording;
+            let _: Option<u64> = duration_ms;
+        }
     }
     {
         let TogetherCorrectionDto = None::<crate::api::TogetherCorrectionDto>.unwrap();
@@ -4837,6 +4846,17 @@ impl SseDecode for Option<u16> {
     }
 }
 
+impl SseDecode for Option<u64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<u64>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<Vec<String>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -5158,6 +5178,16 @@ impl SseDecode for crate::api::TogetherContent {
                 return crate::api::TogetherContent::Service {
                     link: var_link,
                     recording: var_recording,
+                };
+            }
+            3 => {
+                let mut var_url = <String>::sse_decode(deserializer);
+                let mut var_recording = <Option<crate::api::Recording>>::sse_decode(deserializer);
+                let mut var_durationMs = <Option<u64>>::sse_decode(deserializer);
+                return crate::api::TogetherContent::Stream {
+                    url: var_url,
+                    recording: var_recording,
+                    duration_ms: var_durationMs,
                 };
             }
             _ => {
@@ -6767,6 +6797,17 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::TogetherContent> {
                 recording.into_into_dart().into_dart(),
             ]
             .into_dart(),
+            crate::api::TogetherContent::Stream {
+                url,
+                recording,
+                duration_ms,
+            } => [
+                3.into_dart(),
+                url.into_into_dart().into_dart(),
+                recording.into_into_dart().into_dart(),
+                duration_ms.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -7927,6 +7968,16 @@ impl SseEncode for Option<u16> {
     }
 }
 
+impl SseEncode for Option<u64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <u64>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<Vec<String>> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -8178,6 +8229,16 @@ impl SseEncode for crate::api::TogetherContent {
                 <i32>::sse_encode(2, serializer);
                 <crate::api::MusicLink>::sse_encode(link, serializer);
                 <Option<crate::api::Recording>>::sse_encode(recording, serializer);
+            }
+            crate::api::TogetherContent::Stream {
+                url,
+                recording,
+                duration_ms,
+            } => {
+                <i32>::sse_encode(3, serializer);
+                <String>::sse_encode(url, serializer);
+                <Option<crate::api::Recording>>::sse_encode(recording, serializer);
+                <Option<u64>>::sse_encode(duration_ms, serializer);
             }
             _ => {
                 unimplemented!("");

@@ -882,6 +882,35 @@ is small; the content problem is the real constraint:
 >   Spotify-hosted JavaScript and **must** run in a sandboxed child frame rather
 >   than the origin where `withGlobalTauri` exposes every command — the same line
 >   `docs/TOGETHER.md` §9 holds for YouTube. Full plan: §11 there.
+> - ~~**The only "online" source was YouTube, and it syncs coarsely.**~~
+>   **`TogetherContent::Stream` added 2026-08-08**, and it came out of asking how
+>   BlackHole and Echo work rather than out of the Spotify thread. Those stream
+>   from services' *private* APIs — JioSaavn's undocumented endpoints, YouTube's
+>   InnerTube — with no licence, which §9 already declined and which is also
+>   fragile (BlackHole's repo and F-Droid listing are both gone now). But looking
+>   at it surfaced the source this design had walked past: **a podcast episode is
+>   a plain MP3 over HTTPS that its publisher wants clients to fetch**, and so are
+>   Internet Archive, Jamendo and FMA items. Both devices pull the same public URL
+>   themselves, so nothing is transferred and no account exists on either side —
+>   and because it plays in an ordinary media element it takes the **fine**
+>   deadband, holding four times tighter than a service track ever can. It is the
+>   best-syncing online source available to this app, and it needed no vendor at
+>   all.
+>
+>   The URL is the hazard and is guarded in core by `valid_stream_url`
+>   (`crates/comrade_core/src/together.rs:901`) on send **and** receive: HTTPS
+>   only, no credentials or `@` in the authority, a dotted host so
+>   `https://router/reboot` cannot resolve inside the *listener's* LAN, no literal
+>   IPs, no control characters or quoting metacharacters, bounded length. It
+>   deliberately does **not** resolve the name — DNS can point an ordinary-looking
+>   host at a private address and a pure function cannot see that, so this refuses
+>   the *stated* private target and the rest belongs to whatever makes the
+>   request. Stated on the function rather than left to be discovered.
+>
+>   The bigger fix is structural: the send and receive paths each had their own
+>   `if let … Youtube` guard, so a new variant carrying a peer-chosen string could
+>   be added and wired through three frontends without either noticing. Both now
+>   call `TogetherContent::admissible`, which matches exhaustively.
 > - **A handed-over file still plays only once it is whole**, and core has been
 >   ready for it since the transfer landed. `ShareTracker::playable_at` and
 >   `runway_ms` are unit-tested and remain dead code — the gap is per-frontend and
