@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -578,6 +579,14 @@ private fun PlayerHome(
                         TogetherDecisions.Pairing(listener.npub, listener.label),
                         onPickFileWith,
                     )
+                    if (!failed) onStarted()
+                },
+                onAlone = {
+                    chosen = null
+                    // The same call as any other, with the pairing that has
+                    // nobody in it — which is what keeps listening alone from
+                    // being a second implementation of the player.
+                    failed = !startWith(context, what, TogetherDecisions.ALONE, onPickFileWith)
                     if (!failed) onStarted()
                 },
             )
@@ -1152,6 +1161,7 @@ private fun LinkField(onBack: () -> Unit, onPlay: (TogetherDecisions.Link) -> Un
 private fun ListenWithSheet(
     onDismiss: () -> Unit,
     onChosen: (TogetherDecisions.Listener) -> Unit,
+    onAlone: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var all by remember { mutableStateOf<List<TogetherDecisions.Listener>>(emptyList()) }
@@ -1180,6 +1190,36 @@ private fun ListenWithSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // Above the people and outside the search, because it is not a
+            // person and because it is the answer that always works: it needs no
+            // contact, no permission and no network, which is exactly what makes
+            // the tab usable as an ordinary music player.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onAlone() }
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(
+                    QueueMusicIcon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.together_who_alone),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        stringResource(R.string.together_who_alone_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            HorizontalDivider()
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -1586,37 +1626,59 @@ private fun LiveSession(
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
     )
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            stringResource(R.string.together_with, s.peerLabel),
-            style = MaterialTheme.typography.bodyMedium,
-            color = TogetherMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text("·", color = TogetherMuted)
-        Text(statusLabel(s), style = MaterialTheme.typography.bodyMedium, color = TogetherMuted)
-    }
+    // Everything from here to the transport is *about the other person*, so
+    // listening alone draws none of it — there is no name to put in "with …",
+    // no status that is not about them, and no gap between two playheads when
+    // there is one playhead. What a solo session keeps is the sleeve, the
+    // title, the transport and the queue, which is a music player.
+    if (!s.solo) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                stringResource(R.string.together_with, s.peerLabel),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TogetherMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text("·", color = TogetherMuted)
+            Text(statusLabel(s), style = MaterialTheme.typography.bodyMedium, color = TogetherMuted)
+        }
 
-    // The measured half, which the desktop player has had since 2026-08-05 and
-    // this one did not. Recomputed on every recomposition rather than stored,
-    // because whether these may be shown at all depends on how old the reading
-    // is *now* — see `TogetherDecisions.measurement`. The position poll drives
-    // a recomposition every 250 ms while playing, which is what ages them off
-    // the screen once corrections stop arriving.
-    val measured = TogetherDecisions.measurement(
-        driftMs = s.driftMs,
-        qualityMs = s.qualityMs,
-        ageMs = System.currentTimeMillis() - s.correctedAtMs,
-    )
-    driftLabel(measured.drift)?.let {
-        Text(it, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
-    }
-    // Deliberately not colour-coded, on either frontend: "we've lost track of
-    // them" is an honest report of poor measurement, not a fault, and red would
-    // say otherwise.
-    qualityLabel(measured.quality)?.let {
-        Text(it, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
+        // The measured half, which the desktop player has had since 2026-08-05
+        // and this one did not. Recomputed on every recomposition rather than
+        // stored, because whether these may be shown at all depends on how old
+        // the reading is *now* — see `TogetherDecisions.measurement`. The
+        // position poll drives a recomposition every 250 ms while playing, which
+        // is what ages them off the screen once corrections stop arriving.
+        val measured = TogetherDecisions.measurement(
+            driftMs = s.driftMs,
+            qualityMs = s.qualityMs,
+            ageMs = System.currentTimeMillis() - s.correctedAtMs,
+        )
+        driftLabel(measured.drift)?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
+        }
+        // Deliberately not colour-coded, on either frontend: "we've lost track
+        // of them" is an honest report of poor measurement, not a fault, and red
+        // would say otherwise.
+        qualityLabel(measured.quality)?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
+        }
+
+        // What we tried to tell them did not go. The player kept playing, which
+        // is the point — your own music has no business waiting on a relay — so
+        // this is what admits the other half did not happen.
+        val unsent by TogetherManager.sendFailed.collectAsState()
+        if (unsent) {
+            Text(
+                stringResource(R.string.together_send_failed),
+                style = MaterialTheme.typography.bodySmall,
+                color = TogetherMuted,
+            )
+        }
     }
 
     // Control-and-status, and the honest limit of it, while another app plays.
@@ -1656,7 +1718,7 @@ private fun LiveSession(
     // mine": let them watch this one as it plays. Offered only by the side that
     // holds the file and only for our own player — an embed is already on both
     // screens, and an external session is somebody else's audio to send.
-    if (s.weLead && !s.embed && !s.external && !s.streaming) {
+    if (s.weLead && !s.solo && !s.embed && !s.external && !s.streaming) {
         TextButton(onClick = onStream) { Text(stringResource(R.string.together_stream)) }
         Text(
             stringResource(R.string.together_stream_note),
@@ -1687,7 +1749,11 @@ private fun LiveSession(
     }
 
     TextButton(onClick = { TogetherManager.leave() }) {
-        Text(stringResource(R.string.together_leave))
+        Text(
+            stringResource(
+                if (s.solo) R.string.together_stop else R.string.together_leave,
+            ),
+        )
     }
 
     // The honest limits, on screen rather than in a doc nobody reads.

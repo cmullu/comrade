@@ -919,6 +919,28 @@ object TogetherDecisions {
     /** The person this device is playing with, for as long as the session lasts. */
     data class Pairing(val npub: String, val label: String)
 
+    /**
+     * Listening on your own — the pairing with nobody in it.
+     *
+     * **This is what makes the tab a music player rather than only a way to
+     * share one**, which is what it was asked to be, and modelling it as a
+     * pairing rather than as a second kind of session is the whole trick: the
+     * player, the queue, prev/next, the foreground service and the notification
+     * are identical, and the only difference is that nothing is sent. One gate
+     * (`TogetherManager.sendOut`) reads [isAlone] and returns, instead of a
+     * `solo` branch in every one of those places.
+     *
+     * The empty string is a safe sentinel because a real peer is an `npub1…`
+     * bech32 string and can never be blank — pinned by a test rather than left
+     * as an assumption. It also fails in the right direction: a bug that let
+     * this reach `parse_pubkey` gets a refusal from core, not a message to the
+     * wrong person.
+     */
+    val ALONE: Pairing = Pairing(npub = "", label = "")
+
+    /** Whether this session has nobody else in it. */
+    fun isAlone(pairing: Pairing?): Boolean = pairing != null && pairing.npub.isBlank()
+
     /** What has to happen before something new can start playing. */
     sealed interface StartStep {
         /** Nobody chosen yet — the "and who with?" sheet. */
@@ -949,6 +971,11 @@ object TogetherDecisions {
      */
     fun startStep(pairing: Pairing?, sessionLive: Boolean, weLead: Boolean): StartStep = when {
         pairing == null -> StartStep.AskWho
+        // Nobody to interrupt and nobody to ask about. Checked before the
+        // takeover arm rather than left to `weLead` happening to be true: a
+        // solo session that ever reached that arm would put up "stop what  is
+        // playing?" — a question about nobody, with a blank where the name goes.
+        isAlone(pairing) -> StartStep.PlayNow(pairing)
         sessionLive && !weLead -> StartStep.ConfirmTakeover(pairing)
         else -> StartStep.PlayNow(pairing)
     }

@@ -1058,4 +1058,64 @@ class TogetherDecisionsTest {
         assertNull(TogetherDecisions.watchUrl("../../evil"))
         assertNull(TogetherDecisions.watchUrl("a".repeat(64)))
     }
+    // ── Listening alone ─────────────────────────────────────────────────────
+
+    @Test
+    fun aPairingWithNobodyInItIsTheOneThatMeansAlone() {
+        assertTrue(TogetherDecisions.isAlone(TogetherDecisions.ALONE))
+        assertFalse(TogetherDecisions.isAlone(TogetherDecisions.Pairing("npub1abc", "Ana")))
+        // Not chosen yet is not the same as chosen to be alone — `startStep`
+        // asks who in the first case and must never confuse it with the second.
+        assertFalse(TogetherDecisions.isAlone(null))
+    }
+
+    @Test
+    fun theSoloSentinelCannotCollideWithARealPeer() {
+        // The whole safety of an empty npub as the sentinel: a real one is a
+        // bech32 string and can never be blank. Pinned rather than assumed,
+        // because the consequence of a collision is a send to the wrong person.
+        for (real in listOf("npub1abc", "  npub1abc  ", "0", "-")) {
+            assertFalse(
+                "a real peer id read as alone: $real",
+                TogetherDecisions.isAlone(TogetherDecisions.Pairing(real, "x")),
+            )
+        }
+        // Whitespace is not a peer either — it is the same nobody.
+        assertTrue(TogetherDecisions.isAlone(TogetherDecisions.Pairing(" ", "")))
+    }
+
+    @Test
+    fun beingAloneIsStillAChosenAnswerSoNothingAsksAgain() {
+        // `startStep` must treat it as settled: the sheet has been answered, and
+        // re-opening it on the next track is the failure the pairing exists to
+        // fix — for one listener as much as for two.
+        val step = TogetherDecisions.startStep(
+            pairing = TogetherDecisions.ALONE,
+            sessionLive = true,
+            weLead = true,
+        )
+        assertEquals(
+            TogetherDecisions.StartStep.PlayNow(TogetherDecisions.ALONE),
+            step,
+        )
+    }
+
+    @Test
+    fun aloneNeverAsksToTakeOverFromNobody() {
+        // The takeover arm reads `weLead`, and a solo session has no leader
+        // because it has no second person. Whichever way that flag happens to
+        // fall, the question "stop what … is playing?" has a blank where the
+        // name goes — so alone is answered before the arm is reached.
+        for (weLead in listOf(true, false)) {
+            assertEquals(
+                "asked about nobody with weLead=$weLead",
+                TogetherDecisions.StartStep.PlayNow(TogetherDecisions.ALONE),
+                TogetherDecisions.startStep(
+                    pairing = TogetherDecisions.ALONE,
+                    sessionLive = true,
+                    weLead = weLead,
+                ),
+            )
+        }
+    }
 }

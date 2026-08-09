@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -142,6 +143,19 @@ object TogetherManager {
              * another app's artwork is in another app's window.
              */
             val sourceUri: String? = null,
+            /**
+             * Whether there is nobody else in this session.
+             *
+             * The whole of listening alone, as far as this screen is concerned:
+             * the player, the queue, the transport, the service and the
+             * notification are the paired ones unchanged, and what a `true` here
+             * removes is the half of the screen that is *about* the other person
+             * — their name, the status line, the two measured readouts, and the
+             * offer to send them the picture. Set once at construction from
+             * [TogetherDecisions.isAlone] rather than re-derived, so the screen
+             * never has to test a peer id for emptiness.
+             */
+            val solo: Boolean = false,
         ) : UiState
     }
 
@@ -376,7 +390,112 @@ object TogetherManager {
      */
     init {
         StreamTransfer.setSink(streamSink)
+        drainOutbound()
     }
+
+    // ── Everything this device says to the other one ────────────────────────
+
+    /**
+     * One outbound session command, queued.
+     *
+     * @param what a short label, for the log line when it fails. Never the
+     *   content: these end up in logcat.
+     */
+    private data class Outbound(val what: String, val run: () -> Unit)
+
+    /**
+     * Commands on their way out, in the order they were asked for.
+     *
+     * **This exists because every `together_*` call blocks the thread it is made
+     * on, and they were being made on the main one.** `ComradeCore` bridges the
+     * async FFI with `runBlocking`, and the last rung of `send_together` is
+     * `vault.send_dm(...).await` — a relay round trip. So a tap on play ran the
+     * network send inside the click handler, and with no relay reachable the
+     * main thread sat in it until Android put up *"Comrade isn't responding"*.
+     * Offline is exactly where that is worst and exactly where this feature is
+     * supposed to be at its best.
+     *
+     * A channel rather than `launch(Dispatchers.IO)` per call, and the reason is
+     * ordering: `together_set_state` takes the session's next Lamport sequence
+     * number **inside** the call, so two commands racing on different IO threads
+     * can be numbered in the opposite order to the taps that made them — pause
+     * then play arriving as play then pause, which is a session that ends up
+     * playing when the person asked for silence. One consumer, one at a time,
+     * FIFO.
+     *
+     * `UNLIMITED` because the producer is a person pressing buttons and the
+     * consumer is a network send: a bounded queue could only choose between
+     * dropping a command and suspending the caller, and the caller is the UI
+     * thread this whole mechanism exists to keep free.
+     */
+    private val outbound = Channel<Outbound>(Channel.UNLIMITED)
+
+    private fun drainOutbound() = scope.launch(Dispatchers.IO) {
+        for (command in outbound) {
+            // Cleared by the next thing that *does* go, so the sentence on
+            // screen tracks whether we can reach them now rather than whether we
+            // ever failed to. A flag that only ever latches true would be a
+            // permanent accusation against a session that recovered.
+            runCatching { command.run() }.onSuccess { _sendFailed.value = false }.onFailure {
+                // Logged and dropped rather than retried. A session command is
+                // worthless once stale — the next heartbeat carries the truth,
+                // and the drift ladder is what closes the gap a lost command
+                // left. Retrying would deliver a play the person has since
+                // undone.
+                Log.w(TAG, "could not send ${command.what}", it)
+                _sendFailed.value = true
+            }
+        }
+    }
+
+    /**
+     * Say something to the other device — off this thread, in order, and **not
+     * at all when there is nobody to say it to**.
+     *
+     * The solo gate is here rather than at each call site because that is what
+     * makes listening alone the same code path as listening together
+     * ([TogetherDecisions.ALONE]). Every transport control, the queue, the
+     * service and the notification behave identically; the sends simply stop at
+     * this line.
+     */
+    private fun sendOut(what: String, run: () -> Unit) {
+        if (alone) return
+        outbound.trySend(Outbound(what, run))
+    }
+
+    /** Whether the session being set up, or running, has nobody else in it. */
+    private val alone: Boolean get() = TogetherDecisions.isAlone(_pairing.value)
+
+    /**
+     * A file-handover or stream-negotiation signal, on the session envelope.
+     *
+     * Exposed so [ShareTransfer] and [StreamTransfer] reach the same queue as
+     * every other outbound command, which they need for a reason of their own:
+     * both call from **WebRTC observer callbacks** — `onIceCandidate`,
+     * `onCreateSuccess` — and a relay round trip inside one of those blocks the
+     * peer connection's signalling thread. That is the shape of the two
+     * callback deadlocks `.claude/rules/rust.md` records, arriving from the
+     * Kotlin side instead.
+     *
+     * Ordering matters here too, and more than for a transport command: an
+     * answer that overtakes its offer is a negotiation that cannot complete.
+     */
+    fun sendShareSignal(signal: uniffi.comrade_core.ShareSignal) {
+        sendOut("share signal") { ComradeCore.togetherShareTyped(signal) }
+    }
+
+    private val _sendFailed = MutableStateFlow(false)
+
+    /**
+     * Whether the last thing we tried to tell them did not go.
+     *
+     * Surfaced because the queue made the failure silent: it used to throw out
+     * of the click handler and the screen said so. Now the player starts
+     * regardless — which is the point, since your own music has no business
+     * waiting on a relay — and this is what admits that the other person has not
+     * heard about it.
+     */
+    val sendFailed: StateFlow<Boolean> = _sendFailed.asStateFlow()
 
     private val _micEnabled = MutableStateFlow(false)
 
@@ -826,8 +945,7 @@ object TogetherManager {
         val invited = _state.value as? UiState.Invited ?: return
         pairWith(invited)
         _queue.value = null
-        runCatching { ComradeCore.togetherJoinTyped() }
-            .onFailure { Log.w("TogetherManager", "join before asking failed", it) }
+        sendOut("join") { ComradeCore.togetherJoinTyped() }
         _state.value = UiState.Live(
             peer = invited.peer,
             peerLabel = invited.peerLabel,
@@ -944,8 +1062,7 @@ object TogetherManager {
         if (_state.value is UiState.Live) {
             pendingSelfEnds++
             pendingSelfEndsAtMs = System.currentTimeMillis()
-            runCatching { ComradeCore.togetherEndTyped() }
-                .onFailure { Log.w(TAG, "could not end the last thing before the next", it) }
+            sendOut("leave") { ComradeCore.togetherEndTyped() }
             ShareTransfer.end()
             stopPlayback(replacing = true)
         }
@@ -970,10 +1087,16 @@ object TogetherManager {
         _queue.value = queue
         val title = recording?.title.orEmpty()
         openPlayer(uri) { durationMs ->
-            ComradeCore.togetherStartTyped(
-                peer,
-                uniffi.comrade_core.TogetherContent.LocalFile(durationMs.toULong(), recording),
-            )
+            // Queued, not awaited. The player is already open by this point and
+            // there is no reason for it to wait on a relay — offline, that wait
+            // was the ANR. A session the peer never hears about simply never
+            // gets joined, which the status line already says.
+            sendOut("invitation") {
+                ComradeCore.togetherStartTyped(
+                    peer,
+                    uniffi.comrade_core.TogetherContent.LocalFile(durationMs.toULong(), recording),
+                )
+            }
             _state.value = UiState.Live(
                 peer = peer,
                 peerLabel = peerLabel,
@@ -986,6 +1109,7 @@ object TogetherManager {
                 durationMs = durationMs,
                 status = Status.WaitingForThem,
                 sourceUri = openedUri,
+                solo = alone,
             )
             startService()
         }
@@ -1004,9 +1128,12 @@ object TogetherManager {
         beginSession(context, peer, peerLabel)
         _queue.value = null
         openEmbed(videoId)
-        runCatching {
-            ComradeCore.togetherStartTyped(peer, uniffi.comrade_core.TogetherContent.Youtube(videoId))
-        }.onFailure { Log.w(TAG, "could not invite them to a video", it) }
+        sendOut("video invitation") {
+            ComradeCore.togetherStartTyped(
+                peer,
+                uniffi.comrade_core.TogetherContent.Youtube(videoId),
+            )
+        }
         _state.value = UiState.Live(
             peer = peer,
             peerLabel = peerLabel,
@@ -1025,6 +1152,7 @@ object TogetherManager {
             status = Status.WaitingForThem,
             picture = TogetherDecisions.EMBED_PICTURE,
             embed = true,
+            solo = alone,
         )
         startService()
     }
@@ -1062,7 +1190,7 @@ object TogetherManager {
     ) {
         beginSession(context, peer, peerLabel)
         _queue.value = null
-        ComradeCore.togetherStartTyped(peer, content)
+        sendOut("stream invitation") { ComradeCore.togetherStartTyped(peer, content) }
         _state.value = UiState.Live(
             peer = peer,
             peerLabel = peerLabel,
@@ -1079,6 +1207,7 @@ object TogetherManager {
             // is exactly the case the ordering above creates.
             durationMs = 0,
             status = Status.WaitingForThem,
+            solo = alone,
         )
         startService()
         openStreamPlayer(content.url)
@@ -1098,8 +1227,7 @@ object TogetherManager {
         val invited = _state.value as? UiState.Invited ?: return
         val content = wantedStream ?: return
         pairWith(invited)
-        runCatching { ComradeCore.togetherJoinTyped() }
-            .onFailure { Log.w(TAG, "join failed", it) }
+        sendOut("join") { ComradeCore.togetherJoinTyped() }
         _state.value = UiState.Live(
             peer = invited.peer,
             peerLabel = invited.peerLabel,
@@ -1135,8 +1263,7 @@ object TogetherManager {
         val videoId = wantedVideoId ?: return
         pairWith(invited)
         openEmbed(videoId)
-        runCatching { ComradeCore.togetherJoinTyped() }
-            .onFailure { Log.w(TAG, "join failed", it) }
+        sendOut("join") { ComradeCore.togetherJoinTyped() }
         _state.value = UiState.Live(
             peer = invited.peer,
             peerLabel = invited.peerLabel,
@@ -1202,8 +1329,7 @@ object TogetherManager {
         openedPath = null
         openedUri = null
         openedDurationMs = 0
-        runCatching { ComradeCore.togetherJoinTyped() }
-            .onFailure { Log.w(TAG, "join failed", it) }
+        sendOut("join") { ComradeCore.togetherJoinTyped() }
         _state.value = UiState.Live(
             peer = invited.peer,
             peerLabel = invited.peerLabel,
@@ -1239,7 +1365,7 @@ object TogetherManager {
 
     private val externalListener = object : ExternalSessionPlayer.Listener {
         override fun onStateChanged(posMs: Long, playing: Boolean) {
-            ComradeCore.togetherSetStateTyped(posMs, playing, 0)
+            sendOut("state") { ComradeCore.togetherSetStateTyped(posMs, playing, 0) }
             refreshLive(playing = playing, positionMs = posMs)
         }
 
@@ -1272,7 +1398,7 @@ object TogetherManager {
         val invited = _state.value as? UiState.Invited ?: return
         pairWith(invited)
         openPlayer(uri) { durationMs ->
-            ComradeCore.togetherJoinTyped()
+            sendOut("join") { ComradeCore.togetherJoinTyped() }
             _state.value = UiState.Live(
                 peer = invited.peer,
                 peerLabel = invited.peerLabel,
@@ -1299,7 +1425,7 @@ object TogetherManager {
      */
     fun setState(posMs: Long, playing: Boolean) {
         val p = player ?: return
-        ComradeCore.togetherSetStateTyped(posMs, playing, SCHEDULE_AHEAD_MS)
+        sendOut("state") { ComradeCore.togetherSetStateTyped(posMs, playing, SCHEDULE_AHEAD_MS) }
         scope.launch {
             delay(SCHEDULE_AHEAD_MS)
             val now = System.currentTimeMillis()
@@ -1328,7 +1454,7 @@ object TogetherManager {
         // Cleared first: this end is the user's, so the next `TogetherEnded`
         // must be acted on rather than swallowed as a replacement's.
         pendingSelfEnds = 0
-        runCatching { ComradeCore.togetherEndTyped() }
+        sendOut("leave") { ComradeCore.togetherEndTyped() }
         stopPlayback()
         forgetPairing()
         _state.value = UiState.Idle
@@ -1336,6 +1462,7 @@ object TogetherManager {
 
     /** The pairing is over — not paused between tracks, over. */
     private fun forgetPairing() {
+        _sendFailed.value = false
         _pairing.value = null
         pairingEndedAtMs = 0
         _queue.value = null
@@ -1568,7 +1695,7 @@ object TogetherManager {
              * (`buffering`, `unstarted`) before it calls.
              */
             override fun onStateChanged(posMs: Long, playing: Boolean) {
-                ComradeCore.togetherSetStateTyped(posMs, playing, 0)
+                sendOut("state") { ComradeCore.togetherSetStateTyped(posMs, playing, 0) }
                 refreshLive(playing = playing, positionMs = posMs)
             }
 
@@ -1807,7 +1934,7 @@ object TogetherManager {
             suppressor,
             System.currentTimeMillis(),
         ) ?: return
-        ComradeCore.togetherSetStateTyped(emit.posMs, emit.playing, 0)
+        sendOut("state") { ComradeCore.togetherSetStateTyped(emit.posMs, emit.playing, 0) }
     }
 
     /**

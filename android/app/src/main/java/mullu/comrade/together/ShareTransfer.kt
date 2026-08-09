@@ -8,7 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import mullu.comrade.ComradeCore
 import mullu.comrade.transfer.FileTransfer
 import mullu.comrade.transfer.ShareDecisions
 import uniffi.comrade_core.RefusalReason
@@ -23,7 +22,7 @@ import uniffi.comrade_core.TransferSignal
  * handoff drives. What lives here is only what is *about a session*: the four
  * facts that used to be baked into the engine —
  *
- *  * signals ride the session envelope ([ComradeCore.togetherShareTyped]), which
+ *  * signals ride the session envelope ([TogetherManager.sendShareSignal]), which
  *    is what stops this being a way to open a peer-to-peer connection to someone
  *    who never agreed to watch anything,
  *  * the file we can send is the one the player has open,
@@ -118,8 +117,7 @@ object ShareTransfer {
         // that event is ever missed, a stale expectation would swallow the next
         // session's first stream offer, and this is the cheap second answer.
         expectingLateFileOffer = false
-        runCatching { ComradeCore.togetherShareTyped(ShareSignal.Ask) }
-            .onFailure { Log.w(TAG, "ask failed", it) }
+        TogetherManager.sendShareSignal(ShareSignal.Ask)
         engine.note("Asking them to send it…")
     }
 
@@ -213,8 +211,7 @@ object ShareTransfer {
         // Answered either way. A re-delivered `Ask` is also how a lost `Offer`
         // gets a second chance — the engine kept the transfer, so this costs
         // nothing — and their side drops the duplicate by the same rule.
-        runCatching { ComradeCore.togetherShareTyped(ShareSignal.Offer(offer)) }
-            .onFailure { Log.w(TAG, "offer failed", it) }
+        TogetherManager.sendShareSignal(ShareSignal.Offer(offer))
     }
 
     // ── Receiver ────────────────────────────────────────────────────────────
@@ -274,10 +271,13 @@ object ShareTransfer {
 
     // ── Plumbing ────────────────────────────────────────────────────────────
 
-    private fun send(signal: ShareSignal) {
-        io.launch {
-            runCatching { ComradeCore.togetherShareTyped(signal) }
-                .onFailure { Log.w(TAG, "share signal failed", it) }
-        }
-    }
+    /**
+     * One signal out, through the session's own outbound queue.
+     *
+     * It used to be `io.launch { … }` per signal, which kept it off this thread
+     * but let two signals race — and a handover answer that overtakes its offer
+     * is a negotiation that never completes. The queue is FIFO, which is the
+     * property this needs and a dispatcher does not give.
+     */
+    private fun send(signal: ShareSignal) = TogetherManager.sendShareSignal(signal)
 }
