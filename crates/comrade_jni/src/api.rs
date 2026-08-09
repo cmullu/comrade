@@ -102,10 +102,18 @@ pub(crate) fn runtime() -> &'static Arc<RwLock<ComradeRuntime>> {
 /// installs a panic hook that logs the backtrace. The hook only *observes* —
 /// it does not stop unwinding — so uniffi's `catch_unwind` at the Kotlin
 /// boundary still turns a panic into a `PanicException` rather than a crash.
-/// This crate itself logs through `tracing`, not `log`; the bridge is for
-/// flutter_rust_bridge's own diagnostics.
+///
+/// [`crate::init_logging`] goes **first**, and the order is the point. On
+/// Android both calls install a `log` sink and the first one wins for good
+/// (`android_logger::init_once`): ours is warn-and-error and scoped to this
+/// project's crates, frb's is TRACE and scoped to nothing. Calling ours first
+/// is what keeps a user's logcat from filling with third-party trace lines.
+/// This crate logs through `tracing`; on Android that reaches the same sink via
+/// the `log-always` bridge (see [`crate::init_logging`]), on every other target
+/// it does not and only frb's own diagnostics come through here.
 #[frb(init)]
 pub fn init_app() {
+    crate::init_logging();
     flutter_rust_bridge::setup_default_user_utils();
 }
 

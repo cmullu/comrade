@@ -50,6 +50,33 @@ serde_json    = { workspace = true }
 tokio         = { workspace = true }
 tracing       = { workspace = true }
 
+# ── Android only: `tracing` output reaching logcat ───────────────────────────
+#
+# Nothing on this side installed a subscriber, so every `warn!` from Rust was
+# formatted and dropped on the floor — including the one line that explained a
+# CI failure (`global_runtime_with_relays` in lib.rs). `init_logging` in lib.rs
+# is the install; this is the smallest dependency set that can carry it.
+#
+# All three are already in the Android link graph: `flutter_rust_bridge`'s
+# default `user-utils` feature depends on `android_logger` (that is what
+# `setup_default_user_utils` drives), which depends on `env_filter` and `log`.
+# So this adds dependency *edges* and no new crate — and adds nothing at all to
+# the host, `cargo test`, the CLI or the desktop shell, which is why it is a
+# target table and not a feature.
+[target.'cfg(target_os = "android")'.dependencies]
+# `log-always`, not `log`: with plain `log` the records stop the moment anyone
+# calls `tracing::subscriber::set_global_default`, and they stop *silently*.
+# `log-always` emits either way, so the logcat route cannot be switched off by
+# a change somewhere else in the graph.
+tracing        = { workspace = true, features = ["log-always"] }
+android_logger = "0.15"
+log            = "0.4"
+# Pulled in directly (android_logger re-exports no builder) to hold the level
+# *and target* line described in lib.rs's `install_logcat_bridge`.
+# `default-features = false` matches android_logger's own declaration: its
+# regex message-filter is not used here.
+env_filter     = { version = "0.1", default-features = false }
+
 [features]
 default = []
 # Turn on the real HTTP media pipeline (Blossom upload + fetch-and-decrypt) so

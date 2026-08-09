@@ -93,6 +93,100 @@ uniffi::setup_scaffolding!("comrade");
 pub mod api;
 mod frb_generated;
 
+// ── tracing → logcat ─────────────────────────────────────────────────────────
+
+/// Guards [`init_logging`] so the install runs exactly once however many
+/// threads race into the FFI at startup. A `OnceLock` rather than a bare flag
+/// because `get_or_init` is the "at most one caller runs the closure"
+/// primitive, and because a test can then assert the install happened.
+static LOGGING: OnceLock<()> = OnceLock::new();
+
+/// Put the Rust side's `tracing` output in front of the person debugging the
+/// app — `adb logcat -s comrade` — at **warn and error only**.
+///
+/// Idempotent, thread-safe, and it cannot panic or fail: every later call
+/// returns without doing anything, and there is no error to report because
+/// there is nothing a caller could do about one.
+///
+/// Called from [`global_runtime`], [`global_runtime_with_relays`] and
+/// [`api::init_app`], which is deliberately three places rather than one. Those
+/// three are exhaustive for anything that logs: no exported method does
+/// anything without the process-global runtime, and both accessors of it start
+/// here — `global_runtime_with_relays` before its own `warn!`, which is the
+/// line that went missing and prompted this. The Dart ABI additionally has
+/// `#[frb(init)]`, which runs before any other `frb_*` call, and going through
+/// it too is what settles who installs the `log` sink first (see
+/// [`api::init_app`]). The stateless helpers ([`version`],
+/// [`generate_keypair`], …) are left out on purpose: they log nothing, and
+/// prefixing forty exports with an init call is how one gets forgotten.
+///
+/// A no-op on every other target, so `cargo test`, the CLI (which installs its
+/// own `tracing_subscriber` in `src/main.rs`) and the desktop shell are
+/// unchanged and pick up no new dependency.
+pub(crate) fn init_logging() {
+    LOGGING.get_or_init(install_logcat_bridge);
+}
+
+/// The Android install: `tracing` events → `log` records (the `log-always`
+/// feature in Cargo.toml) → `android_logger` → logcat under the tag `comrade`,
+/// each line prefixed with the module path it came from.
+#[cfg(target_os = "android")]
+fn install_logcat_bridge() {
+    // Warn and error, in every build — an owner decision, not a debug switch,
+    // so a user's bug report can be explained without a special build.
+    //
+    // The line is drawn *below* `info!` because that is where content starts:
+    // `comrade_core::vault` logs every sent DM's recipient npub and event id at
+    // info (`Vault DM sent`), `comrade_core::media` logs the uploaded blob's
+    // URL, and `debug!` adds each *incoming* DM's sender and a peer npub per
+    // presence beacon. logcat is readable by `adb`, by the user, and on older
+    // Android by other apps, so shipping that would be shipping the social
+    // graph. Warn and error carry an error string plus, at a few sites, an
+    // event id or a relay URL — narrow enough to ship, wide enough to explain
+    // a failure. `crates/` currently has 64 `warn!` and no `error!` at all.
+    const LEVEL: log::LevelFilter = log::LevelFilter::Warn;
+
+    // Our own crates only. A `warn!` out of libp2p, nostr-sdk or redb carries
+    // multiaddrs, peer ids, relay URLs and host names that nobody here audited
+    // and that a dependency bump can change without review — and this ships to
+    // users' devices. Exit: add a directive for a specific third-party target
+    // when it earns one, deliberately, rather than inheriting the whole graph.
+    let mut filter = env_filter::Builder::new();
+    for crate_target in [
+        "comrade_jni",
+        "comrade_ui",
+        "comrade_core",
+        "comrade_state",
+        "comrade_storage",
+    ] {
+        filter.filter_module(crate_target, LEVEL);
+    }
+
+    android_logger::init_once(
+        android_logger::Config::default()
+            // One fixed tag so `adb logcat -s comrade` finds all of it;
+            // android_logger then prefixes each message with the module path.
+            .with_tag("comrade")
+            .with_max_level(LEVEL)
+            .with_filter(filter.build()),
+    );
+
+    // `init_once` installs nothing if a `log` logger is already set, and
+    // `flutter_rust_bridge::setup_default_user_utils` sets one at TRACE — so on
+    // the Flutter path the Config above can be the one discarded (see
+    // `api::init_app` for why it normally is not). This clamp is the half that
+    // holds either way: `tracing`'s log bridge tests `log::max_level()` before
+    // it builds a record, so warn-and-error survives losing that race. It also
+    // pins frb's own logging to warn, which is the same owner decision applied
+    // to the only other thing writing here.
+    log::set_max_level(LEVEL);
+}
+
+/// Nothing to install off Android: this crate is only loaded by `android/` and
+/// `app/`, and every other lane already has its own subscriber.
+#[cfg(not(target_os = "android"))]
+fn install_logcat_bridge() {}
+
 // ── The process-global runtime ────────────────────────────────────────────────
 
 /// The one [`ComradeRuntime`] for the whole process, shared by *both* foreign
@@ -107,6 +201,7 @@ static RUNTIME: OnceLock<Arc<RwLock<ComradeRuntime>>> = OnceLock::new();
 /// through one ABI is immediately visible through the other and the vault's
 /// redb file is only ever opened once.
 pub(crate) fn global_runtime() -> &'static Arc<RwLock<ComradeRuntime>> {
+    init_logging();
     RUNTIME.get_or_init(|| Arc::new(RwLock::new(ComradeRuntime::new())))
 }
 
@@ -121,6 +216,9 @@ pub(crate) fn global_runtime() -> &'static Arc<RwLock<ComradeRuntime>> {
 pub(crate) fn global_runtime_with_relays(
     relays: Vec<String>,
 ) -> &'static Arc<RwLock<ComradeRuntime>> {
+    // Before the `warn!` below, not after: that line is the one this bridge was
+    // built for, and it is emitted on the *first* call into this function.
+    init_logging();
     let mut seeded = false;
     let runtime = RUNTIME.get_or_init(|| {
         seeded = true;
@@ -1536,6 +1634,46 @@ mod tests {
     /// and use `Comrade::new()`.
     fn isolated() -> Arc<Comrade> {
         Comrade::with_runtime(Arc::new(RwLock::new(ComradeRuntime::new())))
+    }
+
+    #[test]
+    fn init_logging_never_panics_however_many_threads_race_it() {
+        // The install sits on the entry path of every FFI call, so the contract
+        // is: callable from anywhere, any number of times, from any number of
+        // threads, and never a panic — a panic here would surface to Kotlin as
+        // a `PanicException` from an unrelated method.
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    init_logging();
+                    init_logging();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("init_logging must not panic");
+        }
+        assert!(LOGGING.get().is_some(), "the install must be recorded");
+    }
+
+    #[test]
+    fn resolving_the_global_runtime_installs_logging() {
+        // Guards the wiring, which is the part that rots: `global_runtime` and
+        // `global_runtime_with_relays` are the funnels both foreign ABIs reach,
+        // and if either stops installing the bridge, Android silently goes back
+        // to dropping every `warn!`.
+        //
+        // Weaker than it looks, and worth saying so: `cargo test` shares one
+        // process, so an earlier test may already have installed it. There is
+        // no `tests/` binary to isolate this in — the crate is
+        // `crate-type = ["cdylib"]`, so an integration test cannot link it.
+        let _ = global_runtime();
+        assert!(LOGGING.get().is_some());
+        let _ = global_runtime_with_relays(vec!["wss://relay.example.test".to_string()]);
+        assert!(LOGGING.get().is_some());
+        // …and the flutter_rust_bridge accessor goes through the same funnel.
+        let _ = api::runtime();
+        assert!(LOGGING.get().is_some());
     }
 
     #[test]
