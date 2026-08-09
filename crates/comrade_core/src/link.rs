@@ -100,7 +100,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nostr::PublicKey;
+use nostr::key::PublicKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -854,7 +854,7 @@ mod id_hex {
 }
 
 mod xonly_hex {
-    use nostr::PublicKey;
+    use nostr::key::PublicKey;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(key: &PublicKey, s: S) -> Result<S::Ok, S::Error> {
@@ -1416,14 +1416,15 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::Keys;
+    use nostr::prelude::Keys;
 
     fn key(seed: u8) -> PublicKey {
         // Deterministic keys so failures are reproducible. `Keys::generate`
         // would make a flake impossible to re-run.
         let mut secret = [seed; 32];
         secret[31] = seed.wrapping_add(1).max(1);
-        Keys::new(nostr::SecretKey::from_slice(&secret).expect("valid scalar")).public_key()
+        Keys::new(nostr::prelude::SecretKey::from_slice(&secret).expect("valid scalar"))
+            .public_key()
     }
 
     fn offer(now: u64) -> LinkOffer {

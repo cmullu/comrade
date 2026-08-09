@@ -33,7 +33,7 @@
  * to be able to tell.
  */
 
-use nostr_sdk::{Keys, PublicKey};
+use nostr_sdk::prelude::{Keys, PublicKey};
 use serde::{Deserialize, Serialize};
 
 use super::courier::{self, Envelope};

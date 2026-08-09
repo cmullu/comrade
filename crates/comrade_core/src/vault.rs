@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use nostr_sdk::nips::nip04;
 use nostr_sdk::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -137,8 +136,8 @@ const GIFT_WRAP_TIMESTAMP_SKEW_SECS: u64 = 172_800;
 /// extraction needs the shared regex, which this free function doesn't have).
 /// Returns `None` (after logging) on any decrypt/verify failure — a bad or
 /// foreign gift wrap must never crash the notification loop.
-async fn decrypt_gift_wrapped_dm(our_keys: &Keys, event: &Event) -> Option<VaultMessage> {
-    let unwrapped = match UnwrappedGift::from_gift_wrap(our_keys, event).await {
+fn decrypt_gift_wrapped_dm(our_keys: &Keys, event: &Event) -> Option<VaultMessage> {
+    let unwrapped = match UnwrappedGift::from_gift_wrap(our_keys, event) {
         Ok(u) => u,
         Err(e) => {
             warn!(event_id = %event.id, "Vault: failed to unwrap gift-wrapped DM: {e}");
@@ -201,7 +200,7 @@ pub struct VaultEngine {
 
 impl VaultEngine {
     pub async fn new(keys: &Keys, relay_urls: Vec<String>) -> Result<Self, VaultError> {
-        let client = Client::new(keys.clone());
+        let client = Client::new();
         for url in &relay_urls {
             client
                 .add_relay(url.as_str())
@@ -298,8 +297,14 @@ impl VaultEngine {
                 Err(e) => warn!("dropping invalid reply tag {id}: {e}"),
             }
         }
-        let event = EventBuilder::private_msg(&self.our_keys, *recipient, plaintext, rumor_tags)
-            .await
+        // 0.45 moved this off `EventBuilder` into nip17's own builder, and made it
+        // synchronous — sealing a rumor is local crypto, so the old `.await` never
+        // awaited I/O. The wrapping is unchanged: `finalize` still makes the rumor,
+        // seals it, and signs the gift wrap with a one-time key, which is what
+        // keeps our pubkey off the wrapper.
+        let event = PrivateDirectMessageBuilder::new(*recipient, plaintext)
+            .rumor_extra_tags(rumor_tags)
+            .finalize(&self.our_keys)
             .map_err(|e| VaultError::EncryptionFailed(e.to_string()))?;
 
         // A send right after unlock races the relay dials: the pool "succeeds"
@@ -347,7 +352,7 @@ impl VaultEngine {
             .since(since);
 
         self.client
-            .subscribe(filter, None)
+            .subscribe(filter)
             .await
             .map_err(|e| VaultError::EncryptionFailed(e.to_string()))?;
 
@@ -355,48 +360,46 @@ impl VaultEngine {
 
         let our_keys = self.our_keys.clone();
         let pay_regex = self.pay_regex.clone();
-        let callback = Arc::new(callback);
 
-        self.client
-            .handle_notifications(move |notification| {
-                let our_keys = our_keys.clone();
-                let pay_regex = pay_regex.clone();
-                let callback = callback.clone();
-
-                async move {
-                    if let RelayPoolNotification::Event { event, .. } = notification {
-                        let msg = match event.kind {
-                            Kind::GiftWrap => {
-                                match decrypt_gift_wrapped_dm(&our_keys, &event).await {
-                                    Some(m) => m,
-                                    None => return Ok::<bool, Box<dyn std::error::Error>>(false),
-                                }
-                            }
-                            Kind::EncryptedDirectMessage => {
-                                match decrypt_legacy_nip04_dm(&our_keys, &event) {
-                                    Some(m) => m,
-                                    None => return Ok::<bool, Box<dyn std::error::Error>>(false),
-                                }
-                            }
-                            _ => return Ok::<bool, Box<dyn std::error::Error>>(false),
-                        };
-
-                        let upi_intents = extract_upi_intents(&msg.content, &pay_regex);
-                        if !upi_intents.is_empty() {
-                            info!(
-                                count = upi_intents.len(),
-                                "Vault: UPI payment intents detected"
-                            );
+        // 0.45 replaced `handle_notifications(callback)` with a notification
+        // *stream*. The loop below is the same shape the closure had, minus the
+        // per-event clones the old API forced: a `move` async closure could not
+        // borrow, so every event cloned the keys and the regex. Owning them once
+        // here is the whole difference, and it is why this reads shorter.
+        //
+        // `Shutdown` ends the stream, which ends this function — same as
+        // returning `true` from the old callback.
+        let mut notifications = self.client.notifications();
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                let msg = match event.kind {
+                    // No longer `.await`: 0.45's `UnwrappedGift::from_gift_wrap`
+                    // is synchronous, because unwrapping is pure crypto over
+                    // bytes already in hand and never was I/O.
+                    Kind::GiftWrap => match decrypt_gift_wrapped_dm(&our_keys, &event) {
+                        Some(m) => m,
+                        None => continue,
+                    },
+                    Kind::EncryptedDirectMessage => {
+                        match decrypt_legacy_nip04_dm(&our_keys, &event) {
+                            Some(m) => m,
+                            None => continue,
                         }
-                        let msg = VaultMessage { upi_intents, ..msg };
-
-                        callback(msg);
                     }
-                    Ok::<bool, Box<dyn std::error::Error>>(false)
+                    _ => continue,
+                };
+
+                let upi_intents = extract_upi_intents(&msg.content, &pay_regex);
+                if !upi_intents.is_empty() {
+                    info!(
+                        count = upi_intents.len(),
+                        "Vault: UPI payment intents detected"
+                    );
                 }
-            })
-            .await
-            .map_err(|e| VaultError::EncryptionFailed(e.to_string()))
+                callback(VaultMessage { upi_intents, ..msg });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -507,7 +510,7 @@ mod tests {
             nip04::encrypt(alice.secret_key(), &bob.public_key(), b"legacy hello").unwrap();
         let event = EventBuilder::new(Kind::EncryptedDirectMessage, encrypted)
             .tag(Tag::public_key(bob.public_key()))
-            .sign_with_keys(&alice)
+            .finalize(&alice)
             .unwrap();
 
         let msg = decrypt_legacy_nip04_dm(&bob, &event).expect("decrypts");
@@ -525,14 +528,14 @@ mod tests {
         let reply = EventBuilder::new(Kind::EncryptedDirectMessage, "ciphertext")
             .tag(Tag::public_key(keys.public_key()))
             .tag(Tag::parse(["e", parent.as_str(), "", "reply"]).unwrap())
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .unwrap();
         assert_eq!(reply_target(&reply).as_deref(), Some(parent.as_str()));
 
         // A DM with no e-tag has no reply target.
         let plain = EventBuilder::new(Kind::EncryptedDirectMessage, "ciphertext")
             .tag(Tag::public_key(keys.public_key()))
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .unwrap();
         assert_eq!(reply_target(&plain), None);
     }
@@ -543,9 +546,11 @@ mod tests {
         // gift wrap — `reply_target` must work on an `UnsignedEvent` too.
         let keys = Keys::generate();
         let parent = "c".repeat(64);
-        let rumor = EventBuilder::private_msg_rumor(keys.public_key(), "hi")
+        // 0.45 made the rumor helper private, so the rumor is built directly —
+        // same kind, same tag, and `finalize_unsigned` is what `build` was called.
+        let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "hi")
             .tag(Tag::parse(["e", parent.as_str(), "", "reply"]).unwrap())
-            .build(keys.public_key());
+            .finalize_unsigned(keys.public_key());
         assert_eq!(reply_target(&rumor).as_deref(), Some(parent.as_str()));
     }
 
@@ -556,8 +561,9 @@ mod tests {
         let parent = "a".repeat(64);
         let reply_tag = Tag::parse(["e", parent.as_str(), "", "reply"]).unwrap();
 
-        let wrapped = EventBuilder::private_msg(&alice, bob.public_key(), "hi bob", [reply_tag])
-            .await
+        let wrapped = PrivateDirectMessageBuilder::new(bob.public_key(), "hi bob")
+            .rumor_extra_tags([reply_tag])
+            .finalize(&alice)
             .expect("gift wrap");
 
         // The outer wrapper leaks nothing about Alice: it's signed by a
@@ -565,9 +571,7 @@ mod tests {
         assert_ne!(wrapped.pubkey, alice.public_key());
         assert_eq!(wrapped.kind, Kind::GiftWrap);
 
-        let msg = decrypt_gift_wrapped_dm(&bob, &wrapped)
-            .await
-            .expect("bob can unwrap and decrypt");
+        let msg = decrypt_gift_wrapped_dm(&bob, &wrapped).expect("bob can unwrap and decrypt");
         assert_eq!(msg.content, "hi bob");
         assert_eq!(msg.sender_pubkey, alice.public_key().to_hex());
         assert_eq!(msg.event_id, wrapped.id.to_hex());
@@ -580,11 +584,11 @@ mod tests {
         let bob = Keys::generate();
         let eve = Keys::generate();
 
-        let wrapped = EventBuilder::private_msg(&alice, bob.public_key(), "secret", [])
-            .await
+        let wrapped = PrivateDirectMessageBuilder::new(bob.public_key(), "secret")
+            .finalize(&alice)
             .unwrap();
 
-        assert!(decrypt_gift_wrapped_dm(&eve, &wrapped).await.is_none());
+        assert!(decrypt_gift_wrapped_dm(&eve, &wrapped).is_none());
     }
 
     #[test]

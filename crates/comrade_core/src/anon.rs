@@ -30,7 +30,7 @@
  */
 
 use hmac::{Hmac, Mac};
-use nostr_sdk::{Keys, SecretKey};
+use nostr_sdk::prelude::{Keys, SecretKey};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

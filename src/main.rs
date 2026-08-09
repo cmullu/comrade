@@ -109,7 +109,7 @@ fn read_line(prompt: &str) -> io::Result<String> {
 // ── Demo scenarios ───────────────────────────────────────────────────────────
 
 /// Map a raw Nostr Kind-1 event into a persistable [`Chitthi`] cache row.
-fn event_to_chitthi(event: &nostr_sdk::Event, reply_to: Option<String>) -> Chitthi {
+fn event_to_chitthi(event: &nostr_sdk::prelude::Event, reply_to: Option<String>) -> Chitthi {
     Chitthi {
         id: event.id.to_hex(),
         author_npub: event.pubkey.to_hex(),
@@ -127,7 +127,7 @@ async fn demo_chitthi_feed(state: &Arc<RwLock<AppState>>) {
 
     let keys = Keys::generate();
     let root = EventBuilder::new(Kind::TextNote, "Root Chitthi: Namaste from Sabha!")
-        .sign_with_keys(&keys)
+        .finalize(&keys)
         .expect("sign root");
 
     let root_id = root.id.to_hex();
@@ -135,7 +135,7 @@ async fn demo_chitthi_feed(state: &Arc<RwLock<AppState>>) {
 
     let reply = EventBuilder::new(Kind::TextNote, "Reply Chitthi")
         .tags([reply_tag])
-        .sign_with_keys(&keys)
+        .finalize(&keys)
         .expect("sign reply");
 
     // Persist incoming Chitthis to the encrypted cache if the store is unlocked.

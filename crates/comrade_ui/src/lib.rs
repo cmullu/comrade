@@ -288,7 +288,7 @@ impl UiService {
     /// Crate-internal: clone the live keypair for engine construction. Kept
     /// `pub(crate)` so the secret never leaks into the public UI surface — only
     /// the [`runtime`] bridge, which builds the Nostr engines, can reach it.
-    pub(crate) fn identity_keys(&self) -> Option<nostr_sdk::Keys> {
+    pub(crate) fn identity_keys(&self) -> Option<nostr_sdk::prelude::Keys> {
         self.identity.as_ref().map(|p| p.keys.clone())
     }
 

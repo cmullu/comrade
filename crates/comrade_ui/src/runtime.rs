@@ -124,7 +124,7 @@ use comrade_core::together::{
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, PayRegex, VaultCallback, VaultEngine, VaultMessage,
 };
-use nostr_sdk::{EventId, Metadata, PublicKey, ToBech32};
+use nostr_sdk::prelude::{EventId, Metadata, PublicKey, ToBech32};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
@@ -321,7 +321,7 @@ pub struct ChitthiDto {
 
 impl ChitthiDto {
     /// Build from a live Nostr Kind-1 event captured in the Tokio feed loop.
-    pub fn from_event(event: &nostr_sdk::Event) -> Self {
+    pub fn from_event(event: &nostr_sdk::prelude::Event) -> Self {
         let author = event
             .pubkey
             .to_bech32()
@@ -2479,7 +2479,7 @@ impl ComradeRuntime {
     fn sealed_ingress(
         &self,
         vault: Arc<VaultEngine>,
-        keys: nostr_sdk::Keys,
+        keys: nostr_sdk::prelude::Keys,
         mesh: Option<LocalRadios>,
     ) -> Option<SealedIngress> {
         Some(SealedIngress {
@@ -2505,7 +2505,7 @@ impl ComradeRuntime {
     /// bootstrap feed for a fresh identity that hasn't added anyone yet — never
     /// the unbounded relay-wide firehose `subscribe_chitthi_feed` used to get.
     fn feed_filter_spec(&self) -> FeedFilterSpec {
-        let mut authors: Vec<nostr_sdk::PublicKey> = Vec::new();
+        let mut authors: Vec<nostr_sdk::prelude::PublicKey> = Vec::new();
         if let Some(id) = self.ui.current_identity() {
             if let Ok(pk) = parse_pubkey(&id.npub) {
                 authors.push(pk);
@@ -5232,7 +5232,7 @@ pub struct RuntimeHandles {
     vault: Option<Arc<VaultEngine>>,
     sakha: Option<Arc<SakhaEngine>>,
     store: Option<Arc<comrade_storage::EncryptedStore>>,
-    keys: Option<nostr_sdk::Keys>,
+    keys: Option<nostr_sdk::prelude::Keys>,
     username: Option<String>,
     identity: Option<IdentityDto>,
     /// The live sender outbox — shared with the runtime and the inbox callback,
@@ -7160,7 +7160,7 @@ async fn upload_blob(blob: Vec<u8>, mime: &str) -> Result<String, UiError> {
     // no frontend could route around it.
     let uploader = BlossomUploader::with_servers(
         DEFAULT_BLOSSOM_SERVERS.iter().copied(),
-        nostr_sdk::Keys::generate(),
+        nostr_sdk::prelude::Keys::generate(),
     );
     let receipt = uploader
         .upload(&blob, mime)
@@ -7303,7 +7303,7 @@ fn iso_date(unix_secs: u64) -> String {
 /// throwaway secp256k1 key — no extra dependency, and cryptographically
 /// unpredictable.
 fn timestamped_store_id(created_at: u64) -> String {
-    let tail = nostr_sdk::Keys::generate().public_key().to_hex();
+    let tail = nostr_sdk::prelude::Keys::generate().public_key().to_hex();
     format!("{created_at:020}-{}", &tail[..12])
 }
 
@@ -8479,7 +8479,7 @@ fn load_or_create_device_seed(
 /// receipt logic and the dedup rules, and two copies of privacy rules drift.
 struct SealedIngress {
     vault: Arc<VaultEngine>,
-    keys: nostr_sdk::Keys,
+    keys: nostr_sdk::prelude::Keys,
     store: Option<Arc<comrade_storage::EncryptedStore>>,
     tx: broadcast::Sender<BridgeEvent>,
     call_dedup: Arc<SeenSet>,
@@ -8590,7 +8590,7 @@ struct LocalRadios {
     mesh: Option<MeshLink>,
     /// Bluetooth. Always present, inert until a platform radio marks it active.
     ble: Arc<BleRouter>,
-    keys: nostr_sdk::Keys,
+    keys: nostr_sdk::prelude::Keys,
 }
 
 impl LocalRadios {
@@ -8918,7 +8918,7 @@ impl BleRouter {
 /// other's opening message out of existence. Derived from a throwaway keypair
 /// because that is the entropy source the crate already has.
 fn random_packet_seed() -> u64 {
-    let bytes = nostr_sdk::Keys::generate().public_key().to_bytes();
+    let bytes = nostr_sdk::prelude::Keys::generate().public_key().to_bytes();
     u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
 }
 
@@ -10285,7 +10285,7 @@ mod tests {
         // Regression guard: incoming media/DM senders arrive as hex, outgoing
         // DTOs emit bech32. Both must normalise to the identical npub so the
         // frontend keys one conversation (and the couple panel) per peer.
-        let keys = nostr_sdk::Keys::generate();
+        let keys = nostr_sdk::prelude::Keys::generate();
         let hex = keys.public_key().to_hex();
         let npub = keys.public_key().to_bech32().unwrap();
         assert_eq!(to_npub(&hex), npub, "hex must normalise to npub");
@@ -10349,11 +10349,11 @@ mod tests {
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
 
-        let a = nostr_sdk::Keys::generate()
+        let a = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
-        let b = nostr_sdk::Keys::generate()
+        let b = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -10398,7 +10398,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -10912,7 +10912,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -10959,7 +10959,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -10995,7 +10995,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -11016,7 +11016,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -11092,7 +11092,7 @@ mod tests {
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
         let store = rt.ui.store_ref().unwrap();
 
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -11288,7 +11288,7 @@ mod tests {
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
         let store = rt.ui.store_ref().unwrap();
 
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -11348,7 +11348,7 @@ mod tests {
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
         let store = rt.ui.store_ref().unwrap();
 
-        let peer = nostr_sdk::Keys::generate()
+        let peer = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -11404,11 +11404,11 @@ mod tests {
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
         let store = rt.ui.store_ref().unwrap();
 
-        let alice = nostr_sdk::Keys::generate()
+        let alice = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
-        let bob = nostr_sdk::Keys::generate()
+        let bob = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -11488,7 +11488,7 @@ mod tests {
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
         assert!(rt.send_dm("npub1notvalid", "hello").await.is_err());
-        let ok = nostr_sdk::Keys::generate()
+        let ok = nostr_sdk::prelude::Keys::generate()
             .public_key()
             .to_bech32()
             .unwrap();
@@ -11534,7 +11534,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         let id = rt.unlock_vault(dir.path(), "pin").await.unwrap();
-        let peer_hex = nostr_sdk::PublicKey::parse(&id.npub).unwrap().to_hex();
+        let peer_hex = nostr_sdk::prelude::PublicKey::parse(&id.npub)
+            .unwrap()
+            .to_hex();
         let reff = MediaRef {
             event_id: "evt1".into(),
             url: "https://blob.example/abc".into(),
@@ -11621,7 +11623,7 @@ mod tests {
     // ── Message requests, receipts, and calls ────────────────────────────────
 
     fn stranger() -> (String, String) {
-        let pk = nostr_sdk::Keys::generate().public_key();
+        let pk = nostr_sdk::prelude::Keys::generate().public_key();
         (pk.to_hex(), pk.to_bech32().unwrap())
     }
 
@@ -12162,7 +12164,7 @@ mod tests {
     }
 
     async fn test_vault() -> Arc<VaultEngine> {
-        let keys = nostr_sdk::Keys::generate();
+        let keys = nostr_sdk::prelude::Keys::generate();
         Arc::new(
             VaultEngine::new(&keys, vec!["wss://relay.damus.io".into()])
                 .await

@@ -13,7 +13,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use hkdf::Hkdf;
-use nostr_sdk::{Keys, PublicKey, SecretKey, ToBech32};
+use nostr_sdk::prelude::{Keys, PublicKey, SecretKey, ToBech32};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tracing::instrument;
@@ -40,7 +40,7 @@ impl KeyProfile {
         Self::from_keys(keys)
     }
 
-    /// Restore a profile from an existing `nostr_sdk::Keys`.
+    /// Restore a profile from an existing `nostr_sdk::prelude::Keys`.
     pub fn from_keys(keys: Keys) -> Result<Self, CryptoError> {
         let npub = keys
             .public_key()

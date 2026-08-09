@@ -141,7 +141,7 @@ pub fn build_file_metadata_event(keys: &Keys, meta: &FileMetadata) -> Result<Eve
 
     EventBuilder::new(Kind::from(FILE_METADATA_KIND), meta.caption.clone())
         .tags(tags)
-        .sign_with_keys(keys)
+        .finalize(keys)
         .map_err(|e| MediaError::SigningFailed(e.to_string()))
 }
 
@@ -315,7 +315,7 @@ mod nip96 {
             ];
             let event = EventBuilder::new(Kind::from(HTTP_AUTH_KIND), "")
                 .tags(tags)
-                .sign_with_keys(&self.keys)
+                .finalize(&self.keys)
                 .map_err(|e| MediaError::SigningFailed(e.to_string()))?;
             let json =
                 serde_json::to_string(&event).map_err(|e| MediaError::Http(e.to_string()))?;
@@ -772,7 +772,7 @@ mod http {
             ];
             let event = EventBuilder::new(Kind::from(BLOSSOM_AUTH_KIND), "Upload encrypted media")
                 .tags(tags)
-                .sign_with_keys(&self.keys)
+                .finalize(&self.keys)
                 .map_err(|e| MediaError::SigningFailed(e.to_string()))?;
             let json =
                 serde_json::to_string(&event).map_err(|e| MediaError::Http(e.to_string()))?;
@@ -1077,7 +1077,7 @@ mod tests {
     fn parse_rejects_event_without_url() {
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::from(FILE_METADATA_KIND), "no tags")
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .unwrap();
         assert!(parse_file_metadata(&event).is_err());
     }

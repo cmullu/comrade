@@ -33,7 +33,7 @@ async fn main() {
     // tells it what kind of thing the user just sent.
     for server in DEFAULT_BLOSSOM_SERVERS {
         for mime in ["application/octet-stream", "image/jpeg"] {
-            let uploader = BlossomUploader::new(*server, nostr_sdk::Keys::generate());
+            let uploader = BlossomUploader::new(*server, nostr_sdk::prelude::Keys::generate());
             let outcome = match uploader.upload(&blob, mime).await {
                 Ok(r) => format!("OK   {}", r.url),
                 Err(e) => format!("FAIL {e}"),
@@ -45,7 +45,7 @@ async fn main() {
 
     let mut any = false;
     for server in DEFAULT_BLOSSOM_SERVERS {
-        let uploader = BlossomUploader::new(*server, nostr_sdk::Keys::generate());
+        let uploader = BlossomUploader::new(*server, nostr_sdk::prelude::Keys::generate());
         match uploader.upload(&blob, "application/octet-stream").await {
             Ok(receipt) => {
                 any = true;
@@ -71,7 +71,7 @@ async fn main() {
     // The failover path itself: what a caller actually gets.
     let all = BlossomUploader::with_servers(
         DEFAULT_BLOSSOM_SERVERS.iter().copied(),
-        nostr_sdk::Keys::generate(),
+        nostr_sdk::prelude::Keys::generate(),
     );
     match all.upload(&blob, "application/octet-stream").await {
         Ok(r) => println!("\nfailover upload -> {}", r.url),

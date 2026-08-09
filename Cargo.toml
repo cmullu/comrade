@@ -17,12 +17,26 @@ resolver = "2"
 
 [workspace.dependencies]
 tokio          = { version = "1",     features = ["full"] }
-nostr-sdk      = { version = "0.44", features = ["nip04", "nip44", "nip59"] }
+nostr-sdk      = { version = "0.45" }
 # The base crate `nostr-sdk` re-exports. Same major.minor, so cargo unifies them
 # and `nostr::PublicKey` *is* `nostr_sdk::PublicKey` — this adds a dependency
 # edge, not a second copy of the type. `default-features = false` keeps the
 # wasm-reachable subset (`comrade_core::link`) free of the sdk's tokio net stack.
-nostr          = { version = "0.44", default-features = false, features = ["std"] }
+#
+# **The NIP features live here, not on `nostr-sdk`.** They were on the sdk until
+# 0.45, which dropped them — it now depends on `nostr` with only
+# `std, rand, os-rng`, so asking the sdk for `nip44` is a hard resolver error
+# ("does not have that feature"), not a silent downgrade. Cargo unifies the
+# feature sets across the graph, so enabling them on the base crate is what makes
+# `nostr_sdk::nips::nip44` exist. Sealed DMs (nip59) and both encryption schemes
+# are load-bearing, not optional extras: dropping one would compile and then fail
+# to talk to half the network.
+nostr          = { version = "0.45", default-features = false, features = [
+    "std",
+    "nip04",
+    "nip44",
+    "nip59",
+] }
 libp2p         = { version = "0.56",  features = ["tokio", "tcp", "noise", "yamux", "mdns", "gossipsub", "macros"] }
 yrs            = "0.21"
 serde          = { version = "1",     features = ["derive"] }
