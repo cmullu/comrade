@@ -81,6 +81,35 @@ object StreamTransfer {
     /** Whether a stream connection is up or being negotiated. */
     val active: Boolean get() = session != null
 
+    /**
+     * This device's microphone, to be added to whichever connection is
+     * negotiated next — including one *we* did not offer.
+     *
+     * **The answering side is the whole reason this exists.** Talking over what
+     * you are listening to has to work in both directions, and nothing here
+     * renegotiates: `onRenegotiationNeeded` is deliberately empty, because a
+     * mid-session renegotiation over a relayed signalling path is a stall in the
+     * middle of a film. So the track goes on at negotiation time and stays
+     * there, and turning the microphone on and off is `setEnabled` on a track
+     * that is already on the wire — the same arrangement a call uses for mute.
+     *
+     * Held by [TogetherManager], which nulls it before disposing the track: a
+     * connection negotiated afterwards must not be handed a released one.
+     */
+    @Volatile
+    var localAudio: AudioTrack? = null
+
+    /**
+     * Whether the live connection carries audio of ours.
+     *
+     * `false` means the microphone cannot be switched on without renegotiating
+     * — the permission was granted after this connection was built — which is a
+     * question for the caller rather than something to do silently.
+     */
+    @Volatile
+    var sendingAudio: Boolean = false
+        private set
+
     fun setSink(sink: Sink?) {
         this.sink = sink
     }
@@ -102,6 +131,7 @@ object StreamTransfer {
         session = s
         video?.let { pc.addTrack(it, listOf(STREAM_ID)) }
         audio?.let { pc.addTrack(it, listOf(STREAM_ID)) }
+        sendingAudio = audio != null
         // Named so a reader does not go looking for where the constraints are
         // set: unified plan with tracks already added needs none.
         val none = MediaConstraints()
@@ -162,6 +192,13 @@ object StreamTransfer {
         val pc = newPeer(context, s) ?: return
         s.pc = pc
         session = s
+        // Our voice goes on before we answer, so the connection is two-way from
+        // the moment it exists — see [localAudio]. Null when the microphone has
+        // not been granted, which is the honest one-way answer rather than a
+        // renegotiation we do not implement.
+        val voice = localAudio
+        voice?.let { runCatching { pc.addTrack(it, listOf(STREAM_ID)) } }
+        sendingAudio = voice != null
         pc.setRemoteDescription(
             object : SimpleSdpObserver("setRemote(offer)") {
                 override fun onSetSuccess() {
@@ -195,6 +232,7 @@ object StreamTransfer {
         val s = session ?: return
         session = null
         s.stopped = true
+        sendingAudio = false
         runCatching { s.pc?.close() }
         sink?.onRemoteVideo(null)
         sink?.onRemoteAudio(null)

@@ -558,6 +558,22 @@
     <string name="together_pause">Pause</string>
     <string name="together_back_ten">−10s</string>
     <string name="together_forward_ten">+10s</string>
+    <!-- Previous is never disabled: with nothing behind it, it restarts the
+         track, which is TogetherDecisions.backStep's answer. Next is, because
+         at the end of a queue there is genuinely nothing to go to. -->
+    <string name="together_previous">Previous track</string>
+    <string name="together_next">Next track</string>
+    <!-- The second half of "choose a person once": something else to play,
+         to the same person, with no second trip through the who-with sheet. -->
+    <string name="together_play_something_else">Play something else</string>
+    <string name="together_back_to_session">Back to what\'s playing</string>
+    <!-- Interrupting what the other person put on. The follower may start
+         something as freely as the leader — that is what a pair means — but it
+         stops their music on both devices, so it is asked first. -->
+    <string name="together_takeover_title">Stop what\'s playing?</string>
+    <string name="together_takeover_body">%1$s put this on. Playing something else stops it for both of you.</string>
+    <string name="together_takeover_yes">Play mine</string>
+    <string name="together_takeover_no">Cancel</string>
 
     <string name="together_join_stream">Listen</string>
     <string name="together_stream_join_note">Your phone fetches the same link theirs is playing. Nothing is copied between you.</string>
@@ -565,10 +581,13 @@
     <string name="together_invite_notification_text">Open Comrade to join</string>
     <string name="together_invited">%1$s wants to watch %2$s with you</string>
     <string name="together_join">Join</string>
+    <!-- Join used to open the document picker for a local file, which asked
+         someone to find their own copy of the thing the invitation exists
+         because they do not have. Join now takes their copy over the session's
+         own connection and plays it as it lands; this is the second answer, for
+         whoever does have the file and would rather not spend the bytes. -->
+    <string name="together_join_own_copy">I have my own copy</string>
     <string name="together_not_now">Not now</string>
-    <!-- The case together otherwise assumes away: only one of you has the file.
-         It comes straight from their device, never through a server of ours. -->
-    <string name="together_ask_for_copy">I don\'t have it</string>
     <!-- Shown only while Comrade may not read the audio library, which is where
          a copy you already own would be found. Asking here rather than at
          startup: an invitation is the moment the permission is obviously worth
@@ -608,6 +627,16 @@
     <!-- A YouTube invitation: there is nothing to look for and nothing to ask
          for, so the join is unconditional and the button says what it does. -->
     <string name="together_join_video">Watch it</string>
+    <!-- The embed refusing, said on this side. The panel above it is YouTube's
+         own and may not be replaced (docs/TOGETHER.md §11a); this is the
+         session's answer underneath it, which used to be nothing at all. The
+         first is the common case by far — the video plays fine, just not
+         embedded. -->
+    <string name="together_embed_not_embeddable">Whoever posted this doesn\'t allow it to play outside YouTube.</string>
+    <string name="together_embed_not_found">That video isn\'t there any more — it may be private or deleted.</string>
+    <string name="together_embed_failed">YouTube couldn\'t play that here.</string>
+    <string name="together_embed_watch_on_youtube">Watch it on YouTube</string>
+    <string name="together_embed_watch_note">Opening YouTube leaves the session — nothing changes on their phone, and the embed here pauses.</string>
     <!-- Following a player Comrade does not own (docs/TOGETHER.md section 13).
          Source-agnostic by construction and in the copy: this names no service
          and no client, because the feature drives whatever published a media
@@ -639,5 +668,9 @@
     <string name="together_mic_on">Turn your microphone on</string>
     <string name="together_mic_off">Turn your microphone off</string>
     <string name="together_mic_note">Your microphone goes out with the sound of what you\u2019re playing. Use headphones, or they\u2019ll hear it twice.</string>
+    <!-- One case only: their picture is already arriving on the single
+         connection this session has, and adding a microphone to it means
+         renegotiating that connection \u2014 which would take the picture away. -->
+    <string name="together_mic_unavailable">Your microphone can\u2019t join while you\u2019re watching their stream. It\u2019ll work on the next thing you play.</string>
     <string name="together_follow_note">Comrade is following another app on this phone. It can play, pause and place the playhead \u2014 it can\u2019t show you the picture.</string>
 </resources>

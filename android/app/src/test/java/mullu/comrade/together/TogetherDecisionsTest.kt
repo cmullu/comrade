@@ -843,4 +843,219 @@ class TogetherDecisionsTest {
         // trust, so a thumb would land nowhere.
         assertFalse(TogetherDecisions.scrubbable(durationMs = 180_000, external = true))
     }
+
+    // ── Pairing ─────────────────────────────────────────────────────────────
+
+    private val ana = TogetherDecisions.Pairing("npub_ana", "Ana")
+
+    @Test
+    fun theFirstThingPlayedAsksWhoWithAndTheSecondDoesNot() {
+        assertEquals(
+            TogetherDecisions.StartStep.AskWho,
+            TogetherDecisions.startStep(pairing = null, sessionLive = false, weLead = false),
+        )
+        // The whole point: paired, so choosing a second track plays it.
+        assertEquals(
+            TogetherDecisions.StartStep.PlayNow(ana),
+            TogetherDecisions.startStep(pairing = ana, sessionLive = false, weLead = true),
+        )
+    }
+
+    @Test
+    fun skippingYourOwnTrackIsNotAQuestion() {
+        // A dialog on every press of next is what would make a queue unusable.
+        assertEquals(
+            TogetherDecisions.StartStep.PlayNow(ana),
+            TogetherDecisions.startStep(pairing = ana, sessionLive = true, weLead = true),
+        )
+    }
+
+    @Test
+    fun interruptingWhatTheOtherPersonPutOnIsAskedFirst() {
+        assertEquals(
+            TogetherDecisions.StartStep.ConfirmTakeover(ana),
+            TogetherDecisions.startStep(pairing = ana, sessionLive = true, weLead = false),
+        )
+    }
+
+    @Test
+    fun theNextTrackFromThePersonWeArePairedWithIsNotANewInvitation() {
+        assertTrue(
+            TogetherDecisions.continuesSession(
+                pairing = ana,
+                fromNpub = "npub_ana",
+                contentKind = TogetherDecisions.LOCAL_FILE_KIND,
+                endedAtMs = 1_000,
+                nowMs = 1_400,
+            ),
+        )
+    }
+
+    @Test
+    fun somebodyElseEntirelyStillGetsToAsk() {
+        assertFalse(
+            TogetherDecisions.continuesSession(
+                pairing = ana,
+                fromNpub = "npub_bo",
+                contentKind = TogetherDecisions.LOCAL_FILE_KIND,
+                endedAtMs = 1_000,
+                nowMs = 1_400,
+            ),
+        )
+        assertFalse(
+            TogetherDecisions.continuesSession(
+                pairing = null,
+                fromNpub = "npub_ana",
+                contentKind = TogetherDecisions.LOCAL_FILE_KIND,
+                endedAtMs = 1_000,
+                nowMs = 1_400,
+            ),
+        )
+    }
+
+    @Test
+    fun aPairingGoesStaleAndSoDoesOneThatNeverEnded() {
+        val late = 1_000 + TogetherDecisions.PAIRING_GRACE_MS + 1
+        assertFalse(
+            TogetherDecisions.continuesSession(
+                ana, "npub_ana", TogetherDecisions.LOCAL_FILE_KIND, endedAtMs = 1_000, nowMs = late,
+            ),
+        )
+        // Zero is "no previous session", which must not read as "just now".
+        assertFalse(
+            TogetherDecisions.continuesSession(
+                ana, "npub_ana", TogetherDecisions.LOCAL_FILE_KIND, endedAtMs = 0, nowMs = 1_400,
+            ),
+        )
+        // A clock that stepped backwards is not evidence of anything.
+        assertFalse(
+            TogetherDecisions.continuesSession(
+                ana, "npub_ana", TogetherDecisions.LOCAL_FILE_KIND, endedAtMs = 5_000, nowMs = 1_400,
+            ),
+        )
+    }
+
+    @Test
+    fun beingPairedIsNotAgreementToFetchFromWhereverTheyPointNext() {
+        // The one kind that is always asked about: joining a stream makes a
+        // request to a host they named, which is a decision about this device's
+        // network rather than about listening together.
+        assertFalse(
+            TogetherDecisions.continuesSession(
+                ana, "npub_ana", TogetherDecisions.STREAM_KIND, endedAtMs = 1_000, nowMs = 1_400,
+            ),
+        )
+        assertTrue(
+            TogetherDecisions.continuesSession(
+                ana, "npub_ana", TogetherDecisions.YOUTUBE_KIND, endedAtMs = 1_000, nowMs = 1_400,
+            ),
+        )
+    }
+
+    // ── The queue ───────────────────────────────────────────────────────────
+
+    private val threeTracks = listOf(track("One"), track("Two"), track("Three"))
+
+    @Test
+    fun theQueueIsTheListTheTrackWasPickedOutOf() {
+        val queue = TogetherDecisions.queueFrom(threeTracks, threeTracks[1].uri)
+        assertNotNull(queue)
+        assertEquals("Two", queue?.current?.title)
+        assertEquals("Three", TogetherDecisions.nextTrack(queue)?.title)
+    }
+
+    @Test
+    fun aTrackThatIsNotInTheListGetsNoQueue() {
+        // A pasted link, a file from the picker: one thing, no list.
+        assertNull(TogetherDecisions.queueFrom(threeTracks, "content://elsewhere"))
+        assertNull(TogetherDecisions.nextTrack(null))
+    }
+
+    @Test
+    fun thereIsNoNextTrackAtTheEnd() {
+        val queue = TogetherDecisions.queueFrom(threeTracks, threeTracks[2].uri)
+        assertNull(TogetherDecisions.nextTrack(queue))
+    }
+
+    @Test
+    fun backMeansTheStartOfThisOneOrTheLastOneDependingOnWhen() {
+        val queue = TogetherDecisions.queueFrom(threeTracks, threeTracks[1].uri)
+        // Straight away: they meant the previous track.
+        assertEquals(
+            TogetherDecisions.Back.Previous(0),
+            TogetherDecisions.backStep(queue, positionMs = 900),
+        )
+        // Well into it: they missed the start of this one.
+        assertEquals(
+            TogetherDecisions.Back.Restart,
+            TogetherDecisions.backStep(queue, positionMs = TogetherDecisions.RESTART_WITHIN_MS + 1),
+        )
+    }
+
+    @Test
+    fun backAlwaysDoesSomethingEvenWithNothingBehindIt() {
+        // A back button that does nothing reads as broken, so the first track
+        // and the no-queue case both restart.
+        val first = TogetherDecisions.queueFrom(threeTracks, threeTracks[0].uri)
+        assertEquals(TogetherDecisions.Back.Restart, TogetherDecisions.backStep(first, positionMs = 0))
+        assertEquals(TogetherDecisions.Back.Restart, TogetherDecisions.backStep(null, positionMs = 0))
+    }
+
+    @Test
+    fun theQueueOnlyMovesToATrackThatExists() {
+        val queue = TogetherDecisions.Queue(threeTracks, 1)
+        assertEquals(2, TogetherDecisions.movedTo(queue, 2)?.index)
+        assertNull(TogetherDecisions.movedTo(queue, 3))
+        assertNull(TogetherDecisions.movedTo(queue, -1))
+    }
+
+    // ── Answering an invitation ─────────────────────────────────────────────
+
+    @Test
+    fun joiningALocalFileTakesTheirCopyRatherThanOpeningAPicker() {
+        // The bug this replaced: tapping Join handed the follower the document
+        // picker and asked them to find a file the invitation exists because
+        // they do not have.
+        assertEquals(
+            TogetherDecisions.JoinAction.TakeTheirCopy,
+            TogetherDecisions.joinAction(youtube = false, contentKind = TogetherDecisions.LOCAL_FILE_KIND),
+        )
+        assertEquals(
+            TogetherDecisions.JoinAction.WatchVideo,
+            TogetherDecisions.joinAction(youtube = true, contentKind = TogetherDecisions.YOUTUBE_KIND),
+        )
+        assertEquals(
+            TogetherDecisions.JoinAction.FetchTheStream,
+            TogetherDecisions.joinAction(youtube = false, contentKind = TogetherDecisions.STREAM_KIND),
+        )
+    }
+
+    // ── When the embed refuses ──────────────────────────────────────────────
+
+    @Test
+    fun theEmbedsRefusalIsToldApartBecauseTheNextStepDiffers() {
+        assertEquals(
+            TogetherDecisions.EmbedFailure.NotEmbeddable,
+            TogetherDecisions.embedFailure("not_embeddable"),
+        )
+        assertEquals(
+            TogetherDecisions.EmbedFailure.NotFound,
+            TogetherDecisions.embedFailure("video_not_found"),
+        )
+        assertEquals(TogetherDecisions.EmbedFailure.Unknown, TogetherDecisions.embedFailure("html_5_player"))
+    }
+
+    @Test
+    fun theWayOutIsBuiltOnlyFromSomethingThatIsActuallyAnId() {
+        assertEquals(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            TogetherDecisions.watchUrl("dQw4w9WgXcQ"),
+        )
+        // This string goes into an Intent. Anything that is not an id gets no
+        // URL rather than a URL with it pasted in.
+        assertNull(TogetherDecisions.watchUrl(""))
+        assertNull(TogetherDecisions.watchUrl("abc&sub=1"))
+        assertNull(TogetherDecisions.watchUrl("../../evil"))
+        assertNull(TogetherDecisions.watchUrl("a".repeat(64)))
+    }
 }

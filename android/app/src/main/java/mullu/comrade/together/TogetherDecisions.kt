@@ -889,4 +889,269 @@ object TogetherDecisions {
      * which is the same judgement `ui/TogetherScreen.kt` already made for it.
      */
     fun scrubbable(durationMs: Long, external: Boolean): Boolean = !external && durationMs > 0
+
+    // ── The `TogetherContent` variants, as they cross the bridge ────────────
+    //
+    // Strings rather than the typed variants for the reason the file header
+    // gives: nothing here may import uniffi, or the JVM lane loses the only half
+    // of this feature it can check. `RelayConnectionService` flattens the enum
+    // to exactly these, so this is the vocabulary, not a parallel one.
+
+    const val YOUTUBE_KIND = "youtube"
+    const val STREAM_KIND = "stream"
+    const val LOCAL_FILE_KIND = "local_file"
+
+    // ── Staying paired, so a session is with a person and not with a file ───
+    //
+    // Until 2026-08-08 the unit of this feature was *one thing, played with one
+    // person*: every track asked again who to play it with, and the other side
+    // got a fresh invitation for each one. That is the right shape for "watch
+    // this film with me" and the wrong one for a music player, which is what
+    // this tab mostly is — nobody picks a friend once per song.
+    //
+    // So the **pairing** is the session and the content is what passes through
+    // it. None of that is a protocol change: `together_start` refuses while a
+    // session exists, so replacing what is playing is still an end and a start
+    // on the wire. What makes the pair survive it is [continuesSession], which
+    // is the receiving side agreeing that the next invitation from the same
+    // person, moments later, is the same evening rather than a new request.
+
+    /** The person this device is playing with, for as long as the session lasts. */
+    data class Pairing(val npub: String, val label: String)
+
+    /** What has to happen before something new can start playing. */
+    sealed interface StartStep {
+        /** Nobody chosen yet — the "and who with?" sheet. */
+        data object AskWho : StartStep
+
+        /** Already paired, and nothing of anyone else's is interrupted. */
+        data class PlayNow(val pairing: Pairing) : StartStep
+
+        /**
+         * Already paired, and **they** are the one playing.
+         *
+         * The follower may start something as freely as the leader — that is
+         * the point of a pair rather than a broadcast — but it stops what the
+         * other person put on, on both devices, so it is asked first and their
+         * name is in the question. Nothing here decides the wording; the screen
+         * does, from [Pairing.label].
+         */
+        data class ConfirmTakeover(val pairing: Pairing) : StartStep
+    }
+
+    /**
+     * Whether choosing something to play needs a person, a confirmation, or
+     * neither.
+     *
+     * Deliberately silent about the leader interrupting themselves: replacing
+     * your own track is what a next button does, and a dialog on every skip is
+     * the thing that would make the queue unusable.
+     */
+    fun startStep(pairing: Pairing?, sessionLive: Boolean, weLead: Boolean): StartStep = when {
+        pairing == null -> StartStep.AskWho
+        sessionLive && !weLead -> StartStep.ConfirmTakeover(pairing)
+        else -> StartStep.PlayNow(pairing)
+    }
+
+    /**
+     * How long after a session ends its pairing is still the current one.
+     *
+     * Generous, because it only has to cover an end and a start crossing the
+     * same relay back to back, and stingy enough that an invitation arriving
+     * minutes later is asked about rather than assumed. A minute is well past
+     * any round trip this feature tolerates elsewhere — the session TTL itself
+     * is shorter.
+     */
+    const val PAIRING_GRACE_MS: Long = 60_000
+
+    /**
+     * Whether an arriving invitation continues the session we were just in.
+     *
+     * `true` means the screen must **not** ask again: the person already agreed
+     * to listen with them, and being asked once per track is the failure this
+     * whole section exists to fix.
+     *
+     * **[STREAM_KIND] is excluded on purpose, and it is the one interesting
+     * line here.** Joining a stream makes a request to a host the *other*
+     * person named, which `TogetherManager.onInvited` already refuses to do
+     * unasked however confidently core validated the URL. A pairing is
+     * agreement to listen together; it is not agreement to fetch from wherever
+     * they point next, and quietly widening it here would undo that rule
+     * somewhere it is easy to miss.
+     *
+     * @param endedAtMs when the previous session ended, or `0` for "never" —
+     *   which is not the same as "just now" and must not read as inside the
+     *   window.
+     */
+    fun continuesSession(
+        pairing: Pairing?,
+        fromNpub: String,
+        contentKind: String,
+        endedAtMs: Long,
+        nowMs: Long,
+    ): Boolean {
+        val paired = pairing ?: return false
+        if (paired.npub != fromNpub) return false
+        if (endedAtMs <= 0) return false
+        val age = nowMs - endedAtMs
+        // A clock that stepped backwards is not evidence of anything, the same
+        // saturating refusal `StallWatch` makes rather than reading it as zero.
+        if (age < 0 || age > PAIRING_GRACE_MS) return false
+        return contentKind != STREAM_KIND
+    }
+
+    // ── A queue, because prev and next are what a music player is ───────────
+    //
+    // The queue is whatever list the track was picked out of — the library, or
+    // the library as the search field had narrowed it. That is the list the
+    // person was looking at when they chose, so it is the one "next" should
+    // mean, and it costs nothing to carry.
+    //
+    // Sources that are not a list get no queue and say so: a pasted link, a
+    // file from the picker and a followed external session are each one thing.
+    // The buttons stay on screen and go quiet, rather than appearing and
+    // disappearing under the thumb.
+
+    data class Queue(val tracks: List<Track>, val index: Int) {
+        val current: Track? get() = tracks.getOrNull(index)
+    }
+
+    /** The list, positioned at the track that was tapped. `null` if it is not in it. */
+    fun queueFrom(tracks: List<Track>, uri: String): Queue? {
+        val at = tracks.indexOfFirst { it.uri == uri }
+        return if (at < 0) null else Queue(tracks, at)
+    }
+
+    /** The next track, or `null` at the end of the queue and with no queue at all. */
+    fun nextTrack(queue: Queue?): Track? =
+        queue?.tracks?.getOrNull(queue.index + 1)
+
+    /**
+     * How long into a track the back button still means "the one before".
+     *
+     * The convention every music player shares, and it is worth stating why
+     * rather than copying: back is pressed for two different reasons — *I
+     * missed the start of this* and *I want the last one* — and time-into-track
+     * is the only signal that tells them apart.
+     */
+    const val RESTART_WITHIN_MS: Long = 3_000
+
+    /** What the back button does, which is not always the same thing. */
+    sealed interface Back {
+        /** Put this one back to the beginning. Always available. */
+        data object Restart : Back
+
+        data class Previous(val index: Int) : Back
+    }
+
+    /**
+     * Back, resolved.
+     *
+     * Restart is the answer whenever there is nothing before this — including
+     * with no queue at all — because a back button that does nothing is the one
+     * outcome guaranteed to read as broken, and restarting is both honest and
+     * what was probably wanted.
+     */
+    fun backStep(queue: Queue?, positionMs: Long): Back =
+        if (positionMs > RESTART_WITHIN_MS || queue == null || queue.index <= 0) {
+            Back.Restart
+        } else {
+            Back.Previous(queue.index - 1)
+        }
+
+    /** The queue moved to [to], or `null` when that is not a track. */
+    fun movedTo(queue: Queue, to: Int): Queue? =
+        if (to in queue.tracks.indices) queue.copy(index = to) else null
+
+    // ── Answering an invitation ─────────────────────────────────────────────
+
+    /**
+     * What "Join" does, per kind of thing we were invited to.
+     *
+     * **This is the fix for a Join button that opened a file picker.** A
+     * follower who taps join wants what the leader is playing; being handed the
+     * document picker and asked to find their own copy of it is a question with
+     * no good answer, since the usual reason to be invited is that they do not
+     * have the file. So a local file joins by taking *their* copy over the
+     * session's own connection (`docs/TOGETHER.md` §9a and §12, which already
+     * plays it as it arrives) and the picker becomes the second answer, for the
+     * person who does have it and would rather not spend the bytes.
+     */
+    sealed interface JoinAction {
+        /** The embed. Nothing to find and nothing to fetch. */
+        data object WatchVideo : JoinAction
+
+        /** Both devices fetch the URL the inviter named. */
+        data object FetchTheStream : JoinAction
+
+        /** Pull their copy down the session, and play it as it lands. */
+        data object TakeTheirCopy : JoinAction
+    }
+
+    fun joinAction(youtube: Boolean, contentKind: String): JoinAction = when {
+        youtube || contentKind == YOUTUBE_KIND -> JoinAction.WatchVideo
+        contentKind == STREAM_KIND -> JoinAction.FetchTheStream
+        else -> JoinAction.TakeTheirCopy
+    }
+
+    // ── When the embed refuses ──────────────────────────────────────────────
+    //
+    // The IFrame player draws its own "This video is unavailable" panel inside
+    // the WebView and reports the same thing to us, and until now this side did
+    // nothing with it: the error went to logcat, the screen kept its transport,
+    // and the session sat there claiming to be waiting for the other person to
+    // open something that was never going to open. The panel is YouTube's and
+    // cannot be replaced — that is the term of use §11a records — but the
+    // *session's* answer to it is ours, and it should be a sentence and a way
+    // out rather than silence.
+
+    /** Why the embed will not play this, in the vocabulary the screen needs. */
+    sealed interface EmbedFailure {
+        /**
+         * The owner does not allow it to play outside YouTube.
+         *
+         * By far the most common one, and the only one with a genuinely useful
+         * next step: the video is fine, it just has to be watched over there.
+         */
+        data object NotEmbeddable : EmbedFailure
+
+        /** The id names nothing — a private, deleted or mistyped video. */
+        data object NotFound : EmbedFailure
+
+        /** Something else. Named rather than guessed at. */
+        data object Unknown : EmbedFailure
+    }
+
+    /**
+     * Classify the player's error.
+     *
+     * Takes text for the same reason [embedState] does — the library's enum is
+     * a third-party import this file must not have — and
+     * `YoutubeSessionPlayer.errorName` is the single place that maps it.
+     */
+    fun embedFailure(error: String): EmbedFailure = when (error) {
+        // 101 and 150 are the same refusal reported two ways, which is why the
+        // library folds them into one constant and so does this.
+        "not_embeddable" -> EmbedFailure.NotEmbeddable
+        "video_not_found" -> EmbedFailure.NotFound
+        else -> EmbedFailure.Unknown
+    }
+
+    /**
+     * Where to send someone whose video will not play here.
+     *
+     * `null` for anything that is not an id, rather than a URL with the input
+     * pasted into it: this string goes into an `Intent`, and the one rule for
+     * building a URL out of something that arrived over the wire is not to.
+     * Core's `valid_youtube_id` is the real gate on the way in; this is the
+     * same character set, restated where the URL is actually assembled.
+     */
+    fun watchUrl(videoId: String): String? {
+        if (videoId.isBlank() || videoId.length > MAX_VIDEO_ID) return null
+        val safe = videoId.all { it.isDigit() || it in 'a'..'z' || it in 'A'..'Z' || it == '-' || it == '_' }
+        return if (safe) "https://www.youtube.com/watch?v=$videoId" else null
+    }
+
+    /** Ids are eleven characters; the cap is only to bound a hostile string. */
+    private const val MAX_VIDEO_ID = 32
 }

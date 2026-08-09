@@ -65,7 +65,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -187,18 +186,56 @@ fun TogetherScreen(
         // "allowed to look, and it is genuinely not here" path.
         libraryMissed = granted && !TogetherManager.lookAgain(context)
     }
+    // The microphone, which is now offered in every mode rather than only in a
+    // streamed one. A separate launcher from `askToRecord` above even though
+    // both ask for `RECORD_AUDIO`, because what follows a grant is completely
+    // different: that one goes on to the screen-capture consent, this one opens
+    // a voice channel and nothing else.
+    //
+    // The microphone cannot be switched on right now, and it is not the
+    // permission. One case only: a picture is already arriving on the single
+    // connection this session has, and adding our voice to it means
+    // renegotiating, which would take the picture away to add a microphone.
+    var micBlocked by remember { mutableStateOf(false) }
+    val askToTalk = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        // A refusal is silent on purpose: they were just shown the system
+        // dialog and said no, so a sentence explaining the dialog they closed
+        // would be telling them what they already decided.
+        if (granted) micBlocked = !TogetherManager.toggleMic(context)
+    }
+
+    // Choosing something *else* to play, without being asked who with again.
+    // Held here rather than inside `LiveSession` because it survives the
+    // session states the chooser passes through — it is open across the end of
+    // the old session and the start of the new one.
+    var choosingAgain by remember { mutableStateOf(false) }
 
     TogetherOverlay(modifier) {
-        when (val s = state) {
-            // The default surface, and the reason this tab exists. Not wrapped
-            // in the scrolling column below: it owns its own scrolling, because
-            // a library of two thousand tracks is a LazyColumn and nesting one
-            // inside a `verticalScroll` measures every row.
-            is TogetherManager.UiState.Idle -> PlayerHome(
+        val s = state
+        // The chooser covers two cases and they are the same screen: nothing is
+        // playing, or something is and they want something else. The pairing is
+        // what carries between them — `PlayerHome` reads it and skips the
+        // who-with sheet, so putting a second thing on is one step rather than
+        // starting over.
+        //
+        // Written as an `if` rather than a `when` guard because guards are a
+        // Kotlin 2.1 feature and this module is on 1.9.22.
+        val choosing = s is TogetherManager.UiState.Idle ||
+            (s is TogetherManager.UiState.Live && choosingAgain)
+        if (choosing) {
+            // Not wrapped in the scrolling column below: it owns its own
+            // scrolling, because a library of two thousand tracks is a
+            // LazyColumn and nesting one inside a `verticalScroll` measures
+            // every row.
+            PlayerHome(
                 onPickFileWith = onPickFileWith,
+                onClose = if (choosingAgain) ({ choosingAgain = false }) else null,
+                onStarted = { choosingAgain = false },
             )
-
-            else -> Column(
+        } else {
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     // A video surface plus controls plus the two honest notes
@@ -215,31 +252,33 @@ fun TogetherScreen(
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            // Neither a video nor a stream needs a file or a
-                            // permission, so each is a single unconditional tap;
-                            // a file still sends someone to the picker, because
-                            // that is genuinely the next step.
-                            when {
-                                s.youtube -> Button(onClick = { TogetherManager.joinEmbed(context) }) {
-                                    Text(stringResource(R.string.together_join_video))
-                                }
-                                s.contentKind == STREAM_KIND ->
+                            // **What Join does is `TogetherDecisions.joinAction`'s
+                            // to say, and it changed on 2026-08-08.** It used to
+                            // open the document picker for a local file and ask
+                            // the person to find their own copy — of the thing
+                            // the invitation exists *because* they do not have.
+                            // The answer that gets them to a player is their
+                            // copy, over the session's own connection, playing
+                            // as it lands (§12); the picker is the second
+                            // answer, for whoever does have the file and would
+                            // rather not spend the bytes.
+                            when (TogetherDecisions.joinAction(s.youtube, s.contentKind)) {
+                                TogetherDecisions.JoinAction.WatchVideo ->
+                                    Button(onClick = { TogetherManager.joinEmbed(context) }) {
+                                        Text(stringResource(R.string.together_join_video))
+                                    }
+
+                                TogetherDecisions.JoinAction.FetchTheStream ->
                                     Button(onClick = { TogetherManager.joinStream(context) }) {
                                         Text(stringResource(R.string.together_join_stream))
                                     }
-                                else -> {
-                                    Button(onClick = onPickFileToJoin) {
+
+                                TogetherDecisions.JoinAction.TakeTheirCopy -> {
+                                    Button(onClick = { TogetherManager.askForTheirCopy(context) }) {
                                         Text(stringResource(R.string.together_join))
                                     }
-                                    // The case `together` otherwise assumes
-                                    // away: you do not have it. Their copy comes
-                                    // straight from their device — never through
-                                    // a server of ours. Absent for a video and a
-                                    // stream: there is no file either side
-                                    // holds, so the offer would be one nobody
-                                    // could accept.
-                                    TextButton(onClick = { TogetherManager.askForTheirCopy(context) }) {
-                                        Text(stringResource(R.string.together_ask_for_copy))
+                                    TextButton(onClick = onPickFileToJoin) {
+                                        Text(stringResource(R.string.together_join_own_copy))
                                     }
                                 }
                             }
@@ -249,7 +288,7 @@ fun TogetherScreen(
                         }
                         // What joining a stream actually does, before they do
                         // it: their device fetches a URL the other person named.
-                        if (s.contentKind == STREAM_KIND) {
+                        if (s.contentKind == TogetherDecisions.STREAM_KIND) {
                             Text(
                                 stringResource(R.string.together_stream_join_note),
                                 style = MaterialTheme.typography.bodySmall,
@@ -264,7 +303,7 @@ fun TogetherScreen(
                         // stream invitation names no recording we could match,
                         // and a blank title means none was carried.
                         val couldLook = !s.youtube &&
-                            s.contentKind != STREAM_KIND &&
+                            s.contentKind != TogetherDecisions.STREAM_KIND &&
                             s.title.isNotBlank()
                         // The same one-ask rule `/play` follows, and for the
                         // same reason: someone who has already refused gets no
@@ -295,9 +334,26 @@ fun TogetherScreen(
                         }
                     }
 
-                    is TogetherManager.UiState.Live -> LiveSession(s) {
-                        askToRecord.launch(android.Manifest.permission.RECORD_AUDIO)
-                    }
+                    is TogetherManager.UiState.Live -> LiveSession(
+                        s = s,
+                        onStream = {
+                            askToRecord.launch(android.Manifest.permission.RECORD_AUDIO)
+                        },
+                        micBlocked = micBlocked,
+                        onMic = {
+                            micBlocked = false
+                            if (!TogetherManager.toggleMic(context)) {
+                                // Two reasons it can say no, and only one of
+                                // them has a dialog behind it.
+                                if (TogetherManager.micNeedsPermission(context)) {
+                                    askToTalk.launch(android.Manifest.permission.RECORD_AUDIO)
+                                } else {
+                                    micBlocked = true
+                                }
+                            }
+                        },
+                        onPlaySomethingElse = { choosingAgain = true },
+                    )
 
                     // Covered above; the compiler needs the arm.
                     is TogetherManager.UiState.Idle -> Unit
@@ -314,43 +370,29 @@ fun TogetherScreen(
 }
 
 /**
- * `TogetherContent::Stream`'s tag as it crosses the bridge.
- *
- * The string rather than the typed variant because that is what
- * `UiState.Invited.contentKind` carries, and it carries a string so
- * `RelayConnectionService` can hand over a variant this build has not learned
- * without failing to compile a lane `ci.yml` does not run.
- */
-private const val STREAM_KIND = "stream"
-
-/**
  * The full-screen backdrop this screen is drawn on.
  *
- * `MainActivity` stacks this over the whole app, so without a background of its
- * own the session drew as floating text over whatever tab was behind it — the
- * chat list showing through the film's controls — and taps on the gaps between
- * the controls reached that tab instead of stopping here. Both halves of that
- * are fixed in this one composable, matching `CallOverlay` in
+ * `MainActivity` stacks this over the whole app for an invitation, so without a
+ * background of its own the session drew as floating text over whatever tab was
+ * behind it — the chat list showing through the film's controls — and taps on
+ * the gaps between the controls reached that tab instead of stopping here. Both
+ * halves of that are fixed in this one composable, matching `CallOverlay` in
  * `call/CallScreen.kt`, which covers the app the same way for the same reason.
  *
- * Dark rather than `colorScheme.background`, and built on the same value the
- * call overlay uses: this is a surface a picture is watched on, and a light
- * chrome around a film is the wrong thing in a dark room whatever the system
- * theme says.
- *
- * The gradient is fixed rather than pulled out of the artwork. Sampling a cover
- * would need `androidx.palette`, which is a dependency this repo would not take
- * for one background — and a colour sampled from a cover is as often muddy as it
- * is lovely, on a screen whose whole job is to stay out of the way.
+ * **It used to paint its own dark blue gradient, and that was the wrong call.**
+ * The argument was that a picture wants a dark chrome around it whatever the
+ * system theme says — true of a film, and this tab is mostly a music player,
+ * reached by tapping a bottom-nav item next to four screens that do follow the
+ * theme. So it landed as the one tab that ignored Material You and read as a
+ * different app. It now sits on `colorScheme` like everything else; a hard-coded
+ * dark room is not worth being the odd one out for.
  */
 @Composable
 private fun TogetherOverlay(modifier: Modifier, content: @Composable () -> Unit) {
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(listOf(TogetherBackgroundTop, TogetherBackground)),
-            )
+            .background(MaterialTheme.colorScheme.background)
             // Swallow taps that miss a control. Compose routes a tap on an
             // unhandled area to whatever sits behind it, so a background alone
             // would still let someone open a chat through the film.
@@ -361,22 +403,29 @@ private fun TogetherOverlay(modifier: Modifier, content: @Composable () -> Unit)
     ) { content() }
 }
 
-/** Mirrors `CallBackground` in `call/CallScreen.kt`. */
-private val TogetherBackground = Color(0xFF0E1621)
+/*
+ * The screen's five colours, every one of them a `colorScheme` token.
+ *
+ * Composable getters rather than constants, which is what makes them follow the
+ * theme — including Material You, which the rest of the app has and this screen
+ * did not. The names are kept short because they appear on nearly every line
+ * below; what they must not do is claim a colour the theme is not providing,
+ * which is why the old `OnDark`/`CardColor` pair went with the gradient.
+ */
 
-/** One step lighter at the top, so the screen has a direction to it. */
-private val TogetherBackgroundTop = Color(0xFF1B2740)
+/** The sleeve behind the artwork, and the badge behind a source icon. */
+private val TogetherSleeve: Color
+    @Composable get() = MaterialTheme.colorScheme.surfaceVariant
 
-/** The sleeve behind the artwork — one step up from the backdrop, not black, so
- *  an audio session reads as a record cover rather than a dead screen. */
-private val SleeveColor = Color(0xFF1A2438)
+/** Cards on the backdrop — the same fill the other tabs' rows use. */
+private val TogetherCard: Color
+    @Composable get() = MaterialTheme.colorScheme.surfaceVariant
 
-/** Cards on the dark backdrop. Translucent so the gradient reads through. */
-private val CardColor = Color(0x14FFFFFF)
+private val TogetherText: Color
+    @Composable get() = MaterialTheme.colorScheme.onBackground
 
-/** Text on the dark backdrop, which is not `colorScheme.onSurface`. */
-private val OnDark = Color(0xFFF2F5FA)
-private val OnDarkMuted = Color(0xFF9FB0C7)
+private val TogetherMuted: Color
+    @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
 
 /** How far the skip buttons move. Matches the desktop transport. */
 private const val SKIP_MS: Long = 10_000
@@ -399,7 +448,14 @@ private sealed interface HomeStep {
  * thing you could only start from a conversation.
  */
 private sealed interface Chosen {
-    data class Track(val track: TogetherDecisions.Track) : Chosen
+    /**
+     * @param queue the list it was picked out of, so prev and next mean the
+     *   list the person was looking at rather than the whole library.
+     */
+    data class Track(
+        val track: TogetherDecisions.Track,
+        val queue: List<TogetherDecisions.Track>,
+    ) : Chosen
 
     /** A YouTube video or a public media URL, already classified by core. */
     data class Link(val link: TogetherDecisions.Link) : Chosen
@@ -416,12 +472,32 @@ private sealed interface Chosen {
 
 /**
  * The tab's own screen: three ways to start, and the people to start with.
+ *
+ * **"And who with?" is asked once per session, not once per track.** The person
+ * is [TogetherManager.pairing] and the step is
+ * [TogetherDecisions.startStep], so the sheet appears when there is nobody yet
+ * and never again for the length of the session. Choosing something while the
+ * *other* person is the one playing is the one case that stops to ask, because
+ * it takes their music off on both devices.
+ *
+ * @param onClose the way back to a session that is already running, or `null`
+ *   when this is the idle tab and there is nothing behind it.
+ * @param onStarted something began playing, so the caller can put the session
+ *   back on screen.
  */
 @Composable
-private fun PlayerHome(onPickFileWith: (peer: String, label: String) -> Unit) {
+private fun PlayerHome(
+    onPickFileWith: (peer: String, label: String) -> Unit,
+    onClose: (() -> Unit)?,
+    onStarted: () -> Unit = {},
+) {
     val context = LocalContext.current
     var step by remember { mutableStateOf<HomeStep>(HomeStep.Choosing) }
     var chosen by remember { mutableStateOf<Chosen?>(null) }
+    // Chosen, and waiting for a yes because it would stop what they put on.
+    var confirming by remember { mutableStateOf<Pair<Chosen, TogetherDecisions.Pairing>?>(null) }
+    val pairing by TogetherManager.pairing.collectAsState()
+    val live by TogetherManager.state.collectAsState()
     // A start that failed. Held rather than logged and forgotten: core can
     // refuse the content (a stream URL it will not admit), and a tap that
     // produced neither a session nor a sentence is the failure mode the rest of
@@ -458,6 +534,7 @@ private fun PlayerHome(onPickFileWith: (peer: String, label: String) -> Unit) {
                 onBrowse = { step = HomeStep.Browsing },
                 onPickAFile = { chosen = Chosen.AFile },
                 onLink = { step = HomeStep.Linking },
+                onClose = onClose,
             )
 
             is HomeStep.Browsing -> LibraryBrowser(
@@ -466,7 +543,7 @@ private fun PlayerHome(onPickFileWith: (peer: String, label: String) -> Unit) {
                     askToReadLibrary.launch(MediaLibraryAccess.permissionFor(Build.VERSION.SDK_INT))
                 },
                 onBack = { step = HomeStep.Choosing },
-                onPlay = { track -> chosen = Chosen.Track(track) },
+                onPlay = { track, shown -> chosen = Chosen.Track(track, shown) },
             )
 
             is HomeStep.Linking -> LinkField(
@@ -476,15 +553,78 @@ private fun PlayerHome(onPickFileWith: (peer: String, label: String) -> Unit) {
         }
     }
 
-    // The second step, over whichever of the three is showing. A sheet rather
-    // than a screen because the thing they just chose is still behind it, which
-    // is the difference between "and who with?" and starting over.
+    // What happens next to whatever was just chosen. The three answers are
+    // `TogetherDecisions.startStep`'s, so the sheet, the question and the
+    // straight-to-playing case cannot disagree about which applies.
     chosen?.let { what ->
-        ListenWithSheet(
-            onDismiss = { chosen = null },
-            onChosen = { listener ->
+        when (
+            val next = TogetherDecisions.startStep(
+                pairing = pairing,
+                sessionLive = live is TogetherManager.UiState.Live,
+                weLead = (live as? TogetherManager.UiState.Live)?.weLead ?: false,
+            )
+        ) {
+            // The second step, over whichever of the three is showing. A sheet
+            // rather than a screen because the thing they just chose is still
+            // behind it, which is the difference between "and who with?" and
+            // starting over.
+            is TogetherDecisions.StartStep.AskWho -> ListenWithSheet(
+                onDismiss = { chosen = null },
+                onChosen = { listener ->
+                    chosen = null
+                    failed = !startWith(
+                        context,
+                        what,
+                        TogetherDecisions.Pairing(listener.npub, listener.label),
+                        onPickFileWith,
+                    )
+                    if (!failed) onStarted()
+                },
+            )
+
+            is TogetherDecisions.StartStep.ConfirmTakeover -> {
+                // Set from a side effect rather than drawn inline, so the
+                // dialog below is the only thing that can clear `chosen` — two
+                // places clearing it is how a tap ends up doing nothing.
+                LaunchedEffect(what, next.pairing) {
+                    confirming = what to next.pairing
+                    chosen = null
+                }
+            }
+
+            // Cleared last, deliberately: writing `chosen = null` first would
+            // leave the rest of this block running in an effect whose composable
+            // is on its way out of the composition.
+            is TogetherDecisions.StartStep.PlayNow -> LaunchedEffect(what, next.pairing) {
+                failed = !startWith(context, what, next.pairing, onPickFileWith)
+                if (!failed) onStarted()
                 chosen = null
-                failed = !startWith(context, what, listener, onPickFileWith)
+            }
+        }
+    }
+
+    // Taking the music off somebody else. Asked because it is their choice we
+    // are ending, and answered on their own screen a moment later — the
+    // follower may put something on as freely as the leader, which is what a
+    // pair means, but not silently.
+    confirming?.let { (what, with) ->
+        AlertDialog(
+            onDismissRequest = { confirming = null },
+            title = { Text(stringResource(R.string.together_takeover_title)) },
+            text = { Text(stringResource(R.string.together_takeover_body, with.label)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirming = null
+                    failed = !startWith(context, what, with, onPickFileWith)
+                    if (!failed) onStarted()
+                }) {
+                    Text(stringResource(R.string.together_takeover_yes))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = null }) {
+                    Text(stringResource(R.string.together_takeover_no))
+                }
             },
         )
     }
@@ -505,22 +645,16 @@ private fun PlayerHome(onPickFileWith: (peer: String, label: String) -> Unit) {
 private fun startWith(
     context: Context,
     what: Chosen,
-    listener: TogetherDecisions.Listener,
+    with: TogetherDecisions.Pairing,
     onPickFileWith: (peer: String, label: String) -> Unit,
 ): Boolean = when (what) {
-    is Chosen.Track -> runCatching {
-        TogetherManager.start(
-            context,
-            listener.npub,
-            listener.label,
-            Uri.parse(what.track.uri),
-            MusicLibrary.recordingOf(what.track),
-        )
-    }.onFailure { Log.w(TAG, "could not start on a library track", it) }.isSuccess
+    // The one route that carries a queue, because it is the only source that is
+    // a list. Everything else here is one thing, and says so by passing none.
+    is Chosen.Track -> TogetherManager.playTrack(context, with, what.track, what.queue)
 
     is Chosen.Link -> when (val link = what.link) {
         is TogetherDecisions.Link.Video -> runCatching {
-            TogetherManager.startEmbed(context, listener.npub, listener.label, link.videoId)
+            TogetherManager.startEmbed(context, with.npub, with.label, link.videoId)
         }.onFailure { Log.w(TAG, "could not start on a video", it) }.isSuccess
 
         is TogetherDecisions.Link.Stream -> runCatching {
@@ -536,7 +670,7 @@ private fun startWith(
                 // it can be 2 kB, and it was core's own answer a moment ago —
                 // there is nothing to learn from seeing it again.
                 ?: error("core no longer accepts this stream URL")
-            TogetherManager.startStream(context, listener.npub, listener.label, content)
+            TogetherManager.startStream(context, with.npub, with.label, content)
         }.onFailure { Log.w(TAG, "could not start on a link", it) }.isSuccess
 
         // Unreachable: `LinkField` never offers an unplayable link. Answered
@@ -547,7 +681,7 @@ private fun startWith(
     // The picker is the next step, not the last one — so this succeeded at what
     // it was asked to do even though no session exists yet.
     is Chosen.AFile -> {
-        onPickFileWith(listener.npub, listener.label)
+        onPickFileWith(with.npub, with.label)
         true
     }
 }
@@ -561,6 +695,7 @@ private fun ChooseASource(
     onBrowse: () -> Unit,
     onPickAFile: () -> Unit,
     onLink: () -> Unit,
+    onClose: (() -> Unit)?,
 ) {
     Column(
         modifier = Modifier
@@ -569,16 +704,35 @@ private fun ChooseASource(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Spacer(Modifier.height(8.dp))
+        // Only over a running session: on the idle tab there is nothing behind
+        // this to go back to, and a back arrow that leads nowhere is worse than
+        // none.
+        onClose?.let { close ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = close) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.together_back_to_session),
+                        tint = TogetherText,
+                    )
+                }
+                Text(
+                    stringResource(R.string.together_back_to_session),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TogetherMuted,
+                )
+            }
+        }
         Text(
             stringResource(R.string.together_home_title),
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.SemiBold,
-            color = OnDark,
+            color = TogetherText,
         )
         Text(
             stringResource(R.string.together_home_subtitle),
             style = MaterialTheme.typography.bodyMedium,
-            color = OnDarkMuted,
+            color = TogetherMuted,
         )
         Spacer(Modifier.height(8.dp))
         // Order and content are `TogetherDecisions.sources`', so the list the
@@ -619,7 +773,7 @@ private fun ChooseASource(
         Text(
             stringResource(R.string.together_home_note),
             style = MaterialTheme.typography.bodySmall,
-            color = OnDarkMuted,
+            color = TogetherMuted,
         )
         Spacer(Modifier.height(24.dp))
     }
@@ -636,7 +790,7 @@ private fun SourceCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
-            .background(CardColor)
+            .background(TogetherCard)
             .clickable(onClick = onClick)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -646,14 +800,14 @@ private fun SourceCard(
             modifier = Modifier
                 .size(44.dp)
                 .clip(CircleShape)
-                .background(SleeveColor),
+                .background(TogetherSleeve),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, contentDescription = null, tint = OnDark, modifier = Modifier.size(22.dp))
+            Icon(icon, contentDescription = null, tint = TogetherText, modifier = Modifier.size(22.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = OnDark)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = OnDarkMuted)
+            Text(title, style = MaterialTheme.typography.titleMedium, color = TogetherText)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
         }
     }
 }
@@ -672,7 +826,12 @@ private fun LibraryBrowser(
     libraryGranted: Boolean,
     onAsk: () -> Unit,
     onBack: () -> Unit,
-    onPlay: (TogetherDecisions.Track) -> Unit,
+    /**
+     * The track, **and the list it came out of** — which is the list as the
+     * search field had narrowed it, not the whole library. That is what the
+     * person was looking at when they chose, so it is what next should mean.
+     */
+    onPlay: (TogetherDecisions.Track, List<TogetherDecisions.Track>) -> Unit,
 ) {
     val context = LocalContext.current
     var page by remember { mutableStateOf<MusicLibrary.Page?>(null) }
@@ -716,7 +875,7 @@ private fun LibraryBrowser(
                     },
                 ),
                 style = MaterialTheme.typography.bodyMedium,
-                color = OnDarkMuted,
+                color = TogetherMuted,
                 modifier = Modifier.padding(vertical = 12.dp),
             )
             if (step == MediaLibraryAccess.Step.Ask) {
@@ -742,7 +901,7 @@ private fun LibraryBrowser(
             loaded == null -> Text(
                 stringResource(R.string.together_library_loading),
                 style = MaterialTheme.typography.bodyMedium,
-                color = OnDarkMuted,
+                color = TogetherMuted,
             )
 
             shown.isEmpty() -> Text(
@@ -754,7 +913,7 @@ private fun LibraryBrowser(
                     },
                 ),
                 style = MaterialTheme.typography.bodyMedium,
-                color = OnDarkMuted,
+                color = TogetherMuted,
             )
 
             else -> LazyColumn(Modifier.fillMaxSize()) {
@@ -762,7 +921,7 @@ private fun LibraryBrowser(
                 // one, row state reattaches to the wrong item as the filter
                 // narrows.
                 items(shown, key = { it.uri }) { track ->
-                    TrackRow(track, onClick = { onPlay(track) })
+                    TrackRow(track, onClick = { onPlay(track, shown) })
                 }
                 if (loaded.truncated) {
                     item(key = "truncated") {
@@ -772,7 +931,7 @@ private fun LibraryBrowser(
                         Text(
                             stringResource(R.string.together_library_truncated),
                             style = MaterialTheme.typography.bodySmall,
-                            color = OnDarkMuted,
+                            color = TogetherMuted,
                             modifier = Modifier.padding(16.dp),
                         )
                     }
@@ -794,10 +953,10 @@ private fun BrowserHeader(title: String, onBack: () -> Unit) {
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = stringResource(R.string.together_back),
-                tint = OnDark,
+                tint = TogetherText,
             )
         }
-        Text(title, style = MaterialTheme.typography.titleLarge, color = OnDark)
+        Text(title, style = MaterialTheme.typography.titleLarge, color = TogetherText)
     }
 }
 
@@ -823,19 +982,19 @@ private fun TrackRow(track: TogetherDecisions.Track, onClick: () -> Unit) {
             Text(
                 track.title,
                 style = MaterialTheme.typography.bodyLarge,
-                color = OnDark,
+                color = TogetherText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 TogetherDecisions.trackSubtitle(track),
                 style = MaterialTheme.typography.bodySmall,
-                color = OnDarkMuted,
+                color = TogetherMuted,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = OnDarkMuted)
+        Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = TogetherMuted)
     }
 }
 
@@ -878,7 +1037,7 @@ private fun Cover(
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(corner))
-            .background(SleeveColor),
+            .background(TogetherSleeve),
         contentAlignment = Alignment.Center,
     ) {
         val bitmap = art
@@ -893,7 +1052,7 @@ private fun Cover(
             Icon(
                 QueueMusicIcon,
                 contentDescription = null,
-                tint = OnDarkMuted,
+                tint = TogetherMuted,
                 modifier = Modifier.size(glyphDp.dp),
             )
         }
@@ -927,7 +1086,7 @@ private fun LinkField(onBack: () -> Unit, onPlay: (TogetherDecisions.Link) -> Un
         Text(
             stringResource(R.string.together_link_explainer),
             style = MaterialTheme.typography.bodyMedium,
-            color = OnDarkMuted,
+            color = TogetherMuted,
         )
         OutlinedTextField(
             value = text,
@@ -974,7 +1133,7 @@ private fun LinkField(onBack: () -> Unit, onPlay: (TogetherDecisions.Link) -> Un
             Text(
                 stringResource(R.string.together_link_refused),
                 style = MaterialTheme.typography.bodySmall,
-                color = OnDarkMuted,
+                color = TogetherMuted,
             )
         }
     }
@@ -1334,8 +1493,68 @@ private fun ShareRelayConsent() {
     )
 }
 
+/**
+ * What to say when the embed will not play this — and where to go instead.
+ *
+ * The panel above it is YouTube's own, and §11a is why it may not be replaced or
+ * hidden. This is the session's answer underneath it, which until now was
+ * nothing at all: the error reached logcat, the transport stayed, and the status
+ * line went on saying we were waiting for the other person to open something
+ * that was never going to open.
+ *
+ * By far the most common cause is a video whose owner does not allow it outside
+ * YouTube, and that one has a real next step — the video is fine, it just has to
+ * be watched over there. Which sentence applies is
+ * [TogetherDecisions.embedFailure]'s to decide.
+ */
 @Composable
-private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
+private fun EmbedRefusal() {
+    val context = LocalContext.current
+    val failure by TogetherManager.embedFailure.collectAsState()
+    val why = failure ?: return
+    Text(
+        stringResource(
+            when (why) {
+                TogetherDecisions.EmbedFailure.NotEmbeddable -> R.string.together_embed_not_embeddable
+                TogetherDecisions.EmbedFailure.NotFound -> R.string.together_embed_not_found
+                TogetherDecisions.EmbedFailure.Unknown -> R.string.together_embed_failed
+            },
+        ),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+    )
+    // Only when there is somewhere to send them. `watchUrl` answers null for
+    // anything that is not an id, which is the one rule for building a URL out
+    // of a string that arrived over the wire.
+    TogetherManager.watchUrl()?.let { url ->
+        TextButton(onClick = {
+            runCatching {
+                context.startActivity(
+                    android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url)),
+                )
+            }.onFailure { Log.w(TAG, "no browser for the video", it) }
+        }) {
+            Text(stringResource(R.string.together_embed_watch_on_youtube))
+        }
+    }
+    // Said plainly, because leaving for YouTube takes them out of the session:
+    // the embed pauses in the background and nothing on the other device
+    // changes.
+    Text(
+        stringResource(R.string.together_embed_watch_note),
+        style = MaterialTheme.typography.bodySmall,
+        color = TogetherMuted,
+    )
+}
+
+@Composable
+private fun LiveSession(
+    s: TogetherManager.UiState.Live,
+    onStream: () -> Unit,
+    micBlocked: Boolean,
+    onMic: () -> Unit,
+    onPlaySomethingElse: () -> Unit,
+) {
     // Hold the screen awake for a playing film and nothing else — two hours of
     // music must not burn the battery lighting up a screen with nothing on it.
     // The rule is TogetherDecisions.keepScreenOn, tested there; this only
@@ -1363,7 +1582,7 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
         s.title.ifBlank { s.peerLabel },
         style = MaterialTheme.typography.headlineSmall,
         fontWeight = FontWeight.SemiBold,
-        color = OnDark,
+        color = TogetherText,
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
     )
@@ -1371,12 +1590,12 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
         Text(
             stringResource(R.string.together_with, s.peerLabel),
             style = MaterialTheme.typography.bodyMedium,
-            color = OnDarkMuted,
+            color = TogetherMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        Text("·", color = OnDarkMuted)
-        Text(statusLabel(s), style = MaterialTheme.typography.bodyMedium, color = OnDarkMuted)
+        Text("·", color = TogetherMuted)
+        Text(statusLabel(s), style = MaterialTheme.typography.bodyMedium, color = TogetherMuted)
     }
 
     // The measured half, which the desktop player has had since 2026-08-05 and
@@ -1391,13 +1610,13 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
         ageMs = System.currentTimeMillis() - s.correctedAtMs,
     )
     driftLabel(measured.drift)?.let {
-        Text(it, style = MaterialTheme.typography.bodySmall, color = OnDarkMuted)
+        Text(it, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
     }
     // Deliberately not colour-coded, on either frontend: "we've lost track of
     // them" is an honest report of poor measurement, not a fault, and red would
     // say otherwise.
     qualityLabel(measured.quality)?.let {
-        Text(it, style = MaterialTheme.typography.bodySmall, color = OnDarkMuted)
+        Text(it, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
     }
 
     // Control-and-status, and the honest limit of it, while another app plays.
@@ -1405,7 +1624,7 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
         Text(
             stringResource(R.string.together_follow_note),
             style = MaterialTheme.typography.bodySmall,
-            color = OnDarkMuted,
+            color = TogetherMuted,
         )
     }
 
@@ -1421,7 +1640,17 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
         )
     }
 
-    Transport(s)
+    EmbedRefusal()
+
+    Transport(s, onMic = onMic, onPlaySomethingElse = onPlaySomethingElse)
+
+    if (micBlocked) {
+        Text(
+            stringResource(R.string.together_mic_unavailable),
+            style = MaterialTheme.typography.bodySmall,
+            color = TogetherMuted,
+        )
+    }
 
     // The third answer to §9a's question, beside "find your own copy" and "take
     // mine": let them watch this one as it plays. Offered only by the side that
@@ -1432,7 +1661,7 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
         Text(
             stringResource(R.string.together_stream_note),
             style = MaterialTheme.typography.bodySmall,
-            color = OnDarkMuted,
+            color = TogetherMuted,
         )
         // Before the system dialog, not after: it arrives with no explanation of
         // its own, and a recording prompt nobody can account for is one people
@@ -1440,20 +1669,20 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
         Text(
             stringResource(R.string.together_stream_consent),
             style = MaterialTheme.typography.bodySmall,
-            color = OnDarkMuted,
+            color = TogetherMuted,
         )
     }
     if (s.streaming) {
         Text(
             stringResource(R.string.together_streaming),
             style = MaterialTheme.typography.bodyMedium,
-            color = OnDark,
+            color = TogetherText,
         )
         // The one thing about the microphone that is not obvious from the icon.
         Text(
             stringResource(R.string.together_mic_note),
             style = MaterialTheme.typography.bodySmall,
-            color = OnDarkMuted,
+            color = TogetherMuted,
         )
     }
 
@@ -1465,7 +1694,7 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
     Text(
         stringResource(R.string.together_accuracy_note),
         style = MaterialTheme.typography.bodySmall,
-        color = OnDarkMuted,
+        color = TogetherMuted,
     )
     // The background promise is true of our own player and false of an embed —
     // YouTube pauses a backgrounded one, and turning that off is a feature of
@@ -1477,7 +1706,7 @@ private fun LiveSession(s: TogetherManager.UiState.Live, onStream: () -> Unit) {
             if (s.embed) R.string.together_embed_background_note else R.string.together_background_note,
         ),
         style = MaterialTheme.typography.bodySmall,
-        color = OnDarkMuted,
+        color = TogetherMuted,
     )
     Spacer(Modifier.height(24.dp))
 }
@@ -1520,7 +1749,7 @@ private fun Sleeve(s: TogetherManager.UiState.Live) {
                 },
             )
             .clip(RoundedCornerShape(24.dp))
-            .background(SleeveColor),
+            .background(TogetherSleeve),
         contentAlignment = Alignment.Center,
     ) {
         when {
@@ -1577,10 +1806,26 @@ private const val ROW_COVER_DP = 48
  * `MediaSession` carries no duration we can trust and an embed reports none
  * until it loads, so both would otherwise get a bar with no end on it: a
  * scrubber that lies about where the end is, which is worse than no scrubber.
- * Play, pause and the two skips all still work, because those need no length.
+ * Play, pause and the four skips all still work, because those need no length.
+ *
+ * **Two rows, because this is a music player.** The top one is track-level —
+ * previous, ten back, play, ten forward, next — and the bottom one is the two
+ * controls that are about the session rather than the playhead: the microphone
+ * and the way to put something else on. Cramming seven controls into one line
+ * makes the play button small, and the play button is the one thing anybody
+ * reaches for without looking.
+ *
+ * @param onMic pressed the microphone. Hoisted because turning it on may need a
+ *   runtime permission, and a launcher belongs at the top of the screen rather
+ *   than inside a row that is created and destroyed as the session changes.
+ * @param onPlaySomethingElse open the chooser without asking who again.
  */
 @Composable
-private fun Transport(s: TogetherManager.UiState.Live) {
+private fun Transport(
+    s: TogetherManager.UiState.Live,
+    onMic: () -> Unit,
+    onPlaySomethingElse: () -> Unit,
+) {
     // While a finger is on the slider the poll must not move it — the decision
     // is TogetherDecisions.pollMayMoveSlider, and the manager honours it; this
     // only has to report the drag boundaries.
@@ -1602,9 +1847,9 @@ private fun Transport(s: TogetherManager.UiState.Live) {
             },
             valueRange = 0f..max,
             colors = SliderDefaults.colors(
-                thumbColor = OnDark,
-                activeTrackColor = OnDark,
-                inactiveTrackColor = CardColor,
+                thumbColor = TogetherText,
+                activeTrackColor = TogetherText,
+                inactiveTrackColor = TogetherCard,
             ),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1612,23 +1857,25 @@ private fun Transport(s: TogetherManager.UiState.Live) {
             Text(
                 TogetherDecisions.clock(shown),
                 style = MaterialTheme.typography.labelMedium,
-                color = OnDarkMuted,
+                color = TogetherMuted,
             )
             // Nothing at all rather than `0:00` when no length is known — the
             // decision is `remainingClock`'s, tested there.
             TogetherDecisions.remainingClock(shown, s.durationMs)?.let {
-                Text(it, style = MaterialTheme.typography.labelMedium, color = OnDarkMuted)
+                Text(it, style = MaterialTheme.typography.labelMedium, color = TogetherMuted)
             }
         }
     }
 
-    // Back / play-pause / forward, centred, matching the desktop transport. The
-    // skips go through `setState` like every other command, so they are ordered
-    // by the same Lamport counter and cannot race the other side's.
+    val context = LocalContext.current
+    // Previous / back / play-pause / forward / next, centred. Every one of them
+    // goes through `setState` or through the manager's queue, so they are
+    // ordered by the same Lamport counter as the other person's and cannot race
+    // them.
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .padding(top = 8.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1640,35 +1887,29 @@ private fun Transport(s: TogetherManager.UiState.Live) {
             val target = (s.positionMs + delta).coerceIn(0L, ceiling)
             TogetherManager.setState(target, s.playing)
         }
-        // The microphone, and only where it means something: a streamed session
-        // carries one audio track that the sender's voice shares with what they
-        // are playing (docs/TOGETHER.md §15). In every other mode there is no
-        // audio of ours going anywhere, and a control that toggles nothing is
-        // worse than no control — the same rule the library button follows.
-        if (s.streaming) {
-            val micOn by TogetherManager.micEnabled.collectAsState()
-            IconButton(onClick = { TogetherManager.toggleMic() }) {
-                Icon(
-                    MicIcon,
-                    contentDescription = stringResource(
-                        if (micOn) R.string.together_mic_off else R.string.together_mic_on,
-                    ),
-                    tint = if (micOn) MaterialTheme.colorScheme.primary else OnDarkMuted,
-                )
-            }
+        // Previous is always live, because it always does something: with no
+        // track behind this one it restarts this one, which is
+        // `TogetherDecisions.backStep`'s answer and the reason a back button
+        // never has to be greyed out.
+        IconButton(onClick = { TogetherManager.skipBack(context) }) {
+            Icon(
+                SkipPreviousIcon,
+                contentDescription = stringResource(R.string.together_previous),
+                tint = TogetherText,
+            )
         }
         TextButton(onClick = { skip(-SKIP_MS) }) {
-            Text(stringResource(R.string.together_back_ten), color = OnDark)
+            Text(stringResource(R.string.together_back_ten), color = TogetherText)
         }
         // The one big control. A filled circle rather than a Button, because at
         // this size the label would be the shape — and because it is the only
         // thing on the screen anybody reaches for in the dark.
         Box(
             modifier = Modifier
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = 8.dp)
                 .size(64.dp)
                 .clip(CircleShape)
-                .background(OnDark)
+                .background(MaterialTheme.colorScheme.primary)
                 .clickable { TogetherManager.setState(s.positionMs, !s.playing) },
             contentAlignment = Alignment.Center,
         ) {
@@ -1677,12 +1918,69 @@ private fun Transport(s: TogetherManager.UiState.Live) {
                 contentDescription = stringResource(
                     if (s.playing) R.string.together_pause else R.string.together_play,
                 ),
-                tint = TogetherBackground,
+                tint = MaterialTheme.colorScheme.onPrimary,
                 modifier = Modifier.size(32.dp),
             )
         }
         TextButton(onClick = { skip(SKIP_MS) }) {
-            Text(stringResource(R.string.together_forward_ten), color = OnDark)
+            Text(stringResource(R.string.together_forward_ten), color = TogetherText)
+        }
+        // Next, unlike previous, genuinely has nothing to do at the end of a
+        // queue or with no queue at all — a pasted link and a picked file are
+        // one thing each. Drawn and disabled rather than absent: a control that
+        // appears and disappears under the thumb is worse than one that is
+        // visibly not available.
+        val queue by TogetherManager.queue.collectAsState()
+        val hasNext = TogetherDecisions.nextTrack(queue) != null
+        IconButton(
+            onClick = { TogetherManager.skipForward(context) },
+            enabled = hasNext,
+        ) {
+            Icon(
+                SkipNextIcon,
+                contentDescription = stringResource(R.string.together_next),
+                tint = if (hasNext) TogetherText else TogetherMuted.copy(alpha = 0.4f),
+            )
+        }
+    }
+
+    // The session-level row. The microphone first, because it is the one people
+    // look for.
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // **In every mode, not only a streamed one.** It used to appear only
+        // while streaming, on the argument that there was otherwise no audio of
+        // ours going anywhere — true of the wire and beside the point for the
+        // person: listening to an album together with no way to say "this bit"
+        // is a worse version of listening alone. What differs between the modes
+        // is only what the voice rides on, which is [TogetherManager.toggleMic]'s
+        // problem rather than this row's.
+        //
+        // Off by default, always. A session that opened with a live microphone
+        // would have decided something about a room it cannot see.
+        val micOn by TogetherManager.micEnabled.collectAsState()
+        IconButton(onClick = onMic) {
+            Icon(
+                if (micOn) MicIcon else MicOffIcon,
+                contentDescription = stringResource(
+                    if (micOn) R.string.together_mic_off else R.string.together_mic_on,
+                ),
+                tint = if (micOn) MaterialTheme.colorScheme.primary else TogetherMuted,
+            )
+        }
+        // The second half of "choose a person once": something else to play,
+        // with no second trip through the who-with sheet. Absent for an
+        // external session, where Comrade holds no player and putting something
+        // on would mean taking the playback away from the app that has it.
+        if (!s.external) {
+            TextButton(onClick = onPlaySomethingElse) {
+                Text(stringResource(R.string.together_play_something_else), color = TogetherText)
+            }
         }
     }
 }

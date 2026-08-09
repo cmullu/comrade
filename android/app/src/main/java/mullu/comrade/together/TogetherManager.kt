@@ -191,6 +191,109 @@ object TogetherManager {
     /** The invitation's content kind, for [PlaybackModeDecision.ownershipFor]. */
     private var invitedKind: String = ""
 
+    private val _pairing = MutableStateFlow<TogetherDecisions.Pairing?>(null)
+
+    /**
+     * Who this device is listening with, for as long as the session lasts.
+     *
+     * **The unit of this feature is the pair, not the track.** Choosing someone
+     * used to be part of choosing a thing to play, so every song asked again
+     * and the other person was invited again — which is the right shape for
+     * "watch this film with me" and the wrong one for a music player. This is
+     * what survives a change of content on both sides:
+     * [TogetherDecisions.startStep] reads it here, and
+     * [TogetherDecisions.continuesSession] reads it on the receiving side.
+     */
+    val pairing: StateFlow<TogetherDecisions.Pairing?> = _pairing.asStateFlow()
+
+    /**
+     * When the last session with [_pairing] ended, or `0`.
+     *
+     * The receiving half of the pairing: an invitation from the same person
+     * moments after a session ended is the next track rather than a new
+     * request, and this is what "moments" is measured from.
+     */
+    private var pairingEndedAtMs: Long = 0
+
+    /**
+     * How many of *our own* `ended` events to swallow.
+     *
+     * `together_start` refuses while a session exists, so replacing what is
+     * playing is an end followed by a start on the wire — and the end's
+     * `TogetherEnded { by_peer: false }` reaches this device through the event
+     * channel, which is to say **after** `together_end` returned and routinely
+     * after the `together_start` that replaced it. Acting on it would tear down
+     * the session that is already running.
+     *
+     * A count rather than a flag because it is nearly exact: one `together_end`
+     * produces exactly one of these, so one increment consumes exactly one
+     * event. The one case where it does not is worth stating, because it is
+     * what [pendingSelfEndsAtMs] exists for — `together_end` on a session core
+     * has *already* expired returns without emitting anything at all, which
+     * would leave this armed and swallow the next genuine end instead.
+     *
+     * Nothing else is needed here, and it is worth saying why rather than
+     * rediscovering it: core drops an inbound `Start` while a session exists,
+     * and filters an `End` whose session id is not the one it is in
+     * (`runtime.rs`, `dispatch_together`). So a stale *peer* end cannot reach
+     * this at all, and only our own can.
+     */
+    private var pendingSelfEnds: Int = 0
+
+    /** When [pendingSelfEnds] was last armed. */
+    private var pendingSelfEndsAtMs: Long = 0
+
+    /**
+     * How long an armed [pendingSelfEnds] stays believable.
+     *
+     * The event it is waiting for is queued before `together_end` returns, so
+     * it is a matter of milliseconds; anything past this is the case where no
+     * event was emitted, and holding the latch would cost a real end.
+     */
+    private const val SELF_END_WINDOW_MS: Long = 5_000
+
+    /**
+     * What "next" means, when there is anything for it to mean.
+     *
+     * The list a track was picked out of — the library as the search field had
+     * narrowed it, which is what the person was looking at when they chose.
+     * Null for every source that is one thing rather than a list: a pasted
+     * link, a file from the picker, a followed external session.
+     */
+    private val _queue = MutableStateFlow<TogetherDecisions.Queue?>(null)
+
+    /**
+     * A flow rather than a field because the next button greys out on it, and a
+     * plain field would leave that button stale until something else happened
+     * to recompose the transport.
+     */
+    val queue: StateFlow<TogetherDecisions.Queue?> = _queue.asStateFlow()
+
+    /**
+     * The video an embed session is on, so a refusal can offer a way out.
+     *
+     * Distinct from [wantedVideoId], which is what an *invitation* named before
+     * anybody decided: this one is what is actually playing, on either side.
+     */
+    private var playingVideoId: String? = null
+
+    private val _embedFailure = MutableStateFlow<TogetherDecisions.EmbedFailure?>(null)
+
+    /**
+     * Why the embed will not play this, when it will not.
+     *
+     * Separate from [openFailed] because there is something to *do* about this
+     * one: the common case by far is a video whose owner does not allow it
+     * outside YouTube, and the useful answer is a way over there rather than a
+     * sentence. Until now the error reached logcat and nothing else, so the
+     * screen kept a transport under YouTube's own "This video is unavailable"
+     * panel and went on saying it was waiting for the other person to open it.
+     */
+    val embedFailure: StateFlow<TogetherDecisions.EmbedFailure?> = _embedFailure.asStateFlow()
+
+    /** Where to send someone the embed refused. Null unless there is one. */
+    fun watchUrl(): String? = playingVideoId?.let { TogetherDecisions.watchUrl(it) }
+
     /**
      * The sound of what we are playing, on its way out (`docs/TOGETHER.md` §15).
      * Null in every session that is not streaming, which is all of them until
@@ -278,30 +381,133 @@ object TogetherManager {
     private val _micEnabled = MutableStateFlow(false)
 
     /**
-     * Whether the sender's voice goes out alongside what they are playing.
+     * Whether this device's microphone is going out to the other person.
      *
      * A flow rather than a plain flag because the control is a toggle on screen
      * and has to redraw when it changes — the same shape `CallManager.muted`
      * uses for the in-call microphone, deliberately, so the two controls behave
      * alike.
      *
-     * **Off by default.** A session that opened with a live microphone would
-     * have decided something about a room it cannot see.
+     * **Off by default, in every mode.** A session that opened with a live
+     * microphone would have decided something about a room it cannot see.
      */
     val micEnabled: StateFlow<Boolean> = _micEnabled.asStateFlow()
 
     /**
-     * Turn the sender's microphone on or off for a streamed session.
+     * Turn the microphone on or off.
      *
-     * Watching something together and being unable to say anything about it is
-     * not the feature, so this is the control that makes the rest of §15 worth
-     * having. It reaches [PlaybackCapture.micEnabled], which decides whether the
-     * voice is *summed* into the track or the microphone is overwritten.
+     * Listening to something together and being unable to say anything about it
+     * is not the feature, so this is available in **every** mode rather than
+     * only in a streamed one — a shared album with no way to say "this bit" is
+     * a worse version of listening alone. What differs is only what the voice
+     * rides on:
+     *
+     * - **streaming** (`docs/TOGETHER.md` §15): the outgoing track already
+     *   carries the film's own sound, and [PlaybackCapture.micEnabled] decides
+     *   whether the voice is *summed* into it. The track itself stays live.
+     * - **everything else**: there is no outgoing audio at all until now, so
+     *   turning the microphone on opens a voice-only connection
+     *   ([startTalking]) and muting is that one track going quiet.
+     *
+     * @return `false` when the microphone is not ours to switch on yet —
+     *   `RECORD_AUDIO` has not been granted, or the channel could not open. The
+     *   screen asks for the permission and calls [startTalking]; a control that
+     *   silently did nothing is the one outcome worth avoiding here.
      */
-    fun toggleMic() {
-        val next = !_micEnabled.value
-        _micEnabled.value = next
-        capture?.micEnabled = next
+    fun toggleMic(context: Context): Boolean {
+        appContext = context.applicationContext
+        if (_micEnabled.value) {
+            applyMic(false)
+            return true
+        }
+        if (streamAudioTrack == null && !startTalking(context)) return false
+        applyMic(true)
+        return true
+    }
+
+    /** Push the microphone decision at whatever is actually carrying it. */
+    private fun applyMic(on: Boolean) {
+        _micEnabled.value = on
+        capture?.micEnabled = on
+        // A streamed session's track carries the film whatever the microphone
+        // is doing, so it stays enabled; a voice-only one *is* the microphone,
+        // so muting is the track going quiet.
+        runCatching { streamAudioTrack?.setEnabled(capture != null || on) }
+    }
+
+    /**
+     * Open a voice channel to the person we are listening with.
+     *
+     * The same `PeerConnection` a streamed session uses, with no video on it —
+     * "the SDP is the intent" (see [StreamTransfer]) covers this without a new
+     * wire type, because an offer arriving with no armed transfer is already
+     * known not to be a file, and its m-lines say the rest.
+     *
+     * **The track is attached at negotiation time and never afterwards**, on
+     * both sides: [StreamTransfer.localAudio] is what the answering side adds
+     * before it answers, so once a connection exists both microphones are on it
+     * and muting is `setEnabled`. Nothing here renegotiates, and this is why it
+     * does not have to.
+     *
+     * Called by the screen after `RECORD_AUDIO` comes back granted, and by
+     * [toggleMic] when it was already granted.
+     */
+    fun startTalking(context: Context): Boolean {
+        appContext = context.applicationContext
+        val ctx = appContext ?: return false
+        if (!micGranted(ctx)) return false
+        if (_state.value !is UiState.Live) return false
+        val factory = mullu.comrade.call.CallManager.sharedFactory(ctx) ?: return false
+        if (streamAudioTrack == null) {
+            val source = runCatching { factory.createAudioSource(org.webrtc.MediaConstraints()) }
+                .onFailure { Log.w(TAG, "could not open the microphone", it) }
+                .getOrNull() ?: return false
+            streamAudioSource = source
+            streamAudioTrack = factory.createAudioTrack(STREAM_AUDIO_ID, source)
+        }
+        StreamTransfer.localAudio = streamAudioTrack
+        // Already negotiated with our voice on it: nothing to do but let
+        // [applyMic] unmute the track.
+        if (StreamTransfer.active && StreamTransfer.sendingAudio) return true
+        // Connected, but our track was not on the wire when it was negotiated —
+        // the permission arrived afterwards. Renegotiating means tearing this
+        // connection down and offering a new one, which is fine for a voice
+        // channel and **not** fine while a picture is arriving on it: ending it
+        // would take away the film to add a microphone. That case waits.
+        if (_remoteVideo.value != null) return false
+        return StreamTransfer.offer(ctx, _localVideo.value, streamAudioTrack)
+    }
+
+    /** Whether the microphone has been granted, asked exactly where it is used. */
+    private fun micGranted(ctx: Context): Boolean =
+        ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Which of the two ways [toggleMic] can say no this is.
+     *
+     * They need different answers and the screen cannot tell them apart from a
+     * `false`: a missing permission gets the system dialog, and the other case —
+     * a picture already arriving on the only connection there is, which
+     * renegotiating would take away — gets a sentence, because there is nothing
+     * to tap.
+     */
+    fun micNeedsPermission(context: Context): Boolean = !micGranted(context.applicationContext)
+
+    /**
+     * Put the voice channel back after the session it rode on was replaced.
+     *
+     * Signalling rides the session envelope, so replacing what is playing takes
+     * the connection with it — see [beginSession]. Without this, talking would
+     * end every time somebody pressed next, which is the opposite of what a
+     * pairing is for.
+     */
+    private fun reopenVoice() {
+        val ctx = appContext ?: return
+        if (!_micEnabled.value) return
+        if (StreamTransfer.active && StreamTransfer.sendingAudio) return
+        if (!startTalking(ctx)) return
+        applyMic(true)
     }
 
     private val _openFailed = MutableStateFlow(false)
@@ -389,6 +595,36 @@ object TogetherManager {
             ?: recording?.let { titleOf(it) }.orEmpty()
         _state.value = UiState.Invited(peer, peerLabel, title, youtube, contentKind)
 
+        // The next thing from the person we were *just* listening with is the
+        // next track, not a new request — so it is answered rather than asked
+        // about (`TogetherDecisions.continuesSession`, which is where the rule
+        // and its one exclusion live). Being asked once per song is the thing
+        // that made this tab unusable as a music player.
+        //
+        // Below the `youtube` and `stream` returns on purpose: those two are
+        // deliberately never auto-joined *cold*, and this is the warm case.
+        if (
+            TogetherDecisions.continuesSession(
+                pairing = _pairing.value,
+                fromNpub = peer,
+                contentKind = contentKind,
+                endedAtMs = pairingEndedAtMs,
+                nowMs = System.currentTimeMillis(),
+            )
+        ) {
+            if (youtube) {
+                joinEmbed(context)
+                return
+            }
+            // A copy we already hold is better than one we pull over the wire,
+            // so the library is still asked first — it is only the *question*
+            // that is skipped, never the lookup.
+            val here = recording
+                ?.let { runCatching { LibraryResolver.resolve(context, it, durationMs) }.getOrNull() }
+            if (here != null) join(context, here.uri) else askForTheirCopy(context)
+            return
+        }
+
         // A YouTube invitation is deliberately **not** auto-joined, even though
         // this device could certainly play it and no library lookup is needed.
         // Opening a video and starting to report a playhead is agreeing to watch
@@ -405,6 +641,12 @@ object TogetherManager {
         if (stream != null || recording == null || youtube) return
         val found = runCatching { LibraryResolver.resolve(context, recording, durationMs) }.getOrNull()
         if (found != null) join(context, found.uri)
+    }
+
+    /** Remember who this session is with, from the invitation we are answering. */
+    private fun pairWith(invited: UiState.Invited) {
+        _pairing.value = TogetherDecisions.Pairing(invited.peer, invited.peerLabel)
+        pairingEndedAtMs = 0
     }
 
     /** `Artist — Title`, or just the title when the file named no artist. */
@@ -522,8 +764,43 @@ object TogetherManager {
     }
 
     fun onEnded(byPeer: Boolean) {
+        // Our own end, sent to make room for the next thing with the same
+        // person. It reaches us through the event channel and therefore lands
+        // *after* the `together_start` that replaced it, so acting on it would
+        // tear down the session that is already running. See [pendingSelfEnds].
+        if (!byPeer && pendingSelfEnds > 0) {
+            if (System.currentTimeMillis() - pendingSelfEndsAtMs <= SELF_END_WINDOW_MS) {
+                pendingSelfEnds--
+                return
+            }
+            // Armed and never spent: `together_end` found nothing to end,
+            // because the session had already expired. Dropped rather than
+            // held, or this would swallow a real end later.
+            pendingSelfEnds = 0
+        }
         ShareTransfer.end()
         stopPlayback()
+        if (byPeer) {
+            // Held for a minute rather than dropped, because from this side a
+            // session ending and the next track being put on look identical —
+            // an `End` followed by a `Start`. Keeping the pairing is what makes
+            // the second one continue the evening instead of asking again, and
+            // the cost of being wrong is small: a fresh invitation from the
+            // same person inside a minute is answered rather than offered.
+            val at = System.currentTimeMillis()
+            pairingEndedAtMs = at
+            // And dropped when the window closes, which is not decoration. The
+            // pairing is also what [TogetherDecisions.startStep] reads to skip
+            // the who-with sheet, so a pairing left behind by somebody who
+            // genuinely walked away would mean a track picked ten minutes later
+            // silently invited them.
+            scope.launch {
+                delay(TogetherDecisions.PAIRING_GRACE_MS)
+                if (_state.value is UiState.Idle && pairingEndedAtMs == at) forgetPairing()
+            }
+        } else {
+            forgetPairing()
+        }
         _state.value = UiState.Idle
     }
 
@@ -547,6 +824,8 @@ object TogetherManager {
     fun askForTheirCopy(context: Context) {
         appContext = context.applicationContext
         val invited = _state.value as? UiState.Invited ?: return
+        pairWith(invited)
+        _queue.value = null
         runCatching { ComradeCore.togetherJoinTyped() }
             .onFailure { Log.w("TogetherManager", "join before asking failed", it) }
         _state.value = UiState.Live(
@@ -564,6 +843,14 @@ object TogetherManager {
             status = Status.OpenYourCopy,
         )
         ShareTransfer.ask()
+        // **This route did not do this, and [startService]'s own comment claimed
+        // every route out of `Invited` did.** Survivable while it was the
+        // secondary "I don't have it" answer; not survivable now that it is what
+        // Join does for a local file (`TogetherDecisions.joinAction`) — without
+        // it the invitation stays in the shade after being answered, and the
+        // transfer and the playback that follows run with no foreground service
+        // to keep them alive when the app goes to the background.
+        startService()
     }
 
     /** What the handover is doing, for the screen. Null when nothing is. */
@@ -636,14 +923,51 @@ object TogetherManager {
 
     // ── Outgoing, from this device ──────────────────────────────────────────
 
+    /**
+     * Make room for something new without letting go of the person.
+     *
+     * Every route that opens a session goes through here, and it is the whole
+     * of "pick a person once". `together_start` refuses while a session exists,
+     * so putting a second track on genuinely is an end and a start on the wire —
+     * what makes it one evening rather than two is that the pairing survives it
+     * here, and that the other side recognises the invitation that follows
+     * ([TogetherDecisions.continuesSession]).
+     *
+     * The microphone survives too, which is why [stopPlayback] is told this is a
+     * replacement: a voice channel rides the session envelope and therefore dies
+     * with it, and losing the ability to talk every time somebody presses next
+     * would be the opposite of what a pairing is for. [reopenVoice] puts it
+     * back once the new session is live.
+     */
+    private fun beginSession(context: Context, peer: String, peerLabel: String) {
+        appContext = context.applicationContext
+        if (_state.value is UiState.Live) {
+            pendingSelfEnds++
+            pendingSelfEndsAtMs = System.currentTimeMillis()
+            runCatching { ComradeCore.togetherEndTyped() }
+                .onFailure { Log.w(TAG, "could not end the last thing before the next", it) }
+            ShareTransfer.end()
+            stopPlayback(replacing = true)
+        }
+        _pairing.value = TogetherDecisions.Pairing(peer, peerLabel)
+        pairingEndedAtMs = 0
+    }
+
+    /**
+     * @param queue the list this track came out of, so prev and next mean
+     *   something. Null for every source that is one thing rather than a list,
+     *   which is the honest answer for a pasted link or a file from the picker.
+     */
     fun start(
         context: Context,
         peer: String,
         peerLabel: String,
         uri: Uri,
         recording: uniffi.comrade_core.Recording?,
+        queue: TogetherDecisions.Queue? = null,
     ) {
-        appContext = context.applicationContext
+        beginSession(context, peer, peerLabel)
+        _queue.value = queue
         val title = recording?.title.orEmpty()
         openPlayer(uri) { durationMs ->
             ComradeCore.togetherStartTyped(
@@ -677,7 +1001,8 @@ object TogetherManager {
      * that), and no handover to offer.
      */
     fun startEmbed(context: Context, peer: String, peerLabel: String, videoId: String) {
-        appContext = context.applicationContext
+        beginSession(context, peer, peerLabel)
+        _queue.value = null
         openEmbed(videoId)
         runCatching {
             ComradeCore.togetherStartTyped(peer, uniffi.comrade_core.TogetherContent.Youtube(videoId))
@@ -735,7 +1060,8 @@ object TogetherManager {
         peerLabel: String,
         content: uniffi.comrade_core.TogetherContent.Stream,
     ) {
-        appContext = context.applicationContext
+        beginSession(context, peer, peerLabel)
+        _queue.value = null
         ComradeCore.togetherStartTyped(peer, content)
         _state.value = UiState.Live(
             peer = peer,
@@ -771,6 +1097,7 @@ object TogetherManager {
         appContext = context.applicationContext
         val invited = _state.value as? UiState.Invited ?: return
         val content = wantedStream ?: return
+        pairWith(invited)
         runCatching { ComradeCore.togetherJoinTyped() }
             .onFailure { Log.w(TAG, "join failed", it) }
         _state.value = UiState.Live(
@@ -806,6 +1133,7 @@ object TogetherManager {
         appContext = context.applicationContext
         val invited = _state.value as? UiState.Invited ?: return
         val videoId = wantedVideoId ?: return
+        pairWith(invited)
         openEmbed(videoId)
         runCatching { ComradeCore.togetherJoinTyped() }
             .onFailure { Log.w(TAG, "join failed", it) }
@@ -867,8 +1195,10 @@ object TogetherManager {
         val p = ExternalSessionPlayer(context)
         p.setListener(externalListener)
         if (!p.bind()) return FollowRefusal.NothingPlaying
+        pairWith(invited)
         player?.release()
         player = p
+        _queue.value = null
         openedPath = null
         openedUri = null
         openedDurationMs = 0
@@ -940,6 +1270,7 @@ object TogetherManager {
     fun join(context: Context, uri: Uri) {
         appContext = context.applicationContext
         val invited = _state.value as? UiState.Invited ?: return
+        pairWith(invited)
         openPlayer(uri) { durationMs ->
             ComradeCore.togetherJoinTyped()
             _state.value = UiState.Live(
@@ -994,9 +1325,75 @@ object TogetherManager {
     }
 
     fun leave() {
+        // Cleared first: this end is the user's, so the next `TogetherEnded`
+        // must be acted on rather than swallowed as a replacement's.
+        pendingSelfEnds = 0
         runCatching { ComradeCore.togetherEndTyped() }
         stopPlayback()
+        forgetPairing()
         _state.value = UiState.Idle
+    }
+
+    /** The pairing is over — not paused between tracks, over. */
+    private fun forgetPairing() {
+        _pairing.value = null
+        pairingEndedAtMs = 0
+        _queue.value = null
+    }
+
+    // ── The queue ───────────────────────────────────────────────────────────
+
+    /**
+     * Play a track from this phone's library to whoever we are paired with.
+     *
+     * The queue is the list it was picked out of, so prev and next mean the
+     * list the person was looking at rather than the whole library.
+     */
+    fun playTrack(
+        context: Context,
+        pairing: TogetherDecisions.Pairing,
+        track: TogetherDecisions.Track,
+        queue: List<TogetherDecisions.Track>,
+    ): Boolean = runCatching {
+        start(
+            context = context,
+            peer = pairing.npub,
+            peerLabel = pairing.label,
+            uri = Uri.parse(track.uri),
+            recording = MusicLibrary.recordingOf(track),
+            queue = TogetherDecisions.queueFrom(queue, track.uri),
+        )
+    }.onFailure { Log.w(TAG, "could not play that track", it) }.isSuccess
+
+    /** The next track in the queue, to the same person. A no-op at the end of it. */
+    fun skipForward(context: Context) {
+        val pairing = _pairing.value ?: return
+        val at = _queue.value ?: return
+        val moved = TogetherDecisions.movedTo(at, at.index + 1) ?: return
+        val track = moved.current ?: return
+        playTrack(context, pairing, track, moved.tracks)
+    }
+
+    /**
+     * Back — which is two different things, and
+     * [TogetherDecisions.backStep] is what tells them apart.
+     *
+     * Restarting goes through [setState] like every other transport command, so
+     * the other person follows it; moving to the previous track replaces the
+     * content, exactly as [skipForward] does.
+     */
+    fun skipBack(context: Context) {
+        val live = _state.value as? UiState.Live ?: return
+        when (val step = TogetherDecisions.backStep(_queue.value, live.positionMs)) {
+            TogetherDecisions.Back.Restart -> setState(0, live.playing)
+            is TogetherDecisions.Back.Previous -> {
+                val pairing = _pairing.value ?: return
+                val at = _queue.value ?: return
+                val moved = TogetherDecisions.movedTo(at, step.index) ?: return
+                val track = moved.current ?: return
+                playTrack(context, pairing, track, moved.tracks)
+            }
+        }
     }
 
     /**
@@ -1148,6 +1545,8 @@ object TogetherManager {
         openedPath = null
         openedUri = null
         openedDurationMs = 0
+        playingVideoId = videoId
+        _embedFailure.value = null
         val p = YoutubeSessionPlayer(videoId)
         p.setListener(object : YoutubeSessionPlayer.Listener {
             override fun onPrepared(durationMs: Long) {
@@ -1173,8 +1572,20 @@ object TogetherManager {
                 refreshLive(playing = playing, positionMs = posMs)
             }
 
+            /**
+             * Said on screen, with a way out.
+             *
+             * It used to go to logcat and nowhere else, which left the session
+             * sitting under YouTube's own "This video is unavailable" panel
+             * still claiming to be waiting for the other person to open
+             * something that was never going to open. The panel is theirs and
+             * §11a is why we may not replace it — but this side's answer to it
+             * is ours, and the common case (a video its owner does not allow
+             * outside YouTube) has a genuinely useful next step.
+             */
             override fun onError(message: String) {
                 Log.w(TAG, "embed: $message")
+                _embedFailure.value = TogetherDecisions.embedFailure(message)
             }
         })
         player = p
@@ -1288,12 +1699,20 @@ object TogetherManager {
         // The audio track exists whether or not the capture started: it is what
         // carries the sender's voice, and the microphone is worth sending even
         // when the film's sound is not going anywhere.
-        val audioSource = factory.createAudioSource(org.webrtc.MediaConstraints())
-        val audioTrack = factory.createAudioTrack(STREAM_AUDIO_ID, audioSource).apply {
-            setEnabled(true)
+        //
+        // Reused rather than rebuilt when a voice channel already opened one —
+        // a second `AudioSource` over the same microphone is a leak of the
+        // first, and there is exactly one outgoing audio track in every mode.
+        val audioTrack = streamAudioTrack ?: run {
+            val audioSource = factory.createAudioSource(org.webrtc.MediaConstraints())
+            streamAudioSource = audioSource
+            factory.createAudioTrack(STREAM_AUDIO_ID, audioSource).also { streamAudioTrack = it }
         }
-        streamAudioSource = audioSource
-        streamAudioTrack = audioTrack
+        // Enabled unconditionally here, unlike the voice-only case: this track
+        // carries the film's own sound, and `micEnabled` decides only whether
+        // the voice is summed into it.
+        runCatching { audioTrack.setEnabled(true) }
+        StreamTransfer.localAudio = audioTrack
 
         if (!StreamTransfer.offer(ctx, _localVideo.value, audioTrack)) {
             Log.w(TAG, "could not offer the stream")
@@ -1305,6 +1724,9 @@ object TogetherManager {
     /** Tear the outgoing picture down. Safe to call twice, and from any thread. */
     private fun stopVideoCapture() {
         StreamTransfer.end()
+        // Before the track is disposed: a connection negotiated later must not
+        // be handed one that has been released.
+        StreamTransfer.localAudio = null
         _remoteVideo.value = null
         streamAudioTrack?.let { runCatching { it.dispose() } }
         streamAudioTrack = null
@@ -1483,7 +1905,14 @@ object TogetherManager {
         )
     }
 
-    private fun stopPlayback() {
+    /**
+     * @param replacing whether the session is being swapped for another with the
+     *   same person, rather than genuinely ending. The difference is the
+     *   microphone: it is the user's standing choice about the room they are
+     *   in, not a property of whichever track happens to be on, so pressing next
+     *   must not silently mute them.
+     */
+    private fun stopPlayback(replacing: Boolean = false) {
         pollJob?.cancel()
         pollJob = null
         player?.release()
@@ -1499,14 +1928,16 @@ object TogetherManager {
         AudioInjection.install(null)
         capture?.stop()
         capture = null
-        _micEnabled.value = false
+        if (!replacing) _micEnabled.value = false
         stopVideoCapture()
         wanted = null
         wantedMs = 0
         wantedVideoId = null
         wantedStream = null
+        playingVideoId = null
         invitedKind = ""
         _openFailed.value = false
+        _embedFailure.value = null
         scrub = TogetherDecisions.ScrubState(scrubbing = false, pendingRemoteMs = null)
         abandonAudioFocus()
         stopService()
@@ -1561,6 +1992,11 @@ object TogetherManager {
         // invitation must leave the shade whether or not this build runs the
         // service, and every route out of `Invited` passes through here.
         appContext?.let { Notifier.clearTogetherInvite(it) }
+        // A voice channel rides the session envelope, so replacing what is
+        // playing takes it with it. Put back here, the one point every live
+        // route passes through, so talking survives pressing next. A no-op
+        // whenever the microphone is off, which is its default.
+        reopenVoice()
         if (disableServiceForTest) return
         val ctx = appContext ?: return
         TogetherService.start(ctx)
