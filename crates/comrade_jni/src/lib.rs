@@ -75,6 +75,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+use comrade_core::catalogue::{AudioPlan, CatalogueMatch};
 use comrade_core::crypto::KeyProfile;
 use comrade_core::handoff::{AttachmentRoute, HandoffSignal};
 use comrade_core::share::transport::RelayPolicy;
@@ -85,11 +86,11 @@ use comrade_ui::{
     AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
-    JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto,
-    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadSample,
-    ReadVerdict, ReadingDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto, TaskState,
-    TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    JournalEntryDto, LibraryCandidateDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
+    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto,
+    PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto,
+    ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
+    TaskState, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1110,6 +1111,45 @@ impl Comrade {
         comrade_ui::play_route(plan, found_local_copy, link, access)
     }
 
+    /// Ask a public catalogue what recording `query` names.
+    ///
+    /// The one call on this path that reaches a third party, so it is `async`
+    /// (Kotlin sees a `suspend fun`) and must never be driven from a UI thread —
+    /// `TogetherManager`'s outbound queue is the pattern, and the ANR fixed in
+    /// `eb30e02` is what happens otherwise.
+    ///
+    /// Only the query text leaves the device. An empty result means the catalogue
+    /// has no such recording; [`UiError::CatalogueUnavailable`] means this build
+    /// cannot search at all (`catalogue-http` off) and a UI must not render it as
+    /// "not found". Needs no vault.
+    /// **Takes no lock at all**, which is deliberate rather than an oversight.
+    /// `comrade_ui::catalogue_lookup` is a free function precisely so that this
+    /// wrapper cannot hold a guard across a network round trip — the rule in
+    /// `.claude/rules/rust.md` that two shipped deadlocks came from. A method on
+    /// the runtime would have made the lock unavoidable, because the returned
+    /// future would borrow the guard.
+    pub async fn catalogue_lookup(&self, query: String) -> Result<Vec<CatalogueMatch>, UiError> {
+        comrade_ui::catalogue_lookup(&query).await
+    }
+
+    /// Which tier will supply a recording this device does not have.
+    ///
+    /// The rung below [`Self::play_route`]'s `AskForFile`: given what the
+    /// catalogue said and whether the peer offered a copy, pick the first tier
+    /// that can actually supply the bytes. Pure, so it takes no lock and reaches
+    /// no network — the licence gate is applied inside, and a caller cannot
+    /// bypass it by passing a URL it liked the look of.
+    pub fn audio_plan(
+        &self,
+        want: Recording,
+        want_ms: u64,
+        library: Vec<LibraryCandidateDto>,
+        peer_has_it: bool,
+        catalogue: Vec<CatalogueMatch>,
+    ) -> AudioPlan {
+        comrade_ui::audio_plan(want, want_ms, library, peer_has_it, catalogue)
+    }
+
     /// Name a piece of work. `peer` of `None` is a note to self, which never
     /// touches a relay.
     pub async fn assign_task(
@@ -2006,6 +2046,28 @@ mod tests {
         let status = c.turn_server_status();
         assert!(!status.configured);
         assert_eq!(status.url, None);
+    }
+
+    /// The catalogue rung is reachable through the FFI object and works
+    /// **before unlock** — a search box that demanded a vault to tell you what a
+    /// song is called would be an odd thing to ship.
+    /// No `is_vault_unlocked()` assertion here, deliberately: that method uses
+    /// `blocking_read`, which panics inside a Tokio runtime by design (see the
+    /// module header's listener-callback invariant), and this is a
+    /// `#[tokio::test]`. The vault is untouched because nothing unlocked it.
+    #[tokio::test]
+    async fn the_catalogue_rung_is_reachable_before_unlock() {
+        let c = isolated();
+
+        // Empty query: no socket, no error.
+        assert_eq!(c.catalogue_lookup("  ".into()).await.unwrap(), Vec::new());
+
+        // And the pure half decides a tier with no vault and no network.
+        let want = Recording::titled("Kun Faya Kun");
+        assert_eq!(
+            c.audio_plan(want, 470_000, Vec::new(), true, Vec::new()),
+            AudioPlan::Peer
+        );
     }
 
     #[tokio::test]

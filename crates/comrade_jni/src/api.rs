@@ -692,6 +692,8 @@ pub enum _UiError {
     Storage(String),
     VaultLocked,
     Engine(String),
+    Catalogue(String),
+    CatalogueUnavailable,
 }
 
 // ── Stateless helpers (no runtime needed) ────────────────────────────────────

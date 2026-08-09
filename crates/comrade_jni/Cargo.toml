@@ -83,6 +83,10 @@ default = []
 # the Android build can actually send/receive attachments. The APK workflows
 # pass `--features media-http`; the lean workspace test build leaves it off.
 media-http = ["comrade_ui/media-http"]
+# Turn on the real catalogue lookup so the Android build can actually search for
+# a recording by name. The APK workflows pass `--features media-http,catalogue-http`;
+# the lean workspace test build leaves both off and exercises the offline paths.
+catalogue-http = ["comrade_ui/catalogue-http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

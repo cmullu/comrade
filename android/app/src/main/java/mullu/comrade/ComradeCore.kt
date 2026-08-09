@@ -139,10 +139,16 @@ object ComradeCore {
         is UiException.Crypto -> v1
         is UiException.Storage -> v1
         is UiException.Engine -> v1
+        is UiException.Catalogue -> v1
+        // Deliberately not "nothing found" — see `CatalogueResult.Unavailable`.
+        // Callers that can tell the two apart should use that instead of this
+        // sentence; this is the fallback for anywhere the distinction is lost.
+        is UiException.CatalogueUnavailable -> "This build cannot search for music."
         // No `else` on purpose. `UiException` is a sealed hierarchy generated
         // from `UiError`, so adding a variant in Rust should break *this*
         // compile and make someone word the new failure — the alternative is a
-        // fallback branch that silently starts printing `v1=` again.
+        // fallback branch that silently starts printing `v1=` again. It has now
+        // done that once, for these two, which is the comment working.
     }
 
     // ── Library / crypto helpers (no store required) ─────────────────────────
@@ -706,6 +712,65 @@ object ComradeCore {
         access: uniffi.comrade_core.ServiceAccess = serviceAccess(),
     ): uniffi.comrade_ui.PlayRoute? =
         runCatching { ffi.playRoute(plan, foundLocalCopy, link, access) }.getOrNull()
+
+    /**
+     * A finished catalogue search, in the three shapes the screen has to tell
+     * apart.
+     *
+     * **Not a `Result<List<…>>`**, and that is the whole reason this type exists:
+     * a `Result` collapses [Unavailable] into [Failed], and those two are the one
+     * pair that must never be rendered the same way. `UiError::CatalogueUnavailable`
+     * means this build cannot search; anything else means the search itself went
+     * wrong. Telling somebody their song does not exist because a Cargo feature
+     * is off is a wrong answer delivered confidently.
+     */
+    sealed interface CatalogueResult {
+        data class Found(val matches: List<uniffi.comrade_core.CatalogueMatch>) : CatalogueResult
+
+        /** `catalogue-http` is off in this build. Not a failure of the query. */
+        data object Unavailable : CatalogueResult
+
+        data class Failed(val reason: String) : CatalogueResult
+    }
+
+    /**
+     * Ask a public catalogue what `query` names.
+     *
+     * **Suspends, and must be called off the main thread.** It is the only call
+     * on this path that reaches a third party, and a `runBlocking` wrapper around
+     * it from a click handler is precisely the ANR fixed in `eb30e02` — see
+     * `docs/TOGETHER.md` §17. There is deliberately no non-suspend variant to
+     * reach for.
+     *
+     * Only the query text leaves the device.
+     */
+    suspend fun catalogueLookup(query: String): CatalogueResult =
+        try {
+            CatalogueResult.Found(ffi.catalogueLookup(query))
+        } catch (_: UiException.CatalogueUnavailable) {
+            // Caught by *type*, not by matching on a message: the sentence is
+            // free to be reworded, and a string match would silently start
+            // reporting "search failed" the day somebody improved the wording.
+            CatalogueResult.Unavailable
+        } catch (e: UiException) {
+            CatalogueResult.Failed(e.humanMessage())
+        }
+
+    /**
+     * Which tier will supply a recording, once the catalogue has answered.
+     *
+     * Pure and synchronous — no lock, no network. `null` on failure rather than a
+     * default tier, for [playRoute]'s reason: every tier carries a different
+     * sentence, and defaulting to one would promise something.
+     */
+    fun audioPlan(
+        want: uniffi.comrade_core.Recording,
+        wantMs: ULong,
+        library: List<uniffi.comrade_ui.LibraryCandidateDto>,
+        peerHasIt: Boolean,
+        catalogue: List<uniffi.comrade_core.CatalogueMatch>,
+    ): uniffi.comrade_core.AudioPlan? =
+        runCatching { ffi.audioPlan(want, wantMs, library, peerHasIt, catalogue) }.getOrNull()
 
     /**
      * What this device is signed in to and may drive playback on.

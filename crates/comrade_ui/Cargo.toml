@@ -33,6 +33,11 @@ default = []
 # the underlying core. Frontends that ship media (e.g. the Tauri desktop) turn
 # this on; the workspace test build leaves it off and exercises the offline path.
 media-http = ["comrade_core/media-http"]
+# Enable the real catalogue lookup (MusicBrainz over HTTPS) in the underlying
+# core. Same argument as `media-http`: the pure parts — query shaping, the tier
+# ladder, the licence gate — are always compiled and always tested, and only the
+# socket is behind the flag. A frontend that ships search turns this on.
+catalogue-http = ["comrade_core/catalogue-http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

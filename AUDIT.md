@@ -1128,6 +1128,30 @@ is small; the content problem is the real constraint:
 >   cover `Join` or `End`, which are one-shot and have no ladder behind them. A
 >   `Join` lost this way leaves the inviter on "waiting for them to open it"
 >   forever, which is a reported symptom.
+> - **A whole tested module was reachable from nothing, and no lane noticed.**
+>   Found and closed 2026-08-09 (`docs/TOGETHER.md` §20). `comrade_core::catalogue`
+>   had a resolver trait, a MusicBrainz adapter, the four-tier ladder, a licence
+>   gate applied before any fetch, and its own `catalogue-http` CI lane — and not
+>   one caller. No `comrade_ui` method, no FFI export, no screen. It is now wired
+>   end to end behind Together's search card (`comrade_ui::catalogue_lookup` and
+>   `audio_plan`, both exported over uniffi and frb), and the `catalogue-http`
+>   lanes were widened from `comrade_core` alone to `comrade_ui` and `comrade_jni`
+>   as well, since the lookup is two `#[cfg]` branches of which a core-only lane
+>   type-checks neither.
+>   **The class is the interesting part and it is not closed.** "Tested" and
+>   "reachable" are independent properties, nothing here checks the second, and
+>   this is the same shape as the skipping two-peer test one layer up: a green
+>   tick over code no caller can get to. A dead-code sweep over `pub` items in
+>   `comrade_core` that no frontend and no test-outside-the-module calls would
+>   find the rest, and is not written.
+> - **`catalogue.rs`'s no-pluggable-source-tier decision was reversed by the
+>   owner** on 2026-08-09, to make Together a BlackHole-shaped player. Recorded in
+>   that module's header rather than left as a comment contradicting the code —
+>   *"a comment asserting a guarantee the code does not provide is a bug"*. The
+>   §1201/InfoSoc-Art.6/§65A analysis is kept, because it is now the reason the
+>   tier ships pluggable **and empty**: the seam is provided, a circumvention
+>   adapter is not. No adapter for the new tier is written; that is named as
+>   missing in §20 rather than implied to exist.
 > - **A two-peer lane existed and had never run — and when it finally ran it was
 >   testing one peer twice.** Fixed 2026-08-09 (`docs/TOGETHER.md` §19), in two
 >   rounds, because the first round only revealed the second problem.

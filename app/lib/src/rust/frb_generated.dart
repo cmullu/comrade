@@ -3951,6 +3951,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return UiError_Engine(
           dco_decode_String(raw[1]),
         );
+      case 8:
+        return UiError_Catalogue(
+          dco_decode_String(raw[1]),
+        );
+      case 9:
+        return UiError_CatalogueUnavailable();
       default:
         throw Exception('unreachable');
     }
@@ -5546,6 +5552,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 7:
         final var_field0 = sse_decode_String(deserializer);
         return UiError_Engine(var_field0);
+      case 8:
+        final var_field0 = sse_decode_String(deserializer);
+        return UiError_Catalogue(var_field0);
+      case 9:
+        return UiError_CatalogueUnavailable();
       default:
         throw UnimplementedError('');
     }
@@ -6899,6 +6910,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case UiError_Engine(field0: final field0):
         sse_encode_i_32(7, serializer);
         sse_encode_String(field0, serializer);
+      case UiError_Catalogue(field0: final field0):
+        sse_encode_i_32(8, serializer);
+        sse_encode_String(field0, serializer);
+      case UiError_CatalogueUnavailable():
+        sse_encode_i_32(9, serializer);
     }
   }
 

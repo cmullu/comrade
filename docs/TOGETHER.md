@@ -2370,3 +2370,116 @@ everything and this covers one layer of it:
 So: the protocol and the bindings are now checked between two peers on every
 push. The session layer and the media path are not, and no green tick in this
 repo should be read as saying otherwise.
+
+## 20. Search by name, and the tier that is now pluggable
+
+_Added 2026-08-09, at the owner's request to make Together "primarily like
+BlackHole" — a music player first, with listening together as a mode of it._
+
+BlackHole's architecture is a client plus a metadata/search layer plus
+third-party source adapters plus a downloader. Most of that already existed here
+under different names, and the mapping is worth writing down because the gap was
+much smaller than it looked:
+
+| BlackHole | Comrade |
+| --- | --- |
+| Local library | `together/MusicLibrary.kt` (MediaStore paging, artwork, byte-sized LRU) |
+| Player UI | `PlayerHome` · `LibraryBrowser` · `Transport` · `Cover`/`Sleeve` |
+| Search / metadata | `comrade_core::catalogue` — **existed, tested, and reachable from nothing** |
+| Source adapters | the four-tier ladder, §9 |
+| Streaming / download | `media-http`'s guards; no downloader yet |
+| Playlist DB, favourites, queue, history | **nothing at all** — still the real hole |
+| Listen together | the session protocol, §§1–8 |
+
+### The search layer was already written and wired to nothing
+
+`catalogue.rs` had `CatalogueResolver`, a MusicBrainz adapter, `Recording` with
+an ISRC field, `choose_audio_plan`, a licence gate, `MAX_CANDIDATES`, and its own
+CI lane under `catalogue-http`. What it did not have was a single caller: no
+`comrade_ui` method, no FFI export, no screen. A module can be fully tested and
+still be dead code, and nothing in this repo notices — the same shape as §19's
+skipping test, one layer up.
+
+It is now reachable end to end: `comrade_ui::catalogue_lookup` (the one call that
+touches a socket) and `comrade_ui::audio_plan` (pure), both exported over uniffi
+and flutter_rust_bridge, behind Together's fourth source card.
+
+**Both are free functions, not `ComradeRuntime` methods, and that is load-bearing
+rather than stylistic.** A method's returned future borrows the guard, so a
+wrapper *cannot* release the lock before awaiting a network round trip — the
+shape of the two deadlocks this repo has already fixed. Making them free
+functions removes the lock from the type system's point of view, so the mistake
+is not available.
+
+### "Cannot search" and "not found" are different sentences
+
+`UiError::CatalogueUnavailable` exists because `catalogue-http` is off in the
+lean test build, and a lookup there cannot reach a socket. Returning an empty
+list would render as *"we searched and that song does not exist"* — a wrong
+answer, silently produced, from a Cargo feature being off.
+
+So the distinction is carried the whole way: a distinct `UiError` variant, a
+distinct `ComradeCore.CatalogueResult.Unavailable` (which is why that is a sealed
+interface and not a `Result`, since a `Result` collapses exactly this pair), a
+distinct `TogetherDecisions.SearchOutcome.NoCatalogue`, and two different
+strings. The JVM test `aBuildWithNoCatalogueIsNotTheSameAsARecordingThatDoesNotExist`
+is what stops them merging back together.
+
+Adding the two variants also broke two exhaustive matches on purpose — the Kotlin
+`when` in `ComradeCore.humanMessage` and the Dart `switch` in
+`describeUiError` — which is the mechanism `ComradeCore`'s own comment says it
+wants ("adding a variant in Rust should break *this* compile"). It has now done
+that once, which is the comment working rather than a nuisance.
+
+### What a search can actually do today
+
+The catalogue answers *what the recording is*. `audio_plan` then picks the tier,
+and this screen can act on exactly one of the four: `Library`. The catalogue
+supplies the proper title and artist, `LibraryResolver` searches `MediaStore` for
+it — using `comrade_core::together::match_score`, **not** a second scorer in the
+screen, which an earlier draft of this work did have and which is the drift
+`TogetherDecisions`' header exists to prevent — and a session opens on the copy
+already on the phone.
+
+The other three tiers are named honestly and have no button behind them yet.
+A search that finds the song but no local copy says *"found the song, but no copy
+of it on this phone"* rather than opening the nearest thing: `MATCH_CONFIDENT`
+exists so that guessing on somebody's behalf is not what happens.
+
+### The extractor tier: a decision reversed, on the record
+
+`catalogue.rs`'s header argued against a pluggable `AudioSource` trait at all, so
+that a DRM tier "would have to be written from scratch by whoever wanted it". **On
+2026-08-09 the owner decided to add the seam**, and that reversal is recorded in
+that header rather than left as a contradiction between a comment and the code.
+
+The original analysis is not deleted, because it is still why the tier ships
+**pluggable and empty**: obtaining audio from a service that does not serve it
+unencrypted means defeating a protection measure, which is a liability distinct
+from infringement (DMCA §1201, EU InfoSoc Art. 6, India's Copyright Act §65A).
+The seam is provided; a circumvention adapter is not, and is not going to be
+written here. Whoever wants one writes it against the interface and owns that
+decision, which is a better place for it than an absence that reads as an
+oversight.
+
+The maintenance argument stands on its own and is the practical reason to prefer
+a separately-maintained extractor to bytes parsed here: an extractor depends on
+internals its upstream may change without notice, so a hand-rolled one inherits
+that tail forever. This is the thing that breaks while the playlists, the UI and
+the player are all fine.
+
+### What is still missing, plainly
+
+- **Playlists, favourites, queue and history.** Nothing. This is the half that
+  makes it a music player rather than a session tool, and it has no storage, no
+  FFI and no screen.
+- **A downloader and ID3 tagging.** The `OpenLicence` tier decides that a fetch
+  is permitted; nothing carries it out.
+- **Adapters for the pluggable tier.** The seam is the deliverable here; the
+  self-hosted sources worth having behind it (Subsonic/Navidrome/Jellyfin,
+  Funkwhale, open-licence archives) are not written.
+- **A second catalogue.** `MUSICBRAINZ` is a constant in `TogetherScreen.kt`
+  because `CatalogueMatch` carries no source field. Adding a second resolver makes
+  that constant a lie, and the field has to move onto the match — stated as a
+  named constant with that comment rather than an inlined string so the next
+  person finds it.

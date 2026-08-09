@@ -541,6 +541,21 @@
     <string name="together_link_placeholder">Paste a link</string>
     <string name="together_link_go">Play this</string>
     <!-- Names what would work rather than what was wrong. -->
+    <!-- Searching a catalogue by name. The two "nothing" strings below are
+         deliberately different sentences: one is about this build, the other is
+         about the song. See TogetherDecisions.SearchOutcome. -->
+    <string name="together_source_search">Search by name</string>
+    <string name="together_source_search_note">Looks the song up online — the only source that leaves your phone</string>
+    <string name="together_search_explainer">Type a song and we\'ll ask a public music catalogue what it is, then look for your own copy of it. Only what you type is sent.</string>
+    <string name="together_search_placeholder">Song, or song and artist</string>
+    <string name="together_search_go">Search</string>
+    <string name="together_search_running">Searching…</string>
+    <string name="together_search_nothing_found">The catalogue has nothing by that name. Try the artist as well as the title.</string>
+    <string name="together_search_no_catalogue">This build can\'t search online. Your own music and links still work.</string>
+    <string name="together_search_failed">Couldn\'t search: %1$s</string>
+    <string name="together_search_result_subtitle">%1$s · from %2$s</string>
+    <string name="together_search_unknown_artist">Unknown artist</string>
+    <string name="together_search_not_on_phone">Found the song, but no copy of it on this phone. Pick a file, or ask the other person to send theirs.</string>
     <string name="together_link_refused">That isn’t something Comrade can play. A YouTube link works, or an https link that points straight at an audio or video file.</string>
     <string name="together_could_not_play">That didn’t play. If it was a link, it may not point straight at an audio or video file.</string>
 

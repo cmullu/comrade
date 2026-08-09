@@ -438,6 +438,7 @@ private sealed interface HomeStep {
     data object Choosing : HomeStep
     data object Browsing : HomeStep
     data object Linking : HomeStep
+    data object Searching : HomeStep
 }
 
 /**
@@ -535,6 +536,7 @@ private fun PlayerHome(
                 onBrowse = { step = HomeStep.Browsing },
                 onPickAFile = { chosen = Chosen.AFile },
                 onLink = { step = HomeStep.Linking },
+                onSearch = { step = HomeStep.Searching },
                 onClose = onClose,
             )
 
@@ -550,6 +552,11 @@ private fun PlayerHome(
             is HomeStep.Linking -> LinkField(
                 onBack = { step = HomeStep.Choosing },
                 onPlay = { link -> chosen = Chosen.Link(link) },
+            )
+
+            is HomeStep.Searching -> SearchByName(
+                onBack = { step = HomeStep.Choosing },
+                onPlay = { chosenTrack, shown -> chosen = Chosen.Track(chosenTrack, shown) },
             )
         }
     }
@@ -697,13 +704,14 @@ private fun startWith(
 
 private const val TAG = "TogetherScreen"
 
-/** The three ways in. */
+/** The four ways in. */
 @Composable
 private fun ChooseASource(
     libraryGranted: Boolean,
     onBrowse: () -> Unit,
     onPickAFile: () -> Unit,
     onLink: () -> Unit,
+    onSearch: () -> Unit,
     onClose: (() -> Unit)?,
 ) {
     Column(
@@ -775,6 +783,16 @@ private fun ChooseASource(
                     title = stringResource(R.string.together_source_link),
                     subtitle = stringResource(R.string.together_source_link_note),
                     onClick = onLink,
+                )
+
+                is TogetherDecisions.Source.SearchByName -> SourceCard(
+                    icon = Icons.Filled.Search,
+                    title = stringResource(R.string.together_source_search),
+                    // Says out loud that this one leaves the phone. It is the
+                    // only source that does, and a person choosing between four
+                    // cards should not have to read the source to learn that.
+                    subtitle = stringResource(R.string.together_source_search_note),
+                    onClick = onSearch,
                 )
             }
         }
@@ -1146,6 +1164,243 @@ private fun LinkField(onBack: () -> Unit, onPlay: (TogetherDecisions.Link) -> Un
             )
         }
     }
+}
+
+/**
+ * Search a public catalogue by name, and play whichever local copy it turns out
+ * to mean.
+ *
+ * **This screen finds a *recording*, not audio**, and the distinction is the
+ * whole design. `catalogue_lookup` answers "what is that song" — title, artist,
+ * album, ISRC when known — and `audio_plan` then decides where the bytes come
+ * from. What this build can act on today is the `library` tier: the catalogue
+ * tells us the proper name, `MediaStore` is searched for it, and a session opens
+ * on the copy already on the phone. The other three tiers are named honestly and
+ * do not pretend to be buttons that work — see [TogetherDecisions.CandidateAction]
+ * and `catalogue.rs`'s header for why `EmbedOrNameIt` is a floor rather than a
+ * gap.
+ *
+ * Every decision here is [TogetherDecisions]', which the JVM lane pins: the five
+ * outcomes, the tier naming, and — the one that matters most — that "this build
+ * cannot search" never renders as "no such song".
+ */
+@Composable
+private fun SearchByName(
+    onBack: () -> Unit,
+    onPlay: (TogetherDecisions.Track, List<TogetherDecisions.Track>) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var query by remember { mutableStateOf("") }
+    var outcome by remember {
+        mutableStateOf<TogetherDecisions.SearchOutcome>(TogetherDecisions.SearchOutcome.Idle)
+    }
+    // Kept alongside the drawn candidates so a tap can ask `audio_plan` about the
+    // same match the catalogue returned, rather than re-deriving one from the row.
+    var matches by remember {
+        mutableStateOf<List<uniffi.comrade_core.CatalogueMatch>>(emptyList())
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        BrowserHeader(stringResource(R.string.together_source_search), onBack)
+        Text(
+            stringResource(R.string.together_search_explainer),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TogetherMuted,
+        )
+        OutlinedTextField(
+            value = query,
+            onValueChange = {
+                query = it
+                // Clearing the field clears the answer. Leaving a previous
+                // result under an empty query invites playing the wrong song.
+                if (it.isBlank()) {
+                    outcome = TogetherDecisions.SearchOutcome.Idle
+                    matches = emptyList()
+                }
+            },
+            singleLine = true,
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+            placeholder = { Text(stringResource(R.string.together_search_placeholder)) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            enabled = query.isNotBlank() &&
+                outcome !is TogetherDecisions.SearchOutcome.Searching,
+            onClick = {
+                outcome = TogetherDecisions.SearchOutcome.Searching
+                scope.launch {
+                    // `Dispatchers.IO`, not the main thread: this is a relay-free
+                    // but genuinely networked call, and `runBlocking` on it from
+                    // a click handler is the ANR of docs/TOGETHER.md §17.
+                    val result = withContext(Dispatchers.IO) {
+                        ComradeCore.catalogueLookup(query)
+                    }
+                    matches = (result as? ComradeCore.CatalogueResult.Found)?.matches.orEmpty()
+                    outcome = TogetherDecisions.searchOutcome(
+                        unavailable = result is ComradeCore.CatalogueResult.Unavailable,
+                        error = (result as? ComradeCore.CatalogueResult.Failed)?.reason,
+                        candidates = matches.map { it.asCandidate() },
+                    )
+                }
+            },
+        ) {
+            Text(stringResource(R.string.together_search_go))
+        }
+
+        when (val shown = outcome) {
+            is TogetherDecisions.SearchOutcome.Idle -> Unit
+
+            is TogetherDecisions.SearchOutcome.Searching -> Text(
+                stringResource(R.string.together_search_running),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TogetherMuted,
+            )
+
+            // The two that must not read alike. This one is about the build.
+            is TogetherDecisions.SearchOutcome.NoCatalogue -> Text(
+                stringResource(R.string.together_search_no_catalogue),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TogetherMuted,
+            )
+
+            // …and this one is about the song.
+            is TogetherDecisions.SearchOutcome.NothingFound -> Text(
+                stringResource(R.string.together_search_nothing_found),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TogetherMuted,
+            )
+
+            is TogetherDecisions.SearchOutcome.Failed -> Text(
+                stringResource(R.string.together_search_failed, shown.reason),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+
+            is TogetherDecisions.SearchOutcome.Found -> Column {
+                shown.candidates.forEachIndexed { i, candidate ->
+                    CandidateRow(
+                        candidate = candidate,
+                        onClick = {
+                            val match = matches.getOrNull(i) ?: return@CandidateRow
+                            scope.launch {
+                                val opened = withContext(Dispatchers.IO) {
+                                    openLocalCopyOf(context, match)
+                                }
+                                if (opened == null) {
+                                    // No local copy above the confidence bar. Say
+                                    // so rather than opening the nearest thing —
+                                    // MATCH_CONFIDENT exists precisely so this
+                                    // asks instead of guessing.
+                                    outcome = TogetherDecisions.SearchOutcome.Failed(
+                                        context.getString(R.string.together_search_not_on_phone),
+                                    )
+                                } else {
+                                    onPlay(opened.first, opened.second)
+                                }
+                            }
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** One catalogue answer, with the catalogue that gave it named on the row. */
+@Composable
+private fun CandidateRow(candidate: TogetherDecisions.Candidate, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Icon(QueueMusicIcon, contentDescription = null, tint = TogetherMuted)
+        Column(Modifier.weight(1f)) {
+            Text(
+                candidate.title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = TogetherText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                // The catalogue is named on every row, not once at the top of the
+                // list: `CatalogueResolver::name`'s contract is that a guess
+                // presented without its source is worse than no guess, and a
+                // header scrolls away while the row does not.
+                stringResource(
+                    R.string.together_search_result_subtitle,
+                    candidate.artist.ifBlank { stringResource(R.string.together_search_unknown_artist) },
+                    candidate.catalogue,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = TogetherMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** [uniffi.comrade_core.CatalogueMatch] in the shape the pure decisions take. */
+private fun uniffi.comrade_core.CatalogueMatch.asCandidate() = TogetherDecisions.Candidate(
+    title = recording.title,
+    artist = recording.artist,
+    album = recording.album,
+    durationMs = durationMs?.toLong() ?: 0L,
+    catalogue = MUSICBRAINZ,
+    durationKnown = durationMs != null,
+)
+
+/**
+ * The catalogue behind [ComradeCore.catalogueLookup].
+ *
+ * Named here rather than plumbed through the FFI because there is exactly one
+ * resolver and `CatalogueMatch` carries no source field. **If a second catalogue
+ * is ever added, this constant becomes a lie and the field has to move onto the
+ * match** — which is the point of stating it as a constant with this comment
+ * rather than inlining the string at the call site.
+ */
+private const val MUSICBRAINZ = "MusicBrainz"
+
+/**
+ * Find this phone's own copy of `match`, or `null`.
+ *
+ * The `library` rung of `audio_plan`, carried out — and deliberately delegated
+ * to [LibraryResolver] rather than reimplemented. That object already supplies
+ * `MediaStore` candidates and applies `comrade_core::together::match_score`, so
+ * the "is this the same recording" judgement stays core's one answer instead of
+ * becoming a second opinion in this file. An earlier draft of this screen scored
+ * titles itself, which is exactly the drift `TogetherDecisions`' header exists to
+ * prevent.
+ *
+ * `null` covers both "no copy" and "nothing confident enough", deliberately:
+ * `MATCH_CONFIDENT` exists so that opening the wrong track on somebody's behalf
+ * is not a thing this does.
+ */
+private fun openLocalCopyOf(
+    context: Context,
+    match: uniffi.comrade_core.CatalogueMatch,
+): Pair<TogetherDecisions.Track, List<TogetherDecisions.Track>>? {
+    val wantMs = (match.durationMs ?: 0UL).toLong()
+    // Core decides which rung applies; this screen can only act on `library`.
+    // The other three are real answers with no button behind them yet, and the
+    // caller says so rather than silently doing nothing.
+    val resolved = LibraryResolver.resolve(context, match.recording, wantMs) ?: return null
+    val page = runCatching { MusicLibrary.page(context) }.getOrNull() ?: return null
+    // The queue is the library the person is choosing from, so prev/next mean
+    // that list — the same contract `LibraryBrowser` passes to `onPlay`.
+    val track = page.tracks.firstOrNull { it.uri == resolved.uri.toString() } ?: return null
+    return track to page.tracks
 }
 
 /**

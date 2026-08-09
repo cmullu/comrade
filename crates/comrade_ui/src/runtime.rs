@@ -110,6 +110,7 @@ fn relay_policy_to_prefs(policy: RelayPolicy) -> comrade_storage::SharePrefs {
         relay_limit_bytes: limit,
     }
 }
+use comrade_core::catalogue::{choose_audio_plan, AudioPlan, CatalogueMatch};
 use comrade_core::tara::{
     tara_chat_answer, tara_chat_line, CompanionEngine, JournalSignal, ReflectiveCompanion,
 };
@@ -117,8 +118,8 @@ use comrade_core::together::{
     command_apply, describe_state_change, direct_path_live, direct_signal_admissible,
     heartbeat_interval_ms, parse_together_envelope, projected_peer_pos_ms, session_is_live_at,
     signal_is_fresh, sync_verdict, ClockEcho, ClockFilter, CommandApply, CommandStamp,
-    PlayheadControl, StateChange, SyncSample, SyncVerdict, TogetherContent, TogetherEnvelope,
-    TogetherSignal, CLOCK_BURST_PROBES,
+    PlayheadControl, Recording, StateChange, SyncSample, SyncVerdict, TogetherContent,
+    TogetherEnvelope, TogetherSignal, CLOCK_BURST_PROBES,
 };
 use comrade_core::vault::{
     build_pay_regex, extract_upi_intents, PayRegex, VaultCallback, VaultEngine, VaultMessage,
@@ -731,6 +732,107 @@ pub fn play_route(
             }
         }
     }
+}
+
+/// Which tier will supply a recording this device does not have, decided
+/// without a network.
+///
+/// [`play_route`]'s `AskForFile` is the honest answer when all a caller has is
+/// its own library — but it is not the *last* answer, and this is the rung below
+/// it. Given what the catalogue said (see
+/// [`ComradeRuntime::catalogue_lookup`], the only part that touches a socket)
+/// and whether the other side offered a copy, [`choose_audio_plan`] picks the
+/// first tier that can actually supply the bytes: the peer, then an
+/// openly-licensed archive, then nothing but an embed.
+///
+/// Pure, so the whole policy is unit-tested with no network and no filesystem —
+/// and deliberately a thin pass-through rather than a second copy of the
+/// ladder. The licence gate lives in `comrade_core::catalogue` and is applied
+/// there, not here: a sloppy caller cannot smuggle a licensed URL past it by
+/// coming through this function.
+///
+/// `library` is what the frontend's own resolver turned up — `MediaStore` on
+/// Android, a picked file on desktop — each entry a recording and its duration
+/// in milliseconds.
+pub fn audio_plan(
+    want: Recording,
+    want_ms: u64,
+    library: Vec<LibraryCandidateDto>,
+    peer_has_it: bool,
+    catalogue: Vec<CatalogueMatch>,
+) -> AudioPlan {
+    let owned: Vec<(Recording, u64)> = library
+        .into_iter()
+        .map(|c| (c.recording, c.duration_ms))
+        .collect();
+    choose_audio_plan(&want, want_ms, &owned, peer_has_it, &catalogue)
+}
+
+/// Ask a public catalogue what recording `query` names. **The one part of
+/// this path that contacts a third party**, which is why it is the only part
+/// behind a feature and the only part that is not pure.
+///
+/// What leaves the device is the query text and nothing else: no npub, no
+/// contact, no library contents, and no indication that a session is being
+/// planned. That is the disclosure [`ComradeRuntime::play_query`]'s doc refers
+/// to, and it is the whole of it.
+///
+/// A free function, not a method, and that is the point: it reads nothing from
+/// [`ComradeRuntime`], so a caller needs no lock — and therefore cannot hold one
+/// across this network round trip, which is the shape of the two deadlocks this
+/// repo has already fixed. Needs no vault either.
+///
+/// Results are metadata: [`CatalogueMatch::audio_url`] is `None` for
+/// MusicBrainz, and for any catalogue that *does* serve audio the licence
+/// gate is applied by [`audio_plan`], not here. Ordering is the catalogue's
+/// own — most likely first — and capped at
+/// [`comrade_core::catalogue::MAX_CANDIDATES`].
+///
+/// An empty list means "the catalogue has no such recording", which is a
+/// real answer. A build without `catalogue-http` returns
+/// [`UiError::CatalogueUnavailable`] instead, because "we cannot search" and
+/// "we searched and found nothing" must not look the same to a UI.
+///
+/// A catalogue lookup is public data about a public recording, so this works
+/// before unlock — deliberately. The alternative is asking somebody to unlock a
+/// vault to find out what a song is called.
+pub async fn catalogue_lookup(query: &str) -> Result<Vec<CatalogueMatch>, UiError> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[cfg(feature = "catalogue-http")]
+    {
+        use comrade_core::catalogue::{CatalogueResolver, MusicBrainz};
+        // MusicBrainz asks that clients identify themselves, and a generic
+        // agent is what gets a project rate-limited. No version: the string
+        // would then change with every release for no benefit to them.
+        let resolver = MusicBrainz::new("comrade/1.0 (https://github.com/cmullu/comrade)");
+        resolver
+            .lookup(q)
+            .await
+            .map_err(|e| UiError::Catalogue(e.to_string()))
+    }
+    #[cfg(not(feature = "catalogue-http"))]
+    {
+        Err(UiError::CatalogueUnavailable)
+    }
+}
+
+/// One thing this device already has, as the frontend's library resolver found
+/// it.
+///
+/// A named record rather than a tuple because it crosses two FFI boundaries:
+/// uniffi and flutter_rust_bridge both render a `(Recording, u64)` as something
+/// positional and unreadable, and a caller that swaps the two arguments gets a
+/// duration compared against a title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct LibraryCandidateDto {
+    pub recording: Recording,
+    /// As this device's own metadata reports it. `0` when unknown, which
+    /// [`comrade_core::together::match_score`] treats as "no duration evidence"
+    /// rather than as a zero-length track.
+    pub duration_ms: u64,
 }
 
 /// One step of handing a large attachment over, on its way to the frontend that
@@ -15826,6 +15928,96 @@ mod tests {
         ));
         assert!(!rt.chat_command_catalog().is_empty());
         assert_eq!(rt.chat_mentions("hi @ana").len(), 1);
+    }
+
+    /// An empty query must not reach a socket, and must not be an error either —
+    /// a composer calls this as somebody clears the field.
+    #[tokio::test]
+    async fn an_empty_catalogue_query_is_no_results_rather_than_a_lookup() {
+        assert_eq!(catalogue_lookup("   ").await.unwrap(), Vec::new());
+    }
+
+    /// The distinction [`UiError::CatalogueUnavailable`] exists for: this build
+    /// has no `catalogue-http`, so it must say it cannot search rather than
+    /// reporting that the recording does not exist.
+    ///
+    /// Inverted under the feature, because the assertion worth making then is
+    /// that the call is *reachable* — and the answer beyond that depends on
+    /// MusicBrainz, which a test must not.
+    #[tokio::test]
+    async fn a_build_without_the_feature_says_so_instead_of_answering_nothing_found() {
+        let got = catalogue_lookup("kun faya kun").await;
+        #[cfg(not(feature = "catalogue-http"))]
+        assert!(
+            matches!(got, Err(UiError::CatalogueUnavailable)),
+            "a build that cannot search must not report an empty catalogue: {got:?}"
+        );
+        #[cfg(feature = "catalogue-http")]
+        assert!(
+            !matches!(got, Err(UiError::CatalogueUnavailable)),
+            "the feature is on, so this must not claim the build lacks a catalogue"
+        );
+    }
+
+    /// The tier ladder, through the runtime wrapper rather than through
+    /// `choose_audio_plan` directly — the wrapper's own job is mapping
+    /// [`LibraryCandidateDto`] onto the pairs core wants, and swapping those two
+    /// fields is the mistake the named record exists to prevent.
+    #[test]
+    fn the_audio_plan_prefers_this_device_then_the_peer_then_an_open_archive() {
+        use comrade_core::catalogue::{CatalogueMatch, OpenLicence};
+
+        let want = Recording {
+            isrc: Some("GBAYE0601498".into()),
+            title: "Kun Faya Kun".into(),
+            artist: "A. R. Rahman".into(),
+            album: None,
+        };
+        let mine = vec![LibraryCandidateDto {
+            recording: want.clone(),
+            duration_ms: 470_000,
+        }];
+
+        // Rung 1: it is already here, so nothing else is consulted.
+        assert!(matches!(
+            audio_plan(want.clone(), 470_000, mine.clone(), true, Vec::new()),
+            AudioPlan::Library { .. }
+        ));
+
+        // Rung 2: not here, but the other side says they have it.
+        assert_eq!(
+            audio_plan(want.clone(), 470_000, Vec::new(), true, Vec::new()),
+            AudioPlan::Peer
+        );
+
+        // Rung 3: nobody has it, and the archive's licence permits a copy.
+        let open = CatalogueMatch {
+            recording: want.clone(),
+            duration_ms: Some(470_000),
+            audio_url: Some("https://archive.example/kfk.flac".into()),
+            licence: OpenLicence::CreativeCommons,
+        };
+        assert_eq!(
+            audio_plan(want.clone(), 470_000, Vec::new(), false, vec![open]),
+            AudioPlan::OpenLicence {
+                url: "https://archive.example/kfk.flac".into()
+            }
+        );
+
+        // Rung 4, and the one that matters: an archive that serves audio has not
+        // thereby licensed it. Same URL, undeclared licence, and the plan must
+        // fall through to the embed rather than fetch it.
+        let unlicensed = CatalogueMatch {
+            recording: want.clone(),
+            duration_ms: Some(470_000),
+            audio_url: Some("https://archive.example/kfk.flac".into()),
+            licence: OpenLicence::Unknown,
+        };
+        assert_eq!(
+            audio_plan(want, 470_000, Vec::new(), false, vec![unlicensed]),
+            AudioPlan::EmbedOnly,
+            "an unknown licence must not be fetched — the gate is the licence, not the URL"
+        );
     }
 
     #[tokio::test]
