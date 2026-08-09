@@ -50,6 +50,7 @@ CACHE="${ANDROID_TYPECHECK_CACHE:-$HOME/.cache/comrade-android-typecheck}"
 J="$CACHE/jars"
 LOG="$CACHE/compose.log"
 GM=https://dl.google.com/dl/android/maven2
+MC=https://repo1.maven.org/maven2
 
 # Everything the non-Compose lane already sets up: the toolchain, android.jar,
 # the uniffi bindings and the R stub. Delegated rather than duplicated — one
@@ -104,10 +105,28 @@ aar_classes "$GM/androidx/emoji2/emoji2/1.3.0/emoji2-1.3.0.aar" "$J/c-emoji2.jar
 aar_classes "$GM/androidx/autofill/autofill/1.0.0/autofill-1.0.0.aar" "$J/c-autofill.jar"
 fetch "$GM/androidx/collection/collection/1.4.0/collection-1.4.0.jar" "$J/c-collection.jar"
 
+# The instrumented tests, which nothing here could see until 2026-08-09. They
+# are worth type-checking more than anything else in the tree per line, because
+# their build lane is a 45-minute emulator round trip: a mistyped DTO field in
+# `TwoPeerJniIntegrationTest` used to cost one of those to discover.
+echo "== androidTest dependencies =="
+aar_classes "$GM/androidx/test/core/1.5.0/core-1.5.0.aar" "$J/t-test-core.jar"
+aar_classes "$GM/androidx/test/runner/1.5.2/runner-1.5.2.aar" "$J/t-runner.jar"
+aar_classes "$GM/androidx/test/rules/1.5.0/rules-1.5.0.aar" "$J/t-rules.jar"
+aar_classes "$GM/androidx/test/monitor/1.6.1/monitor-1.6.1.aar" "$J/t-monitor.jar"
+aar_classes "$GM/androidx/test/ext/junit/1.1.5/junit-1.1.5.aar" "$J/t-ext-junit.jar"
+aar_classes "$GM/androidx/test/espresso/espresso-core/3.5.1/espresso-core-3.5.1.aar" "$J/t-espresso.jar"
+aar_classes "$GM/androidx/compose/ui/ui-test-junit4-android/$C/ui-test-junit4-android-$C.aar" "$J/t-ui-test-junit4.jar"
+aar_classes "$GM/androidx/compose/ui/ui-test-android/$C/ui-test-android-$C.aar" "$J/t-ui-test.jar"
+fetch "$MC/junit/junit/4.13.2/junit-4.13.2.jar" "$J/t-junit.jar"
+fetch "$MC/org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar" "$J/t-hamcrest.jar"
+
 echo "== compiling everything =="
 FILES=()
 while IFS= read -r f; do FILES+=("$f"); done \
   < <(find "$REPO/android/app/src/main/java/mullu/comrade" -name '*.kt' | sort)
+while IFS= read -r f; do FILES+=("$f"); done \
+  < <(find "$REPO/android/app/src/androidTest/java/mullu/comrade" -name '*.kt' | sort)
 while IFS= read -r f; do FILES+=("$f"); done < <(find "$CACHE/uniffi" -name '*.kt')
 # The sibling's stub declares a placeholder `MainActivity` because the plain
 # lane compiles the notification Intents that name its type without compiling

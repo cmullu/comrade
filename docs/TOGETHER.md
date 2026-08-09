@@ -2212,3 +2212,97 @@ No unit test covers the threading fix or the solo gate *in the manager* —
 `TogetherManager` imports Android, so the JVM lane cannot see it, and there is no
 Robolectric lane in this repo. What is tested is the pure half: `isAlone`, the
 sentinel's safety, and `startStep`'s three answers.
+
+## 19. The two-peer lane that was green and proving nothing
+
+_Added 2026-08-09, after §17's bugs were found on handsets rather than in CI._
+
+The obvious reading of §17 is "we need a two-phone check". The more useful
+finding is that **one already existed and had never run.**
+
+`android/app/src/androidTest/.../TwoPeerJniIntegrationTest.kt` stands up two
+independent `Comrade` FFI instances, each with its own vault, against one relay,
+and exchanges traffic across the real generated bindings. It has been there since
+COMMS-03. It begins with `Assume.assumeTrue(comradeTestRelayUrl != null)`, and
+`android-apk.yml` ran `connectedDebugAndroidTest` without ever passing that
+argument — so every test in the file skipped on every run, and **a skipped test
+is a green test.** The lane that was supposed to be the evidence for two peers
+talking to each other was evidence of nothing.
+
+Three things close that:
+
+1. **The workflow starts the relay** (`deploy/test-relay/docker-compose.yml`,
+   which also existed and was wired to nothing) and reaches it over
+   `adb reverse tcp:8090 tcp:8090`, so the device's own `127.0.0.1:8090` is the
+   address. The image is pinned rather than `:latest`, because this is a gate now
+   and an upstream push should not be able to turn a branch red.
+
+   **It used `10.0.2.2` first, and that is what the first run failed on.** All
+   three two-peer tests reported "nothing arrived" while the relay logged a clean
+   startup, its migrations, and no client traffic whatsoever. `10.0.2.2` is the
+   emulated *radio* NAT's host loopback, and on an API 35 image the default
+   network an app is given is emulated Wi-Fi (netsim) — so the address every
+   tutorial offers is not reliably one the app can route to. A reverse forward has
+   none of that in it, and it works on a physical handset too, which `10.0.2.2`
+   never can.
+
+   Worth recording what was *not* the cause, because it is the plausible answer
+   and it is wrong: Android's `cleartextTrafficPermitted` policy does not apply
+   here. It is enforced by the Java networking stack, and these peers connect
+   through `nostr-sdk` on a native tokio socket, which the platform does not
+   intercept. A `networkSecurityConfig` would have been a fix for a mechanism that
+   was never running.
+2. **The workflow asserts that it did.** `comradeRequireRelay=true` turns a
+   missing URL from a quiet skip into a failure naming the step that should have
+   provided it. Without that second argument, deleting the relay step would go
+   green again and nobody would know — which is the exact failure this section is
+   about, so it gets a mechanism rather than a comment.
+3. **A session is what it tests**, not just a DM: invite → join → a run of
+   transport commands → end, with the arrival order asserted.
+
+### The fast twin, and why it exists
+
+`a_run_of_transport_commands_arrives_in_the_order_it_was_sent` in
+`crates/comrade_ui/tests/two_peer_integration.rs` asserts the same ordering
+property hermetically, over the in-process relay, in about a second. The device
+lane answers the same question through the real bindings over a real socket, in
+about forty-five minutes.
+
+The device lane also captures `logcat` and uploads it on failure, added after
+that first red run could not be diagnosed from Gradle's output — three "nothing
+arrived" assertions and no reason for any of them. Guessing at causes at fifteen
+minutes a round is not a debugging loop worth having.
+
+Both are worth having, and the fast one immediately proved it: **written first
+asserting exact positions, it failed** — `30_000` arrived as `30_016`. That is
+not a bug, it is `TogetherCommandDto::pos_ms`'s documented contract (a *playing*
+command is carried forward through the message's flight time so the receiver
+applies it as-is instead of compensating twice; a paused playhead does not
+advance). Had that assertion gone straight into the device lane, the first red
+build would have been the test's fault and would have cost a 45-minute round trip
+to find out. Both now assert what the contract supports: play/pause exactly in
+order, positions floored at what was sent and ceilinged by a plausible flight
+time, and a paused position exactly equal.
+
+### What this lane still does not cover
+
+Worth being precise, because "two phones interacting" sounds like it covers
+everything and this covers one layer of it:
+
+- **Two processes, not two apps.** Both peers are `Comrade` objects in one test
+  process. `TogetherManager`, `ShareTransfer` and `StreamTransfer` are Kotlin
+  `object` singletons, so a second instance of the *session layer* cannot exist
+  in the same process at all — which means the manager, its outbound queue and
+  the foreground service are not in this lane. `build.gradle.kts`'s
+  `deviceHarnessRole` is the mechanism for two installable app IDs; it is still
+  unwired.
+- **No WebRTC between two devices.** The streaming and file-handover paths need
+  a media connection, and two emulators sit behind separate NATs with no route to
+  each other — a pair would need a TURN server both can reach and a host-side
+  orchestrator running leader and follower roles. That is the lane that would
+  cover §17's *follower-never-plays* symptom directly, and it is not built here.
+- **Nothing about the player.** No `MediaPlayer`, no audio, no cover, no screen.
+
+So: the protocol and the bindings are now checked between two peers on every
+push. The session layer and the media path are not, and no green tick in this
+repo should be read as saying otherwise.

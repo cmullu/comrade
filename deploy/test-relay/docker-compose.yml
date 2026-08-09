@@ -19,7 +19,12 @@
 # daemon available) — validate in CI/locally before relying on it.
 services:
   test-relay:
-    image: scsibug/nostr-rs-relay:latest
+    # Pinned, not `:latest`, since 2026-08-09 — this is a **required** CI gate
+    # now (`android-apk.yml`'s device lanes), and `:latest` means an upstream
+    # push can turn a branch red with no change of ours. The exit condition for
+    # bumping it: the relay stops accepting `config.toml` as written, or a NIP
+    # this app depends on is only in a newer release.
+    image: scsibug/nostr-rs-relay:0.10.0
     ports:
       - "8090:8080"
     volumes:

@@ -1079,6 +1079,15 @@ is small; the content problem is the real constraint:
 >   (`.claude/scripts/android-typecheck-compose.sh`). How it looks is verified by
 >   nothing but a device, and the 🫂 glyph is hand-authored path data that no lane
 >   here can render.
+> - **A two-peer lane existed and had never run.** Fixed 2026-08-09
+>   (`docs/TOGETHER.md` §19): `TwoPeerJniIntegrationTest` skips itself without
+>   `comradeTestRelayUrl`, and `android-apk.yml` never passed it — so since
+>   COMMS-03 every test in that file skipped on every run and the lane was green.
+>   The relay is started and the argument passed now, and `comradeRequireRelay`
+>   makes a future skip a failure rather than a pass. **The general lesson is
+>   unaddressed**: nothing in this repo fails a build because a test was skipped,
+>   and `Assume` is used elsewhere. A skipped-test count assertion across the
+>   whole suite would close it and is not written.
 > - **The main thread made the network calls, and no lane can catch that.**
 >   Fixed 2026-08-09 (`docs/TOGETHER.md` §17): every `together_*` call is
 >   `runBlocking` over an FFI whose last rung is a relay send, and they were made
