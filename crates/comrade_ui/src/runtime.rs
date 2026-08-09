@@ -2586,7 +2586,15 @@ impl ComradeRuntime {
         self.together_shares_seen.clear();
         core_metrics::reset();
         self.lock_vault().await;
-        tracing::warn!("panic wipe complete: local state destroyed and vault locked");
+        // `debug!`, not `warn!`, since 2026-08-09 — when Rust warnings started
+        // reaching Android's logcat. This function's doc is careful to say the
+        // wipe "does not hide", and that is still true; what changed is that a
+        // warn-level line here would newly leave *"local state destroyed"* in a
+        // buffer `adb` reads, timestamped, for a feature whose threat model is a
+        // phone taken under duress. The line is a finished-marker with no
+        // diagnostic value that debug cannot serve, so there is nothing to weigh
+        // against it.
+        tracing::debug!("panic wipe complete: local state destroyed and vault locked");
         Ok(())
     }
 
@@ -6347,9 +6355,21 @@ impl RuntimeHandles {
         // A together signal is also exactly the kind of traffic the mesh suits —
         // small, frequent, and worthless once stale.
         //
-        // Note the honest limitation: `mesh` is `Some` only while the Saathi
-        // engine is running, which today means the off-grid workspace. Starting
-        // it for a session is engine-lifecycle work (AUDIT A1 /
+        // **This comment used to claim `mesh` is `Some` only in the off-grid
+        // workspace, and that was stale from the day `LocalRadios` replaced
+        // `MeshLink` here.** It cost real debugging time: a reader chasing "why
+        // does a together session not work on a hotspot" concludes from it that
+        // no local route is even attempted, and goes looking somewhere else.
+        //
+        // What is actually true: `RuntimeHandles::mesh_link` returns `Some`
+        // whenever there are identity keys, and `LocalRadios` is *two* radios —
+        // the WiFi mesh, which is indeed `None` outside the off-grid workspace,
+        // **and Bluetooth, which is always present** and inert only until a
+        // platform radio marks it active. So a together signal does get a local
+        // attempt, on BLE at minimum, before either rung below.
+        //
+        // What remains genuinely missing is starting the *WiFi* mesh for a
+        // session, which is still engine-lifecycle work (AUDIT A1 /
         // `docs/COMMS_ARCHITECTURE.md` ADR-4) and deliberately not done here.
         if let Some(mesh) = &self.mesh {
             let created = now_secs();
@@ -8010,7 +8030,14 @@ fn handle_together_envelope(
         // the one place that decides, and it matches exhaustively so a new
         // variant cannot inherit a yes.
         if !content.admissible() {
-            tracing::warn!(peer = %peer_npub, "dropping together invite we will not play");
+            // Deliberately no `peer` field. Warn-level reaches logcat, which is
+            // readable by whoever holds the device — and the distinction that
+            // matters there is *whose* data it is: the owner's own configuration
+            // they can already read in Settings, but a contact's npub is about
+            // somebody else, who did not consent to being named in a system
+            // buffer on this phone. The refusal is what is worth logging; which
+            // peer sent it adds nothing a developer can act on.
+            tracing::warn!("dropping a together invite we will not play");
             return;
         }
         *guard = Some(TogetherSession {

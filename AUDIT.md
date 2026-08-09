@@ -1079,6 +1079,55 @@ is small; the content problem is the real constraint:
 >   (`.claude/scripts/android-typecheck-compose.sh`). How it looks is verified by
 >   nothing but a device, and the 🫂 glyph is hand-authored path data that no lane
 >   here can render.
+> - **Shipping Rust `warn!` to logcat made two lines newly sensitive, and both are
+>   fixed; two more are accepted with a reason.** 2026-08-09, alongside the
+>   `tracing`→logcat bridge. Warn-level output now reaches a buffer `adb` reads, so
+>   the audit is of what our own 64 `warn!` sites interpolate. The line held is
+>   **whose** data it is: the device owner's own configuration is ~free to disclose
+>   to whoever holds the device — they can read it in Settings — but data about a
+>   *third party* is not.
+>   - Fixed: `comrade_ui/src/runtime.rs:2597`, the panic wipe's completion line,
+>     dropped `warn!`→`debug!`. `panic_wipe`'s doc is careful that it "does not
+>     hide", and that is unchanged; what a warn here would newly do is leave
+>     *"local state destroyed"* timestamped in logcat, for a feature whose threat
+>     model is a phone taken under duress. It is a finished-marker with no
+>     diagnostic value debug cannot serve.
+>   - Fixed: `comrade_ui/src/runtime.rs:8040` no longer names the peer whose
+>     invite was refused. A contact's npub is about somebody who did not consent
+>     to being named in a system buffer on this phone, and which peer it was adds
+>     nothing a developer can act on.
+>   - Accepted: `comrade_core/src/relay.rs:371` logs a relay URL. That is the
+>     owner's own configured infrastructure, already visible in Settings to anyone
+>     holding the device, and it is the one field that makes "which relay failed"
+>     answerable. Exit condition: if relay lists ever become per-peer or
+>     discovered rather than chosen, this becomes third-party data and must go.
+>   - Accepted: `comrade_core/src/vault.rs:144`,`:173` and
+>     `comrade_core/src/sakha.rs:273`,`:281`,`:295`,`:302` log a nostr `event_id`
+>     for content addressed to the owner. Opaque, about the owner's own inbox, and
+>     the only handle that makes a decrypt failure diagnosable. Exit condition: if
+>     an event id ever becomes correlatable to a *sender* without the ciphertext,
+>     re-open this.
+>   - **Not audited**: `info!` and `debug!` sites, on the grounds that they do not
+>     ship. That holds only while nothing lowers the filter — `comrade_jni`'s
+>     `LEVEL` const (`crates/comrade_jni/src/lib.rs:147`) is the single place it is
+>     set, and dropping it to info would
+>     put every outbound DM's recipient npub (`vault.rs:321`) and every uploaded
+>     blob URL (`media.rs:265`) on the device. Do not lower it without redoing
+>     this pass.
+> - **`send_together` treats "a radio took it" as delivery, which is the exact
+>   error #106 fixed for DMs.** Found 2026-08-09 while diagnosing a field report,
+>   not fixed. `LocalRadios::send`'s own doc
+>   (`crates/comrade_ui/src/runtime.rs:8508-8511`) says its return value means
+>   only that a radio accepted the frame and must "never" be read as proof of
+>   delivery — and `send_together` (`runtime.rs:6366-6372`) does exactly that:
+>   `if mesh.send(…).await { return Ok(()) }`, short-circuiting the direct and
+>   relay rungs below. So a BLE frame accepted for a peer who is not there loses
+>   the command *and* skips the relay that would have carried it. The mitigating
+>   argument is real but partial — a together signal is worthless once stale, and
+>   the drift ladder closes a gap a lost command left — but that argument does not
+>   cover `Join` or `End`, which are one-shot and have no ladder behind them. A
+>   `Join` lost this way leaves the inviter on "waiting for them to open it"
+>   forever, which is a reported symptom.
 > - **A two-peer lane existed and had never run.** Fixed 2026-08-09
 >   (`docs/TOGETHER.md` §19): `TwoPeerJniIntegrationTest` skips itself without
 >   `comradeTestRelayUrl`, and `android-apk.yml` never passed it — so since
