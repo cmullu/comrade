@@ -693,6 +693,7 @@ pub enum _UiError {
     VaultLocked,
     Engine(String),
     Catalogue(String),
+    Download(String),
     CatalogueUnavailable,
 }
 

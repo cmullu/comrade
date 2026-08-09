@@ -3777,6 +3777,9 @@ const _: fn() = || {
         crate::api::UiError::Catalogue(field0) => {
             let _: String = field0;
         }
+        crate::api::UiError::Download(field0) => {
+            let _: String = field0;
+        }
         crate::api::UiError::CatalogueUnavailable => {}
     }
     {
@@ -5407,6 +5410,10 @@ impl SseDecode for crate::api::UiError {
                 return crate::api::UiError::Catalogue(var_field0);
             }
             9 => {
+                let mut var_field0 = <String>::sse_decode(deserializer);
+                return crate::api::UiError::Download(var_field0);
+            }
+            10 => {
                 return crate::api::UiError::CatalogueUnavailable;
             }
             _ => {
@@ -7044,7 +7051,10 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::UiError> {
             crate::api::UiError::Catalogue(field0) => {
                 [8.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::UiError::CatalogueUnavailable => [9.into_dart()].into_dart(),
+            crate::api::UiError::Download(field0) => {
+                [9.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::UiError::CatalogueUnavailable => [10.into_dart()].into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -8430,8 +8440,12 @@ impl SseEncode for crate::api::UiError {
                 <i32>::sse_encode(8, serializer);
                 <String>::sse_encode(field0, serializer);
             }
-            crate::api::UiError::CatalogueUnavailable => {
+            crate::api::UiError::Download(field0) => {
                 <i32>::sse_encode(9, serializer);
+                <String>::sse_encode(field0, serializer);
+            }
+            crate::api::UiError::CatalogueUnavailable => {
+                <i32>::sse_encode(10, serializer);
             }
             _ => {
                 unimplemented!("");

@@ -110,7 +110,9 @@ fn relay_policy_to_prefs(policy: RelayPolicy) -> comrade_storage::SharePrefs {
         relay_limit_bytes: limit,
     }
 }
+use comrade_core::catalogue::OpenLicence;
 use comrade_core::catalogue::{choose_audio_plan, AudioPlan, CatalogueMatch};
+use comrade_core::download::{permit_download, DownloadRefusal};
 use comrade_core::tara::{
     tara_chat_answer, tara_chat_line, CompanionEngine, JournalSignal, ReflectiveCompanion,
 };
@@ -815,6 +817,108 @@ pub async fn catalogue_lookup(query: &str) -> Result<Vec<CatalogueMatch>, UiErro
     }
     #[cfg(not(feature = "catalogue-http"))]
     {
+        Err(UiError::CatalogueUnavailable)
+    }
+}
+
+/// Whether a catalogue answer may be downloaded, and if not, why.
+///
+/// **Flat and typed rather than a `Result<_, DownloadRefusal>`**, because this is
+/// not a failure — it is the answer to "should this row have a download button".
+/// A UI asks it while drawing a list, for every row, and none of the three
+/// refusals is exceptional: MusicBrainz never serves audio, so [`Self::NoAudio`]
+/// is the *normal* verdict today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadVerdictDto {
+    /// The licence permits a copy. The licence is carried so a UI can say on
+    /// what basis — somebody downloading a track is entitled to know.
+    Permitted { licence: OpenLicence },
+    /// A metadata-only answer. No button.
+    NoAudio,
+    /// Audio is there and its licence does not permit copying it. **Serving the
+    /// bytes is not licensing them**, which is the whole reason this is a
+    /// separate verdict from [`Self::NoAudio`] rather than both being "no".
+    NotOpenlyLicensed,
+    /// The catalogue gave a non-HTTPS URL.
+    InsecureUrl,
+}
+
+/// A track that has been fetched, ready for the platform's music library.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DownloadedTrackDto {
+    /// The whole file.
+    ///
+    /// **Buffered in memory, and that is a real limit rather than an oversight.**
+    /// `comrade_core::download::MAX_TRACK_BYTES` is 96 MB to accommodate lossless
+    /// album tracks, so a worst-case download is a 96 MB `ByteArray` crossing the
+    /// FFI. Typical tracks are 3–12 MB and this is unremarkable for them.
+    /// Streaming to a caller-supplied path instead — bounded RAM, one write —
+    /// is the follow-up recorded in `docs/TOGETHER.md` §21; it is not done here
+    /// because it puts filesystem code in the core for a case no archive this
+    /// serves has actually hit.
+    pub bytes: Vec<u8>,
+    /// `Artist - Title.ext`, already sanitised of path separators, control
+    /// characters and reserved punctuation — see
+    /// `comrade_core::download::filename_for`. A frontend must not build its own.
+    pub filename: String,
+    pub mime: String,
+    /// The metadata to write into the library's own columns, since no in-file
+    /// tags are added (see the `download` module header).
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+}
+
+/// Whether `m` may be downloaded.
+///
+/// Pure — no network, no lock, no vault. Safe to call per row while drawing a
+/// list, which is what it is for.
+pub fn download_verdict(m: CatalogueMatch) -> DownloadVerdictDto {
+    match permit_download(&m) {
+        Ok(ok) => DownloadVerdictDto::Permitted {
+            licence: ok.licence(),
+        },
+        Err(DownloadRefusal::NoAudio) => DownloadVerdictDto::NoAudio,
+        Err(DownloadRefusal::NotOpenlyLicensed) => DownloadVerdictDto::NotOpenlyLicensed,
+        Err(DownloadRefusal::InsecureUrl) => DownloadVerdictDto::InsecureUrl,
+    }
+}
+
+/// Fetch a catalogue answer's audio.
+///
+/// **Re-runs the gate rather than trusting a prior [`download_verdict`] call**,
+/// and takes the [`CatalogueMatch`] rather than a URL, so there is no argument a
+/// caller could assemble that downloads something the licence does not permit.
+/// A UI that skipped the verdict entirely still cannot get past this.
+///
+/// A free function for the same reason [`catalogue_lookup`] is: it reads nothing
+/// from [`ComradeRuntime`], so no caller can hold a lock across the transfer.
+/// Needs no vault — this is public audio under a public licence.
+pub async fn download_track(m: CatalogueMatch) -> Result<DownloadedTrackDto, UiError> {
+    let permitted =
+        permit_download(&m).map_err(|refusal| UiError::Download(refusal.to_string()))?;
+    #[cfg(feature = "catalogue-http")]
+    {
+        let got = comrade_core::download::fetch_track(&permitted)
+            .await
+            .map_err(|e| UiError::Download(e.to_string()))?;
+        Ok(DownloadedTrackDto {
+            bytes: got.bytes,
+            filename: got.filename,
+            mime: got.mime,
+            title: got.recording.title,
+            artist: got.recording.artist,
+            album: got.recording.album,
+        })
+    }
+    #[cfg(not(feature = "catalogue-http"))]
+    {
+        // The gate above still ran, deliberately: a build without the feature must
+        // refuse an unlicensed download for the *licence* reason, not report that
+        // it cannot download anything. Otherwise a test build would make every
+        // refusal look like a missing feature.
+        let _ = permitted;
         Err(UiError::CatalogueUnavailable)
     }
 }

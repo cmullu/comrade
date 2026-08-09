@@ -85,12 +85,13 @@ use comrade_state::AppWorkspace;
 use comrade_ui::{
     AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
-    CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
-    JournalEntryDto, LibraryCandidateDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
-    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto,
-    PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto,
-    ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
-    TaskState, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    CrisisResourceDto, DownloadVerdictDto, DownloadedTrackDto, FocusSessionDto, FoundProfileDto,
+    IceServerDto, IdentityDto, JournalEntryDto, LibraryCandidateDto, MediaBytesDto,
+    MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto, MessageRequestDto,
+    MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto,
+    PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto,
+    TaraChatDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto,
+    UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1130,6 +1131,32 @@ impl Comrade {
     /// future would borrow the guard.
     pub async fn catalogue_lookup(&self, query: String) -> Result<Vec<CatalogueMatch>, UiError> {
         comrade_ui::catalogue_lookup(&query).await
+    }
+
+    /// Whether a catalogue answer may be downloaded, and if not, why.
+    ///
+    /// Pure — no network, no lock, no vault — so a list can ask it per row while
+    /// drawing. `NoAudio` is the normal answer today: MusicBrainz is a
+    /// metadata catalogue and never serves audio.
+    pub fn download_verdict(&self, m: CatalogueMatch) -> DownloadVerdictDto {
+        comrade_ui::download_verdict(m)
+    }
+
+    /// Fetch a catalogue answer's audio, licence permitting.
+    ///
+    /// **Re-runs the licence gate itself**, so a frontend that skipped
+    /// [`Self::download_verdict`] still cannot download something the licence
+    /// forbids. Takes the match rather than a URL for the same reason — there is
+    /// no argument to assemble that gets past it.
+    ///
+    /// `suspend` in Kotlin, and it must not be driven from the main thread: this
+    /// is a whole audio file over a phone's downlink. Takes no lock, like
+    /// [`Self::catalogue_lookup`] and for the same reason.
+    ///
+    /// The bytes come back in memory — see [`DownloadedTrackDto::bytes`] for the
+    /// size limit that implies and why streaming to a path is the follow-up.
+    pub async fn download_track(&self, m: CatalogueMatch) -> Result<DownloadedTrackDto, UiError> {
+        comrade_ui::download_track(m).await
     }
 
     /// Which tier will supply a recording this device does not have.

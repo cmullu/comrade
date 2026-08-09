@@ -6550,6 +6550,7 @@ extension UiErrorPatterns on UiError {
     TResult Function(UiError_VaultLocked value)? vaultLocked,
     TResult Function(UiError_Engine value)? engine,
     TResult Function(UiError_Catalogue value)? catalogue,
+    TResult Function(UiError_Download value)? download,
     TResult Function(UiError_CatalogueUnavailable value)? catalogueUnavailable,
     required TResult orElse(),
   }) {
@@ -6573,6 +6574,8 @@ extension UiErrorPatterns on UiError {
         return engine(_that);
       case UiError_Catalogue() when catalogue != null:
         return catalogue(_that);
+      case UiError_Download() when download != null:
+        return download(_that);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable(_that);
       case _:
@@ -6604,6 +6607,7 @@ extension UiErrorPatterns on UiError {
     required TResult Function(UiError_VaultLocked value) vaultLocked,
     required TResult Function(UiError_Engine value) engine,
     required TResult Function(UiError_Catalogue value) catalogue,
+    required TResult Function(UiError_Download value) download,
     required TResult Function(UiError_CatalogueUnavailable value)
         catalogueUnavailable,
   }) {
@@ -6627,6 +6631,8 @@ extension UiErrorPatterns on UiError {
         return engine(_that);
       case UiError_Catalogue():
         return catalogue(_that);
+      case UiError_Download():
+        return download(_that);
       case UiError_CatalogueUnavailable():
         return catalogueUnavailable(_that);
     }
@@ -6655,6 +6661,7 @@ extension UiErrorPatterns on UiError {
     TResult? Function(UiError_VaultLocked value)? vaultLocked,
     TResult? Function(UiError_Engine value)? engine,
     TResult? Function(UiError_Catalogue value)? catalogue,
+    TResult? Function(UiError_Download value)? download,
     TResult? Function(UiError_CatalogueUnavailable value)? catalogueUnavailable,
   }) {
     final _that = this;
@@ -6677,6 +6684,8 @@ extension UiErrorPatterns on UiError {
         return engine(_that);
       case UiError_Catalogue() when catalogue != null:
         return catalogue(_that);
+      case UiError_Download() when download != null:
+        return download(_that);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable(_that);
       case _:
@@ -6707,6 +6716,7 @@ extension UiErrorPatterns on UiError {
     TResult Function()? vaultLocked,
     TResult Function(String field0)? engine,
     TResult Function(String field0)? catalogue,
+    TResult Function(String field0)? download,
     TResult Function()? catalogueUnavailable,
     required TResult orElse(),
   }) {
@@ -6730,6 +6740,8 @@ extension UiErrorPatterns on UiError {
         return engine(_that.field0);
       case UiError_Catalogue() when catalogue != null:
         return catalogue(_that.field0);
+      case UiError_Download() when download != null:
+        return download(_that.field0);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable();
       case _:
@@ -6761,6 +6773,7 @@ extension UiErrorPatterns on UiError {
     required TResult Function() vaultLocked,
     required TResult Function(String field0) engine,
     required TResult Function(String field0) catalogue,
+    required TResult Function(String field0) download,
     required TResult Function() catalogueUnavailable,
   }) {
     final _that = this;
@@ -6783,6 +6796,8 @@ extension UiErrorPatterns on UiError {
         return engine(_that.field0);
       case UiError_Catalogue():
         return catalogue(_that.field0);
+      case UiError_Download():
+        return download(_that.field0);
       case UiError_CatalogueUnavailable():
         return catalogueUnavailable();
     }
@@ -6811,6 +6826,7 @@ extension UiErrorPatterns on UiError {
     TResult? Function()? vaultLocked,
     TResult? Function(String field0)? engine,
     TResult? Function(String field0)? catalogue,
+    TResult? Function(String field0)? download,
     TResult? Function()? catalogueUnavailable,
   }) {
     final _that = this;
@@ -6833,6 +6849,8 @@ extension UiErrorPatterns on UiError {
         return engine(_that.field0);
       case UiError_Catalogue() when catalogue != null:
         return catalogue(_that.field0);
+      case UiError_Download() when download != null:
+        return download(_that.field0);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable();
       case _:
@@ -7278,6 +7296,70 @@ class _$UiError_CatalogueCopyWithImpl<$Res>
     Object? field0 = null,
   }) {
     return _then(UiError_Catalogue(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class UiError_Download extends UiError {
+  const UiError_Download(this.field0) : super._();
+
+  final String field0;
+
+  /// Create a copy of UiError
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $UiError_DownloadCopyWith<UiError_Download> get copyWith =>
+      _$UiError_DownloadCopyWithImpl<UiError_Download>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is UiError_Download &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'UiError.download(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $UiError_DownloadCopyWith<$Res>
+    implements $UiErrorCopyWith<$Res> {
+  factory $UiError_DownloadCopyWith(
+          UiError_Download value, $Res Function(UiError_Download) _then) =
+      _$UiError_DownloadCopyWithImpl;
+  @useResult
+  $Res call({String field0});
+}
+
+/// @nodoc
+class _$UiError_DownloadCopyWithImpl<$Res>
+    implements $UiError_DownloadCopyWith<$Res> {
+  _$UiError_DownloadCopyWithImpl(this._self, this._then);
+
+  final UiError_Download _self;
+  final $Res Function(UiError_Download) _then;
+
+  /// Create a copy of UiError
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(UiError_Download(
       null == field0
           ? _self.field0
           : field0 // ignore: cast_nullable_to_non_nullable

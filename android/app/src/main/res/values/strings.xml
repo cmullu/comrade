@@ -555,7 +555,21 @@
     <string name="together_search_failed">Couldn\'t search: %1$s</string>
     <string name="together_search_result_subtitle">%1$s · from %2$s</string>
     <string name="together_search_unknown_artist">Unknown artist</string>
-    <string name="together_search_not_on_phone">Found the song, but no copy of it on this phone. Pick a file, or ask the other person to send theirs.</string>
+    <string name="together_search_not_on_phone">No copy of \u201C%1$s\u201D on this phone. Try another result, pick a file, or ask the other person to send theirs.</string>
+    <!-- Downloading an openly-licensed track into the phone's music library. -->
+    <string name="together_buffering">buffering\u2026</string>
+    <string name="together_download">Download</string>
+    <string name="together_downloading">Downloading\u2026</string>
+    <string name="together_download_saved">Saved \u201C%1$s\u201D to your music</string>
+    <string name="together_download_already">You already have \u201C%1$s\u201D</string>
+    <string name="together_download_failed">Download failed: %1$s</string>
+    <string name="together_download_needs_q">Saving to your music library needs Android 10 or newer.</string>
+    <string name="together_download_no_row">Your music library refused a new entry.</string>
+    <string name="together_download_write_failed">Couldn\'t finish writing the file.</string>
+    <!-- Why a result has no download button. Each is a different reason and none
+         of them is "download failed". -->
+    <string name="together_download_no_audio">This catalogue only knows the name, not the audio</string>
+    <string name="together_download_not_licensed">Its licence doesn\'t allow a copy</string>
     <string name="together_link_refused">That isn’t something Comrade can play. A YouTube link works, or an https link that points straight at an audio or video file.</string>
     <string name="together_could_not_play">That didn’t play. If it was a link, it may not point straight at an audio or video file.</string>
 

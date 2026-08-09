@@ -871,6 +871,27 @@ object TogetherDecisions {
 
         /** The lookup itself failed — offline, timed out, rate-limited. */
         data class Failed(val reason: String) : SearchOutcome
+
+        /**
+         * The catalogue knew the song and this phone has no copy of it.
+         *
+         * **A sixth outcome rather than a [Failed] with a different sentence,
+         * because the search did not fail — it succeeded.** Reusing [Failed] here
+         * is a bug that shipped: the screen renders that state as
+         * "Couldn't search: …", so a search that worked perfectly reported itself
+         * as a failed search, and replacing the outcome also wiped the result list
+         * so there was no second candidate left to try.
+         *
+         * That is the same mistake this type was created to prevent one variant
+         * up — collapsing two states whose only difference is meaning. So the
+         * candidates are carried through: the list stays on screen, and [wanted]
+         * names which row was tapped so the message can be about that song rather
+         * than about the search.
+         */
+        data class NotOnThisPhone(
+            val candidates: List<Candidate>,
+            val wanted: Candidate,
+        ) : SearchOutcome
     }
 
     /**
@@ -892,6 +913,40 @@ object TogetherDecisions {
         candidates.isEmpty() -> SearchOutcome.NothingFound
         else -> SearchOutcome.Found(candidates)
     }
+
+    /**
+     * The outcome after tapping a result that turns out to have no local copy.
+     *
+     * Its own function so the screen cannot reach for [SearchOutcome.Failed]
+     * again: that is what shipped, and it rendered a working search as
+     * "Couldn't search: …" while throwing away the list. Keeping [candidates]
+     * means the other rows are still there to try, which is the whole reason
+     * somebody searched a catalogue that returns several.
+     */
+    fun notOnThisPhone(candidates: List<Candidate>, wanted: Candidate): SearchOutcome =
+        SearchOutcome.NotOnThisPhone(candidates = candidates, wanted = wanted)
+
+    // ── What the status line says when they join ─────────────────────────────
+
+    /**
+     * Whether "open your copy to start" is a sentence that means anything for
+     * what is playing.
+     *
+     * **It is not, for an embed or a stream, and saying it anyway is a bug that
+     * shipped.** A YouTube session showed "with them · open your copy to start"
+     * under YouTube's own "This video is unavailable" panel: there is no copy of
+     * an embed to open, and there is none of a stream either — both sides fetch
+     * the same URL. Only a `LocalFile` session is waiting on somebody to open a
+     * file, because that is the one kind where the invitation carries a length and
+     * each side supplies its own bytes.
+     *
+     * @param embed the session is a YouTube embed
+     * @param external we are following another app's `MediaSession` (§13), which
+     *   also has no copy of ours to open
+     * @param stream the session is a public media URL both sides fetch
+     */
+    fun needsOwnCopy(embed: Boolean, external: Boolean, stream: Boolean): Boolean =
+        !embed && !external && !stream
 
     /**
      * What tapping a search result does, given the tier core chose.

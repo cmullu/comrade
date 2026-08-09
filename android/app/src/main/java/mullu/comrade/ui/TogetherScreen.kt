@@ -94,6 +94,7 @@ import mullu.comrade.call.CallManager
 import mullu.comrade.together.LibraryResolver
 import mullu.comrade.together.MediaLibraryAccess
 import mullu.comrade.together.MediaSessionAccess
+import mullu.comrade.together.MusicDownloads
 import mullu.comrade.together.MusicLibrary
 import mullu.comrade.together.PlaybackModeDecision
 import mullu.comrade.together.PlaybackOwnership
@@ -1200,6 +1201,13 @@ private fun SearchByName(
     var matches by remember {
         mutableStateOf<List<uniffi.comrade_core.CatalogueMatch>>(emptyList())
     }
+    // Which row is fetching, by index. One at a time: a phone downloading four
+    // tracks at once on a shared connection finishes none of them sooner, and the
+    // per-row spinner has somewhere to be.
+    var downloadingIndex by remember { mutableStateOf<Int?>(null) }
+    // What happened to the last download. Shown above the list rather than in a
+    // snackbar so it survives the row it belonged to scrolling away.
+    var downloadNote by remember { mutableStateOf<String?>(null) }
 
     Column(
         Modifier
@@ -1282,23 +1290,98 @@ private fun SearchByName(
                 color = MaterialTheme.colorScheme.error,
             )
 
-            is TogetherDecisions.SearchOutcome.Found -> Column {
-                shown.candidates.forEachIndexed { i, candidate ->
+            // Both list-bearing outcomes draw the same rows, and that is the fix:
+            // tapping a row that has no local copy must not take the other rows
+            // away. `NotOnThisPhone` adds a line about the row that was tapped and
+            // leaves the rest to try.
+            is TogetherDecisions.SearchOutcome.Found,
+            is TogetherDecisions.SearchOutcome.NotOnThisPhone,
+            -> Column {
+                val rows = when (shown) {
+                    is TogetherDecisions.SearchOutcome.Found -> shown.candidates
+                    is TogetherDecisions.SearchOutcome.NotOnThisPhone -> shown.candidates
+                    // Unreachable: this arm covers exactly the two above.
+                    else -> emptyList()
+                }
+                (shown as? TogetherDecisions.SearchOutcome.NotOnThisPhone)?.let { miss ->
+                    Text(
+                        // Names the song rather than the search, because the
+                        // search worked. No "Couldn't search" prefix.
+                        stringResource(R.string.together_search_not_on_phone, miss.wanted.title),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TogetherMuted,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+                downloadNote?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TogetherMuted,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+                rows.forEachIndexed { i, candidate ->
+                    val match = matches.getOrNull(i)
+                    val verdict = match?.let { ComradeCore.downloadVerdict(it) }
                     CandidateRow(
                         candidate = candidate,
+                        downloading = downloadingIndex == i,
+                        // A button only where the licence permits one. Everything
+                        // else gets a sentence or nothing — see CandidateRow.
+                        onDownload = if (
+                            match != null &&
+                            verdict is uniffi.comrade_ui.DownloadVerdictDto.Permitted &&
+                            downloadingIndex == null
+                        ) {
+                            {
+                                downloadingIndex = i
+                                downloadNote = null
+                                scope.launch {
+                                    val note = withContext(Dispatchers.IO) {
+                                        downloadInto(context, match)
+                                    }
+                                    downloadingIndex = null
+                                    downloadNote = note
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                        downloadNote = when (verdict) {
+                            // Named, because "no download button" with no reason
+                            // reads as a missing feature. `NoAudio` is the normal
+                            // case for a metadata catalogue and says so.
+                            is uniffi.comrade_ui.DownloadVerdictDto.NoAudio ->
+                                stringResource(R.string.together_download_no_audio)
+                            is uniffi.comrade_ui.DownloadVerdictDto.NotOpenlyLicensed ->
+                                stringResource(R.string.together_download_not_licensed)
+                            // An insecure URL is a catalogue bug, not something to
+                            // explain to a listener. Silent.
+                            else -> null
+                        },
                         onClick = {
-                            val match = matches.getOrNull(i) ?: return@CandidateRow
+                            // The outer `match` is this row's; no second lookup.
+                            val want = match ?: return@CandidateRow
                             scope.launch {
                                 val opened = withContext(Dispatchers.IO) {
-                                    openLocalCopyOf(context, match)
+                                    openLocalCopyOf(context, want)
                                 }
                                 if (opened == null) {
                                     // No local copy above the confidence bar. Say
                                     // so rather than opening the nearest thing —
                                     // MATCH_CONFIDENT exists precisely so this
                                     // asks instead of guessing.
-                                    outcome = TogetherDecisions.SearchOutcome.Failed(
-                                        context.getString(R.string.together_search_not_on_phone),
+                                    //
+                                    // **Not `Failed`.** That is what shipped, and
+                                    // it rendered a search that worked as
+                                    // "Couldn't search: …" while wiping the list,
+                                    // so there was no other candidate left to try.
+                                    // The search succeeded; only this row has no
+                                    // copy here.
+                                    outcome = TogetherDecisions.notOnThisPhone(
+                                        candidates = rows,
+                                        wanted = candidate,
                                     )
                                 } else {
                                     onPlay(opened.first, opened.second)
@@ -1312,9 +1395,24 @@ private fun SearchByName(
     }
 }
 
-/** One catalogue answer, with the catalogue that gave it named on the row. */
+/**
+ * One catalogue answer, with the catalogue that gave it named on the row and a
+ * download button only where the licence actually permits one.
+ *
+ * [onDownload] is `null` for every row core refused, and the row then says
+ * nothing about downloading at all — a greyed-out button would invite a tap and
+ * then explain a licence, which is worse than not offering it. Where there *is* a
+ * reason worth naming ([downloadNote]) it is a line of text, not a disabled
+ * control.
+ */
 @Composable
-private fun CandidateRow(candidate: TogetherDecisions.Candidate, onClick: () -> Unit) {
+private fun CandidateRow(
+    candidate: TogetherDecisions.Candidate,
+    onClick: () -> Unit,
+    onDownload: (() -> Unit)? = null,
+    downloadNote: String? = null,
+    downloading: Boolean = false,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1347,6 +1445,28 @@ private fun CandidateRow(candidate: TogetherDecisions.Candidate, onClick: () -> 
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            downloadNote?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TogetherMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (downloading) {
+            Text(
+                stringResource(R.string.together_downloading),
+                style = MaterialTheme.typography.bodySmall,
+                color = TogetherMuted,
+            )
+        } else {
+            onDownload?.let { download ->
+                TextButton(onClick = download) {
+                    Text(stringResource(R.string.together_download), color = TogetherText)
+                }
+            }
         }
     }
 }
@@ -1371,6 +1491,38 @@ private fun uniffi.comrade_core.CatalogueMatch.asCandidate() = TogetherDecisions
  * rather than inlining the string at the call site.
  */
 private const val MUSICBRAINZ = "MusicBrainz"
+
+/**
+ * Fetch an openly-licensed track and put it in the phone's music library.
+ *
+ * Returns the sentence to show. **Blocking** — `Dispatchers.IO` only; it is a
+ * network transfer followed by a `ContentResolver` write.
+ *
+ * The three outcomes stay three sentences. "You already have this" is not a
+ * failure and must not read as one, which is why [MusicDownloads.Outcome] is a
+ * sealed interface rather than a `Result` — the same argument as
+ * `ComradeCore.CatalogueResult`.
+ */
+private fun downloadInto(
+    context: Context,
+    match: uniffi.comrade_core.CatalogueMatch,
+): String {
+    val fetched = kotlinx.coroutines.runBlocking { ComradeCore.downloadTrack(match) }
+    val track = fetched.getOrElse { e ->
+        return context.getString(
+            R.string.together_download_failed,
+            e.message ?: e::class.java.simpleName,
+        )
+    }
+    return when (val saved = MusicDownloads.save(context, track)) {
+        is MusicDownloads.Outcome.Saved ->
+            context.getString(R.string.together_download_saved, saved.displayName)
+        is MusicDownloads.Outcome.AlreadyThere ->
+            context.getString(R.string.together_download_already, saved.displayName)
+        is MusicDownloads.Outcome.Failed ->
+            context.getString(R.string.together_download_failed, saved.reason)
+    }
+}
 
 /**
  * Find this phone's own copy of `match`, or `null`.
@@ -1913,6 +2065,18 @@ private fun LiveSession(
             qualityMs = s.qualityMs,
             ageMs = System.currentTimeMillis() - s.correctedAtMs,
         )
+        // Before the drift line, deliberately: a stalled stream is the *cause* of
+        // the gap the drift line is about to report, and reading them in the other
+        // order makes the gap look like a sync fault. Until now nothing showed
+        // this at all — the transport said "playing", the playhead stopped, and
+        // the only visible effect was the drift line growing.
+        if (s.buffering) {
+            Text(
+                stringResource(R.string.together_buffering),
+                style = MaterialTheme.typography.bodySmall,
+                color = TogetherMuted,
+            )
+        }
         driftLabel(measured.drift)?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = TogetherMuted)
         }

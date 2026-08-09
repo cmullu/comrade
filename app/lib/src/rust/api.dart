@@ -1987,6 +1987,9 @@ sealed class UiError with _$UiError implements FrbException {
   const factory UiError.catalogue(
     String field0,
   ) = UiError_Catalogue;
+  const factory UiError.download(
+    String field0,
+  ) = UiError_Download;
   const factory UiError.catalogueUnavailable() = UiError_CatalogueUnavailable;
 }
 

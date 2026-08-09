@@ -2483,3 +2483,109 @@ the player are all fine.
   that constant a lie, and the field has to move onto the match — stated as a
   named constant with that comment rather than an inlined string so the next
   person finds it.
+
+## 21. Streaming and downloading, BlackHole's other two halves
+
+_Added 2026-08-09, completing §20's "what is still missing" for the media path._
+
+### Streaming already worked; the stall did not show
+
+`MediaPlayer.setDataSource(context, Uri)` on an HTTPS URL **is** progressive HTTP
+— the same model BlackHole uses — and `TogetherContent::Stream` has driven it on
+both sides of a session since §14. So there was no streaming to add.
+
+What was missing is that a stall was invisible. `MEDIA_INFO_BUFFERING_START` /
+`_END` were not wired to anything, so a stream that ran out of bytes looked
+exactly like one that had broken: the transport still said "playing", the
+playhead stopped, and the only visible consequence was **the drift line growing**
+— the session reporting a sync problem whose actual cause was a network stall.
+
+`UiState.Live.buffering` now carries it, and the screen shows it **above** the
+drift line rather than below. That ordering is the point: the stall is the cause
+of the gap the next line is about to report, and the other order reads as a sync
+fault.
+
+Nothing pauses or corrects on a stall, deliberately. A stall that clears in 300 ms
+must not become a command the other side has to apply, and the drift ladder
+already handles a playhead that has stopped moving. `MediaPlayer` may also end a
+stall with no second event at all, so this is shown and never waited on.
+
+### Downloading: the licence gate is a type, not a check
+
+`comrade_core::download` is the "who carries it out" §9's tier table left open for
+`SourceTier::OpenLicence`.
+
+**`fetch_track` does not take a URL.** It takes a `PermittedDownload`, and the
+only way to obtain one is `permit_download`, which refuses a metadata-only
+answer, an undeclared licence, and a non-HTTPS URL. There is therefore no call
+shape that downloads an arbitrary string, and no ordering bug where the bytes
+arrive before the check — §9's *"licence checking happens before the fetch, not
+after"* is a compile-time property here instead of a convention. `EmbedOnly` has
+no path through the module at all.
+
+That is the whole difference between this and the "download button that works
+until somebody's lawyer notices" `catalogue.rs` warns about. `download_track` on
+the FFI **re-runs the gate itself** rather than trusting that the UI asked
+`download_verdict` first, so a frontend that skipped the verdict still cannot get
+past it.
+
+Guards are `media.rs`'s `fetch_guarded_bytes`, not a second opinion: HTTPS only
+and fail-closed on any other or missing scheme, redirects disabled, a connect
+timeout separate from the transfer budget, an audio content-type allowlist checked
+before any body is buffered, and the cap checked against `Content-Length` **and
+again while the body streams** — a cap that only reads the header is not a cap.
+
+The filename is where a third party's strings stop being dangerous, because artist
+and title come from a catalogue's JSON: separators, control characters and the
+punctuation Windows rejects are removed, leading dots trimmed, the stem truncated
+on a character boundary with the extension kept intact (a media scanner keys on
+the extension), and a name that sanitises to nothing becomes `track` rather than
+`.mp3`. `../../etc/passwd` as a title is a test case.
+
+### Why the download goes into `MediaStore` and not app storage
+
+`together/MusicDownloads.kt` writes through `MediaStore.Audio`, which is what
+makes a downloaded track *a track*: visible to `MusicLibrary`, visible to every
+other music app on the phone, and surviving uninstall. App-private storage would
+have been shorter and would have made the download invisible. It also needs no
+storage permission on API 29+ — an app may always insert its own media — which
+matters because the library *read* permission is separately refusable and a
+refusal must not cost the download.
+
+`IS_PENDING` is set while writing and cleared afterwards, and that is not
+optional: without it the media scanner can index a half-written file, and the
+result is not a missing track but a **corrupt** one appearing in every music app
+with the right name and a broken decode. A failed download deletes its own row,
+because a pending row is invisible but still occupies the name — leaving one
+would make the retry report "you already have this" for a file that was never
+written.
+
+Three outcomes, three sentences: `Saved`, `AlreadyThere`, `Failed`.
+`AlreadyThere` is its own case rather than a failure because "you already have
+this" is not one — the same argument as `ComradeCore.CatalogueResult`, and the
+same argument §20 made for `NoCatalogue` versus `NothingFound`.
+
+A row with no permitted download says **why** rather than showing a disabled
+button: `NoAudio` ("this catalogue only knows the name") is the ordinary answer,
+since MusicBrainz serves no audio at all. A greyed-out button invites a tap and
+then explains a licence, which is worse than not offering one.
+
+### What is still missing
+
+- **In-file tags.** No ID3/Vorbis/MP4 frames are written. `id3` is MP3-only while
+  archives serve FLAC, Ogg and M4A just as often, so it would tag one format in
+  four and silently skip the rest. `MediaStore`'s `TITLE`/`ARTIST`/`ALBUM`
+  columns make a download read correctly **on the phone**; a file copied off the
+  device carries only whatever tags the archive already put in it. Closing this
+  properly needs a multi-format writer (`lofty`-shaped).
+- **The whole track is buffered in memory.** `MAX_TRACK_BYTES` is 96 MB to
+  accommodate lossless album tracks, so a worst case is a 96 MB `ByteArray`
+  crossing the FFI. Typical tracks are 3–12 MB. Streaming to a caller-supplied
+  path is the fix; it is not done because it puts filesystem code in the core for
+  a case no archive this serves has hit.
+- **One download at a time**, by construction — the button is hidden while
+  another is in flight. Not a queue, and there is no resume: a failed download
+  starts over.
+- **Adapters for the pluggable tier.** §20's seam is still empty.
+- **Playlists, favourites, queue and history.** Still nothing at all, and still
+  the largest gap between this and a music player.

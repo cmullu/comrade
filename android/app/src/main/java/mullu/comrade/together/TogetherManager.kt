@@ -115,6 +115,15 @@ object TogetherManager {
              */
             val streaming: Boolean = false,
             /**
+             * The decoder is waiting on bytes that have not arrived.
+             *
+             * Only ever true for a session whose source is a network one — a URL
+             * stream or a file still being handed over. A local file cannot
+             * buffer. Advisory: `MediaPlayer` may end a stall with no second
+             * event, so the screen shows it and never waits on it.
+             */
+            val buffering: Boolean = false,
+            /**
              * The last measured gap between the two playheads, signed —
              * positive means this device is ahead — with the error on it and
              * when it was taken.
@@ -290,6 +299,16 @@ object TogetherManager {
      * anybody decided: this one is what is actually playing, on either side.
      */
     private var playingVideoId: String? = null
+
+    /**
+     * The public media URL this session is playing, on either side.
+     *
+     * Tracked for the same reason [playingVideoId] is: the status line has to
+     * know what kind of thing is playing, and "open your copy to start" is
+     * meaningless for a URL both devices fetch for themselves. See
+     * [TogetherDecisions.needsOwnCopy].
+     */
+    private var playingStreamUrl: String? = null
 
     private val _embedFailure = MutableStateFlow<TogetherDecisions.EmbedFailure?>(null)
 
@@ -811,8 +830,28 @@ object TogetherManager {
         return true
     }
 
+    /**
+     * They joined. What the status line then says depends on whether there is a
+     * copy for anybody to open.
+     *
+     * **This said `OpenYourCopy` unconditionally, and that shipped.** A YouTube
+     * session showed "open your copy to start" underneath YouTube's own "This
+     * video is unavailable" panel — there is no copy of an embed, and none of a
+     * URL stream either, since both devices fetch the same address. The
+     * distinction is [TogetherDecisions.needsOwnCopy]'s, so the JVM lane pins it.
+     */
     fun onJoined() {
-        (_state.value as? UiState.Live)?.let { _state.value = it.copy(joined = true, status = Status.OpenYourCopy) }
+        (_state.value as? UiState.Live)?.let {
+            val needsCopy = TogetherDecisions.needsOwnCopy(
+                embed = it.embed,
+                external = it.external,
+                stream = playingStreamUrl != null,
+            )
+            _state.value = it.copy(
+                joined = true,
+                status = if (needsCopy) Status.OpenYourCopy else Status.Together,
+            )
+        }
     }
 
     /**
@@ -1253,6 +1292,7 @@ object TogetherManager {
      * the player says, which is after the session opened.
      */
     private fun openStreamPlayer(url: String) {
+        playingStreamUrl = url
         openPlayer(Uri.parse(url)) { durationMs -> refreshLive(durationMs = durationMs) }
     }
 
@@ -1638,6 +1678,15 @@ object TogetherManager {
                 _openFailed.value = true
             }
 
+            override fun onBuffering(buffering: Boolean) {
+                // Straight through: what it means for the session is the
+                // screen's to say, and the drift ladder already handles a
+                // playhead that has stopped moving. Nothing here pauses or
+                // corrects — a stall that fixes itself in 300ms must not become
+                // a command the other side has to apply.
+                refreshLive(buffering = buffering)
+            }
+
             override fun onVideoSize(width: Int, height: Int) {
                 refreshLive(picture = TogetherDecisions.pictureOf(width, height))
                 // The capture starts at a guess, because `MediaPlayer` only
@@ -2000,6 +2049,7 @@ object TogetherManager {
     private fun refreshLive(
         playing: Boolean? = null,
         streaming: Boolean? = null,
+        buffering: Boolean? = null,
         positionMs: Long? = null,
         /**
          * Only an embed passes this.
@@ -2022,6 +2072,7 @@ object TogetherManager {
         _state.value = live.copy(
             playing = playing ?: live.playing,
             streaming = streaming ?: live.streaming,
+            buffering = buffering ?: live.buffering,
             positionMs = positionMs ?: live.positionMs,
             durationMs = durationMs ?: live.durationMs,
             status = status ?: live.status,
@@ -2062,6 +2113,7 @@ object TogetherManager {
         wantedVideoId = null
         wantedStream = null
         playingVideoId = null
+        playingStreamUrl = null
         invitedKind = ""
         _openFailed.value = false
         _embedFailure.value = null

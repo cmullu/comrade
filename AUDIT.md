@@ -1149,6 +1149,31 @@ is small; the content problem is the real constraint:
 >   fine, and leave the channel silently empty, so
 >   `the_channel_filter_matches_the_notes_we_publish` was added to hold them
 >   together.
+> - **The `OpenLicence` tier could decide a fetch was permitted and nothing could
+>   carry it out.** Closed 2026-08-09 (`docs/TOGETHER.md` §21).
+>   `comrade_core::download` fetches an openly-licensed track and
+>   `together/MusicDownloads.kt` writes it into `MediaStore.Audio`, so it joins the
+>   phone's library and plays offline. The licence gate is enforced by the type
+>   system rather than by a check: `fetch_track` takes a `PermittedDownload` that
+>   only `permit_download` can mint, so no call shape downloads an arbitrary URL
+>   and the check cannot run after the bytes arrive. Guards copied from
+>   `media.rs`'s `fetch_guarded_bytes`.
+>   Named as **not** done, rather than left to be discovered: no in-file tags are
+>   written (the `id3` crate is MP3-only while archives serve FLAC/Ogg/M4A, so it
+>   would tag one format in four — a multi-format writer is the fix); the whole
+>   track is buffered in memory up to a 96 MB cap, where streaming to a path is
+>   the fix; and there is no resume, no queue and no adapter for §20's pluggable
+>   tier.
+> - **A stalled stream was indistinguishable from a broken one, and it looked like
+>   a sync fault.** Fixed 2026-08-09 (`docs/TOGETHER.md` §21).
+>   `MEDIA_INFO_BUFFERING_START`/`_END` were wired to nothing, so a stream that ran
+>   out of bytes left the transport saying "playing" with a stopped playhead — and
+>   the only visible consequence was the drift line growing, i.e. the session
+>   reporting a synchronisation problem whose cause was the network.
+>   `UiState.Live.buffering` now carries it and the screen shows it *above* the
+>   drift line, since the stall is the cause of the gap. Deliberately nothing
+>   pauses or corrects: a stall that clears in 300 ms must not become a command the
+>   peer has to apply.
 > - **A whole tested module was reachable from nothing, and no lane noticed.**
 >   Found and closed 2026-08-09 (`docs/TOGETHER.md` §20). `comrade_core::catalogue`
 >   had a resolver trait, a MusicBrainz adapter, the four-tier ladder, a licence

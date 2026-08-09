@@ -49,6 +49,18 @@ class TogetherPlayer(private val context: Context) : SessionPlayer {
          * Fires before the first frame and again if the track changes size.
          */
         fun onVideoSize(width: Int, height: Int)
+
+        /**
+         * The decoder ran out of buffered bytes, or got some again.
+         *
+         * **Nothing listened to this before**, so a stream that stalled looked
+         * exactly like one that had broken: the transport stayed on "playing", the
+         * playhead stopped, and the only visible consequence was the other side
+         * pulling ahead until the drift ladder started issuing corrections
+         * nothing could apply. A default implementation, because a session on a
+         * local file cannot buffer and has no reason to care.
+         */
+        fun onBuffering(buffering: Boolean) {}
     }
 
     private var player: MediaPlayer? = null
@@ -140,6 +152,20 @@ class TogetherPlayer(private val context: Context) : SessionPlayer {
             setOnErrorListener { _, what, extra ->
                 listener?.onError("player error $what/$extra")
                 true
+            }
+            // The only signal Android gives for a stall. `MEDIA_INFO_BUFFERING_*`
+            // arrive on the player's own thread and are advisory — a stall may
+            // end with `BUFFERING_END`, or simply by playback resuming with no
+            // second event at all, which is why the screen must treat this as a
+            // hint and never as a state it waits on.
+            setOnInfoListener { _, what, _ ->
+                when (what) {
+                    MediaPlayer.MEDIA_INFO_BUFFERING_START -> listener?.onBuffering(true)
+                    MediaPlayer.MEDIA_INFO_BUFFERING_END -> listener?.onBuffering(false)
+                }
+                // False: these are informational, and claiming to have handled
+                // them suppresses nothing useful.
+                false
             }
         }
         player = mp

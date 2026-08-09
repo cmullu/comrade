@@ -161,7 +161,8 @@ impl SourceTier {
 /// that decides whether a tier may run: *does this permit us to hand a copy to
 /// somebody?* Anything not recognised is [`Self::Unknown`], which is treated as
 /// "no".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
 pub enum OpenLicence {
     /// Public domain or an explicit dedication (CC0, PD mark).
     PublicDomain,

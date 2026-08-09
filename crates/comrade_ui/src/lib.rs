@@ -67,18 +67,19 @@ pub use comrade_core::karya::TaskState;
 pub use runtime::play_route;
 // The catalogue rung: one network call and one pure decision, both free
 // functions so no caller can hold a lock across the lookup (see their docs).
-pub use runtime::{audio_plan, catalogue_lookup};
+pub use runtime::{audio_plan, catalogue_lookup, download_track, download_verdict};
 
 pub use runtime::{
     AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BleRouter, BridgeEvent,
     CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime,
-    ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto,
-    FoundProfileDto, IceServerDto, JournalEntryDto, LibraryCandidateDto, MediaBytesDto,
-    MediaMessageDto, MentionMatchDto, MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto,
-    MetricDto, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto,
-    ProfileDto, ReactionDto, ReadingDto, RuntimeHandles, SakhaStatusDto, ShareVerdictDto,
-    TaraChatDto, TaraMessageDto, TaskDto, TogetherCommandDto, TogetherCorrectionDto,
-    TogetherInviteDto, TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
+    ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, DownloadVerdictDto,
+    DownloadedTrackDto, FocusSessionDto, FoundProfileDto, IceServerDto, JournalEntryDto,
+    LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
+    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
+    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
+    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
+    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
+    TogetherShareDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────
@@ -111,6 +112,14 @@ pub enum UiError {
 
     #[error("catalogue lookup failed: {0}")]
     Catalogue(String),
+
+    /// A download was refused or failed. Stringly-typed like [`Self::Catalogue`]
+    /// and [`Self::Engine`] because the interesting distinctions — *why* a
+    /// licence refused it — are answered before a download starts, by
+    /// `download_verdict`, which is typed. What reaches here is a transfer that
+    /// went wrong, and those are network sentences.
+    #[error("download failed: {0}")]
+    Download(String),
 
     /// The build has no catalogue at all, which is a **different answer from
     /// "no results"** and must stay one.
