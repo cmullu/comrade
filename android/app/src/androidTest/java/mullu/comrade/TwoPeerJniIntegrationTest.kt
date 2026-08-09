@@ -29,24 +29,45 @@ import java.util.concurrent.ConcurrentLinkedQueue
  * ## Isolated relay, not the public internet
  * Both instances connect to one relay address read from the
  * `comradeTestRelayUrl` instrumentation argument (see
- * `deploy/test-relay/README.md` for how CI supplies it — a relay container
- * reachable at `10.0.2.2:<port>` from inside the emulator, the standard
- * host-loopback address every Android emulator exposes). Without that
- * argument this test is **skipped**, not silently pointed at the public
- * relay pool — a two-peer test flaking on a real relay's availability/rate
- * limits would defeat the point of an isolated test environment.
+ * `deploy/test-relay/README.md` for how CI supplies it). CI reaches it with
+ * `adb reverse tcp:8090 tcp:8090`, so the address is the device's own
+ * `127.0.0.1:8090` — **not** the `10.0.2.2` host loopback the emulator
+ * documentation offers, which depends on the emulated radio NAT and is not
+ * reliably routable from an app on an API 35 netsim-Wi-Fi image. Without the
+ * argument this test is **skipped**, not silently pointed at the public relay
+ * pool — a two-peer test flaking on a real relay's availability/rate limits
+ * would defeat the point of an isolated test environment.
  *
  * **CI passes it, and asserts that it did.** Until 2026-08-09 it did not: the
  * device lanes ran `connectedDebugAndroidTest` with no relay argument, so every
  * test in this file skipped on every run and the lane was green having proven
  * nothing at all. [relayUrlOrSkip] is where that cannot happen again.
  *
- * ## Two instances, not two installations
+ * ## Two instances, not two installations — and the constructor that makes that
+ * actually true
  * This uses two in-process `Comrade` objects rather than two separately
- * installed app IDs. `build.gradle.kts`'s `deviceHarnessRole` property is the
- * (lower-risk — see its own comment) mechanism that *does* produce two
- * installable app IDs with isolated storage for a fuller cross-app harness;
- * wiring that up is future work, not bundled into this default test target.
+ * installed app IDs, via [Comrade.newIsolatedWithRelays], which builds a
+ * `ComradeRuntime` of its own per handle.
+ *
+ * **It used to call `newWithRelays`, and that is why the first non-skipping run
+ * of this file was red on all three tests.** That constructor returned a handle
+ * onto the one process-global runtime, so "alice" and "bob" were the same
+ * runtime: `unlock_vault` is idempotent, so bob's unlock handed back *alice's*
+ * identity and both sides shared one npub. Alice DMing bob was alice DMing
+ * herself, no `IncomingMessageRequest` was ever emitted, and the three
+ * assertions all read "nothing arrived" with no hint as to why. The regression
+ * test is `two_isolated_handles_are_two_separate_runtimes` in `comrade_jni`,
+ * which runs on every push and fails in one second rather than fifteen minutes.
+ *
+ * Two runtimes in one process is safe only because each is given a vault
+ * directory of its own — redb's exclusive lock is per directory. Keep the
+ * `aliceDir`/`bobDir` split in every test here.
+ *
+ * `build.gradle.kts`'s `deviceHarnessRole` property is the mechanism that *does*
+ * produce two installable app IDs with isolated storage for a fuller cross-app
+ * harness — two processes, two `MediaPlayer`s, real BLE/Wi-Fi between them.
+ * That is still future work: what this file can prove is the bindings and the
+ * wire, not two apps on one handset.
  */
 @RunWith(AndroidJUnit4::class)
 class TwoPeerJniIntegrationTest {
@@ -129,8 +150,8 @@ class TwoPeerJniIntegrationTest {
         val aliceDir = File(context.filesDir, "jni-2peer-alice")
         val bobDir = File(context.filesDir, "jni-2peer-bob")
 
-        val alice = Comrade.newWithRelays(listOf(testRelayUrl))
-        val bob = Comrade.newWithRelays(listOf(testRelayUrl))
+        val alice = Comrade.newIsolatedWithRelays(listOf(testRelayUrl))
+        val bob = Comrade.newIsolatedWithRelays(listOf(testRelayUrl))
         val aliceEvents = RecordingListener()
         val bobEvents = RecordingListener()
 
@@ -174,8 +195,8 @@ class TwoPeerJniIntegrationTest {
         val aliceDir = File(context.filesDir, "jni-presence-alice")
         val bobDir = File(context.filesDir, "jni-presence-bob")
 
-        val alice = Comrade.newWithRelays(listOf(testRelayUrl))
-        val bob = Comrade.newWithRelays(listOf(testRelayUrl))
+        val alice = Comrade.newIsolatedWithRelays(listOf(testRelayUrl))
+        val bob = Comrade.newIsolatedWithRelays(listOf(testRelayUrl))
         val aliceEvents = RecordingListener()
         val bobEvents = RecordingListener()
 
@@ -251,8 +272,8 @@ class TwoPeerJniIntegrationTest {
         val aliceDir = File(context.filesDir, "jni-together-alice")
         val bobDir = File(context.filesDir, "jni-together-bob")
 
-        val alice = Comrade.newWithRelays(listOf(testRelayUrl))
-        val bob = Comrade.newWithRelays(listOf(testRelayUrl))
+        val alice = Comrade.newIsolatedWithRelays(listOf(testRelayUrl))
+        val bob = Comrade.newIsolatedWithRelays(listOf(testRelayUrl))
         val aliceEvents = RecordingListener()
         val bobEvents = RecordingListener()
 

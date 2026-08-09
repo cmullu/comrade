@@ -29,6 +29,12 @@
  * [`global_runtime`]: the single, process-lifetime `ComradeRuntime` that both
  * ABIs read and write. See `docs/FRONTEND_STRATEGY.md` §4 D2.
  *
+ * The lock is on the *directory*, which is why there is exactly one exception:
+ * [`Comrade::new_isolated_with_relays`] builds a runtime of its own for the
+ * two-peer device test, where each peer is pointed at a directory of its own.
+ * Nothing in the shipping app may use it — see its own doc for what a shared
+ * runtime did to that test.
+ *
  * Shape:
  *  • Free functions ([`version`], [`generate_keypair`], …) — stateless crypto
  *    and workspace-metadata helpers that don't need a live runtime.
@@ -207,12 +213,17 @@ pub(crate) fn global_runtime() -> &'static Arc<RwLock<ComradeRuntime>> {
 
 /// [`global_runtime`], but seeding it with an explicit relay set if — and only
 /// if — it has not been created yet (AUDIT.md COMMS-03's isolated-relay test
-/// hook, reached from [`Comrade::new_with_relays`]).
+/// hook, reached from [`api::init_runtime_with_relays`]).
 ///
-/// First caller wins: there is exactly one runtime per process, so a later
-/// call cannot retarget engines that may already be connected. That is logged
-/// rather than silently ignored, and never fails — the caller still gets a
-/// working handle.
+/// First caller wins: there is exactly one *global* runtime per process, so a
+/// later call cannot retarget engines that may already be connected. That is
+/// logged rather than silently ignored, and never fails — the caller still gets
+/// a working handle.
+///
+/// **This is the shape that must not be used to build test peers**, and
+/// [`Comrade::new_isolated_with_relays`] is where that is written down: "first
+/// caller wins" means the second peer silently becomes the first one. The Dart
+/// hook can live with it because it seeds a single runtime once at startup.
 pub(crate) fn global_runtime_with_relays(
     relays: Vec<String>,
 ) -> &'static Arc<RwLock<ComradeRuntime>> {
@@ -470,11 +481,11 @@ pub struct Comrade {
 }
 
 impl Comrade {
-    /// Build a handle over an explicit runtime. Not exported over FFI: the
-    /// only foreign-reachable constructors are [`Comrade::new`] and
-    /// [`Comrade::new_with_relays`], both of which bind the process-global
-    /// runtime. Tests use this to get an isolated runtime (and therefore an
-    /// isolated redb vault) per test.
+    /// Build a handle over an explicit runtime. Not exported over FFI:
+    /// [`Comrade::new`] binds the process-global runtime and
+    /// [`Comrade::new_isolated_with_relays`] builds one of its own. Tests use
+    /// this to get an isolated runtime (and therefore an isolated redb vault)
+    /// per test.
     fn with_runtime(inner: Arc<RwLock<ComradeRuntime>>) -> Arc<Self> {
         Arc::new(Self {
             inner,
@@ -490,17 +501,42 @@ impl Comrade {
         Self::with_runtime(global_runtime().clone())
     }
 
-    /// Like [`Comrade::new`], but connecting new engines to `relays` instead
-    /// of the public default set. AUDIT.md COMMS-03's isolated-relay test
-    /// hook: a two-installation/two-instance device test points both sides
-    /// at one local relay instead of the public internet. Not used by the
-    /// shipping app (which always calls [`Comrade::new`]).
+    /// A **separate** runtime of its own, connected to `relays` instead of the
+    /// public default set — one independent peer, not a handle onto the shared
+    /// one. AUDIT.md COMMS-03's isolated-relay test hook, and the only
+    /// constructor here that does not bind [`global_runtime`]. Not used by the
+    /// shipping app, which always calls [`Comrade::new`].
     ///
-    /// Only takes effect if it is what first creates the process-global
-    /// runtime — see [`global_runtime_with_relays`].
+    /// **The name carries the word `isolated` because the absence of it cost
+    /// months of green CI.** This was `new_with_relays`, and it returned a
+    /// handle onto the process-global runtime — seeding its relay set only if it
+    /// happened to be the first caller. `TwoPeerJniIntegrationTest` built two of
+    /// these and believed it had two peers; it had one runtime twice, so the
+    /// second `unlock_vault` returned the *first* peer's identity (unlock is
+    /// idempotent by design) and both "peers" shared one npub. Alice DMing Bob
+    /// was Alice DMing herself, no `IncomingMessageRequest` ever arrived, and
+    /// all three tests asserted "nothing arrived" — which is exactly what they
+    /// did on 2026-08-09, the first run where they were not skipping.
+    ///
+    /// Two runtimes in one process is safe *here* and nowhere else, for reasons
+    /// worth stating rather than rediscovering:
+    ///  • each opens a **different** vault directory, so redb's exclusive file
+    ///    lock is never contended — the module header's warning is about two
+    ///    runtimes over *one* directory, which this still must not do;
+    ///  • Saathi listens on `/ip4/0.0.0.0/tcp/0` (`saathi.rs:253`), an ephemeral
+    ///    port, so two instances do not collide.
+    ///
+    /// The Dart ABI has no equivalent and must not gain one: `api::runtime()`
+    /// resolves the global unconditionally, so a second runtime would be
+    /// unreachable from every function there. Dart's isolated-relay hook stays
+    /// [`api::init_runtime_with_relays`], which seeds the global.
     #[uniffi::constructor]
-    pub fn new_with_relays(relays: Vec<String>) -> Arc<Self> {
-        Self::with_runtime(global_runtime_with_relays(relays).clone())
+    pub fn new_isolated_with_relays(relays: Vec<String>) -> Arc<Self> {
+        // The global's own funnels call this; an isolated runtime bypasses them,
+        // so it has to install the logcat bridge itself or a test's warnings go
+        // nowhere.
+        init_logging();
+        Self::with_runtime(Arc::new(RwLock::new(ComradeRuntime::with_relays(relays))))
     }
 
     // ── Push events ───────────────────────────────────────────────────────
@@ -1658,10 +1694,13 @@ mod tests {
 
     #[test]
     fn resolving_the_global_runtime_installs_logging() {
-        // Guards the wiring, which is the part that rots: `global_runtime` and
-        // `global_runtime_with_relays` are the funnels both foreign ABIs reach,
-        // and if either stops installing the bridge, Android silently goes back
-        // to dropping every `warn!`.
+        // Guards the wiring, which is the part that rots: `global_runtime`,
+        // `global_runtime_with_relays` and `Comrade::new_isolated_with_relays`
+        // are the funnels the foreign ABIs reach, and if any of them stops
+        // installing the bridge, Android silently goes back to dropping every
+        // `warn!`. The isolated constructor is the easiest of the three to
+        // forget, because it is the one that does *not* route through
+        // `global_runtime`.
         //
         // Weaker than it looks, and worth saying so: `cargo test` shares one
         // process, so an earlier test may already have installed it. There is
@@ -1673,6 +1712,9 @@ mod tests {
         assert!(LOGGING.get().is_some());
         // …and the flutter_rust_bridge accessor goes through the same funnel.
         let _ = api::runtime();
+        assert!(LOGGING.get().is_some());
+        // …as does the one constructor that deliberately does not.
+        let _ = Comrade::new_isolated_with_relays(vec!["wss://relay.example.test".to_string()]);
         assert!(LOGGING.get().is_some());
     }
 
@@ -1727,21 +1769,40 @@ mod tests {
         assert_eq!(c.current_workspace().key, "Base");
     }
 
+    /// The regression test for the bug that made the two-peer device lane
+    /// unpassable as written: two isolated handles must be two *different*
+    /// runtimes, and neither may be the global one.
+    ///
+    /// This fails against the old `new_with_relays` on every one of its three
+    /// assertions, which is the point — that constructor returned the same
+    /// process-global runtime to both callers, so `TwoPeerJniIntegrationTest`'s
+    /// "alice" and "bob" were one peer wearing two names.
     #[test]
-    fn new_with_relays_is_reachable_through_the_ffi_constructor() {
-        // Reachable, and — like every other foreign constructor — a handle
-        // onto the one process-global runtime, not a second one.
-        let c = Comrade::new_with_relays(vec!["wss://relay.example.test".to_string()]);
-        assert!(Arc::ptr_eq(&c.inner, global_runtime()));
-        assert_eq!(c.current_workspace().key, "Base");
+    fn two_isolated_handles_are_two_separate_runtimes() {
+        let relays = vec!["wss://relay.example.test".to_string()];
+        let alice = Comrade::new_isolated_with_relays(relays.clone());
+        let bob = Comrade::new_isolated_with_relays(relays);
+
+        assert!(
+            !Arc::ptr_eq(&alice.inner, &bob.inner),
+            "two isolated handles sharing one runtime is the bug this constructor exists to \
+             prevent: the second unlock_vault returns the first peer's identity, so a DM \
+             between them is a DM to oneself"
+        );
+        assert!(!Arc::ptr_eq(&alice.inner, global_runtime()));
+        assert!(!Arc::ptr_eq(&bob.inner, global_runtime()));
+        assert_eq!(alice.current_workspace().key, "Base");
+        assert_eq!(bob.current_workspace().key, "Base");
     }
 
     #[test]
-    fn every_uniffi_handle_shares_one_process_global_runtime() {
-        // The architectural invariant this crate exists to hold: two cdylibs
-        // (or two runtimes in one) would both open the same vault directory,
-        // and redb's exclusive lock makes the second open fail. See the
-        // module header.
+    fn every_default_uniffi_handle_shares_one_process_global_runtime() {
+        // The architectural invariant this crate exists to hold, and it is about
+        // the *default* constructor: two cdylibs (or two runtimes over one vault
+        // directory) would both `redb::Database::create` the same file, and
+        // redb's exclusive lock makes the second open fail. See the module
+        // header. `new_isolated_with_relays` is exempt because it is only ever
+        // pointed at a directory of its own.
         let a = Comrade::new();
         let b = Comrade::new();
         assert!(Arc::ptr_eq(&a.inner, &b.inner));

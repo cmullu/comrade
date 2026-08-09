@@ -1128,15 +1128,39 @@ is small; the content problem is the real constraint:
 >   cover `Join` or `End`, which are one-shot and have no ladder behind them. A
 >   `Join` lost this way leaves the inviter on "waiting for them to open it"
 >   forever, which is a reported symptom.
-> - **A two-peer lane existed and had never run.** Fixed 2026-08-09
->   (`docs/TOGETHER.md` §19): `TwoPeerJniIntegrationTest` skips itself without
+> - **A two-peer lane existed and had never run — and when it finally ran it was
+>   testing one peer twice.** Fixed 2026-08-09 (`docs/TOGETHER.md` §19), in two
+>   rounds, because the first round only revealed the second problem.
+>   *Round one:* `TwoPeerJniIntegrationTest` skips itself without
 >   `comradeTestRelayUrl`, and `android-apk.yml` never passed it — so since
 >   COMMS-03 every test in that file skipped on every run and the lane was green.
->   The relay is started and the argument passed now, and `comradeRequireRelay`
->   makes a future skip a failure rather than a pass. **The general lesson is
->   unaddressed**: nothing in this repo fails a build because a test was skipped,
->   and `Assume` is used elsewhere. A skipped-test count assertion across the
->   whole suite would close it and is not written.
+>   The relay is started and the argument is passed now; `relayUrlOrSkip` inverts
+>   the polarity so a skip must be *asked for* (`comradeAllowRelaySkip`), and an
+>   "Assert the two-peer tests actually ran" step reads the results XML, because
+>   an in-test guard cannot catch instrumentation that never ran.
+>   *Round two:* the first non-skipping run was red on all three tests, every one
+>   of them "nothing arrived". The cause was not the wire.
+>   `Comrade::new_with_relays` returned a handle onto the **process-global**
+>   `ComradeRuntime` (`comrade_jni/src/lib.rs`, the `OnceLock` landed `2026fce`
+>   2026-07-29), seeding its relay set only if it happened to be the first
+>   caller — so the test's two handles were one runtime, `unlock_vault` is
+>   idempotent and returned alice's identity to bob, and both "peers" shared one
+>   npub. Alice DMing bob was alice DMing herself. Note the shape of this: a
+>   singleton landed for a good reason (one redb open, one runtime across two
+>   FFI ABIs) silently invalidated a test written two weeks earlier, and the lane
+>   that would have caught it was the skipping one. The constructor is now
+>   `new_isolated_with_relays` and builds a runtime of its own — safe only
+>   because each peer gets its own vault directory (redb's lock is per
+>   directory) and Saathi listens on an ephemeral port. Regression test
+>   `two_isolated_handles_are_two_separate_runtimes`, verified failing against
+>   the old body before the fix, runs in the ordinary `cargo test` lane in one
+>   second rather than fifteen minutes.
+>   **Two general lessons, both still open.** Nothing in this repo fails a build
+>   because a test was skipped, and `Assume` is used elsewhere — a skipped-test
+>   count assertion across the whole suite would close it and is not written. And
+>   nothing warns when a new process-global invalidates an existing test's
+>   assumption of independent instances; that is the class the second round
+>   belongs to, and it has no guard.
 > - **The main thread made the network calls, and no lane can catch that.**
 >   Fixed 2026-08-09 (`docs/TOGETHER.md` §17): every `together_*` call is
 >   `runBlocking` over an FFI whose last rung is a relay send, and they were made

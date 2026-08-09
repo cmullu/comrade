@@ -385,18 +385,21 @@ jobs:
             -no-snapshot -no-window -gpu swiftshader_indirect -noaudio
             -no-boot-anim -camera-back none
           working-directory: android
-          # `adb reverse` rather than the emulator's `10.0.2.2` host loopback,
-          # which is what the first run of this lane used and what it failed on:
-          # all three two-peer tests reported "nothing arrived" while the relay
-          # logged a clean startup and no client traffic at all. `10.0.2.2`
-          # depends on the emulated *radio* NAT, and on API 35 images the default
-          # network an app gets is emulated Wi-Fi (netsim) — so the address the
-          # documentation offers is not reliably the one an app can route to.
+          # `adb reverse` rather than the emulator's `10.0.2.2` host loopback:
+          # the device's own `127.0.0.1:8090` is carried over the adb channel to
+          # the runner's 8090. No dependence on the emulated radio NAT, and it
+          # works on a physical handset — which `10.0.2.2` never can — so a
+          # future device-farm lane inherits it.
           #
-          # A reverse forward has none of that in it: the device's own
-          # `127.0.0.1:8090` is carried over the adb channel to the runner's
-          # 8090. It also works on a physical handset, which `10.0.2.2` never
-          # can, so a future device-farm lane inherits it.
+          # **It is not, however, the fix for anything.** An earlier version of
+          # this comment said `10.0.2.2` was "what the first run of this lane
+          # failed on". That was a guess: the next run used the reverse forward
+          # and failed identically, all three tests "nothing arrived". The real
+          # cause was `Comrade.newWithRelays` handing both test peers the same
+          # process-global runtime, so they shared one npub and alice was DMing
+          # herself — see `docs/TOGETHER.md` §19.1. Two network hypotheses were
+          # proposed here and neither was real; the reverse forward is kept on
+          # its own merits, not as a repair.
           #
           # **Only the URL is passed, and that is the fix rather than an
           # omission.** There was a second `comradeRequireRelay=true` argument

@@ -2237,21 +2237,30 @@ Three things close that:
    address. The image is pinned rather than `:latest`, because this is a gate now
    and an upstream push should not be able to turn a branch red.
 
-   **It used `10.0.2.2` first, and that is what the first run failed on.** All
-   three two-peer tests reported "nothing arrived" while the relay logged a clean
-   startup, its migrations, and no client traffic whatsoever. `10.0.2.2` is the
-   emulated *radio* NAT's host loopback, and on an API 35 image the default
-   network an app is given is emulated Wi-Fi (netsim) — so the address every
-   tutorial offers is not reliably one the app can route to. A reverse forward has
-   none of that in it, and it works on a physical handset too, which `10.0.2.2`
-   never can.
+   **It used `10.0.2.2` first. An earlier revision of this section said that is
+   "what the first run failed on" — that was a guess presented as a finding, and
+   it was wrong.** The next run used `adb reverse` and failed identically: all
+   three tests "nothing arrived", the relay logging a clean startup and no client
+   traffic. The address was never the cause (§19.1 is). `adb reverse` is kept
+   because it is the better mechanism on its own merits — no dependence on the
+   emulated radio NAT, and it works on a physical handset, which `10.0.2.2` never
+   can — but it fixed nothing, and the honest version of the sequence is that two
+   plausible network causes were proposed and neither was real.
 
-   Worth recording what was *not* the cause, because it is the plausible answer
-   and it is wrong: Android's `cleartextTrafficPermitted` policy does not apply
-   here. It is enforced by the Java networking stack, and these peers connect
-   through `nostr-sdk` on a native tokio socket, which the platform does not
-   intercept. A `networkSecurityConfig` would have been a fix for a mechanism that
-   was never running.
+   Worth recording what was *also* not the cause, for the same reason: Android's
+   `cleartextTrafficPermitted` policy does not apply here. It is enforced by the
+   Java networking stack, and these peers connect through `nostr-sdk` on a native
+   tokio socket, which the platform does not intercept. A `networkSecurityConfig`
+   would have been a fix for a mechanism that was never running.
+
+   **And the relay's log was not the witness it appeared to be.** "No client
+   traffic whatsoever" was read three times as evidence the peers never arrived;
+   it was nothing of the kind. At the default log level `nostr-rs-relay` records
+   startup, migrations and a once-a-minute sqlite checkpoint, and an idle relay
+   with no client at all produces exactly the log a busy one does. The compose
+   file now sets `RUST_LOG=info,nostr_rs_relay=debug`, which logs connects and
+   each EVENT/REQ, so "the peers never arrived" and "they arrived and the test is
+   wrong" finally look different.
 2. **Skipping has to be asked for**, which is the opposite polarity to the
    obvious one and the second thing this section got wrong. The first attempt was
    a `comradeRequireRelay=true` argument the workflow passed to *demand* a relay —
@@ -2270,6 +2279,50 @@ Three things close that:
    as skipped, or if fewer than three are recorded. Intent is not evidence.
 3. **A session is what it tests**, not just a DM: invite → join → a run of
    transport commands → end, with the arrival order asserted.
+
+### 19.1 The lane was testing one peer twice
+
+_The actual cause of the "nothing arrived" runs, found 2026-08-09 by reading the
+FFI instead of the network._
+
+`Comrade.newWithRelays(listOf(relay))`, called twice, did not produce two peers.
+It produced **the same peer twice**, and every symptom follows from that:
+
+- `comrade_jni` holds `static RUNTIME: OnceLock<Arc<RwLock<ComradeRuntime>>>` —
+  one runtime for the process, which is correct and deliberate: both foreign
+  ABIs (uniffi for Kotlin, flutter_rust_bridge for Dart) must see the same
+  unlocked vault, and `comrade_storage` opens redb with an exclusive file lock,
+  so two runtimes over one directory cannot both open it.
+- `new_with_relays` bound *that* runtime, seeding its relay set only if it
+  happened to be the first caller. So `alice` and `bob` were one runtime.
+- `unlock_vault` is idempotent by design — "safe to call more than once, returns
+  the already-loaded identity". So `bob.unlockVault(bobDir, "pin")` never opened
+  `bobDir`; it handed back **alice's** identity.
+- Therefore `aliceNpub == bobNpub`. `alice.sendDm(bobNpub, …)` was alice DMing
+  herself, no `IncomingMessageRequest` was emitted, and all three tests failed on
+  their first assertion with "nothing arrived" — a message about the wire,
+  describing a bug that had nothing to do with the wire.
+
+The fix is `Comrade::new_isolated_with_relays`, which builds a `ComradeRuntime`
+of its own. Two runtimes in one process is safe **here and nowhere else**, and
+the two reasons are worth stating rather than rediscovering: redb's lock is per
+*directory* and each peer is given its own, and Saathi listens on
+`/ip4/0.0.0.0/tcp/0` — an ephemeral port — so two instances do not collide. The
+word `isolated` is in the name because its absence is what cost the time.
+
+The regression test is `two_isolated_handles_are_two_separate_runtimes` in
+`comrade_jni`, and it was verified failing against the old constructor body
+before the fix rather than assumed to. It runs in the ordinary `cargo test`
+lane, in about a second.
+
+**The uncomfortable part is the shape, not the bug.** The `OnceLock` landed
+`2026fce` on 2026-07-29, for good reasons, and silently invalidated a test
+written `7ce86e7` on 2026-07-15 whose whole premise was two independent
+instances. Nothing failed. Nothing could have: the only lane that ran that test
+was the one skipping itself. A process-global and a test that assumes
+independent instances are a contradiction no compiler and no lint will report,
+and this repo still has no guard for that class — only this write-up and the
+regression test above.
 
 ### The fast twin, and why it exists
 
