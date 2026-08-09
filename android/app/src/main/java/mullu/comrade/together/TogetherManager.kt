@@ -115,6 +115,15 @@ object TogetherManager {
              */
             val streaming: Boolean = false,
             /**
+             * The decoder is waiting on bytes that have not arrived.
+             *
+             * Only ever true for a session whose source is a network one — a URL
+             * stream or a file still being handed over. A local file cannot
+             * buffer. Advisory: `MediaPlayer` may end a stall with no second
+             * event, so the screen shows it and never waits on it.
+             */
+            val buffering: Boolean = false,
+            /**
              * The last measured gap between the two playheads, signed —
              * positive means this device is ahead — with the error on it and
              * when it was taken.
@@ -1669,6 +1678,15 @@ object TogetherManager {
                 _openFailed.value = true
             }
 
+            override fun onBuffering(buffering: Boolean) {
+                // Straight through: what it means for the session is the
+                // screen's to say, and the drift ladder already handles a
+                // playhead that has stopped moving. Nothing here pauses or
+                // corrects — a stall that fixes itself in 300ms must not become
+                // a command the other side has to apply.
+                refreshLive(buffering = buffering)
+            }
+
             override fun onVideoSize(width: Int, height: Int) {
                 refreshLive(picture = TogetherDecisions.pictureOf(width, height))
                 // The capture starts at a guess, because `MediaPlayer` only
@@ -2031,6 +2049,7 @@ object TogetherManager {
     private fun refreshLive(
         playing: Boolean? = null,
         streaming: Boolean? = null,
+        buffering: Boolean? = null,
         positionMs: Long? = null,
         /**
          * Only an embed passes this.
@@ -2053,6 +2072,7 @@ object TogetherManager {
         _state.value = live.copy(
             playing = playing ?: live.playing,
             streaming = streaming ?: live.streaming,
+            buffering = buffering ?: live.buffering,
             positionMs = positionMs ?: live.positionMs,
             durationMs = durationMs ?: live.durationMs,
             status = status ?: live.status,

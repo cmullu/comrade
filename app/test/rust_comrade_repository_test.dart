@@ -72,6 +72,10 @@ void main() {
         describeUiError(const rust.UiError.catalogue('musicbrainz timed out')),
         'musicbrainz timed out',
       );
+      expect(
+        describeUiError(const rust.UiError.download('archive.example refused')),
+        'archive.example refused',
+      );
     });
   });
 

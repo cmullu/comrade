@@ -140,6 +140,7 @@ object ComradeCore {
         is UiException.Storage -> v1
         is UiException.Engine -> v1
         is UiException.Catalogue -> v1
+        is UiException.Download -> v1
         // Deliberately not "nothing found" — see `CatalogueResult.Unavailable`.
         // Callers that can tell the two apart should use that instead of this
         // sentence; this is the fallback for anywhere the distinction is lost.
@@ -771,6 +772,34 @@ object ComradeCore {
         catalogue: List<uniffi.comrade_core.CatalogueMatch>,
     ): uniffi.comrade_core.AudioPlan? =
         runCatching { ffi.audioPlan(want, wantMs, library, peerHasIt, catalogue) }.getOrNull()
+
+    /**
+     * Whether a catalogue answer may be downloaded, and if not, why.
+     *
+     * Pure and synchronous — safe to call per row while a list is drawn. `NoAudio`
+     * is the ordinary answer today, because MusicBrainz is a metadata catalogue.
+     * `null` only if the bridge itself failed.
+     */
+    fun downloadVerdict(
+        match: uniffi.comrade_core.CatalogueMatch,
+    ): uniffi.comrade_ui.DownloadVerdictDto? =
+        runCatching { ffi.downloadVerdict(match) }.getOrNull()
+
+    /**
+     * Fetch an openly-licensed track.
+     *
+     * **Suspends, and must not be driven from the main thread** — it is a whole
+     * audio file over the downlink. Core re-runs the licence gate itself, so this
+     * cannot be talked into fetching something the licence forbids.
+     */
+    suspend fun downloadTrack(
+        match: uniffi.comrade_core.CatalogueMatch,
+    ): Result<uniffi.comrade_ui.DownloadedTrackDto> =
+        try {
+            Result.success(ffi.downloadTrack(match))
+        } catch (e: UiException) {
+            Result.failure(IllegalStateException(e.humanMessage(), e))
+        }
 
     /**
      * What this device is signed in to and may drive playback on.
