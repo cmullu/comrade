@@ -22,6 +22,9 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      # The two-peer device lane runs against this relay, so its config is part
+      # of what can break the lane.
+      - "deploy/test-relay/**"
       - ".github/workflows/android-apk.yml"
   workflow_dispatch:
 
@@ -108,12 +111,16 @@ jobs:
 
       - name: Build comrade_jni for ${{ matrix.abi }}
         # media-http enables the attachment pipeline so the sideloadable APK can
-        # send/receive media (matches the release build).
+        # send/receive media (matches the release build). catalogue-http enables
+        # the recording lookup behind Together's search field — without it the
+        # shipped app has a search box that can only answer
+        # `UiError::CatalogueUnavailable`, which is the honest failure but not a
+        # feature.
         run: |
           cargo ndk \
             --target ${{ matrix.target }} \
             --output-dir android/app/src/main/jniLibs \
-            -- build --release -p comrade_jni --features media-http
+            -- build --release -p comrade_jni --features media-http,catalogue-http
 
       - name: Upload JNI .so artifact
         uses: actions/upload-artifact@v4
@@ -298,6 +305,36 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
+      # ── The two-peer relay ──────────────────────────────────────────────────
+      # `TwoPeerJniIntegrationTest` runs two independent `Comrade` FFI instances
+      # against one relay and is the only lane in this repo where two peers talk
+      # over a real socket through the real generated bindings. It has existed
+      # since COMMS-03 and **skipped on every run**, because nothing passed it a
+      # relay address and a skipped test is a green test. That is why the field
+      # bugs in the together feature were found on handsets rather than here.
+      #
+      # `10.0.2.2` is the standard emulator-to-host loopback, so a relay on the
+      # runner's own localhost is what the emulator reaches. Pinned image, see
+      # the compose file for why.
+      - name: Start isolated test relay
+        run: |
+          set -euo pipefail
+          docker compose -f deploy/test-relay/docker-compose.yml up -d
+          # `up -d` returns once the container is created, not once the relay is
+          # accepting connections — so wait for the socket, and fail loudly with
+          # the relay's own logs rather than letting the test time out 15 s at a
+          # time with nothing to read.
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/8090) 2>/dev/null; then
+              echo "test relay accepting connections after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::test relay never came up on 127.0.0.1:8090"
+          docker compose -f deploy/test-relay/docker-compose.yml logs --no-color
+          exit 1
+
       - name: Enable KVM group perms
         # Hardware acceleration for the emulator on GitHub-hosted Linux runners.
         run: |
@@ -319,7 +356,11 @@ jobs:
             "system-images;android-${{ matrix.api-level }};google_apis;x86_64" \
             "platform-tools" "emulator" > /dev/null
           profile="${{ matrix.preferred-profile }}"
-          if ! avdmanager list device -c | grep -qx "$profile"; then
+          # No pipeline, deliberately: `grep -q` exits on first match and closes
+          # the pipe, `avdmanager` takes SIGPIPE, and under `set -o pipefail` the
+          # pipeline returns 141 — which `!` inverts into "profile missing", so the
+          # job silently builds the *fallback* profile while still passing.
+          if ! grep -qx -- "$profile" <<<"$(avdmanager list device -c)"; then
             echo "::warning::AVD profile '$profile' not available in this SDK; using '${{ matrix.fallback-profile }}'"
             profile="${{ matrix.fallback-profile }}"
           fi
@@ -348,7 +389,119 @@ jobs:
             -no-snapshot -no-window -gpu swiftshader_indirect -noaudio
             -no-boot-anim -camera-back none
           working-directory: android
-          script: ./gradlew connectedDebugAndroidTest --no-daemon
+          # `adb reverse` rather than the emulator's `10.0.2.2` host loopback:
+          # the device's own `127.0.0.1:8090` is carried over the adb channel to
+          # the runner's 8090. No dependence on the emulated radio NAT, and it
+          # works on a physical handset — which `10.0.2.2` never can — so a
+          # future device-farm lane inherits it.
+          #
+          # **It is not, however, the fix for anything.** An earlier version of
+          # this comment said `10.0.2.2` was "what the first run of this lane
+          # failed on". That was a guess: the next run used the reverse forward
+          # and failed identically, all three tests "nothing arrived". The real
+          # cause was `Comrade.newWithRelays` handing both test peers the same
+          # process-global runtime, so they shared one npub and alice was DMing
+          # herself — see `docs/TOGETHER.md` §19.1. Two network hypotheses were
+          # proposed here and neither was real; the reverse forward is kept on
+          # its own merits, not as a repair.
+          #
+          # **Only the URL is passed, and that is the fix rather than an
+          # omission.** There was a second `comradeRequireRelay=true` argument
+          # here, meant to make a missing URL a failure instead of a skip. It
+          # could not work: both arguments travel by the same mechanism, so
+          # anything that stops instrumentation arguments arriving drops the
+          # demand along with the thing it was demanding, and every test skips
+          # green again. It caught only a human deleting one line and leaving the
+          # other. `relayUrlOrSkip` in the test now inverts the polarity —
+          # skipping is what must be asked for — so CI passing nothing *is* the
+          # strict case. The "Assert the two-peer tests actually ran" step below
+          # is the backstop, because an in-test guard cannot catch instrumentation
+          # that never ran at all.
+          #
+          # Logcat is captured either way and uploaded on failure. The first red
+          # run of this lane could not be diagnosed from Gradle's output — three
+          # "nothing arrived" assertions and no reason — and guessing at causes at
+          # fifteen minutes a round is not a debugging loop worth having.
+          # **One shell command, folded — not a shell script.** This cost two
+          # round trips to learn, so it is written down rather than left to the
+          # next person: `android-emulator-runner` runs the `script:` input
+          # **one line at a time**, each through its own `/usr/bin/sh -c`. The
+          # log makes it plain — `sh -c status=0` on one line, `sh -c ./gradlew …`
+          # on the next. Two consequences, both of which bit:
+          #
+          #   * a `\` continuation is passed as a literal argument, so Gradle was
+          #     asked to run a task called `\`;
+          #   * a variable set on one line does not exist on the next, since that
+          #     is a different shell — and `set -uo pipefail` was its own shell
+          #     too, which is why dash rejected it there and nowhere else.
+          #
+          # So this is a YAML *folded* scalar (`>-`): every newline below becomes
+          # a space, producing a single `sh -c` with `;` between statements. The
+          # explanation has to live up here, because a `#` inside the fold would
+          # be part of the command.
+          #
+          # `|| status=$?` keeps a failing Gradle from skipping the logcat dump,
+          # which is echoed to stdout as well as uploaded — the artifact is not
+          # always reachable to whoever is reading the failure, and the whole
+          # reason for capturing it was that a red run could not be explained from
+          # Gradle's output alone.
+          script: >-
+            adb reverse tcp:8090 tcp:8090 ;
+            echo 'reverse forwards now established:' ;
+            adb reverse --list ;
+            adb reverse --list | grep -q 'tcp:8090 tcp:8090' || { echo '::error::adb reverse tcp:8090 did not register, so the emulator has no route to the relay' ; exit 1 ; } ;
+            adb logcat -c || true ;
+            status=0 ;
+            ./gradlew connectedDebugAndroidTest --no-daemon
+            -Pandroid.testInstrumentationRunnerArguments.comradeTestRelayUrl=ws://127.0.0.1:8090
+            || status=$? ;
+            adb logcat -d > "$RUNNER_TEMP/logcat.txt" 2>&1 || true ;
+            if [ "$status" -ne 0 ] ; then
+            echo '----- reverse forwards at end of run (empty means it was lost mid-run) -----' ;
+            adb reverse --list || true ;
+            echo '----- logcat: comrade / relay / socket lines -----' ;
+            grep -iE 'comrade|nostr|relay|websocket|refused|ETIMEDOUT|EHOSTUNREACH'
+            "$RUNNER_TEMP/logcat.txt" | tail -n 200 || true ;
+            echo '----- logcat: last 200 lines -----' ;
+            tail -n 200 "$RUNNER_TEMP/logcat.txt" || true ;
+            fi ;
+            exit $status
+
+      # A skipped test is a green test, and that is how this lane stayed green for
+      # months. The instrumentation arguments are *intent*; the results XML is
+      # evidence. Assert on the evidence — this also catches "the instrumentation
+      # never ran at all", which no in-test guard can.
+      - name: Assert the two-peer tests actually ran
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          root = "android/app/build/outputs/androidTest-results"
+          files = glob.glob(root + "/**/*.xml", recursive=True)
+          if not files:
+              sys.exit("::error::no instrumentation result XML under " + root)
+          ran, skipped = [], []
+          for f in files:
+              for tc in ET.parse(f).iter("testcase"):
+                  if tc.get("classname", "").endswith("TwoPeerJniIntegrationTest"):
+                      name = tc.get("name")
+                      (skipped if tc.find("skipped") is not None else ran).append(name)
+          print("two-peer ran:    ", sorted(ran))
+          print("two-peer skipped:", sorted(skipped))
+          if skipped:
+              sys.exit("::error::two-peer test(s) skipped: " + ", ".join(sorted(skipped))
+                       + " -- the relay instrumentation arguments never reached the runner, "
+                         "so this lane would be green having proven nothing")
+          if len(ran) != 3:
+              sys.exit("::error::expected 3 two-peer tests, saw %d: %s" % (len(ran), sorted(ran)))
+          print("all 3 two-peer tests executed against the relay")
+          PY
+
+      # The relay's own view of the session, which is the difference between "the
+      # test timed out" and "the peers never reached the relay at all".
+      - name: Test relay logs
+        if: failure()
+        run: docker compose -f deploy/test-relay/docker-compose.yml logs --no-color --tail=200
 
       - name: Upload instrumentation reports
         # Only worth the storage when something failed.
@@ -359,4 +512,5 @@ jobs:
           path: |
             android/app/build/reports/androidTests/
             android/app/build/outputs/androidTest-results/
+            ${{ runner.temp }}/logcat.txt
           if-no-files-found: ignore

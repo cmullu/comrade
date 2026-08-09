@@ -792,6 +792,16 @@ object TogetherDecisions {
 
         /** A pasted link: a video, or a public media URL. */
         data object FromALink : Source
+
+        /**
+         * Search a public catalogue by name — the only source that names a
+         * recording rather than pointing at a file.
+         *
+         * It is the one source that tells a third party anything, which is why
+         * it sits last and why [SearchOutcome] insists on naming which catalogue
+         * answered. What leaves the phone is the query text and nothing else.
+         */
+        data object SearchByName : Source
     }
 
     /**
@@ -799,14 +809,145 @@ object TogetherDecisions {
      *
      * On-device first, deliberately: it is the one that needs no typing, no
      * network and no account, and it is what "listen to music together" means
-     * most of the time. The link field is last because it is the only one that
-     * needs a keyboard.
+     * most of the time. The keyboard ones come last, and search comes after the
+     * link field because it is the only source that reaches a third party at all.
      */
     fun sources(libraryGranted: Boolean): List<Source> = listOf(
         Source.OnThisPhone(needsPermission = !libraryGranted),
         Source.PickAFile,
         Source.FromALink,
+        Source.SearchByName,
     )
+
+    // ── Searching a catalogue by name ────────────────────────────────────────
+
+    /**
+     * One catalogue answer, ready to draw.
+     *
+     * [catalogue] is not decoration and must not be dropped to save a line:
+     * `CatalogueResolver::name`'s contract is that *a guess presented without
+     * its source is worse than no guess*. A row saying "Kun Faya Kun — A. R.
+     * Rahman" with no indication that MusicBrainz said so is a claim this app
+     * cannot stand behind.
+     */
+    data class Candidate(
+        val title: String,
+        val artist: String,
+        val album: String?,
+        val durationMs: Long,
+        val catalogue: String,
+        /** `true` when [durationMs] came from the catalogue rather than a guess. */
+        val durationKnown: Boolean,
+    )
+
+    /**
+     * What a search came back with — **five outcomes, not a list and a spinner.**
+     *
+     * The distinction the shapes exist for is [NoCatalogue] versus [NothingFound].
+     * They are one pixel apart on screen and opposite in meaning: one says this
+     * build cannot search, the other says the catalogue has no such recording.
+     * Collapsing them tells somebody their song does not exist because a Cargo
+     * feature is off, which is a wrong answer delivered confidently — see
+     * `UiError::CatalogueUnavailable`.
+     */
+    sealed interface SearchOutcome {
+        /** Nothing typed yet, or the field was cleared. */
+        data object Idle : SearchOutcome
+
+        /** A lookup is in flight. */
+        data object Searching : SearchOutcome
+
+        /** Answers, most likely first, as the catalogue ordered them. */
+        data class Found(val candidates: List<Candidate>) : SearchOutcome
+
+        /** The catalogue was reached and has no such recording. */
+        data object NothingFound : SearchOutcome
+
+        /**
+         * This build has no catalogue at all (`catalogue-http` off). Not a
+         * failure of the query and must never be rendered as one.
+         */
+        data object NoCatalogue : SearchOutcome
+
+        /** The lookup itself failed — offline, timed out, rate-limited. */
+        data class Failed(val reason: String) : SearchOutcome
+    }
+
+    /**
+     * Turn a completed lookup into what the screen shows.
+     *
+     * @param unavailable what `UiError::CatalogueUnavailable` came back as — the
+     *   caller's single job is to keep this distinct from an error string, and
+     *   it is checked first for exactly that reason.
+     * @param error any other failure's message, or `null`
+     * @param candidates what arrived, possibly empty
+     */
+    fun searchOutcome(
+        unavailable: Boolean,
+        error: String?,
+        candidates: List<Candidate>,
+    ): SearchOutcome = when {
+        unavailable -> SearchOutcome.NoCatalogue
+        error != null -> SearchOutcome.Failed(error)
+        candidates.isEmpty() -> SearchOutcome.NothingFound
+        else -> SearchOutcome.Found(candidates)
+    }
+
+    /**
+     * What tapping a search result does, given the tier core chose.
+     *
+     * A thin naming of `AudioPlan` rather than a second ladder: the order is
+     * `comrade_core::catalogue`'s and re-deciding it here is the drift this file
+     * exists to avoid. What is genuinely local is the *sentence* — a screen has
+     * to say something different for each, and only the frontend knows its own
+     * words.
+     */
+    sealed interface CandidateAction {
+        /** This phone has it. Start a session on the local copy. */
+        data class PlayOwnCopy(val confidence: Double) : CandidateAction
+
+        /** The other person has it and can send it over. */
+        data object AskThePeer : CandidateAction
+
+        /** An archive whose licence permits a copy — fetch it. */
+        data class FetchOpenly(val url: String) : CandidateAction
+
+        /**
+         * Nobody can hand over the bytes.
+         *
+         * The honest floor, and the reason it is not a dead end: an embed still
+         * plays, and a name still tells somebody where to open it. A screen that
+         * offered a download here would be offering something this app will not
+         * do — see `catalogue.rs`'s header.
+         */
+        data object EmbedOrNameIt : CandidateAction
+    }
+
+    /**
+     * Name the tier `choose_audio_plan` picked.
+     *
+     * @param tier the plan's discriminant as the FFI reports it —
+     *   `library` · `peer` · `open_licence` · `embed_only`
+     * @param confidence the match score, for `library`
+     * @param url the fetchable URL, for `open_licence`
+     *
+     * An unrecognised tier is [CandidateAction.EmbedOrNameIt] rather than a
+     * throw: a core that grows a fifth tier this build has never heard of should
+     * degrade to the floor, not crash a music player. It is also the only
+     * fallback that promises nothing.
+     */
+    fun candidateAction(tier: String, confidence: Double, url: String?): CandidateAction =
+        when (tier) {
+            "library" -> CandidateAction.PlayOwnCopy(confidence)
+            "peer" -> CandidateAction.AskThePeer
+            "open_licence" ->
+                if (url.isNullOrBlank()) {
+                    CandidateAction.EmbedOrNameIt
+                } else {
+                    CandidateAction.FetchOpenly(url)
+                }
+            else -> CandidateAction.EmbedOrNameIt
+        }
 
     /**
      * What a pasted link turns out to be.

@@ -2212,3 +2212,274 @@ No unit test covers the threading fix or the solo gate *in the manager* —
 `TogetherManager` imports Android, so the JVM lane cannot see it, and there is no
 Robolectric lane in this repo. What is tested is the pure half: `isAlone`, the
 sentinel's safety, and `startStep`'s three answers.
+
+## 19. The two-peer lane that was green and proving nothing
+
+_Added 2026-08-09, after §17's bugs were found on handsets rather than in CI._
+
+The obvious reading of §17 is "we need a two-phone check". The more useful
+finding is that **one already existed and had never run.**
+
+`android/app/src/androidTest/.../TwoPeerJniIntegrationTest.kt` stands up two
+independent `Comrade` FFI instances, each with its own vault, against one relay,
+and exchanges traffic across the real generated bindings. It has been there since
+COMMS-03. It begins with `Assume.assumeTrue(comradeTestRelayUrl != null)`, and
+`android-apk.yml` ran `connectedDebugAndroidTest` without ever passing that
+argument — so every test in the file skipped on every run, and **a skipped test
+is a green test.** The lane that was supposed to be the evidence for two peers
+talking to each other was evidence of nothing.
+
+Three things close that:
+
+1. **The workflow starts the relay** (`deploy/test-relay/docker-compose.yml`,
+   which also existed and was wired to nothing) and reaches it over
+   `adb reverse tcp:8090 tcp:8090`, so the device's own `127.0.0.1:8090` is the
+   address. The image is pinned rather than `:latest`, because this is a gate now
+   and an upstream push should not be able to turn a branch red.
+
+   **It used `10.0.2.2` first. An earlier revision of this section said that is
+   "what the first run failed on" — that was a guess presented as a finding, and
+   it was wrong.** The next run used `adb reverse` and failed identically: all
+   three tests "nothing arrived", the relay logging a clean startup and no client
+   traffic. The address was never the cause (§19.1 is). `adb reverse` is kept
+   because it is the better mechanism on its own merits — no dependence on the
+   emulated radio NAT, and it works on a physical handset, which `10.0.2.2` never
+   can — but it fixed nothing, and the honest version of the sequence is that two
+   plausible network causes were proposed and neither was real.
+
+   Worth recording what was *also* not the cause, for the same reason: Android's
+   `cleartextTrafficPermitted` policy does not apply here. It is enforced by the
+   Java networking stack, and these peers connect through `nostr-sdk` on a native
+   tokio socket, which the platform does not intercept. A `networkSecurityConfig`
+   would have been a fix for a mechanism that was never running.
+
+   **And the relay's log was not the witness it appeared to be.** "No client
+   traffic whatsoever" was read three times as evidence the peers never arrived;
+   it was nothing of the kind. At the default log level `nostr-rs-relay` records
+   startup, migrations and a once-a-minute sqlite checkpoint, and an idle relay
+   with no client at all produces exactly the log a busy one does. The compose
+   file now sets `RUST_LOG=info,nostr_rs_relay=debug`, which logs connects and
+   each EVENT/REQ, so "the peers never arrived" and "they arrived and the test is
+   wrong" finally look different.
+2. **Skipping has to be asked for**, which is the opposite polarity to the
+   obvious one and the second thing this section got wrong. The first attempt was
+   a `comradeRequireRelay=true` argument the workflow passed to *demand* a relay —
+   and it could not work, because the flag and the URL travel by the same
+   mechanism. Anything that stops the instrumentation arguments arriving drops the
+   demand along with the thing it was demanding, and every test skips green again;
+   it caught only a human deleting one line and leaving the other. So
+   `relayUrlOrSkip` is inverted: CI passes nothing and gets a red test the moment
+   the wiring breaks, and a laptop passes `-e comradeAllowRelaySkip true` to get
+   its skip. Absence of configuration is strict, which is the only polarity that
+   fails safe.
+
+   And because no in-test guard can catch instrumentation that never ran at all,
+   the workflow also asserts on the **results XML** rather than on its own intent:
+   "Assert the two-peer tests actually ran" fails if any of the three is recorded
+   as skipped, or if fewer than three are recorded. Intent is not evidence.
+3. **A session is what it tests**, not just a DM: invite → join → a run of
+   transport commands → end, with the arrival order asserted.
+
+### 19.1 The lane was testing one peer twice
+
+_The actual cause of the "nothing arrived" runs, found 2026-08-09 by reading the
+FFI instead of the network._
+
+`Comrade.newWithRelays(listOf(relay))`, called twice, did not produce two peers.
+It produced **the same peer twice**, and every symptom follows from that:
+
+- `comrade_jni` holds `static RUNTIME: OnceLock<Arc<RwLock<ComradeRuntime>>>` —
+  one runtime for the process, which is correct and deliberate: both foreign
+  ABIs (uniffi for Kotlin, flutter_rust_bridge for Dart) must see the same
+  unlocked vault, and `comrade_storage` opens redb with an exclusive file lock,
+  so two runtimes over one directory cannot both open it.
+- `new_with_relays` bound *that* runtime, seeding its relay set only if it
+  happened to be the first caller. So `alice` and `bob` were one runtime.
+- `unlock_vault` is idempotent by design — "safe to call more than once, returns
+  the already-loaded identity". So `bob.unlockVault(bobDir, "pin")` never opened
+  `bobDir`; it handed back **alice's** identity.
+- Therefore `aliceNpub == bobNpub`. `alice.sendDm(bobNpub, …)` was alice DMing
+  herself, no `IncomingMessageRequest` was emitted, and all three tests failed on
+  their first assertion with "nothing arrived" — a message about the wire,
+  describing a bug that had nothing to do with the wire.
+
+The fix is `Comrade::new_isolated_with_relays`, which builds a `ComradeRuntime`
+of its own. Two runtimes in one process is safe **here and nowhere else**, and
+the two reasons are worth stating rather than rediscovering: redb's lock is per
+*directory* and each peer is given its own, and Saathi listens on
+`/ip4/0.0.0.0/tcp/0` — an ephemeral port — so two instances do not collide. The
+word `isolated` is in the name because its absence is what cost the time.
+
+The regression test is `two_isolated_handles_are_two_separate_runtimes` in
+`comrade_jni`, and it was verified failing against the old constructor body
+before the fix rather than assumed to. It runs in the ordinary `cargo test`
+lane, in about a second.
+
+**The uncomfortable part is the shape, not the bug.** The `OnceLock` landed
+`2026fce` on 2026-07-29, for good reasons, and silently invalidated a test
+written `7ce86e7` on 2026-07-15 whose whole premise was two independent
+instances. Nothing failed. Nothing could have: the only lane that ran that test
+was the one skipping itself. A process-global and a test that assumes
+independent instances are a contradiction no compiler and no lint will report,
+and this repo still has no guard for that class — only this write-up and the
+regression test above.
+
+### The fast twin, and why it exists
+
+`a_run_of_transport_commands_arrives_in_the_order_it_was_sent` in
+`crates/comrade_ui/tests/two_peer_integration.rs` asserts the same ordering
+property hermetically, over the in-process relay, in about a second. The device
+lane answers the same question through the real bindings over a real socket, in
+about forty-five minutes.
+
+The device lane also captures `logcat` and uploads it on failure, added after
+that first red run could not be diagnosed from Gradle's output — three "nothing
+arrived" assertions and no reason for any of them. Guessing at causes at fifteen
+minutes a round is not a debugging loop worth having.
+
+Both are worth having, and the fast one immediately proved it: **written first
+asserting exact positions, it failed** — `30_000` arrived as `30_016`. That is
+not a bug, it is `TogetherCommandDto::pos_ms`'s documented contract (a *playing*
+command is carried forward through the message's flight time so the receiver
+applies it as-is instead of compensating twice; a paused playhead does not
+advance). Had that assertion gone straight into the device lane, the first red
+build would have been the test's fault and would have cost a 45-minute round trip
+to find out. Both now assert what the contract supports: play/pause exactly in
+order, positions floored at what was sent and ceilinged by a plausible flight
+time, and a paused position exactly equal.
+
+### What this lane still does not cover
+
+Worth being precise, because "two phones interacting" sounds like it covers
+everything and this covers one layer of it:
+
+- **Two processes, not two apps.** Both peers are `Comrade` objects in one test
+  process. `TogetherManager`, `ShareTransfer` and `StreamTransfer` are Kotlin
+  `object` singletons, so a second instance of the *session layer* cannot exist
+  in the same process at all — which means the manager, its outbound queue and
+  the foreground service are not in this lane. `build.gradle.kts`'s
+  `deviceHarnessRole` is the mechanism for two installable app IDs; it is still
+  unwired.
+- **No WebRTC between two devices.** The streaming and file-handover paths need
+  a media connection, and two emulators sit behind separate NATs with no route to
+  each other — a pair would need a TURN server both can reach and a host-side
+  orchestrator running leader and follower roles. That is the lane that would
+  cover §17's *follower-never-plays* symptom directly, and it is not built here.
+- **Nothing about the player.** No `MediaPlayer`, no audio, no cover, no screen.
+
+So: the protocol and the bindings are now checked between two peers on every
+push. The session layer and the media path are not, and no green tick in this
+repo should be read as saying otherwise.
+
+## 20. Search by name, and the tier that is now pluggable
+
+_Added 2026-08-09, at the owner's request to make Together "primarily like
+BlackHole" — a music player first, with listening together as a mode of it._
+
+BlackHole's architecture is a client plus a metadata/search layer plus
+third-party source adapters plus a downloader. Most of that already existed here
+under different names, and the mapping is worth writing down because the gap was
+much smaller than it looked:
+
+| BlackHole | Comrade |
+| --- | --- |
+| Local library | `together/MusicLibrary.kt` (MediaStore paging, artwork, byte-sized LRU) |
+| Player UI | `PlayerHome` · `LibraryBrowser` · `Transport` · `Cover`/`Sleeve` |
+| Search / metadata | `comrade_core::catalogue` — **existed, tested, and reachable from nothing** |
+| Source adapters | the four-tier ladder, §9 |
+| Streaming / download | `media-http`'s guards; no downloader yet |
+| Playlist DB, favourites, queue, history | **nothing at all** — still the real hole |
+| Listen together | the session protocol, §§1–8 |
+
+### The search layer was already written and wired to nothing
+
+`catalogue.rs` had `CatalogueResolver`, a MusicBrainz adapter, `Recording` with
+an ISRC field, `choose_audio_plan`, a licence gate, `MAX_CANDIDATES`, and its own
+CI lane under `catalogue-http`. What it did not have was a single caller: no
+`comrade_ui` method, no FFI export, no screen. A module can be fully tested and
+still be dead code, and nothing in this repo notices — the same shape as §19's
+skipping test, one layer up.
+
+It is now reachable end to end: `comrade_ui::catalogue_lookup` (the one call that
+touches a socket) and `comrade_ui::audio_plan` (pure), both exported over uniffi
+and flutter_rust_bridge, behind Together's fourth source card.
+
+**Both are free functions, not `ComradeRuntime` methods, and that is load-bearing
+rather than stylistic.** A method's returned future borrows the guard, so a
+wrapper *cannot* release the lock before awaiting a network round trip — the
+shape of the two deadlocks this repo has already fixed. Making them free
+functions removes the lock from the type system's point of view, so the mistake
+is not available.
+
+### "Cannot search" and "not found" are different sentences
+
+`UiError::CatalogueUnavailable` exists because `catalogue-http` is off in the
+lean test build, and a lookup there cannot reach a socket. Returning an empty
+list would render as *"we searched and that song does not exist"* — a wrong
+answer, silently produced, from a Cargo feature being off.
+
+So the distinction is carried the whole way: a distinct `UiError` variant, a
+distinct `ComradeCore.CatalogueResult.Unavailable` (which is why that is a sealed
+interface and not a `Result`, since a `Result` collapses exactly this pair), a
+distinct `TogetherDecisions.SearchOutcome.NoCatalogue`, and two different
+strings. The JVM test `aBuildWithNoCatalogueIsNotTheSameAsARecordingThatDoesNotExist`
+is what stops them merging back together.
+
+Adding the two variants also broke two exhaustive matches on purpose — the Kotlin
+`when` in `ComradeCore.humanMessage` and the Dart `switch` in
+`describeUiError` — which is the mechanism `ComradeCore`'s own comment says it
+wants ("adding a variant in Rust should break *this* compile"). It has now done
+that once, which is the comment working rather than a nuisance.
+
+### What a search can actually do today
+
+The catalogue answers *what the recording is*. `audio_plan` then picks the tier,
+and this screen can act on exactly one of the four: `Library`. The catalogue
+supplies the proper title and artist, `LibraryResolver` searches `MediaStore` for
+it — using `comrade_core::together::match_score`, **not** a second scorer in the
+screen, which an earlier draft of this work did have and which is the drift
+`TogetherDecisions`' header exists to prevent — and a session opens on the copy
+already on the phone.
+
+The other three tiers are named honestly and have no button behind them yet.
+A search that finds the song but no local copy says *"found the song, but no copy
+of it on this phone"* rather than opening the nearest thing: `MATCH_CONFIDENT`
+exists so that guessing on somebody's behalf is not what happens.
+
+### The extractor tier: a decision reversed, on the record
+
+`catalogue.rs`'s header argued against a pluggable `AudioSource` trait at all, so
+that a DRM tier "would have to be written from scratch by whoever wanted it". **On
+2026-08-09 the owner decided to add the seam**, and that reversal is recorded in
+that header rather than left as a contradiction between a comment and the code.
+
+The original analysis is not deleted, because it is still why the tier ships
+**pluggable and empty**: obtaining audio from a service that does not serve it
+unencrypted means defeating a protection measure, which is a liability distinct
+from infringement (DMCA §1201, EU InfoSoc Art. 6, India's Copyright Act §65A).
+The seam is provided; a circumvention adapter is not, and is not going to be
+written here. Whoever wants one writes it against the interface and owns that
+decision, which is a better place for it than an absence that reads as an
+oversight.
+
+The maintenance argument stands on its own and is the practical reason to prefer
+a separately-maintained extractor to bytes parsed here: an extractor depends on
+internals its upstream may change without notice, so a hand-rolled one inherits
+that tail forever. This is the thing that breaks while the playlists, the UI and
+the player are all fine.
+
+### What is still missing, plainly
+
+- **Playlists, favourites, queue and history.** Nothing. This is the half that
+  makes it a music player rather than a session tool, and it has no storage, no
+  FFI and no screen.
+- **A downloader and ID3 tagging.** The `OpenLicence` tier decides that a fetch
+  is permitted; nothing carries it out.
+- **Adapters for the pluggable tier.** The seam is the deliverable here; the
+  self-hosted sources worth having behind it (Subsonic/Navidrome/Jellyfin,
+  Funkwhale, open-licence archives) are not written.
+- **A second catalogue.** `MUSICBRAINZ` is a constant in `TogetherScreen.kt`
+  because `CatalogueMatch` carries no source field. Adding a second resolver makes
+  that constant a lie, and the field has to move onto the match — stated as a
+  named constant with that comment rather than an inlined string so the next
+  person finds it.

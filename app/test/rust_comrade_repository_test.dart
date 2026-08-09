@@ -58,6 +58,21 @@ void main() {
         contains('Atlantis'),
       );
     });
+
+    test('says the build cannot search, not that nothing was found', () {
+      // The two catalogue variants must not collapse into one sentence. An
+      // empty result means the recording is not in the catalogue; this means
+      // the build has no catalogue, and rendering it as "not found" tells
+      // somebody their song does not exist because a Cargo feature is off.
+      final unavailable =
+          describeUiError(const rust.UiError.catalogueUnavailable());
+      expect(unavailable, contains('cannot search'));
+      expect(unavailable, isNot(contains('found')));
+      expect(
+        describeUiError(const rust.UiError.catalogue('musicbrainz timed out')),
+        'musicbrainz timed out',
+      );
+    });
   });
 
   group('parseCallMediaKind', () {

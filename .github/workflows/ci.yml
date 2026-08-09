@@ -67,13 +67,25 @@ jobs:
       # guards on that request (HTTPS-only, no redirects, bounded read) plus the
       # response parser only compile under `catalogue-http`. Same argument as
       # the lane above: a guard behind a feature with no lane never runs.
+      #
+      # **All three crates, not just the core.** `comrade_ui::catalogue_lookup`
+      # is two `#[cfg]` branches — the real resolver and the
+      # `CatalogueUnavailable` refusal — and only one of them compiles per
+      # configuration, so a lane covering `comrade_core` alone type-checks
+      # neither. `comrade_jni` is included because it is what the APK builds and
+      # what the feature is forwarded through; a break there is a break in the
+      # only shipping consumer.
       - name: cargo test (catalogue-http)
-        run: cargo test -p comrade_core --features catalogue-http --locked
+        run: >-
+          cargo test -p comrade_core -p comrade_ui -p comrade_jni
+          --features comrade_jni/catalogue-http --locked
 
       # Clippy too, or the feature-gated half accumulates the lint debt the
       # default build is held free of.
       - name: cargo clippy (catalogue-http)
-        run: cargo clippy -p comrade_core --all-targets --features catalogue-http --locked -- -D warnings
+        run: >-
+          cargo clippy -p comrade_core -p comrade_ui -p comrade_jni --all-targets
+          --features comrade_jni/catalogue-http --locked -- -D warnings
 
   # The desktop Tauri crate is excluded from the workspace (needs system
   # webview libs), so it gets its own compile+lint lane — without this it is

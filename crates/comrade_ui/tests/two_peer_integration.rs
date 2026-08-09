@@ -1138,6 +1138,125 @@ async fn accepted_peers_start_join_pause_and_end_a_session() {
     assert!(alice.together_session().is_none());
 }
 
+/// A run of transport commands arrives in the order it was sent.
+///
+/// **The property a music player lives on, and the one that broke on handsets.**
+/// `together_set_state` takes the session's next Lamport sequence number *inside*
+/// the call, so two concurrent senders can be numbered in the opposite order to
+/// the taps that produced them — and pause-then-play arriving as play-then-pause
+/// is a session that plays when the person asked for silence. Android's fix is a
+/// FIFO queue (`TogetherManager.sendOut`); this pins the half of the contract
+/// that queue depends on, which is that the *core* preserves what it is handed
+/// and the receiver reports it in the same order.
+///
+/// Hermetic, so it runs on every push under `cargo test --workspace`. The device
+/// lane in `android-apk.yml` asserts the same property through the real bindings
+/// over a real socket, which is a slower and more expensive answer to the same
+/// question — this one is the fast gate, and the reason a reorder cannot reach a
+/// branch without something going red.
+///
+/// Sequential rather than concurrent sends on purpose: this is the ordering the
+/// wire and the receiver must preserve, and a test that raced its own sends
+/// would be asserting something core does not promise.
+#[tokio::test]
+async fn a_run_of_transport_commands_arrives_in_the_order_it_was_sent() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut bob_events = bob.subscribe_events();
+    let mut alice_events = alice.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+
+    alice
+        .together_start(
+            &bob_npub,
+            TogetherContent::local_file(600_000, Some(Recording::titled("Kun Faya Kun"))),
+        )
+        .await
+        .unwrap();
+    wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::TogetherInvited(_))
+    })
+    .await
+    .expect("bob is invited");
+    bob.together_join().await.unwrap();
+    wait_for(&mut alice_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::TogetherJoined { .. })
+    })
+    .await
+    .expect("alice hears bob join");
+
+    // Distinct positions *and* alternating play state, so a reorder shows up
+    // whichever of the two a bug scrambles.
+    let sent: Vec<(u64, bool)> = vec![
+        (30_000, true),
+        (60_000, false),
+        (90_000, true),
+        (120_000, false),
+    ];
+    for (pos_ms, playing) in &sent {
+        alice
+            .together_set_state(*pos_ms, *playing, 0)
+            .await
+            .unwrap();
+    }
+
+    let mut arrived: Vec<(u64, bool)> = Vec::new();
+    while arrived.len() < sent.len() {
+        let event = wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+            matches!(e, BridgeEvent::TogetherCommand(_))
+        })
+        .await
+        .unwrap_or_else(|| panic!("only {} of {} commands arrived", arrived.len(), sent.len()));
+        let BridgeEvent::TogetherCommand(command) = event else {
+            unreachable!()
+        };
+        arrived.push((command.pos_ms, command.playing));
+    }
+
+    // The play/pause sequence is compared exactly, because that is the thing a
+    // reorder scrambles and the thing that makes a session play when somebody
+    // asked for silence.
+    let sent_playing: Vec<bool> = sent.iter().map(|(_, p)| *p).collect();
+    let arrived_playing: Vec<bool> = arrived.iter().map(|(_, p)| *p).collect();
+    assert_eq!(
+        sent_playing, arrived_playing,
+        "play/pause must arrive in the order it was sent"
+    );
+
+    // Positions are compared with a floor and a ceiling rather than for
+    // equality, and the first draft of this test got that wrong in a way worth
+    // recording: it asserted equality and failed with `30000` arriving as
+    // `30016`. That is not a bug, it is `TogetherCommandDto::pos_ms`'s
+    // documented contract — a *playing* command is carried forward through the
+    // message's flight time so the receiver applies it as-is rather than
+    // compensating twice. A paused one does not advance, because a paused
+    // playhead does not.
+    //
+    // So the assertion is the one the contract actually supports: never behind
+    // where it was sent from, and near enough that the ordering claim above is
+    // about these commands and not about some later pair.
+    const FLIGHT_CEILING_MS: u64 = 2_000;
+    for (i, ((sent_pos, sent_play), (got_pos, _))) in sent.iter().zip(&arrived).enumerate() {
+        assert!(
+            got_pos >= sent_pos && *got_pos < sent_pos + FLIGHT_CEILING_MS,
+            "command {i} arrived at {got_pos} for a send of {sent_pos}",
+        );
+        if !sent_play {
+            assert_eq!(
+                got_pos, sent_pos,
+                "a paused playhead must not be carried forward — command {i}",
+            );
+        }
+    }
+}
+
 // ── Tasks and offers over the real wire ──────────────────────────────────────
 //
 // The unit tests pin the state machine and the parser; these pin the thing

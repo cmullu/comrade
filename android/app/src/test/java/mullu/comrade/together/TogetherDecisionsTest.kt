@@ -6,6 +6,7 @@ import mullu.comrade.together.TogetherDecisions.Op
 import mullu.comrade.together.TogetherDecisions.ScrubState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -742,13 +743,14 @@ class TogetherDecisionsTest {
         // A source that vanished on a refusal would leave no way back to it.
         for (granted in listOf(true, false)) {
             val sources = TogetherDecisions.sources(libraryGranted = granted)
-            assertEquals(3, sources.size)
+            assertEquals(4, sources.size)
             assertEquals(
                 TogetherDecisions.Source.OnThisPhone(needsPermission = !granted),
                 sources.first(),
             )
             assertTrue(sources.contains(TogetherDecisions.Source.PickAFile))
             assertTrue(sources.contains(TogetherDecisions.Source.FromALink))
+            assertTrue(sources.contains(TogetherDecisions.Source.SearchByName))
         }
     }
 
@@ -1118,4 +1120,135 @@ class TogetherDecisionsTest {
             )
         }
     }
+
+    // ── Searching a catalogue by name ────────────────────────────────────────
+
+    @Test
+    fun searchIsOfferedLastBecauseItIsTheOnlySourceThatTellsAnyoneAnything() {
+        val offered = TogetherDecisions.sources(libraryGranted = true)
+        assertEquals(
+            "search must be the last source offered",
+            TogetherDecisions.Source.SearchByName,
+            offered.last(),
+        )
+        assertEquals(
+            "on-device music must still be first",
+            TogetherDecisions.Source.OnThisPhone(needsPermission = false),
+            offered.first(),
+        )
+    }
+
+    /**
+     * The distinction the whole outcome type exists for. If these two ever
+     * collapse, the app tells somebody their song does not exist because a Cargo
+     * feature is off.
+     */
+    @Test
+    fun aBuildWithNoCatalogueIsNotTheSameAsARecordingThatDoesNotExist() {
+        assertEquals(
+            TogetherDecisions.SearchOutcome.NoCatalogue,
+            TogetherDecisions.searchOutcome(unavailable = true, error = null, candidates = emptyList()),
+        )
+        assertEquals(
+            TogetherDecisions.SearchOutcome.NothingFound,
+            TogetherDecisions.searchOutcome(unavailable = false, error = null, candidates = emptyList()),
+        )
+        assertNotEquals(
+            TogetherDecisions.searchOutcome(unavailable = true, error = null, candidates = emptyList()),
+            TogetherDecisions.searchOutcome(unavailable = false, error = null, candidates = emptyList()),
+        )
+    }
+
+    @Test
+    fun unavailableWinsOverAnErrorStringSoTheReasonIsNeverMisreported() {
+        // Both can be set by a caller that maps errors sloppily. "This build
+        // cannot search" is the more specific and more useful answer, so it is
+        // checked first rather than being shadowed by a generic failure.
+        assertEquals(
+            TogetherDecisions.SearchOutcome.NoCatalogue,
+            TogetherDecisions.searchOutcome(
+                unavailable = true,
+                error = "this build has no catalogue support",
+                candidates = emptyList(),
+            ),
+        )
+    }
+
+    @Test
+    fun aFailedLookupKeepsItsReasonRatherThanBecomingAnEmptyList() {
+        assertEquals(
+            TogetherDecisions.SearchOutcome.Failed("musicbrainz timed out"),
+            TogetherDecisions.searchOutcome(
+                unavailable = false,
+                error = "musicbrainz timed out",
+                candidates = emptyList(),
+            ),
+        )
+    }
+
+    @Test
+    fun resultsKeepTheCatalogueOrderTheyArrivedIn() {
+        // "Most likely first" is the catalogue's judgement, and re-sorting it
+        // here would be substituting ours for one we have no basis for.
+        val one = candidate("Kun Faya Kun")
+        val two = candidate("Kun Faya Kun (Remix)")
+        val outcome = TogetherDecisions.searchOutcome(false, null, listOf(one, two))
+        assertEquals(
+            TogetherDecisions.SearchOutcome.Found(listOf(one, two)),
+            outcome,
+        )
+    }
+
+    @Test
+    fun eachTierNamesADifferentAction() {
+        assertEquals(
+            TogetherDecisions.CandidateAction.PlayOwnCopy(0.95),
+            TogetherDecisions.candidateAction("library", 0.95, null),
+        )
+        assertEquals(
+            TogetherDecisions.CandidateAction.AskThePeer,
+            TogetherDecisions.candidateAction("peer", 0.0, null),
+        )
+        assertEquals(
+            TogetherDecisions.CandidateAction.FetchOpenly("https://archive.example/a.flac"),
+            TogetherDecisions.candidateAction("open_licence", 0.0, "https://archive.example/a.flac"),
+        )
+        assertEquals(
+            TogetherDecisions.CandidateAction.EmbedOrNameIt,
+            TogetherDecisions.candidateAction("embed_only", 0.0, null),
+        )
+    }
+
+    @Test
+    fun anOpenLicenceTierWithNoUrlFallsToTheFloorRatherThanOfferingAFetch() {
+        // A button that says "download" and has nothing to download is worse
+        // than the honest floor.
+        assertEquals(
+            TogetherDecisions.CandidateAction.EmbedOrNameIt,
+            TogetherDecisions.candidateAction("open_licence", 0.0, null),
+        )
+        assertEquals(
+            TogetherDecisions.CandidateAction.EmbedOrNameIt,
+            TogetherDecisions.candidateAction("open_licence", 0.0, "  "),
+        )
+    }
+
+    @Test
+    fun aTierThisBuildHasNeverHeardOfDegradesToTheFloorRatherThanThrowing() {
+        // A core that grows a fifth tier must not crash an older music player,
+        // and the floor is the only fallback that promises nothing.
+        assertEquals(
+            TogetherDecisions.CandidateAction.EmbedOrNameIt,
+            TogetherDecisions.candidateAction("some_future_tier", 0.0, "https://x.example/a.mp3"),
+        )
+    }
+
+    private fun candidate(title: String) = TogetherDecisions.Candidate(
+        title = title,
+        artist = "A. R. Rahman",
+        album = "Rockstar",
+        durationMs = 470_000,
+        catalogue = "MusicBrainz",
+        durationKnown = true,
+    )
 }

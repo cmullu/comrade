@@ -29,6 +29,12 @@
  * [`global_runtime`]: the single, process-lifetime `ComradeRuntime` that both
  * ABIs read and write. See `docs/FRONTEND_STRATEGY.md` §4 D2.
  *
+ * The lock is on the *directory*, which is why there is exactly one exception:
+ * [`Comrade::new_isolated_with_relays`] builds a runtime of its own for the
+ * two-peer device test, where each peer is pointed at a directory of its own.
+ * Nothing in the shipping app may use it — see its own doc for what a shared
+ * runtime did to that test.
+ *
  * Shape:
  *  • Free functions ([`version`], [`generate_keypair`], …) — stateless crypto
  *    and workspace-metadata helpers that don't need a live runtime.
@@ -69,6 +75,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use comrade_core::call::{CallMediaKind, CallSignal, HangupReason, IceStrategy};
+use comrade_core::catalogue::{AudioPlan, CatalogueMatch};
 use comrade_core::crypto::KeyProfile;
 use comrade_core::handoff::{AttachmentRoute, HandoffSignal};
 use comrade_core::share::transport::RelayPolicy;
@@ -79,11 +86,11 @@ use comrade_ui::{
     AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto, IdentityDto,
-    JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto,
-    MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto,
-    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadSample,
-    ReadVerdict, ReadingDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto, TaskState,
-    TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    JournalEntryDto, LibraryCandidateDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
+    MeshStatusDto, MessageDto, MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto,
+    PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto,
+    ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
+    TaskState, TogetherSessionDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -92,6 +99,100 @@ uniffi::setup_scaffolding!("comrade");
 
 pub mod api;
 mod frb_generated;
+
+// ── tracing → logcat ─────────────────────────────────────────────────────────
+
+/// Guards [`init_logging`] so the install runs exactly once however many
+/// threads race into the FFI at startup. A `OnceLock` rather than a bare flag
+/// because `get_or_init` is the "at most one caller runs the closure"
+/// primitive, and because a test can then assert the install happened.
+static LOGGING: OnceLock<()> = OnceLock::new();
+
+/// Put the Rust side's `tracing` output in front of the person debugging the
+/// app — `adb logcat -s comrade` — at **warn and error only**.
+///
+/// Idempotent, thread-safe, and it cannot panic or fail: every later call
+/// returns without doing anything, and there is no error to report because
+/// there is nothing a caller could do about one.
+///
+/// Called from [`global_runtime`], [`global_runtime_with_relays`] and
+/// [`api::init_app`], which is deliberately three places rather than one. Those
+/// three are exhaustive for anything that logs: no exported method does
+/// anything without the process-global runtime, and both accessors of it start
+/// here — `global_runtime_with_relays` before its own `warn!`, which is the
+/// line that went missing and prompted this. The Dart ABI additionally has
+/// `#[frb(init)]`, which runs before any other `frb_*` call, and going through
+/// it too is what settles who installs the `log` sink first (see
+/// [`api::init_app`]). The stateless helpers ([`version`],
+/// [`generate_keypair`], …) are left out on purpose: they log nothing, and
+/// prefixing forty exports with an init call is how one gets forgotten.
+///
+/// A no-op on every other target, so `cargo test`, the CLI (which installs its
+/// own `tracing_subscriber` in `src/main.rs`) and the desktop shell are
+/// unchanged and pick up no new dependency.
+pub(crate) fn init_logging() {
+    LOGGING.get_or_init(install_logcat_bridge);
+}
+
+/// The Android install: `tracing` events → `log` records (the `log-always`
+/// feature in Cargo.toml) → `android_logger` → logcat under the tag `comrade`,
+/// each line prefixed with the module path it came from.
+#[cfg(target_os = "android")]
+fn install_logcat_bridge() {
+    // Warn and error, in every build — an owner decision, not a debug switch,
+    // so a user's bug report can be explained without a special build.
+    //
+    // The line is drawn *below* `info!` because that is where content starts:
+    // `comrade_core::vault` logs every sent DM's recipient npub and event id at
+    // info (`Vault DM sent`), `comrade_core::media` logs the uploaded blob's
+    // URL, and `debug!` adds each *incoming* DM's sender and a peer npub per
+    // presence beacon. logcat is readable by `adb`, by the user, and on older
+    // Android by other apps, so shipping that would be shipping the social
+    // graph. Warn and error carry an error string plus, at a few sites, an
+    // event id or a relay URL — narrow enough to ship, wide enough to explain
+    // a failure. `crates/` currently has 64 `warn!` and no `error!` at all.
+    const LEVEL: log::LevelFilter = log::LevelFilter::Warn;
+
+    // Our own crates only. A `warn!` out of libp2p, nostr-sdk or redb carries
+    // multiaddrs, peer ids, relay URLs and host names that nobody here audited
+    // and that a dependency bump can change without review — and this ships to
+    // users' devices. Exit: add a directive for a specific third-party target
+    // when it earns one, deliberately, rather than inheriting the whole graph.
+    let mut filter = env_filter::Builder::new();
+    for crate_target in [
+        "comrade_jni",
+        "comrade_ui",
+        "comrade_core",
+        "comrade_state",
+        "comrade_storage",
+    ] {
+        filter.filter_module(crate_target, LEVEL);
+    }
+
+    android_logger::init_once(
+        android_logger::Config::default()
+            // One fixed tag so `adb logcat -s comrade` finds all of it;
+            // android_logger then prefixes each message with the module path.
+            .with_tag("comrade")
+            .with_max_level(LEVEL)
+            .with_filter(filter.build()),
+    );
+
+    // `init_once` installs nothing if a `log` logger is already set, and
+    // `flutter_rust_bridge::setup_default_user_utils` sets one at TRACE — so on
+    // the Flutter path the Config above can be the one discarded (see
+    // `api::init_app` for why it normally is not). This clamp is the half that
+    // holds either way: `tracing`'s log bridge tests `log::max_level()` before
+    // it builds a record, so warn-and-error survives losing that race. It also
+    // pins frb's own logging to warn, which is the same owner decision applied
+    // to the only other thing writing here.
+    log::set_max_level(LEVEL);
+}
+
+/// Nothing to install off Android: this crate is only loaded by `android/` and
+/// `app/`, and every other lane already has its own subscriber.
+#[cfg(not(target_os = "android"))]
+fn install_logcat_bridge() {}
 
 // ── The process-global runtime ────────────────────────────────────────────────
 
@@ -107,20 +208,29 @@ static RUNTIME: OnceLock<Arc<RwLock<ComradeRuntime>>> = OnceLock::new();
 /// through one ABI is immediately visible through the other and the vault's
 /// redb file is only ever opened once.
 pub(crate) fn global_runtime() -> &'static Arc<RwLock<ComradeRuntime>> {
+    init_logging();
     RUNTIME.get_or_init(|| Arc::new(RwLock::new(ComradeRuntime::new())))
 }
 
 /// [`global_runtime`], but seeding it with an explicit relay set if — and only
 /// if — it has not been created yet (AUDIT.md COMMS-03's isolated-relay test
-/// hook, reached from [`Comrade::new_with_relays`]).
+/// hook, reached from [`api::init_runtime_with_relays`]).
 ///
-/// First caller wins: there is exactly one runtime per process, so a later
-/// call cannot retarget engines that may already be connected. That is logged
-/// rather than silently ignored, and never fails — the caller still gets a
-/// working handle.
+/// First caller wins: there is exactly one *global* runtime per process, so a
+/// later call cannot retarget engines that may already be connected. That is
+/// logged rather than silently ignored, and never fails — the caller still gets
+/// a working handle.
+///
+/// **This is the shape that must not be used to build test peers**, and
+/// [`Comrade::new_isolated_with_relays`] is where that is written down: "first
+/// caller wins" means the second peer silently becomes the first one. The Dart
+/// hook can live with it because it seeds a single runtime once at startup.
 pub(crate) fn global_runtime_with_relays(
     relays: Vec<String>,
 ) -> &'static Arc<RwLock<ComradeRuntime>> {
+    // Before the `warn!` below, not after: that line is the one this bridge was
+    // built for, and it is emitted on the *first* call into this function.
+    init_logging();
     let mut seeded = false;
     let runtime = RUNTIME.get_or_init(|| {
         seeded = true;
@@ -372,11 +482,11 @@ pub struct Comrade {
 }
 
 impl Comrade {
-    /// Build a handle over an explicit runtime. Not exported over FFI: the
-    /// only foreign-reachable constructors are [`Comrade::new`] and
-    /// [`Comrade::new_with_relays`], both of which bind the process-global
-    /// runtime. Tests use this to get an isolated runtime (and therefore an
-    /// isolated redb vault) per test.
+    /// Build a handle over an explicit runtime. Not exported over FFI:
+    /// [`Comrade::new`] binds the process-global runtime and
+    /// [`Comrade::new_isolated_with_relays`] builds one of its own. Tests use
+    /// this to get an isolated runtime (and therefore an isolated redb vault)
+    /// per test.
     fn with_runtime(inner: Arc<RwLock<ComradeRuntime>>) -> Arc<Self> {
         Arc::new(Self {
             inner,
@@ -392,17 +502,42 @@ impl Comrade {
         Self::with_runtime(global_runtime().clone())
     }
 
-    /// Like [`Comrade::new`], but connecting new engines to `relays` instead
-    /// of the public default set. AUDIT.md COMMS-03's isolated-relay test
-    /// hook: a two-installation/two-instance device test points both sides
-    /// at one local relay instead of the public internet. Not used by the
-    /// shipping app (which always calls [`Comrade::new`]).
+    /// A **separate** runtime of its own, connected to `relays` instead of the
+    /// public default set — one independent peer, not a handle onto the shared
+    /// one. AUDIT.md COMMS-03's isolated-relay test hook, and the only
+    /// constructor here that does not bind [`global_runtime`]. Not used by the
+    /// shipping app, which always calls [`Comrade::new`].
     ///
-    /// Only takes effect if it is what first creates the process-global
-    /// runtime — see [`global_runtime_with_relays`].
+    /// **The name carries the word `isolated` because the absence of it cost
+    /// months of green CI.** This was `new_with_relays`, and it returned a
+    /// handle onto the process-global runtime — seeding its relay set only if it
+    /// happened to be the first caller. `TwoPeerJniIntegrationTest` built two of
+    /// these and believed it had two peers; it had one runtime twice, so the
+    /// second `unlock_vault` returned the *first* peer's identity (unlock is
+    /// idempotent by design) and both "peers" shared one npub. Alice DMing Bob
+    /// was Alice DMing herself, no `IncomingMessageRequest` ever arrived, and
+    /// all three tests asserted "nothing arrived" — which is exactly what they
+    /// did on 2026-08-09, the first run where they were not skipping.
+    ///
+    /// Two runtimes in one process is safe *here* and nowhere else, for reasons
+    /// worth stating rather than rediscovering:
+    ///  • each opens a **different** vault directory, so redb's exclusive file
+    ///    lock is never contended — the module header's warning is about two
+    ///    runtimes over *one* directory, which this still must not do;
+    ///  • Saathi listens on `/ip4/0.0.0.0/tcp/0` (`saathi.rs:253`), an ephemeral
+    ///    port, so two instances do not collide.
+    ///
+    /// The Dart ABI has no equivalent and must not gain one: `api::runtime()`
+    /// resolves the global unconditionally, so a second runtime would be
+    /// unreachable from every function there. Dart's isolated-relay hook stays
+    /// [`api::init_runtime_with_relays`], which seeds the global.
     #[uniffi::constructor]
-    pub fn new_with_relays(relays: Vec<String>) -> Arc<Self> {
-        Self::with_runtime(global_runtime_with_relays(relays).clone())
+    pub fn new_isolated_with_relays(relays: Vec<String>) -> Arc<Self> {
+        // The global's own funnels call this; an isolated runtime bypasses them,
+        // so it has to install the logcat bridge itself or a test's warnings go
+        // nowhere.
+        init_logging();
+        Self::with_runtime(Arc::new(RwLock::new(ComradeRuntime::with_relays(relays))))
     }
 
     // ── Push events ───────────────────────────────────────────────────────
@@ -976,6 +1111,45 @@ impl Comrade {
         comrade_ui::play_route(plan, found_local_copy, link, access)
     }
 
+    /// Ask a public catalogue what recording `query` names.
+    ///
+    /// The one call on this path that reaches a third party, so it is `async`
+    /// (Kotlin sees a `suspend fun`) and must never be driven from a UI thread —
+    /// `TogetherManager`'s outbound queue is the pattern, and the ANR fixed in
+    /// `eb30e02` is what happens otherwise.
+    ///
+    /// Only the query text leaves the device. An empty result means the catalogue
+    /// has no such recording; [`UiError::CatalogueUnavailable`] means this build
+    /// cannot search at all (`catalogue-http` off) and a UI must not render it as
+    /// "not found". Needs no vault.
+    /// **Takes no lock at all**, which is deliberate rather than an oversight.
+    /// `comrade_ui::catalogue_lookup` is a free function precisely so that this
+    /// wrapper cannot hold a guard across a network round trip — the rule in
+    /// `.claude/rules/rust.md` that two shipped deadlocks came from. A method on
+    /// the runtime would have made the lock unavoidable, because the returned
+    /// future would borrow the guard.
+    pub async fn catalogue_lookup(&self, query: String) -> Result<Vec<CatalogueMatch>, UiError> {
+        comrade_ui::catalogue_lookup(&query).await
+    }
+
+    /// Which tier will supply a recording this device does not have.
+    ///
+    /// The rung below [`Self::play_route`]'s `AskForFile`: given what the
+    /// catalogue said and whether the peer offered a copy, pick the first tier
+    /// that can actually supply the bytes. Pure, so it takes no lock and reaches
+    /// no network — the licence gate is applied inside, and a caller cannot
+    /// bypass it by passing a URL it liked the look of.
+    pub fn audio_plan(
+        &self,
+        want: Recording,
+        want_ms: u64,
+        library: Vec<LibraryCandidateDto>,
+        peer_has_it: bool,
+        catalogue: Vec<CatalogueMatch>,
+    ) -> AudioPlan {
+        comrade_ui::audio_plan(want, want_ms, library, peer_has_it, catalogue)
+    }
+
     /// Name a piece of work. `peer` of `None` is a note to self, which never
     /// touches a relay.
     pub async fn assign_task(
@@ -1539,6 +1713,52 @@ mod tests {
     }
 
     #[test]
+    fn init_logging_never_panics_however_many_threads_race_it() {
+        // The install sits on the entry path of every FFI call, so the contract
+        // is: callable from anywhere, any number of times, from any number of
+        // threads, and never a panic — a panic here would surface to Kotlin as
+        // a `PanicException` from an unrelated method.
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    init_logging();
+                    init_logging();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("init_logging must not panic");
+        }
+        assert!(LOGGING.get().is_some(), "the install must be recorded");
+    }
+
+    #[test]
+    fn resolving_the_global_runtime_installs_logging() {
+        // Guards the wiring, which is the part that rots: `global_runtime`,
+        // `global_runtime_with_relays` and `Comrade::new_isolated_with_relays`
+        // are the funnels the foreign ABIs reach, and if any of them stops
+        // installing the bridge, Android silently goes back to dropping every
+        // `warn!`. The isolated constructor is the easiest of the three to
+        // forget, because it is the one that does *not* route through
+        // `global_runtime`.
+        //
+        // Weaker than it looks, and worth saying so: `cargo test` shares one
+        // process, so an earlier test may already have installed it. There is
+        // no `tests/` binary to isolate this in — the crate is
+        // `crate-type = ["cdylib"]`, so an integration test cannot link it.
+        let _ = global_runtime();
+        assert!(LOGGING.get().is_some());
+        let _ = global_runtime_with_relays(vec!["wss://relay.example.test".to_string()]);
+        assert!(LOGGING.get().is_some());
+        // …and the flutter_rust_bridge accessor goes through the same funnel.
+        let _ = api::runtime();
+        assert!(LOGGING.get().is_some());
+        // …as does the one constructor that deliberately does not.
+        let _ = Comrade::new_isolated_with_relays(vec!["wss://relay.example.test".to_string()]);
+        assert!(LOGGING.get().is_some());
+    }
+
+    #[test]
     fn version_matches_crate_version() {
         assert_eq!(version(), env!("CARGO_PKG_VERSION"));
     }
@@ -1589,21 +1809,40 @@ mod tests {
         assert_eq!(c.current_workspace().key, "Base");
     }
 
+    /// The regression test for the bug that made the two-peer device lane
+    /// unpassable as written: two isolated handles must be two *different*
+    /// runtimes, and neither may be the global one.
+    ///
+    /// This fails against the old `new_with_relays` on every one of its three
+    /// assertions, which is the point — that constructor returned the same
+    /// process-global runtime to both callers, so `TwoPeerJniIntegrationTest`'s
+    /// "alice" and "bob" were one peer wearing two names.
     #[test]
-    fn new_with_relays_is_reachable_through_the_ffi_constructor() {
-        // Reachable, and — like every other foreign constructor — a handle
-        // onto the one process-global runtime, not a second one.
-        let c = Comrade::new_with_relays(vec!["wss://relay.example.test".to_string()]);
-        assert!(Arc::ptr_eq(&c.inner, global_runtime()));
-        assert_eq!(c.current_workspace().key, "Base");
+    fn two_isolated_handles_are_two_separate_runtimes() {
+        let relays = vec!["wss://relay.example.test".to_string()];
+        let alice = Comrade::new_isolated_with_relays(relays.clone());
+        let bob = Comrade::new_isolated_with_relays(relays);
+
+        assert!(
+            !Arc::ptr_eq(&alice.inner, &bob.inner),
+            "two isolated handles sharing one runtime is the bug this constructor exists to \
+             prevent: the second unlock_vault returns the first peer's identity, so a DM \
+             between them is a DM to oneself"
+        );
+        assert!(!Arc::ptr_eq(&alice.inner, global_runtime()));
+        assert!(!Arc::ptr_eq(&bob.inner, global_runtime()));
+        assert_eq!(alice.current_workspace().key, "Base");
+        assert_eq!(bob.current_workspace().key, "Base");
     }
 
     #[test]
-    fn every_uniffi_handle_shares_one_process_global_runtime() {
-        // The architectural invariant this crate exists to hold: two cdylibs
-        // (or two runtimes in one) would both open the same vault directory,
-        // and redb's exclusive lock makes the second open fail. See the
-        // module header.
+    fn every_default_uniffi_handle_shares_one_process_global_runtime() {
+        // The architectural invariant this crate exists to hold, and it is about
+        // the *default* constructor: two cdylibs (or two runtimes over one vault
+        // directory) would both `redb::Database::create` the same file, and
+        // redb's exclusive lock makes the second open fail. See the module
+        // header. `new_isolated_with_relays` is exempt because it is only ever
+        // pointed at a directory of its own.
         let a = Comrade::new();
         let b = Comrade::new();
         assert!(Arc::ptr_eq(&a.inner, &b.inner));
@@ -1807,6 +2046,28 @@ mod tests {
         let status = c.turn_server_status();
         assert!(!status.configured);
         assert_eq!(status.url, None);
+    }
+
+    /// The catalogue rung is reachable through the FFI object and works
+    /// **before unlock** — a search box that demanded a vault to tell you what a
+    /// song is called would be an odd thing to ship.
+    /// No `is_vault_unlocked()` assertion here, deliberately: that method uses
+    /// `blocking_read`, which panics inside a Tokio runtime by design (see the
+    /// module header's listener-callback invariant), and this is a
+    /// `#[tokio::test]`. The vault is untouched because nothing unlocked it.
+    #[tokio::test]
+    async fn the_catalogue_rung_is_reachable_before_unlock() {
+        let c = isolated();
+
+        // Empty query: no socket, no error.
+        assert_eq!(c.catalogue_lookup("  ".into()).await.unwrap(), Vec::new());
+
+        // And the pure half decides a tier with no vault and no network.
+        let want = Recording::titled("Kun Faya Kun");
+        assert_eq!(
+            c.audio_plan(want, 470_000, Vec::new(), true, Vec::new()),
+            AudioPlan::Peer
+        );
     }
 
     #[tokio::test]

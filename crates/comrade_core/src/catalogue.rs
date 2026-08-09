@@ -25,12 +25,26 @@
  *   that ran a mirror would also be the backend `crate::share`'s whole design
  *   exists to avoid.
  *
- * So there is no adapter for either, and there is deliberately **no single
- * `AudioSource` trait** they could be slotted into: a DRM tier would have to be
- * written from scratch by whoever wanted it. That absence is not only a policy —
- * the four tiers genuinely live in different layers, and pretending otherwise
- * would be a false abstraction. **What is here instead is the decision**, and
- * carrying it out belongs to whoever owns that layer:
+ * So there is no adapter for either. **There was also deliberately no single
+ * `AudioSource` trait they could be slotted into, and on 2026-08-09 the owner
+ * decided to add one** — the tier is being made pluggable so a BlackHole-shaped
+ * source layer can exist. The reasoning above is not deleted, because it is
+ * still the reason the tier ships **pluggable but with no circumvention adapter
+ * in it**: the seam is provided, and an adapter that defeats a protection
+ * measure is not, and is not going to be written here. Whoever wants one writes
+ * it against the interface and owns that decision, which is a better place for
+ * it than a silent absence that reads as an oversight.
+ *
+ * The rest of the original argument stands on its own merits and is worth
+ * keeping in view: an extractor is the component that *breaks*, because it
+ * depends on internals its upstream is free to change without notice, and a
+ * source layer whose adapters are hand-rolled inherits that maintenance
+ * indefinitely. Prefer an established, separately-maintained extractor over
+ * bytes parsed here.
+ *
+ * The four tiers genuinely live in different layers, so **what is here is still
+ * the decision** rather than the mechanism, and carrying it out belongs to
+ * whoever owns that layer:
  *
  * | tier | where the bytes are | who carries it out |
  * |---|---|---|
@@ -101,7 +115,7 @@ const _: () = assert!(MAX_CANDIDATES * 4096 < MAX_LOOKUP_BYTES);
 /// then nothing. Deriving the order from an enum rather than writing it at each
 /// call site is what stops a future caller reaching for the network before
 /// checking the phone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, uniffi::Enum)]
 pub enum SourceTier {
     /// A file already on this device. No network, no third party, no question
     /// about rights — they already have it.
@@ -147,7 +161,7 @@ impl SourceTier {
 /// that decides whether a tier may run: *does this permit us to hand a copy to
 /// somebody?* Anything not recognised is [`Self::Unknown`], which is treated as
 /// "no".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum OpenLicence {
     /// Public domain or an explicit dedication (CC0, PD mark).
     PublicDomain,
@@ -195,7 +209,7 @@ pub fn licence_permits_sharing(licence: OpenLicence) -> bool {
 
 /// One catalogue answer: what the recording is, and whether its audio may be
 /// redistributed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CatalogueMatch {
     pub recording: Recording,
     /// Duration when the catalogue knows it — the tiebreak
@@ -270,7 +284,7 @@ pub enum CatalogueError {
 // No `Eq`: the confidence is an `f64`. `PartialEq` is enough for the tests and
 // for a frontend comparing plans, and rounding it to an integer just to satisfy
 // a derive would throw away the number a UI wants to show.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum AudioPlan {
     /// It is already here. The `f64` is the match score, so a UI can say how
     /// sure it is rather than silently opening a file.

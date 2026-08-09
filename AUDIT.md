@@ -1079,6 +1079,112 @@ is small; the content problem is the real constraint:
 >   (`.claude/scripts/android-typecheck-compose.sh`). How it looks is verified by
 >   nothing but a device, and the 🫂 glyph is hand-authored path data that no lane
 >   here can render.
+> - **Shipping Rust `warn!` to logcat made two lines newly sensitive, and both are
+>   fixed; two more are accepted with a reason.** 2026-08-09, alongside the
+>   `tracing`→logcat bridge. Warn-level output now reaches a buffer `adb` reads, so
+>   the audit is of what our own 64 `warn!` sites interpolate. The line held is
+>   **whose** data it is: the device owner's own configuration is ~free to disclose
+>   to whoever holds the device — they can read it in Settings — but data about a
+>   *third party* is not.
+>   - Fixed: `comrade_ui/src/runtime.rs:2597`, the panic wipe's completion line,
+>     dropped `warn!`→`debug!`. `panic_wipe`'s doc is careful that it "does not
+>     hide", and that is unchanged; what a warn here would newly do is leave
+>     *"local state destroyed"* timestamped in logcat, for a feature whose threat
+>     model is a phone taken under duress. It is a finished-marker with no
+>     diagnostic value debug cannot serve.
+>   - Fixed: `comrade_ui/src/runtime.rs:8040` no longer names the peer whose
+>     invite was refused. A contact's npub is about somebody who did not consent
+>     to being named in a system buffer on this phone, and which peer it was adds
+>     nothing a developer can act on.
+>   - Accepted: `comrade_core/src/relay.rs:371` logs a relay URL. That is the
+>     owner's own configured infrastructure, already visible in Settings to anyone
+>     holding the device, and it is the one field that makes "which relay failed"
+>     answerable. Exit condition: if relay lists ever become per-peer or
+>     discovered rather than chosen, this becomes third-party data and must go.
+>   - Accepted: `comrade_core/src/vault.rs:144`,`:173` and
+>     `comrade_core/src/sakha.rs:273`,`:281`,`:295`,`:302` log a nostr `event_id`
+>     for content addressed to the owner. Opaque, about the owner's own inbox, and
+>     the only handle that makes a decrypt failure diagnosable. Exit condition: if
+>     an event id ever becomes correlatable to a *sender* without the ciphertext,
+>     re-open this.
+>   - **Not audited**: `info!` and `debug!` sites, on the grounds that they do not
+>     ship. That holds only while nothing lowers the filter — `comrade_jni`'s
+>     `LEVEL` const (`crates/comrade_jni/src/lib.rs:147`) is the single place it is
+>     set, and dropping it to info would
+>     put every outbound DM's recipient npub (`vault.rs:321`) and every uploaded
+>     blob URL (`media.rs:265`) on the device. Do not lower it without redoing
+>     this pass.
+> - **`send_together` treats "a radio took it" as delivery, which is the exact
+>   error #106 fixed for DMs.** Found 2026-08-09 while diagnosing a field report,
+>   not fixed. `LocalRadios::send`'s own doc
+>   (`crates/comrade_ui/src/runtime.rs:8508-8511`) says its return value means
+>   only that a radio accepted the frame and must "never" be read as proof of
+>   delivery — and `send_together` (`runtime.rs:6366-6372`) does exactly that:
+>   `if mesh.send(…).await { return Ok(()) }`, short-circuiting the direct and
+>   relay rungs below. So a BLE frame accepted for a peer who is not there loses
+>   the command *and* skips the relay that would have carried it. The mitigating
+>   argument is real but partial — a together signal is worthless once stale, and
+>   the drift ladder closes a gap a lost command left — but that argument does not
+>   cover `Join` or `End`, which are one-shot and have no ladder behind them. A
+>   `Join` lost this way leaves the inviter on "waiting for them to open it"
+>   forever, which is a reported symptom.
+> - **A whole tested module was reachable from nothing, and no lane noticed.**
+>   Found and closed 2026-08-09 (`docs/TOGETHER.md` §20). `comrade_core::catalogue`
+>   had a resolver trait, a MusicBrainz adapter, the four-tier ladder, a licence
+>   gate applied before any fetch, and its own `catalogue-http` CI lane — and not
+>   one caller. No `comrade_ui` method, no FFI export, no screen. It is now wired
+>   end to end behind Together's search card (`comrade_ui::catalogue_lookup` and
+>   `audio_plan`, both exported over uniffi and frb), and the `catalogue-http`
+>   lanes were widened from `comrade_core` alone to `comrade_ui` and `comrade_jni`
+>   as well, since the lookup is two `#[cfg]` branches of which a core-only lane
+>   type-checks neither.
+>   **The class is the interesting part and it is not closed.** "Tested" and
+>   "reachable" are independent properties, nothing here checks the second, and
+>   this is the same shape as the skipping two-peer test one layer up: a green
+>   tick over code no caller can get to. A dead-code sweep over `pub` items in
+>   `comrade_core` that no frontend and no test-outside-the-module calls would
+>   find the rest, and is not written.
+> - **`catalogue.rs`'s no-pluggable-source-tier decision was reversed by the
+>   owner** on 2026-08-09, to make Together a BlackHole-shaped player. Recorded in
+>   that module's header rather than left as a comment contradicting the code —
+>   *"a comment asserting a guarantee the code does not provide is a bug"*. The
+>   §1201/InfoSoc-Art.6/§65A analysis is kept, because it is now the reason the
+>   tier ships pluggable **and empty**: the seam is provided, a circumvention
+>   adapter is not. No adapter for the new tier is written; that is named as
+>   missing in §20 rather than implied to exist.
+> - **A two-peer lane existed and had never run — and when it finally ran it was
+>   testing one peer twice.** Fixed 2026-08-09 (`docs/TOGETHER.md` §19), in two
+>   rounds, because the first round only revealed the second problem.
+>   *Round one:* `TwoPeerJniIntegrationTest` skips itself without
+>   `comradeTestRelayUrl`, and `android-apk.yml` never passed it — so since
+>   COMMS-03 every test in that file skipped on every run and the lane was green.
+>   The relay is started and the argument is passed now; `relayUrlOrSkip` inverts
+>   the polarity so a skip must be *asked for* (`comradeAllowRelaySkip`), and an
+>   "Assert the two-peer tests actually ran" step reads the results XML, because
+>   an in-test guard cannot catch instrumentation that never ran.
+>   *Round two:* the first non-skipping run was red on all three tests, every one
+>   of them "nothing arrived". The cause was not the wire.
+>   `Comrade::new_with_relays` returned a handle onto the **process-global**
+>   `ComradeRuntime` (`comrade_jni/src/lib.rs`, the `OnceLock` landed `2026fce`
+>   2026-07-29), seeding its relay set only if it happened to be the first
+>   caller — so the test's two handles were one runtime, `unlock_vault` is
+>   idempotent and returned alice's identity to bob, and both "peers" shared one
+>   npub. Alice DMing bob was alice DMing herself. Note the shape of this: a
+>   singleton landed for a good reason (one redb open, one runtime across two
+>   FFI ABIs) silently invalidated a test written two weeks earlier, and the lane
+>   that would have caught it was the skipping one. The constructor is now
+>   `new_isolated_with_relays` and builds a runtime of its own — safe only
+>   because each peer gets its own vault directory (redb's lock is per
+>   directory) and Saathi listens on an ephemeral port. Regression test
+>   `two_isolated_handles_are_two_separate_runtimes`, verified failing against
+>   the old body before the fix, runs in the ordinary `cargo test` lane in one
+>   second rather than fifteen minutes.
+>   **Two general lessons, both still open.** Nothing in this repo fails a build
+>   because a test was skipped, and `Assume` is used elsewhere — a skipped-test
+>   count assertion across the whole suite would close it and is not written. And
+>   nothing warns when a new process-global invalidates an existing test's
+>   assumption of independent instances; that is the class the second round
+>   belongs to, and it has no guard.
 > - **The main thread made the network calls, and no lane can catch that.**
 >   Fixed 2026-08-09 (`docs/TOGETHER.md` §17): every `together_*` call is
 >   `runBlocking` over an FFI whose last rung is a relay send, and they were made

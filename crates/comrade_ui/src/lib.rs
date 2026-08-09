@@ -65,17 +65,20 @@ pub use comrade_core::handoff::{
 pub use comrade_core::command::{AppAction, ChatCommand, CommandSpec, Mention, MusicService};
 pub use comrade_core::karya::TaskState;
 pub use runtime::play_route;
+// The catalogue rung: one network call and one pure decision, both free
+// functions so no caller can hold a lock across the lookup (see their docs).
+pub use runtime::{audio_plan, catalogue_lookup};
 
 pub use runtime::{
     AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BleRouter, BridgeEvent,
     CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime,
     ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FocusSessionDto,
-    FoundProfileDto, IceServerDto, JournalEntryDto, MediaBytesDto, MediaMessageDto,
-    MentionMatchDto, MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto, MetricDto,
-    OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto,
-    ReactionDto, ReadingDto, RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto,
-    TaraMessageDto, TaskDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
-    TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
+    FoundProfileDto, IceServerDto, JournalEntryDto, LibraryCandidateDto, MediaBytesDto,
+    MediaMessageDto, MentionMatchDto, MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto,
+    MetricDto, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto,
+    ProfileDto, ReactionDto, ReadingDto, RuntimeHandles, SakhaStatusDto, ShareVerdictDto,
+    TaraChatDto, TaraMessageDto, TaskDto, TogetherCommandDto, TogetherCorrectionDto,
+    TogetherInviteDto, TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────
@@ -105,6 +108,21 @@ pub enum UiError {
 
     #[error("engine error: {0}")]
     Engine(String),
+
+    #[error("catalogue lookup failed: {0}")]
+    Catalogue(String),
+
+    /// The build has no catalogue at all, which is a **different answer from
+    /// "no results"** and must stay one.
+    ///
+    /// `catalogue-http` is off in the lean workspace test build, and a lookup in
+    /// that build cannot reach a socket. Returning an empty list would render as
+    /// "we searched and that recording does not exist" — a wrong answer, silently
+    /// produced, and exactly the "fail fast on missing config rather than quietly
+    /// defaulting" case. A frontend seeing this should say the build cannot
+    /// search, not that the search found nothing.
+    #[error("this build has no catalogue support — rebuild with the `catalogue-http` feature")]
+    CatalogueUnavailable,
 }
 
 // ── DTOs (serializable across any IPC/FFI boundary) ──────────────────────────────

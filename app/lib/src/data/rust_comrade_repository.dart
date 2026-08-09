@@ -614,6 +614,13 @@ String describeUiError(rust.UiError error) => switch (error) {
       rust.UiError_Crypto(:final String field0) => field0,
       rust.UiError_Storage(:final String field0) => field0,
       rust.UiError_Engine(:final String field0) => field0,
+      rust.UiError_Catalogue(:final String field0) => field0,
+      // Deliberately not "nothing found". The distinction is the whole reason
+      // this variant exists rather than an empty result list: the build cannot
+      // search at all, and telling somebody their song does not exist because a
+      // Cargo feature is off is a wrong answer delivered confidently.
+      rust.UiError_CatalogueUnavailable() =>
+        'This build cannot search for music.',
     };
 
 /// `"audio"`/`"video"` — the wire strings the rest of the app already speaks.

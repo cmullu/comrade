@@ -6549,6 +6549,8 @@ extension UiErrorPatterns on UiError {
     TResult Function(UiError_Storage value)? storage,
     TResult Function(UiError_VaultLocked value)? vaultLocked,
     TResult Function(UiError_Engine value)? engine,
+    TResult Function(UiError_Catalogue value)? catalogue,
+    TResult Function(UiError_CatalogueUnavailable value)? catalogueUnavailable,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -6569,6 +6571,10 @@ extension UiErrorPatterns on UiError {
         return vaultLocked(_that);
       case UiError_Engine() when engine != null:
         return engine(_that);
+      case UiError_Catalogue() when catalogue != null:
+        return catalogue(_that);
+      case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
+        return catalogueUnavailable(_that);
       case _:
         return orElse();
     }
@@ -6597,6 +6603,9 @@ extension UiErrorPatterns on UiError {
     required TResult Function(UiError_Storage value) storage,
     required TResult Function(UiError_VaultLocked value) vaultLocked,
     required TResult Function(UiError_Engine value) engine,
+    required TResult Function(UiError_Catalogue value) catalogue,
+    required TResult Function(UiError_CatalogueUnavailable value)
+        catalogueUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -6616,6 +6625,10 @@ extension UiErrorPatterns on UiError {
         return vaultLocked(_that);
       case UiError_Engine():
         return engine(_that);
+      case UiError_Catalogue():
+        return catalogue(_that);
+      case UiError_CatalogueUnavailable():
+        return catalogueUnavailable(_that);
     }
   }
 
@@ -6641,6 +6654,8 @@ extension UiErrorPatterns on UiError {
     TResult? Function(UiError_Storage value)? storage,
     TResult? Function(UiError_VaultLocked value)? vaultLocked,
     TResult? Function(UiError_Engine value)? engine,
+    TResult? Function(UiError_Catalogue value)? catalogue,
+    TResult? Function(UiError_CatalogueUnavailable value)? catalogueUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -6660,6 +6675,10 @@ extension UiErrorPatterns on UiError {
         return vaultLocked(_that);
       case UiError_Engine() when engine != null:
         return engine(_that);
+      case UiError_Catalogue() when catalogue != null:
+        return catalogue(_that);
+      case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
+        return catalogueUnavailable(_that);
       case _:
         return null;
     }
@@ -6687,6 +6706,8 @@ extension UiErrorPatterns on UiError {
     TResult Function(String field0)? storage,
     TResult Function()? vaultLocked,
     TResult Function(String field0)? engine,
+    TResult Function(String field0)? catalogue,
+    TResult Function()? catalogueUnavailable,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -6707,6 +6728,10 @@ extension UiErrorPatterns on UiError {
         return vaultLocked();
       case UiError_Engine() when engine != null:
         return engine(_that.field0);
+      case UiError_Catalogue() when catalogue != null:
+        return catalogue(_that.field0);
+      case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
+        return catalogueUnavailable();
       case _:
         return orElse();
     }
@@ -6735,6 +6760,8 @@ extension UiErrorPatterns on UiError {
     required TResult Function(String field0) storage,
     required TResult Function() vaultLocked,
     required TResult Function(String field0) engine,
+    required TResult Function(String field0) catalogue,
+    required TResult Function() catalogueUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -6754,6 +6781,10 @@ extension UiErrorPatterns on UiError {
         return vaultLocked();
       case UiError_Engine():
         return engine(_that.field0);
+      case UiError_Catalogue():
+        return catalogue(_that.field0);
+      case UiError_CatalogueUnavailable():
+        return catalogueUnavailable();
     }
   }
 
@@ -6779,6 +6810,8 @@ extension UiErrorPatterns on UiError {
     TResult? Function(String field0)? storage,
     TResult? Function()? vaultLocked,
     TResult? Function(String field0)? engine,
+    TResult? Function(String field0)? catalogue,
+    TResult? Function()? catalogueUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -6798,6 +6831,10 @@ extension UiErrorPatterns on UiError {
         return vaultLocked();
       case UiError_Engine() when engine != null:
         return engine(_that.field0);
+      case UiError_Catalogue() when catalogue != null:
+        return catalogue(_that.field0);
+      case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
+        return catalogueUnavailable();
       case _:
         return null;
     }
@@ -7182,6 +7219,91 @@ class _$UiError_EngineCopyWithImpl<$Res>
           : field0 // ignore: cast_nullable_to_non_nullable
               as String,
     ));
+  }
+}
+
+/// @nodoc
+
+class UiError_Catalogue extends UiError {
+  const UiError_Catalogue(this.field0) : super._();
+
+  final String field0;
+
+  /// Create a copy of UiError
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $UiError_CatalogueCopyWith<UiError_Catalogue> get copyWith =>
+      _$UiError_CatalogueCopyWithImpl<UiError_Catalogue>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is UiError_Catalogue &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'UiError.catalogue(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $UiError_CatalogueCopyWith<$Res>
+    implements $UiErrorCopyWith<$Res> {
+  factory $UiError_CatalogueCopyWith(
+          UiError_Catalogue value, $Res Function(UiError_Catalogue) _then) =
+      _$UiError_CatalogueCopyWithImpl;
+  @useResult
+  $Res call({String field0});
+}
+
+/// @nodoc
+class _$UiError_CatalogueCopyWithImpl<$Res>
+    implements $UiError_CatalogueCopyWith<$Res> {
+  _$UiError_CatalogueCopyWithImpl(this._self, this._then);
+
+  final UiError_Catalogue _self;
+  final $Res Function(UiError_Catalogue) _then;
+
+  /// Create a copy of UiError
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(UiError_Catalogue(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class UiError_CatalogueUnavailable extends UiError {
+  const UiError_CatalogueUnavailable() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is UiError_CatalogueUnavailable);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'UiError.catalogueUnavailable()';
   }
 }
 
