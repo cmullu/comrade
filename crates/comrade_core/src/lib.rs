@@ -50,6 +50,8 @@ pub mod command;
 pub mod crypto;
 pub mod dak;
 pub mod dm;
+/// Carrying out the catalogue's OpenLicence tier — the download half of §20.
+pub mod download;
 pub mod error;
 pub mod gcs;
 pub mod geo;
