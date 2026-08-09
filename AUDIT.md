@@ -1128,6 +1128,27 @@ is small; the content problem is the real constraint:
 >   cover `Join` or `End`, which are one-shot and have no ladder behind them. A
 >   `Join` lost this way leaves the inviter on "waiting for them to open it"
 >   forever, which is a reported symptom.
+> - **RUSTSEC-2026-0243: `nostr-relay-pool` was unmaintained, and cargo-deny was
+>   red on `main` because of it.** Fixed 2026-08-09 by upgrading `nostr-sdk`
+>   0.44.1 → 0.45.1, which absorbed that crate — it is gone from `Cargo.lock`
+>   rather than ignored, so there is no `deny.toml` entry to expire and
+>   `cargo deny check` passes all four (advisories, bans, licenses, sources).
+>   The upgrade is not a version bump: 0.45 strips `EventBuilder` to
+>   `new(kind, content)` and moves signing to `finalize(&keys)`, removes the
+>   client's signer so every publishing engine now holds its own `Keys` and signs
+>   before sending, replaces the `handle_notifications` callback with a
+>   notification stream, and drops `TagKind`. Sealed DMs moved to
+>   `PrivateDirectMessageBuilder` and gift-wrap unwrapping became synchronous —
+>   the `.await` never awaited I/O.
+>   Worth recording because it hardened one thing and loosened another: the
+>   `SabhaEngine`'s signing keys are now an explicit field, which makes
+>   `publish_anonymous_chitthi` taking a *different* signer visible at the call
+>   site instead of hidden in the client. Against that, the geohash `g` tag is now
+>   spelled as a string for the tag and a typed `SingleLetterTag` for the filter,
+>   with nothing tying them together — a mismatch would publish fine, subscribe
+>   fine, and leave the channel silently empty, so
+>   `the_channel_filter_matches_the_notes_we_publish` was added to hold them
+>   together.
 > - **A whole tested module was reachable from nothing, and no lane noticed.**
 >   Found and closed 2026-08-09 (`docs/TOGETHER.md` §20). `comrade_core::catalogue`
 >   had a resolver trait, a MusicBrainz adapter, the four-tier ladder, a licence

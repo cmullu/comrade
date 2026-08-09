@@ -130,7 +130,7 @@ pub struct SakhaEngine {
 
 impl SakhaEngine {
     pub async fn new(our_keys: &Keys, relay_urls: Vec<String>) -> Result<Self, SakhaError> {
-        let client = Client::new(our_keys.clone());
+        let client = Client::new();
         for url in &relay_urls {
             client
                 .add_relay(url.as_str())
@@ -215,7 +215,7 @@ impl SakhaEngine {
         let content_b64 = base64_encode(&ciphertext);
 
         let event = EventBuilder::new(Kind::Custom(LEDGER_SYNC_KIND), content_b64)
-            .sign_with_keys(&self.our_keys)
+            .finalize(&self.our_keys)
             .map_err(|e| SakhaError::RelayError(e.to_string()))?;
 
         let output = self
@@ -242,77 +242,70 @@ impl SakhaEngine {
             .since(Timestamp::now());
 
         self.client
-            .subscribe(filter, None)
+            .subscribe(filter)
             .await
             .map_err(|e| SakhaError::RelayError(e.to_string()))?;
 
         info!("Sakha sync subscription active");
 
+        // 0.45's notification stream in place of `handle_notifications`. The doc
+        // and the callback are owned by the loop rather than cloned per event —
+        // the old `move` async closure could not borrow them.
         let doc = self.doc.clone();
-        let on_update = Arc::new(on_update);
-
-        self.client
-            .handle_notifications(move |notification| {
-                let doc = doc.clone();
-                let on_update = on_update.clone();
-                async move {
-                    if let RelayPoolNotification::Event { event, .. } = notification {
-                        // A defense-in-depth check: only the paired partner's
-                        // key can produce ciphertext that decrypts below, but
-                        // rejecting a mismatched author up front avoids even
-                        // trying (AUDIT S9).
-                        if event.kind != Kind::Custom(LEDGER_SYNC_KIND)
-                            || event.pubkey != partner_pk
-                        {
-                            return Ok::<bool, Box<dyn std::error::Error>>(false);
-                        }
-
-                        let ciphertext = match base64_decode(&event.content) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!(event_id = %event.id, "Sakha: base64 decode failed: {e}");
-                                return Ok::<bool, Box<dyn std::error::Error>>(false);
-                            }
-                        };
-
-                        let plaintext = match aes_decrypt(&key, &ciphertext) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                warn!(event_id = %event.id, "Sakha: decrypt failed: {e}");
-                                return Ok::<bool, Box<dyn std::error::Error>>(false);
-                            }
-                        };
-
-                        // `yrs::Update` is not `Send` (it can carry nested
-                        // sub-documents whose observer callbacks aren't
-                        // Send/Sync), so it must never be held across an
-                        // `.await` — decode it only after the write lock is
-                        // acquired, immediately before `apply_update` uses it.
-                        let doc_guard = doc.write().await;
-                        let update = match Update::decode_v1(&plaintext) {
-                            Ok(u) => u,
-                            Err(e) => {
-                                warn!(event_id = %event.id, "Sakha: Yrs decode failed: {e}");
-                                return Ok::<bool, Box<dyn std::error::Error>>(false);
-                            }
-                        };
-                        let text = doc_guard.get_or_insert_text("hisab_kitab");
-                        let mut txn = doc_guard.transact_mut();
-                        match txn.apply_update(update) {
-                            Err(e) => warn!(event_id = %event.id, "Sakha: Yrs apply failed: {e}"),
-                            Ok(()) => {
-                                let content = text.get_string(&txn);
-                                drop(txn);
-                                debug!(event_id = %event.id, "Sakha: CRDT sync applied");
-                                on_update(content);
-                            }
-                        }
-                    }
-                    Ok::<bool, Box<dyn std::error::Error>>(false)
+        let mut notifications = self.client.notifications();
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                // A defense-in-depth check: only the paired partner's
+                // key can produce ciphertext that decrypts below, but
+                // rejecting a mismatched author up front avoids even
+                // trying (AUDIT S9).
+                if event.kind != Kind::Custom(LEDGER_SYNC_KIND) || event.pubkey != partner_pk {
+                    continue;
                 }
-            })
-            .await
-            .map_err(|e| SakhaError::RelayError(e.to_string()))
+
+                let ciphertext = match base64_decode(&event.content) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!(event_id = %event.id, "Sakha: base64 decode failed: {e}");
+                        continue;
+                    }
+                };
+
+                let plaintext = match aes_decrypt(&key, &ciphertext) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(event_id = %event.id, "Sakha: decrypt failed: {e}");
+                        continue;
+                    }
+                };
+
+                // `yrs::Update` is not `Send` (it can carry nested
+                // sub-documents whose observer callbacks aren't
+                // Send/Sync), so it must never be held across an
+                // `.await` — decode it only after the write lock is
+                // acquired, immediately before `apply_update` uses it.
+                let doc_guard = doc.write().await;
+                let update = match Update::decode_v1(&plaintext) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!(event_id = %event.id, "Sakha: Yrs decode failed: {e}");
+                        continue;
+                    }
+                };
+                let text = doc_guard.get_or_insert_text("hisab_kitab");
+                let mut txn = doc_guard.transact_mut();
+                match txn.apply_update(update) {
+                    Err(e) => warn!(event_id = %event.id, "Sakha: Yrs apply failed: {e}"),
+                    Ok(()) => {
+                        let content = text.get_string(&txn);
+                        drop(txn);
+                        debug!(event_id = %event.id, "Sakha: CRDT sync applied");
+                        on_update(content);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn disconnect(&self) {

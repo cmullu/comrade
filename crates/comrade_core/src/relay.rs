@@ -166,7 +166,7 @@ pub fn build_relay_list_event(
 
     EventBuilder::new(Kind::from(RELAY_LIST_KIND), "")
         .tags(tags)
-        .sign_with_keys(keys)
+        .finalize(keys)
         .map_err(|e| GossipError::SigningFailed(e.to_string()))
 }
 
@@ -337,29 +337,27 @@ impl GossipEngine {
             .authors(authors);
 
         self.client
-            .subscribe(filter, None)
+            .subscribe(filter)
             .await
             .map_err(|e| GossipError::SubscriptionError(e.to_string()))?;
 
         info!("gossip: relay-list subscription active");
 
+        // 0.45's notification stream, in place of `handle_notifications`. Ending
+        // the stream (client shutdown) ends this loop, which is what returning
+        // `true` from the old callback did.
         let router = self.router.clone();
-        self.client
-            .handle_notifications(move |notification| {
-                let router = router.clone();
-                async move {
-                    if let RelayPoolNotification::Event { event, .. } = notification {
-                        if event.kind == Kind::from(RELAY_LIST_KIND) {
-                            if let Err(e) = router.write().await.ingest_event(&event) {
-                                warn!("gossip: failed to ingest relay list: {e}");
-                            }
-                        }
+        let mut notifications = self.client.notifications();
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                if event.kind == Kind::from(RELAY_LIST_KIND) {
+                    if let Err(e) = router.write().await.ingest_event(&event) {
+                        warn!("gossip: failed to ingest relay list: {e}");
                     }
-                    Ok::<bool, Box<dyn std::error::Error>>(false)
                 }
-            })
-            .await
-            .map_err(|e| GossipError::SubscriptionError(e.to_string()))
+            }
+        }
+        Ok(())
     }
 
     /// Reconfigure the client's connection pool to include every relay needed
@@ -390,7 +388,7 @@ mod tests {
             .collect();
         EventBuilder::new(Kind::from(RELAY_LIST_KIND), "")
             .tags(parsed)
-            .sign_with_keys(keys)
+            .finalize(keys)
             .expect("sign")
     }
 

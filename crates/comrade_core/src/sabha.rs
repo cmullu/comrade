@@ -11,7 +11,7 @@
  * is left untouched — only the execution/timeline layer adopts the Chitthi name.
  */
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,7 @@ pub fn coarse_timestamp(now: Timestamp) -> Timestamp {
 /// Event for an anonymous Chitthi: a normal Kind-1 note with a coarsened
 /// timestamp and no identity-bearing tags.
 fn anonymous_chitthi_builder(content: &str, now: Timestamp) -> EventBuilder {
-    EventBuilder::text_note(content).custom_created_at(coarse_timestamp(now))
+    EventBuilder::new(Kind::TextNote, content).custom_created_at(coarse_timestamp(now))
 }
 
 /// Event for a note in a location channel.
@@ -64,15 +64,17 @@ fn geohash_channel_filter(cell: &Geohash, since_secs: u64) -> Filter {
             Kind::Custom(KIND_GEOHASH_NOTE),
             Kind::Custom(KIND_GEOHASH_PRESENCE),
         ])
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::G), [cell.to_string()])
+        .custom_tags(SingleLetterTag::LOWERCASE_G, [cell.to_string()])
         .since(Timestamp::now() - since_secs)
 }
 
 fn geohash_tag(cell: &Geohash) -> Tag {
-    Tag::custom(
-        TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::G)),
-        [cell.to_string()],
-    )
+    // 0.45 dropped `TagKind`; `Tag::custom` takes the kind as the string it always
+    // was on the wire, which is what `GEOHASH_TAG` already held for `geohash_of`.
+    // The *filter* still takes the typed `SingleLetterTag`, so `g` is now spelled
+    // two ways in two places and nothing in the type system holds them together —
+    // `the_channel_filter_matches_the_notes_we_publish` is what does.
+    Tag::custom(GEOHASH_TAG, [cell.to_string()])
 }
 
 /// The geohash cell an event belongs to, if it carries a valid `g` tag.
@@ -364,6 +366,15 @@ pub struct SabhaEngine {
     client: Client,
     /// Our own public key — the author of everything this engine publishes.
     our_pk: PublicKey,
+    /// The signing keys.
+    ///
+    /// New in the 0.45 upgrade: `Client` no longer holds a signer, so an engine
+    /// that publishes has to sign before it sends. This is not new exposure —
+    /// `Client::new(keys.clone())` held exactly these — but it is now visible,
+    /// which is the better arrangement: `publish_anonymous_chitthi` takes a
+    /// *different* signer on purpose, and that distinction used to be invisible
+    /// at the call site.
+    keys: Keys,
 }
 
 impl SabhaEngine {
@@ -382,7 +393,7 @@ impl SabhaEngine {
         relays: impl IntoIterator<Item = String>,
     ) -> Result<Self, SabhaError> {
         let our_pk = keys.public_key();
-        let client = Client::new(keys.clone());
+        let client = Client::new();
         let relays: Vec<String> = relays.into_iter().collect();
         for relay in &relays {
             client
@@ -394,13 +405,22 @@ impl SabhaEngine {
         // lookups but never publish feed events or subscribe writes to them.
         for relay in SEARCH_RELAYS {
             if !relays.iter().any(|r| r == relay) {
+                // 0.45 deprecated `add_read_relay` in favour of naming the
+                // capability. Read-only is the point, not an optimisation: a
+                // search relay must never receive a feed publish or a
+                // subscription write.
                 client
-                    .add_read_relay(*relay)
+                    .add_relay(*relay)
+                    .capabilities(RelayCapabilities::READ)
                     .await
                     .map_err(|e| SabhaError::RelayError(e.to_string()))?;
             }
         }
-        Ok(Self { client, our_pk })
+        Ok(Self {
+            client,
+            our_pk,
+            keys: keys.clone(),
+        })
     }
 
     pub async fn add_relay(&self, url: &str) -> Result<(), SabhaError> {
@@ -435,7 +455,7 @@ impl SabhaEngine {
         content: &str,
         reply_to: Option<EventId>,
     ) -> Result<EventId, SabhaError> {
-        let mut builder = EventBuilder::text_note(content);
+        let mut builder = EventBuilder::new(Kind::TextNote, content);
         if let Some(parent) = reply_to {
             let tag = Tag::parse(["e", parent.to_hex().as_str(), "", "reply"])
                 .map_err(|e| SabhaError::ParseError(e.to_string()))?;
@@ -445,9 +465,14 @@ impl SabhaEngine {
         // dials may still be in flight, and the pool "succeeds" against zero
         // relays. Wait for one live relay and require an acceptance.
         wait_for_any_relay(&self.client, CONNECT_WAIT).await;
+        // 0.45 dropped `send_event_builder`: the client has no signer, so signing
+        // is a separate step and `send_event` takes the finished event.
+        let event = builder
+            .finalize(&self.keys)
+            .map_err(|e| SabhaError::ParseError(e.to_string()))?;
         let output = self
             .client
-            .send_event_builder(builder)
+            .send_event(&event)
             .await
             .map_err(|e| SabhaError::RelayError(e.to_string()))?;
         if output.success.is_empty() {
@@ -478,7 +503,7 @@ impl SabhaEngine {
         signer: &Keys,
     ) -> Result<EventId, SabhaError> {
         let event = anonymous_chitthi_builder(content, Timestamp::now())
-            .sign_with_keys(signer)
+            .finalize(signer)
             .map_err(|e| SabhaError::ParseError(e.to_string()))?;
         self.send_signed(event, "anonymous chitthi").await
     }
@@ -491,7 +516,7 @@ impl SabhaEngine {
         signer: &Keys,
     ) -> Result<EventId, SabhaError> {
         let event = geohash_note_builder(cell, content)
-            .sign_with_keys(signer)
+            .finalize(signer)
             .map_err(|e| SabhaError::ParseError(e.to_string()))?;
         self.send_signed(event, "geohash note").await
     }
@@ -513,7 +538,7 @@ impl SabhaEngine {
             )));
         }
         let event = geohash_presence_builder(cell)
-            .sign_with_keys(signer)
+            .finalize(signer)
             .map_err(|e| SabhaError::ParseError(e.to_string()))?;
         self.send_signed(event, "geohash presence").await
     }
@@ -528,24 +553,18 @@ impl SabhaEngine {
     ) -> Result<(), SabhaError> {
         let filter = geohash_channel_filter(cell, since_secs);
         self.client
-            .subscribe(filter, None)
+            .subscribe(filter)
             .await
             .map_err(|e| SabhaError::SubscriptionError(e.to_string()))?;
         info!(cell = %cell, "subscribed to geohash channel");
 
-        let cb = Arc::new(callback);
-        self.client
-            .handle_notifications(move |notification| {
-                let cb = cb.clone();
-                async move {
-                    if let RelayPoolNotification::Event { event, .. } = notification {
-                        cb(*event);
-                    }
-                    Ok(false)
-                }
-            })
-            .await
-            .map_err(|e| SabhaError::SubscriptionError(e.to_string()))?;
+        // 0.45's notification stream in place of `handle_notifications`.
+        let mut notifications = self.client.notifications();
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                callback(*event);
+            }
+        }
         Ok(())
     }
 
@@ -614,9 +633,14 @@ impl SabhaEngine {
         // Best-effort: a missing/unreachable current profile merges from empty.
         let existing = self.fetch_profile(&self.our_pk).await.unwrap_or_default();
         let metadata = merged_metadata(existing, &patch);
+        // `EventBuilder::metadata` is gone in 0.45; a Kind-0 event is its JSON
+        // body, which is what that helper always built.
+        let event = EventBuilder::new(Kind::Metadata, metadata.as_json())
+            .finalize(&self.keys)
+            .map_err(|e| SabhaError::ParseError(e.to_string()))?;
         let output = self
             .client
-            .send_event_builder(EventBuilder::metadata(&metadata))
+            .send_event(&event)
             .await
             .map_err(|e| SabhaError::RelayError(e.to_string()))?;
         if output.success.is_empty() {
@@ -651,7 +675,8 @@ impl SabhaEngine {
         wait_for_any_relay(&self.client, CONNECT_WAIT).await;
         let events = self
             .client
-            .fetch_events(filter, std::time::Duration::from_secs(8))
+            .fetch_events(filter)
+            .timeout(std::time::Duration::from_secs(8))
             .await
             .map_err(|e| SabhaError::RelayError(e.to_string()))?;
         let wanted: std::collections::HashSet<&PublicKey> = authors.iter().collect();
@@ -681,13 +706,18 @@ impl SabhaEngine {
             .limit(limit * 3); // headroom: duplicates collapse per author below
         wait_for_any_relay(&self.client, CONNECT_WAIT).await;
         // Owned URLs, not a borrowed slice iterator: the borrowed form trips
-        // rustc's higher-ranked auto-trait check inside the generic
-        // `fetch_events_from` future, making it non-Send — which the Tauri
-        // command layer requires (desktop clippy lane caught this).
-        let search_relays: Vec<String> = SEARCH_RELAYS.iter().map(|r| r.to_string()).collect();
+        // rustc's higher-ranked auto-trait check inside the generic fetch future,
+        // making it non-Send — which the Tauri command layer requires (desktop
+        // clippy lane caught this). Still true in 0.45, where the relay set moved
+        // from a `fetch_events_from` argument into `ReqTarget::manual`.
+        let targets: Vec<(String, Vec<Filter>)> = SEARCH_RELAYS
+            .iter()
+            .map(|r| (r.to_string(), vec![filter.clone()]))
+            .collect();
         let events = self
             .client
-            .fetch_events_from(search_relays, filter, std::time::Duration::from_secs(8))
+            .fetch_events(ReqTarget::manual(targets))
+            .timeout(std::time::Duration::from_secs(8))
             .await
             .map_err(|e| SabhaError::RelayError(e.to_string()))?;
 
@@ -711,28 +741,26 @@ impl SabhaEngine {
         let filter = spec.into_filter();
 
         self.client
-            .subscribe(filter, None)
+            .subscribe(filter)
             .await
             .map_err(|e| SabhaError::SubscriptionError(e.to_string()))?;
 
         info!("Chitthi feed subscription active");
 
-        let callback = Arc::new(callback);
-        self.client
-            .handle_notifications(move |notification| {
-                let cb = callback.clone();
-                async move {
-                    if let RelayPoolNotification::Event { event, .. } = notification {
-                        if event.kind == Kind::TextNote {
-                            debug!(event_id = %event.id, "Chitthi received");
-                            cb(*event);
-                        }
-                    }
-                    Ok::<bool, Box<dyn std::error::Error>>(false)
+        // 0.45's notification stream in place of `handle_notifications`. The
+        // `Kind::TextNote` check stays: the stream carries every subscription's
+        // events, so a feed callback must still filter to the kind it asked for
+        // (COMMS-04 — this callback must never see the relay-wide firehose).
+        let mut notifications = self.client.notifications();
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                if event.kind == Kind::TextNote {
+                    debug!(event_id = %event.id, "Chitthi received");
+                    callback(*event);
                 }
-            })
-            .await
-            .map_err(|e| SabhaError::SubscriptionError(e.to_string()))
+            }
+        }
+        Ok(())
     }
 }
 
@@ -864,7 +892,7 @@ mod tests {
             }
         }
 
-        builder.sign_with_keys(&keys).unwrap()
+        builder.finalize(&keys).unwrap()
     }
 
     #[test]
@@ -1056,17 +1084,17 @@ mod tests {
     #[test]
     fn newest_metadata_per_author_keeps_latest_kind0() {
         let keys = Keys::generate();
-        let old = EventBuilder::metadata(&Metadata::new().name("old"))
+        let old = EventBuilder::new(Kind::Metadata, Metadata::new().name("old").as_json())
             .custom_created_at(Timestamp::from(100))
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .unwrap();
-        let new = EventBuilder::metadata(&Metadata::new().name("new"))
+        let new = EventBuilder::new(Kind::Metadata, Metadata::new().name("new").as_json())
             .custom_created_at(Timestamp::from(200))
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .unwrap();
-        let other = EventBuilder::metadata(&Metadata::new().name("other"))
+        let other = EventBuilder::new(Kind::Metadata, Metadata::new().name("other").as_json())
             .custom_created_at(Timestamp::from(150))
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
 
         let map = newest_metadata_per_author(vec![new.clone(), old, other]);
@@ -1093,7 +1121,7 @@ mod tests {
         let identity = Keys::generate();
         let throwaway = crate::anon::ephemeral();
         let event = anonymous_chitthi_builder("i am not ok today", Timestamp::now())
-            .sign_with_keys(&throwaway)
+            .finalize(&throwaway)
             .unwrap();
 
         assert_eq!(event.pubkey, throwaway.public_key());
@@ -1113,7 +1141,7 @@ mod tests {
     fn anonymous_chitthi_timestamp_is_coarsened_to_the_hour() {
         let now = Timestamp::from(1_700_003_671); // 01:14:31 past the hour
         let event = anonymous_chitthi_builder("x", now)
-            .sign_with_keys(&crate::anon::ephemeral())
+            .finalize(&crate::anon::ephemeral())
             .unwrap();
         assert_eq!(event.created_at.as_secs() % 3_600, 0);
         assert!(
@@ -1126,10 +1154,10 @@ mod tests {
     #[test]
     fn two_anonymous_posts_are_unlinkable() {
         let one = anonymous_chitthi_builder("a", Timestamp::now())
-            .sign_with_keys(&crate::anon::ephemeral())
+            .finalize(&crate::anon::ephemeral())
             .unwrap();
         let two = anonymous_chitthi_builder("b", Timestamp::now())
-            .sign_with_keys(&crate::anon::ephemeral())
+            .finalize(&crate::anon::ephemeral())
             .unwrap();
         assert_ne!(one.pubkey, two.pubkey);
     }
@@ -1138,18 +1166,58 @@ mod tests {
     fn geohash_note_carries_the_cell_tag_and_ephemeral_kind() {
         let cell = Geohash::parse("tdr1w").unwrap();
         let event = geohash_note_builder(&cell, "anyone around?")
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert_eq!(event.kind, Kind::Custom(KIND_GEOHASH_NOTE));
         assert_eq!(geohash_of(&event).as_ref(), Some(&cell));
         assert_eq!(event.content, "anyone around?");
     }
 
+    /// The tag we write and the filter we subscribe with must agree on `g`.
+    ///
+    /// They are spelled independently — `Tag::custom(GEOHASH_TAG, …)` takes a
+    /// string since 0.45 dropped `TagKind`, while `Filter::custom_tags` still
+    /// takes a typed `SingleLetterTag`. Nothing makes them the same letter, and
+    /// getting it wrong is invisible: publishing works, subscribing works, and
+    /// the channel is simply always empty. So assert the filter actually matches
+    /// a note we produced, rather than that each half looks right on its own.
+    #[test]
+    fn the_channel_filter_matches_the_notes_we_publish() {
+        let cell = Geohash::parse("tdr1w").unwrap();
+        let note = geohash_note_builder(&cell, "anyone around?")
+            .finalize(&Keys::generate())
+            .unwrap();
+        let presence = geohash_presence_builder(&cell)
+            .finalize(&Keys::generate())
+            .unwrap();
+
+        let filter = geohash_channel_filter(&cell, 3_600);
+        assert!(
+            filter.match_event(&note, MatchEventOptions::new()),
+            "the geohash filter must match a note published into that cell"
+        );
+        assert!(
+            filter.match_event(&presence, MatchEventOptions::new()),
+            "and the presence heartbeat, which shares the cell tag"
+        );
+
+        // A different cell must not match, or the filter is matching everything
+        // and the assertions above prove nothing.
+        let elsewhere = Geohash::parse("u4pru").unwrap();
+        let other = geohash_note_builder(&elsewhere, "different city")
+            .finalize(&Keys::generate())
+            .unwrap();
+        assert!(
+            !filter.match_event(&other, MatchEventOptions::new()),
+            "a note in another cell must not match this channel"
+        );
+    }
+
     #[test]
     fn presence_heartbeat_carries_no_content_or_nickname() {
         let cell = Geohash::parse("tdr1").unwrap();
         let event = geohash_presence_builder(&cell)
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert_eq!(event.kind, Kind::Custom(KIND_GEOHASH_PRESENCE));
         assert!(
@@ -1162,17 +1230,14 @@ mod tests {
 
     #[test]
     fn geohash_of_ignores_events_without_a_valid_cell() {
-        let plain = EventBuilder::text_note("no cell")
-            .sign_with_keys(&Keys::generate())
+        let plain = EventBuilder::new(Kind::TextNote, "no cell")
+            .finalize(&Keys::generate())
             .unwrap();
         assert_eq!(geohash_of(&plain), None);
 
         let bogus = EventBuilder::new(Kind::Custom(KIND_GEOHASH_NOTE), "x")
-            .tags([Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::G)),
-                ["not a geohash!"],
-            )])
-            .sign_with_keys(&Keys::generate())
+            .tags([Tag::custom(GEOHASH_TAG, ["not a geohash!"])])
+            .finalize(&Keys::generate())
             .unwrap();
         assert_eq!(geohash_of(&bogus), None);
     }
@@ -1186,7 +1251,7 @@ mod tests {
         assert!(kinds.contains(&Kind::Custom(KIND_GEOHASH_PRESENCE)));
         // The cell must ride in the `g` tag filter, not in the content.
         let note = geohash_note_builder(&cell, "hello")
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(
             filter.match_event(&note, MatchEventOptions::default()),
@@ -1195,7 +1260,7 @@ mod tests {
 
         let elsewhere = Geohash::parse("u4pr").unwrap();
         let other = geohash_note_builder(&elsewhere, "hello")
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(
             !filter.match_event(&other, MatchEventOptions::default()),

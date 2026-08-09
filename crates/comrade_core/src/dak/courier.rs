@@ -56,7 +56,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hmac::{Hmac, Mac};
-use nostr_sdk::{Keys, PublicKey};
+use nostr_sdk::prelude::{Keys, PublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
