@@ -291,6 +291,16 @@ object TogetherManager {
      */
     private var playingVideoId: String? = null
 
+    /**
+     * The public media URL this session is playing, on either side.
+     *
+     * Tracked for the same reason [playingVideoId] is: the status line has to
+     * know what kind of thing is playing, and "open your copy to start" is
+     * meaningless for a URL both devices fetch for themselves. See
+     * [TogetherDecisions.needsOwnCopy].
+     */
+    private var playingStreamUrl: String? = null
+
     private val _embedFailure = MutableStateFlow<TogetherDecisions.EmbedFailure?>(null)
 
     /**
@@ -811,8 +821,28 @@ object TogetherManager {
         return true
     }
 
+    /**
+     * They joined. What the status line then says depends on whether there is a
+     * copy for anybody to open.
+     *
+     * **This said `OpenYourCopy` unconditionally, and that shipped.** A YouTube
+     * session showed "open your copy to start" underneath YouTube's own "This
+     * video is unavailable" panel — there is no copy of an embed, and none of a
+     * URL stream either, since both devices fetch the same address. The
+     * distinction is [TogetherDecisions.needsOwnCopy]'s, so the JVM lane pins it.
+     */
     fun onJoined() {
-        (_state.value as? UiState.Live)?.let { _state.value = it.copy(joined = true, status = Status.OpenYourCopy) }
+        (_state.value as? UiState.Live)?.let {
+            val needsCopy = TogetherDecisions.needsOwnCopy(
+                embed = it.embed,
+                external = it.external,
+                stream = playingStreamUrl != null,
+            )
+            _state.value = it.copy(
+                joined = true,
+                status = if (needsCopy) Status.OpenYourCopy else Status.Together,
+            )
+        }
     }
 
     /**
@@ -1253,6 +1283,7 @@ object TogetherManager {
      * the player says, which is after the session opened.
      */
     private fun openStreamPlayer(url: String) {
+        playingStreamUrl = url
         openPlayer(Uri.parse(url)) { durationMs -> refreshLive(durationMs = durationMs) }
     }
 
@@ -2062,6 +2093,7 @@ object TogetherManager {
         wantedVideoId = null
         wantedStream = null
         playingVideoId = null
+        playingStreamUrl = null
         invitedKind = ""
         _openFailed.value = false
         _embedFailure.value = null

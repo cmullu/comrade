@@ -1282,8 +1282,30 @@ private fun SearchByName(
                 color = MaterialTheme.colorScheme.error,
             )
 
-            is TogetherDecisions.SearchOutcome.Found -> Column {
-                shown.candidates.forEachIndexed { i, candidate ->
+            // Both list-bearing outcomes draw the same rows, and that is the fix:
+            // tapping a row that has no local copy must not take the other rows
+            // away. `NotOnThisPhone` adds a line about the row that was tapped and
+            // leaves the rest to try.
+            is TogetherDecisions.SearchOutcome.Found,
+            is TogetherDecisions.SearchOutcome.NotOnThisPhone,
+            -> Column {
+                val rows = when (shown) {
+                    is TogetherDecisions.SearchOutcome.Found -> shown.candidates
+                    is TogetherDecisions.SearchOutcome.NotOnThisPhone -> shown.candidates
+                    // Unreachable: this arm covers exactly the two above.
+                    else -> emptyList()
+                }
+                (shown as? TogetherDecisions.SearchOutcome.NotOnThisPhone)?.let { miss ->
+                    Text(
+                        // Names the song rather than the search, because the
+                        // search worked. No "Couldn't search" prefix.
+                        stringResource(R.string.together_search_not_on_phone, miss.wanted.title),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TogetherMuted,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+                rows.forEachIndexed { i, candidate ->
                     CandidateRow(
                         candidate = candidate,
                         onClick = {
@@ -1297,8 +1319,16 @@ private fun SearchByName(
                                     // so rather than opening the nearest thing —
                                     // MATCH_CONFIDENT exists precisely so this
                                     // asks instead of guessing.
-                                    outcome = TogetherDecisions.SearchOutcome.Failed(
-                                        context.getString(R.string.together_search_not_on_phone),
+                                    //
+                                    // **Not `Failed`.** That is what shipped, and
+                                    // it rendered a search that worked as
+                                    // "Couldn't search: …" while wiping the list,
+                                    // so there was no other candidate left to try.
+                                    // The search succeeded; only this row has no
+                                    // copy here.
+                                    outcome = TogetherDecisions.notOnThisPhone(
+                                        candidates = rows,
+                                        wanted = candidate,
                                     )
                                 } else {
                                     onPlay(opened.first, opened.second)

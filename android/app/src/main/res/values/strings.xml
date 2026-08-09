@@ -555,7 +555,7 @@
     <string name="together_search_failed">Couldn\'t search: %1$s</string>
     <string name="together_search_result_subtitle">%1$s · from %2$s</string>
     <string name="together_search_unknown_artist">Unknown artist</string>
-    <string name="together_search_not_on_phone">Found the song, but no copy of it on this phone. Pick a file, or ask the other person to send theirs.</string>
+    <string name="together_search_not_on_phone">No copy of \u201C%1$s\u201D on this phone. Try another result, pick a file, or ask the other person to send theirs.</string>
     <string name="together_link_refused">That isn’t something Comrade can play. A YouTube link works, or an https link that points straight at an audio or video file.</string>
     <string name="together_could_not_play">That didn’t play. If it was a link, it may not point straight at an audio or video file.</string>
 

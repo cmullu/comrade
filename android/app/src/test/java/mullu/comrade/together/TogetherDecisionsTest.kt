@@ -1251,4 +1251,48 @@ class TogetherDecisionsTest {
         catalogue = "MusicBrainz",
         durationKnown = true,
     )
+
+    /**
+     * The regression test for a bug that shipped: tapping a search result with no
+     * local copy reported "Couldn't search: …" and wiped the result list.
+     */
+    @Test
+    fun aResultWithNoLocalCopyIsNotAFailedSearchAndKeepsTheOtherResults() {
+        val one = candidate("Kun Faya Kun")
+        val two = candidate("Kun Faya Kun (live)")
+        val outcome = TogetherDecisions.notOnThisPhone(candidates = listOf(one, two), wanted = one)
+
+        assertTrue(
+            "a search that found the song must not be a Failed search — that renders " +
+                "as \"Couldn't search\", which is the bug this pins",
+            outcome !is TogetherDecisions.SearchOutcome.Failed,
+        )
+        val miss = outcome as TogetherDecisions.SearchOutcome.NotOnThisPhone
+        assertEquals(
+            "the other candidates must survive, or there is nothing left to try",
+            listOf(one, two),
+            miss.candidates,
+        )
+        assertEquals(one, miss.wanted)
+    }
+
+    @Test
+    fun onlyAFileSessionIsWaitingForSomebodyToOpenTheirOwnCopy() {
+        // An embed has no copy; a stream has none either, because both devices
+        // fetch the same URL; an external session's copy belongs to another app.
+        assertFalse(
+            "a YouTube embed has no copy to open — this is what shipped saying it did",
+            TogetherDecisions.needsOwnCopy(embed = true, external = false, stream = false),
+        )
+        assertFalse(
+            TogetherDecisions.needsOwnCopy(embed = false, external = false, stream = true),
+        )
+        assertFalse(
+            TogetherDecisions.needsOwnCopy(embed = false, external = true, stream = false),
+        )
+        assertTrue(
+            "a local-file session is the one kind where each side supplies its own bytes",
+            TogetherDecisions.needsOwnCopy(embed = false, external = false, stream = false),
+        )
+    }
 }
