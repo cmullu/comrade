@@ -352,7 +352,11 @@ jobs:
             "system-images;android-${{ matrix.api-level }};google_apis;x86_64" \
             "platform-tools" "emulator" > /dev/null
           profile="${{ matrix.preferred-profile }}"
-          if ! avdmanager list device -c | grep -qx "$profile"; then
+          # No pipeline, deliberately: `grep -q` exits on first match and closes
+          # the pipe, `avdmanager` takes SIGPIPE, and under `set -o pipefail` the
+          # pipeline returns 141 — which `!` inverts into "profile missing", so the
+          # job silently builds the *fallback* profile while still passing.
+          if ! grep -qx -- "$profile" <<<"$(avdmanager list device -c)"; then
             echo "::warning::AVD profile '$profile' not available in this SDK; using '${{ matrix.fallback-profile }}'"
             profile="${{ matrix.fallback-profile }}"
           fi
@@ -394,12 +398,18 @@ jobs:
           # 8090. It also works on a physical handset, which `10.0.2.2` never
           # can, so a future device-farm lane inherits it.
           #
-          # The two instrumentation arguments are a pair and both are
-          # load-bearing: the URL is what the peers connect to, and
-          # `comradeRequireRelay` is this workflow asserting that it set the relay
-          # up — which turns a missing URL from a quiet skip into a failure naming
-          # the step that should have provided it. Without the second one,
-          # deleting the relay step would go green again.
+          # **Only the URL is passed, and that is the fix rather than an
+          # omission.** There was a second `comradeRequireRelay=true` argument
+          # here, meant to make a missing URL a failure instead of a skip. It
+          # could not work: both arguments travel by the same mechanism, so
+          # anything that stops instrumentation arguments arriving drops the
+          # demand along with the thing it was demanding, and every test skips
+          # green again. It caught only a human deleting one line and leaving the
+          # other. `relayUrlOrSkip` in the test now inverts the polarity —
+          # skipping is what must be asked for — so CI passing nothing *is* the
+          # strict case. The "Assert the two-peer tests actually ran" step below
+          # is the backstop, because an in-test guard cannot catch instrumentation
+          # that never ran at all.
           #
           # Logcat is captured either way and uploaded on failure. The first red
           # run of this lane could not be diagnosed from Gradle's output — three
@@ -432,14 +442,16 @@ jobs:
             adb reverse tcp:8090 tcp:8090 ;
             echo 'reverse forwards now established:' ;
             adb reverse --list ;
+            adb reverse --list | grep -q 'tcp:8090 tcp:8090' || { echo '::error::adb reverse tcp:8090 did not register, so the emulator has no route to the relay' ; exit 1 ; } ;
             adb logcat -c || true ;
             status=0 ;
             ./gradlew connectedDebugAndroidTest --no-daemon
             -Pandroid.testInstrumentationRunnerArguments.comradeTestRelayUrl=ws://127.0.0.1:8090
-            -Pandroid.testInstrumentationRunnerArguments.comradeRequireRelay=true
             || status=$? ;
             adb logcat -d > "$RUNNER_TEMP/logcat.txt" 2>&1 || true ;
             if [ "$status" -ne 0 ] ; then
+            echo '----- reverse forwards at end of run (empty means it was lost mid-run) -----' ;
+            adb reverse --list || true ;
             echo '----- logcat: comrade / relay / socket lines -----' ;
             grep -iE 'comrade|nostr|relay|websocket|refused|ETIMEDOUT|EHOSTUNREACH'
             "$RUNNER_TEMP/logcat.txt" | tail -n 200 || true ;
@@ -447,6 +459,36 @@ jobs:
             tail -n 200 "$RUNNER_TEMP/logcat.txt" || true ;
             fi ;
             exit $status
+
+      # A skipped test is a green test, and that is how this lane stayed green for
+      # months. The instrumentation arguments are *intent*; the results XML is
+      # evidence. Assert on the evidence — this also catches "the instrumentation
+      # never ran at all", which no in-test guard can.
+      - name: Assert the two-peer tests actually ran
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          root = "android/app/build/outputs/androidTest-results"
+          files = glob.glob(root + "/**/*.xml", recursive=True)
+          if not files:
+              sys.exit("::error::no instrumentation result XML under " + root)
+          ran, skipped = [], []
+          for f in files:
+              for tc in ET.parse(f).iter("testcase"):
+                  if tc.get("classname", "").endswith("TwoPeerJniIntegrationTest"):
+                      name = tc.get("name")
+                      (skipped if tc.find("skipped") is not None else ran).append(name)
+          print("two-peer ran:    ", sorted(ran))
+          print("two-peer skipped:", sorted(skipped))
+          if skipped:
+              sys.exit("::error::two-peer test(s) skipped: " + ", ".join(sorted(skipped))
+                       + " -- the relay instrumentation arguments never reached the runner, "
+                         "so this lane would be green having proven nothing")
+          if len(ran) != 3:
+              sys.exit("::error::expected 3 two-peer tests, saw %d: %s" % (len(ran), sorted(ran)))
+          print("all 3 two-peer tests executed against the relay")
+          PY
 
       # The relay's own view of the session, which is the difference between "the
       # test timed out" and "the peers never reached the relay at all".

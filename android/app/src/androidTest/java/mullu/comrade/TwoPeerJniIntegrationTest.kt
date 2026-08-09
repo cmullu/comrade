@@ -59,33 +59,45 @@ class TwoPeerJniIntegrationTest {
     }
 
     /**
-     * The relay to use, or a skip — **unless CI said a skip is not acceptable.**
+     * The relay to use, or a skip — **and the polarity here is the opposite of
+     * the obvious one, deliberately.**
      *
-     * Both halves of this matter and the second one is why it exists.
+     * Locally, a skip is right: somebody running the suite on a laptop with no
+     * relay container should not get a red test, and must never get a silent
+     * fall back to the public relay pool, where a two-peer test would flake on
+     * somebody else's rate limit.
      *
-     * Locally, `Assume.assumeTrue` is right: somebody running the suite on a
-     * laptop with no relay container should get a skip rather than a red test,
-     * and must never get a silent fall back to the public relay pool, where a
-     * two-peer test would flake on somebody else's rate limit.
+     * In CI a skip is the failure. These tests existed and skipped on every run
+     * for months because nothing passed `comradeTestRelayUrl`, and a skipped test
+     * is a green test — so the lane meant to be the evidence for two peers
+     * talking was evidence of nothing.
      *
-     * In CI a skip is the failure mode. These tests existed and were skipped on
-     * every run for months, because `connectedDebugAndroidTest` never passed
-     * `comradeTestRelayUrl` and a skipped test is a green test — so the lane that
-     * was supposed to be the evidence for two devices talking to each other was
-     * evidence of nothing. `comradeRequireRelay` is the workflow asserting that
-     * it *did* set the relay up, which turns a missing URL from a quiet skip
-     * into a loud failure naming the step that should have provided it.
+     * The first attempt at closing that was a `comradeRequireRelay=true` flag the
+     * workflow passed to demand a relay, and **it could not work**: the flag and
+     * the URL travel by the same mechanism, so anything that stops the
+     * instrumentation arguments arriving drops both at once — the demand
+     * disappears with the thing it was demanding, and every test skips green
+     * again. It caught only a human deleting one line and leaving the other.
+     *
+     * So the demand is inverted: **skipping is what has to be asked for.** CI
+     * passes nothing and gets a red test the moment the relay wiring breaks; a
+     * laptop passes `-e comradeAllowRelaySkip true` and gets its skip. Absence of
+     * configuration is now strict rather than lenient, which is the only polarity
+     * that fails in the safe direction.
      */
     private fun relayUrlOrSkip(): String {
         val args = InstrumentationRegistry.getArguments()
         val relayUrl = args.getString("comradeTestRelayUrl")
-        val required = args.getString("comradeRequireRelay").toBoolean()
-        if (required && relayUrl.isNullOrBlank()) {
+        // `String?.toBoolean()` maps null to false, so an absent argument means
+        // "not allowed to skip" — which is the strict reading, on purpose.
+        val skipAllowed = args.getString("comradeAllowRelaySkip").toBoolean()
+        if (relayUrl.isNullOrBlank() && !skipAllowed) {
             throw AssertionError(
-                "comradeRequireRelay was set but comradeTestRelayUrl was not — the workflow " +
-                    "claimed to start a test relay and did not pass its address, so this " +
-                    "two-peer test would have skipped and the lane would have gone green " +
-                    "having proven nothing. See android-apk.yml's 'Start isolated test relay'.",
+                "no comradeTestRelayUrl instrumentation argument, and skipping was not " +
+                    "explicitly allowed. In CI this means android-apk.yml's 'Start isolated " +
+                    "test relay' step or its -Pandroid.testInstrumentationRunnerArguments.* " +
+                    "wiring is broken, and this lane must not go green having proven nothing. " +
+                    "Locally, pass -e comradeAllowRelaySkip true (see deploy/test-relay/README.md).",
             )
         }
         org.junit.Assume.assumeTrue(

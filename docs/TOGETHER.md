@@ -2252,11 +2252,22 @@ Three things close that:
    through `nostr-sdk` on a native tokio socket, which the platform does not
    intercept. A `networkSecurityConfig` would have been a fix for a mechanism that
    was never running.
-2. **The workflow asserts that it did.** `comradeRequireRelay=true` turns a
-   missing URL from a quiet skip into a failure naming the step that should have
-   provided it. Without that second argument, deleting the relay step would go
-   green again and nobody would know — which is the exact failure this section is
-   about, so it gets a mechanism rather than a comment.
+2. **Skipping has to be asked for**, which is the opposite polarity to the
+   obvious one and the second thing this section got wrong. The first attempt was
+   a `comradeRequireRelay=true` argument the workflow passed to *demand* a relay —
+   and it could not work, because the flag and the URL travel by the same
+   mechanism. Anything that stops the instrumentation arguments arriving drops the
+   demand along with the thing it was demanding, and every test skips green again;
+   it caught only a human deleting one line and leaving the other. So
+   `relayUrlOrSkip` is inverted: CI passes nothing and gets a red test the moment
+   the wiring breaks, and a laptop passes `-e comradeAllowRelaySkip true` to get
+   its skip. Absence of configuration is strict, which is the only polarity that
+   fails safe.
+
+   And because no in-test guard can catch instrumentation that never ran at all,
+   the workflow also asserts on the **results XML** rather than on its own intent:
+   "Assert the two-peer tests actually ran" fails if any of the three is recorded
+   as skipped, or if fewer than three are recorded. Intent is not evidence.
 3. **A session is what it tests**, not just a DM: invite → join → a run of
    transport commands → end, with the arrival order asserted.
 

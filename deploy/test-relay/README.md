@@ -35,8 +35,24 @@ adb shell am instrument -w \
   mullu.comrade.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-Without `comradeTestRelayUrl`, `TwoPeerJniIntegrationTest` skips itself
-(`Assume.assumeTrue`) rather than silently falling back to the public relay
+Without `comradeTestRelayUrl` the test **fails**, unless you also pass
+`-e comradeAllowRelaySkip true` — which is what a laptop with no relay container
+should do:
+
+```sh
+adb shell am instrument -w \
+  -e comradeAllowRelaySkip true \
+  -e class mullu.comrade.TwoPeerJniIntegrationTest \
+  mullu.comrade.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+That polarity is deliberate and was arrived at the hard way: a flag that had to be
+*present* to demand a relay could not catch the failure that actually happened,
+because it vanished together with the URL whenever the instrumentation arguments
+stopped arriving — leaving the lane green having proven nothing. Absence of
+configuration is strict; skipping is opt-in.
+
+`TwoPeerJniIntegrationTest` never silently falls back to the public relay
 pool — a two-peer test flaking on a relay it doesn't control would defeat the
 point of an isolated environment.
 
