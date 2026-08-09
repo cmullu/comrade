@@ -1079,6 +1079,16 @@ is small; the content problem is the real constraint:
 >   (`.claude/scripts/android-typecheck-compose.sh`). How it looks is verified by
 >   nothing but a device, and the 🫂 glyph is hand-authored path data that no lane
 >   here can render.
+> - **The main thread made the network calls, and no lane can catch that.**
+>   Fixed 2026-08-09 (`docs/TOGETHER.md` §17): every `together_*` call is
+>   `runBlocking` over an FFI whose last rung is a relay send, and they were made
+>   from Compose click handlers and from three WebRTC observer callbacks. Found
+>   from a field report — two phones offline, the leader ANR'd, the follower
+>   never played — not from any check here. The class is not closed: nothing in
+>   this repo asserts that a given Kotlin call is off the main thread, and
+>   `ComradeCore` has ~30 more `runBlocking` wrappers whose callers were not
+>   audited in that pass. A StrictMode policy in a debug build would find the
+>   rest cheaply and is not written.
 > - **A session's cover falls back to the note glyph below API 29.** `MediaStore`'s
 >   `loadThumbnail` is API 29+, and the legacy `albumart` provider is keyed on an
 >   album id a session does not carry (`UiState.Live.sourceUri` is what it has).

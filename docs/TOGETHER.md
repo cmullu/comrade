@@ -2110,3 +2110,105 @@ underneath it is ours: `TogetherDecisions.embedFailure` picks the sentence, and
 `watchUrl` offers the way over there for the common case. That URL is built only
 from something that is actually an id, because the string arrived over the wire
 and ends up in an `Intent`.
+
+## 17. The main thread was doing the network, and offline is where it showed
+
+_Added 2026-08-09, from a two-device test with both phones offline: the leader's
+app hung with "Comrade isn't responding — Close / Wait", and the follower saw the
+track's name and never heard it._
+
+**Every `together_*` call blocks the thread it is made on.** `ComradeCore`
+bridges the async FFI with `runBlocking` (its own header says so), and the last
+rung of `RuntimeHandles::send_together` is `vault.send_dm(…).await` — a relay
+round trip. So the chain was:
+
+```
+Compose onClick  →  TogetherManager.setState  →  runBlocking { together_set_state }
+                                              →  send_together  →  vault.send_dm().await
+```
+
+on the **main thread**. With a relay reachable this is a fast enough round trip
+that nobody noticed. With no relay reachable it is however long the send takes to
+give up, and five seconds of it is an ANR. Every entry point had the same shape:
+`start`, `join`, `leave`, and every play, pause and seek.
+
+The worse instance was not on the main thread at all. `StreamTransfer.send` is
+called from three WebRTC observer callbacks — `onCreateSuccess` (twice) and
+`onIceCandidate` — which run on the peer connection's **signalling thread**, and
+it made the same blocking relay send inside each one. `onIceCandidate` fires once
+per candidate. Blocking that thread stalls ICE gathering, SDP handling and
+candidate delivery together, which is a negotiation that stops rather than fails:
+from outside, a stream that buffers forever and a follower who receives nothing.
+That is the same class as the two callback deadlocks `.claude/rules/rust.md`
+records, arriving from the Kotlin side.
+
+### One queue, because ordering is part of the fix
+
+`TogetherManager.sendOut` puts every outbound command on an unbounded `Channel`
+drained by a single coroutine on `Dispatchers.IO`. A `launch(Dispatchers.IO)` per
+call would have fixed the blocking and introduced a worse bug:
+
+- `together_set_state` takes the session's next **Lamport sequence number inside
+  the call**, so two commands racing on different IO threads can be numbered in
+  the opposite order to the taps that made them. Pause-then-play arriving as
+  play-then-pause is a session that plays when the person asked for silence.
+- Handover signals are worse still: `ShareTransfer.send` *was* `io.launch { … }`
+  per signal, so an ICE candidate could overtake the offer it belongs to — a
+  negotiation that cannot complete. FIFO is what that needs, and a dispatcher
+  does not give it.
+
+Failures are logged and dropped, never retried: a session command is worthless
+once stale, the next heartbeat carries the truth, and the drift ladder is what
+closes the gap a lost one left. Retrying would deliver a play the person has
+since undone. What the screen says instead is `sendFailed` — "couldn't reach them
+just now" — because the player now starts regardless, and something has to admit
+the other half did not happen.
+
+### What this does not explain
+
+**The follower still may not play, and this change is not a claim that it will.**
+It removes a mechanism that would produce exactly the reported symptom, on the
+thread that would produce it. It has not been run on two devices. If it persists,
+the next thing to read is whether ICE gathered host candidates at all — two
+phones with no shared network have no path for a stream regardless of what any
+thread is doing, and `together_start` reaching the peer at all (the invitation
+*did* arrive) only proves the mesh carried a DM, not that a media connection can
+be built.
+
+## 18. Listening alone, which is most of what a music player does
+
+_Added 2026-08-09, owner request: "the idea is to use it as a standalone music
+player as well"._
+
+The tab could browse the phone's music, queue it, draw a cover and drive a
+transport, and then insisted on a second person before any of it ran. That is a
+strange thing for a music player to insist on, and it is the thing that makes the
+feature unusable exactly when it should be at its most useful — one person, no
+network.
+
+**Alone is a pairing with nobody in it** (`TogetherDecisions.ALONE`), not a
+second kind of session, and that is the whole of the change:
+
+| Kept, unchanged | Removed |
+|---|---|
+| the player, the queue, prev/next, the scrubber | their name and the status line |
+| the foreground service and its notification | the two measured readouts |
+| the library, the picker, the link field | the offer to send them the picture |
+
+One gate reads it — `sendOut` returns early — so there is no `solo` branch in the
+transport, the service, the queue or the notification. The empty string is a safe
+sentinel because a real peer is a bech32 `npub1…` that can never be blank, which
+is pinned by a test rather than assumed, and it fails in the right direction: a
+bug that let it reach `parse_pubkey` gets a refusal from core rather than a
+message to the wrong person.
+
+`startStep` answers alone **before** the takeover arm, and that was a real bug
+found while writing its test: a solo session reaching that arm would have asked
+"stop what … is playing?" with a blank where the name goes.
+
+### Not done
+
+No unit test covers the threading fix or the solo gate *in the manager* —
+`TogetherManager` imports Android, so the JVM lane cannot see it, and there is no
+Robolectric lane in this repo. What is tested is the pure half: `isAlone`, the
+sentinel's safety, and `startStep`'s three answers.

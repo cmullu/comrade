@@ -307,10 +307,16 @@ object StreamTransfer {
         override fun onTrack(transceiver: org.webrtc.RtpTransceiver) = Unit
     }
 
-    private fun send(signal: ShareSignal) {
-        runCatching { ComradeCore.togetherShareTyped(signal) }
-            .onFailure { Log.w(TAG, "stream signal failed", it) }
-    }
+    /**
+     * One signal out, through the session's own outbound queue.
+     *
+     * **Every caller of this is a WebRTC observer callback**, and this used to
+     * make the relay round trip inline on the peer connection's signalling
+     * thread — which is where a negotiation stalls rather than fails, and looks
+     * from the outside like a stream that never starts. Queued and ordered now,
+     * like every other thing this device says to the other one.
+     */
+    private fun send(signal: ShareSignal) = TogetherManager.sendShareSignal(signal)
 
     /** The three callbacks nobody needs, written once instead of four times. */
     private open class SimpleSdpObserver(private val what: String) : SdpObserver {

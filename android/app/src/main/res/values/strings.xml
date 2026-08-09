@@ -551,6 +551,16 @@
     <string name="together_who_nobody">Nobody to ask yet — start a conversation first.</string>
     <string name="together_who_no_match">No one here matches that.</string>
     <string name="together_who_online">online</string>
+    <!--
+      Listening alone. Not framed as a lesser option: the tab is a music player
+      that happens to be shareable, and this is the answer that needs no contact,
+      no permission and no network.
+    -->
+    <string name="together_who_alone">Just me</string>
+    <string name="together_who_alone_note">Play it here, on your own</string>
+    <string name="together_stop">Stop</string>
+    <!-- The player kept playing; the other half is what didn\'t happen. -->
+    <string name="together_send_failed">Couldn\'t reach them just now — they haven\'t heard this yet.</string>
     <string name="together_start_failed">That couldn\'t be started. Try something else, or a different link.</string>
 
     <string name="together_with">with %1$s</string>
