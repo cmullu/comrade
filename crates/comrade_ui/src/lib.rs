@@ -76,10 +76,10 @@ pub use runtime::{
     DownloadedTrackDto, FocusSessionDto, FoundProfileDto, IceServerDto, JournalEntryDto,
     LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
     MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
-    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
-    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
-    TogetherShareDto, TurnServerStatusDto,
+    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, RuntimeHandles,
+    SakhaStatusDto, SavedReadDto, SavedReadSummaryDto, ShareVerdictDto, StretchStepDto,
+    TaraChatDto, TaraMessageDto, TaskDto, TogetherCommandDto, TogetherCorrectionDto,
+    TogetherInviteDto, TogetherSessionDto, TogetherShareDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

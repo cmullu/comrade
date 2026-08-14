@@ -1875,24 +1875,93 @@ code {
    would be the game. The one visual emphasis is the countdown, because that
    is the thing being looked at. */
 
+/* The tab's look borrows from calm-browser break screens (Opera Air is the
+   reference): an ambient colour field drifting slowly behind frosted-glass
+   cards. All of it is decorative — the same honesty rules as ever govern the
+   words — and all motion stops under prefers-reduced-motion. */
+
 .view-focus {
+  position: relative;
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px 16px;
+}
+
+/* Two soft radial colour fields, blurred and drifting on a minutes-long
+   loop. Fixed behind the scrolling column; pointer-events off so they can
+   never eat a click. */
+.focus-ambient {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.focus-ambient::before,
+.focus-ambient::after {
+  content: "";
+  position: fixed;
+  width: 55vmax;
+  height: 55vmax;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.16;
+  will-change: transform;
+}
+
+.focus-ambient::before {
+  background: radial-gradient(circle, var(--accent) 0%, transparent 65%);
+  top: -18vmax;
+  left: -12vmax;
+  animation: focus-drift-a 46s ease-in-out infinite alternate;
+}
+
+.focus-ambient::after {
+  background: radial-gradient(circle, var(--good) 0%, transparent 65%);
+  bottom: -20vmax;
+  right: -14vmax;
+  animation: focus-drift-b 58s ease-in-out infinite alternate;
+}
+
+@keyframes focus-drift-a {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(9vmax, 7vmax) scale(1.15);
+  }
+}
+
+@keyframes focus-drift-b {
+  from {
+    transform: translate(0, 0) scale(1.1);
+  }
+  to {
+    transform: translate(-8vmax, -6vmax) scale(0.95);
+  }
 }
 
 .focus-col {
+  position: relative;
   max-width: clamp(560px, 52vw, 820px);
   width: 100%;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 
-.focus-card {
+/* Frosted glass over the ambient field. `backdrop-filter` needs a translucent
+   panel to matter; the solid `background` on `.composer` is overridden here
+   only inside this tab. */
+.view-focus .focus-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border-radius: 18px;
+  transition: border-color 600ms ease;
 }
 
 .focus-head {
@@ -2009,6 +2078,312 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+/* The reading library list. */
+.reader-list {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reader-item-open {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel-2) 65%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 200ms ease, background 200ms ease;
+}
+
+.reader-item-open:hover {
+  border-color: var(--border-strong);
+  background: var(--panel-2);
+}
+
+.reader-item-title {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-item-meta {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.reader-open-source {
+  margin: -4px 0 0;
+  font-size: 12px;
+}
+
+/* ── Stretch break ──
+   A guided figure over a soft pulsing halo, one stretch at a time. The
+   figure's motion is pure CSS keyed off data-stretch / data-side, so main.js
+   only ever swaps two attributes and three lines of text. */
+
+.stretch-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 10px 0 2px;
+}
+
+/* The halo: a slow breath-paced pulse behind the figure. */
+.stretch-stage::before {
+  content: "";
+  position: absolute;
+  width: 190px;
+  height: 190px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--accent) 30%, transparent) 0%,
+    transparent 70%
+  );
+  animation: stretch-halo 5s ease-in-out infinite alternate;
+}
+
+@keyframes stretch-halo {
+  from {
+    transform: scale(0.85);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+
+.stretch-figure {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  overflow: visible;
+  transition: transform 700ms ease;
+}
+
+/* The right-hand side of a mirrored stretch flips the whole figure; the
+   transition above turns the flip into a swing rather than a jump cut. */
+.stretch-figure[data-side="right"] {
+  transform: scaleX(-1);
+}
+
+.stretch-figure path,
+.stretch-figure line {
+  fill: none;
+  stroke: var(--accent-2);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.stretch-figure .fig-torso {
+  fill: color-mix(in srgb, var(--accent) 22%, transparent);
+  stroke-width: 4;
+}
+
+.stretch-figure circle {
+  fill: color-mix(in srgb, var(--accent) 30%, var(--panel));
+  stroke: var(--accent-2);
+  stroke-width: 4;
+}
+
+/* Per-stretch motion. Slow (ease-in-out, alternating) so the figure sets the
+   pace the way Opera Air's exercises do — the animation *is* the metronome.
+   Transform origins are in SVG user units (transform-box) so each part hinges
+   where a body would. */
+.stretch-figure .fig-head,
+.stretch-figure .fig-upper,
+.stretch-figure .fig-shoulders,
+.stretch-figure .fig-arm-left,
+.stretch-figure .fig-arm-right {
+  transform-box: view-box;
+}
+
+.stretch-figure[data-stretch="neck-tilt"] .fig-head {
+  transform-origin: 60px 57px;
+  animation: fig-neck-tilt 5s ease-in-out infinite alternate;
+}
+
+@keyframes fig-neck-tilt {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-22deg);
+  }
+}
+
+.stretch-figure[data-stretch="neck-turn"] .fig-head {
+  transform-origin: 60px 57px;
+  animation: fig-neck-turn 5s ease-in-out infinite alternate;
+}
+
+@keyframes fig-neck-turn {
+  from {
+    transform: translateX(0) scaleX(1);
+  }
+  to {
+    transform: translateX(-9px) scaleX(0.8);
+  }
+}
+
+.stretch-figure[data-stretch="chin-tuck"] .fig-head {
+  transform-origin: 60px 57px;
+  animation: fig-chin-tuck 4s ease-in-out infinite alternate;
+}
+
+@keyframes fig-chin-tuck {
+  from {
+    transform: translateY(0) scale(1);
+  }
+  to {
+    transform: translateY(5px) scale(0.94);
+  }
+}
+
+.stretch-figure[data-stretch="shoulder-roll"] .fig-shoulders,
+.stretch-figure[data-stretch="shoulder-roll"] .fig-arm-left,
+.stretch-figure[data-stretch="shoulder-roll"] .fig-arm-right {
+  animation: fig-shoulder-roll 4s ease-in-out infinite;
+}
+
+@keyframes fig-shoulder-roll {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(0, -6px);
+  }
+  50% {
+    transform: translate(-3px, -2px);
+  }
+  75% {
+    transform: translate(0, 2px);
+  }
+}
+
+.stretch-figure[data-stretch="side-bend"] .fig-upper {
+  transform-origin: 60px 106px;
+  animation: fig-side-bend 6s ease-in-out infinite alternate;
+}
+
+/* The overhead arm of the side bend. */
+.stretch-figure[data-stretch="side-bend"] .fig-arm-right {
+  transform-origin: 78px 62px;
+  animation: fig-arm-overhead 6s ease-in-out infinite alternate;
+}
+
+@keyframes fig-side-bend {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-14deg);
+  }
+}
+
+@keyframes fig-arm-overhead {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-160deg);
+  }
+}
+
+.stretch-figure[data-stretch="seated-twist"] .fig-upper {
+  transform-origin: 60px 84px;
+  animation: fig-seated-twist 6s ease-in-out infinite alternate;
+}
+
+@keyframes fig-seated-twist {
+  from {
+    transform: scaleX(1) rotate(0deg);
+  }
+  to {
+    transform: scaleX(0.72) rotate(-6deg);
+  }
+}
+
+.stretch-name {
+  margin: 8px 0 0;
+  text-align: center;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.stretch-side {
+  margin: 0;
+  min-height: 18px;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+}
+
+.stretch-cue {
+  margin: 4px auto 6px;
+  max-width: 40ch;
+  /* Two rows reserved, like the breathing lines: cues wrap differently and a
+     hopping layout is the roughest edge a calm screen can have. */
+  min-height: 2.9em;
+  text-align: center;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.stretch-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.stretch-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--good));
+  transition: width 300ms linear;
+}
+
+/* Every decorative motion on this tab stands still for anyone who asked
+   motion to stand still. The words and the timer carry the whole break. */
+@media (prefers-reduced-motion: reduce) {
+  .focus-ambient::before,
+  .focus-ambient::after,
+  .stretch-stage::before,
+  .stretch-figure .fig-head,
+  .stretch-figure .fig-upper,
+  .stretch-figure .fig-shoulders,
+  .stretch-figure .fig-arm-left,
+  .stretch-figure .fig-arm-right {
+    animation: none;
+  }
+
+  .stretch-figure {
+    transition: none;
+  }
 }
 
 /* ─────────────────────────── Empty / loading ─────────────────────────── */

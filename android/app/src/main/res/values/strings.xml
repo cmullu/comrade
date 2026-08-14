@@ -347,17 +347,34 @@
     <string name="focus_outcome_lapsed">Lapsed</string>
     <string name="focus_save_note">Save as a journal note</string>
 
-    <!-- Attention: the long-form reader (phase 2) -->
-    <string name="reader_title">Long read</string>
+    <!-- Attention: the long-form reader, now a library of saved reads
+         (phase 2, extended 2026-08-14). Articles arrive by paste or by the
+         system share sheet — sharing from any feed app lands here. -->
+    <string name="reader_title">Long reads</string>
     <string name="reader_paste_label">Paste something worth your attention</string>
-    <string name="reader_paste_hint">An article, a chapter, a letter — whatever you\'ve been meaning to read properly. It stays on this phone, encrypted like your journal. Comrade never fetches it from the web for you.</string>
-    <string name="reader_save">Start reading</string>
+    <string name="reader_paste_hint">An article, a chapter, a letter — share one into Comrade from any app, or paste it here. It stays on this phone, encrypted like your journal. Comrade never fetches it from the web for you.</string>
+    <string name="reader_save">Save to your reads</string>
     <string name="reader_next">Next</string>
     <string name="reader_previous">Back</string>
     <string name="reader_progress">%1$d of %2$d</string>
     <string name="reader_finished">That\'s the end. Worth a line about it?</string>
-    <string name="reader_clear">Close this read</string>
+    <string name="reader_remove">Remove from your reads</string>
     <string name="reader_title_label">Title (optional)</string>
+    <string name="reader_back_to_list">All reads</string>
+    <string name="reader_empty">Nothing saved yet. Share an article into Comrade — or paste one below — and it will wait here.</string>
+    <string name="reader_shared_in">Shared in — give it a look before you keep it.</string>
+    <string name="reader_add">Add something to read</string>
+
+    <!-- Attention: the stretch break (phase 2, extended 2026-08-14). Step
+         names and cues come from the engine (comrade_core::attention::
+         STRETCH_ROUTINE), like the focus prompts do; only the frame is here. -->
+    <string name="stretch_title">Stretch break</string>
+    <string name="stretch_intro">Gentle, seated-friendly stretches for your neck, shoulders and back — under three minutes, with nothing to get right. Nothing about the break is recorded.</string>
+    <string name="stretch_start">Start stretching</string>
+    <string name="stretch_stop">End the break</string>
+    <string name="stretch_done">That was the whole routine. However much of it you did was enough.</string>
+    <string name="stretch_side_left">Left side</string>
+    <string name="stretch_side_right">Right side</string>
 
     <!-- Tasks: what `/task` produces. The empty-state and row copy lives in
          `ui/TaskList.kt` beside the decisions it belongs to and is covered by

@@ -106,6 +106,29 @@ export function chosenPreset(presets, suggested, chosen = null) {
 }
 
 /**
+ * What a reading-library row shows: a title line and a meta line.
+ *
+ * The title falls back to the source label (an article shared in from a feed
+ * often arrives with no title of its own, but "instagram.com" is still more
+ * recognisable than a generic word), then to "Long read". The meta line
+ * carries the source and the reading progress — and drops the source when it
+ * is already standing in as the title, so a row never says the same thing
+ * twice.
+ *
+ * @param {{title: string, source: string, chunk_count: number,
+ *   position: number}} summary a `SavedReadSummaryDto`
+ * @returns {{title: string, meta: string}}
+ */
+export function libraryLine(summary) {
+  const source = (summary.source || "").trim();
+  const named = (summary.title || "").trim();
+  const title = named || source || "Long read";
+  const nav = readerNav(summary.position, summary.chunk_count);
+  const meta = [named ? source : "", nav.label].filter(Boolean).join(" · ");
+  return { title, meta };
+}
+
+/**
  * What the reader's controls should say and whether they are live.
  *
  * @param {number} position zero-based chunk index
@@ -131,7 +154,7 @@ export function readerNav(position, total) {
  * Move the reader, or report that it did not move.
  *
  * `null` means "nothing changed, do not write" — the caller persists the
- * position through `set_reading_position`, which is a disk write into the
+ * position through `set_saved_read_position`, which is a disk write into the
  * encrypted store, and holding the Next key down at the last chunk should not
  * turn into a write per repeat.
  *
