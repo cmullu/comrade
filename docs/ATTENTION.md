@@ -705,6 +705,15 @@ exists precisely because that is expected.
   consequence is that an imported Instagram shelf is mostly links. Whether that
   is worth revisiting — with an explicit, per-item, opt-in fetch behind the same
   kind of feature gate as `media-http` — is an owner decision, not a default.
+- **Text arriving for a link you already have makes a second row.** Found while
+  reviewing this change, not fixed: `save_text` always inserts, so an imported
+  bookmark plus a later share of the same page's text is two shelf entries for one
+  article — the duplication `dedupe_key` exists to prevent, on the path most likely
+  to hit it. The fix is for `save_text` to fill in an existing *text-less* row with
+  the same URL (and to leave a row that already has text alone, because two
+  selections from one article are two texts). Android's "Add the text" flow deletes
+  the bookmark after saving to work around this, so it has to change in the same
+  pass or it would delete the row it just filled.
 - **No dedupe against what was read *before* an import.** A save deleted from the
   shelf and then re-imported comes back. Deleting a row is not the same as saying
   "never again", and a tombstone list is a second thing to keep in the vault.
