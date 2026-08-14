@@ -4,8 +4,10 @@ name: Flutter
 # existing `android` and `desktop*` lanes in ci.yml: the Compose app and the
 # Tauri shell are still the shipping frontends until app/ reaches parity, and
 # deleting their CI before the replacement is proven would leave the shipped
-# artifacts untested. See docs/FRONTEND_STRATEGY.md §7 for the retirement
-# trigger; the removal is Phase 4's last step, not its first.
+# artifacts untested. See docs/FRONTEND_STRATEGY.md §10, "What has NOT been
+# deleted, deliberately", for the retirement gate; the removal is Phase 4's last
+# step, not its first. (§7's trigger is the different question of when to reopen
+# unification at all, and §11 is why Android leads whatever this lane does.)
 #
 # Same trigger discipline as ci.yml: push-only, no `pull_request` (all PRs come
 # from same-repo branches, so a second trigger would only duplicate runs).
