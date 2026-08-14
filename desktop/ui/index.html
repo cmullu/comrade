@@ -350,9 +350,23 @@
           <div id="task-list" class="task-list"></div>
         </section>
 
+        <!-- ─────────────────────────────── Focus ───────────────────────────
+             The one tab with a mood. Everything else in this app is a working
+             surface; this is the one someone opens *because* they are
+             scattered, so it gets the ambient layer, the glass panels and the
+             ring — the Opera Air shape, adapted rather than copied: that
+             browser is light and airy, and flipping to white here would strobe
+             someone's eyes on every tab switch at night. So the same idea in
+             this app's own key, soft luminous dark.
+
+             `#focus-ambient` is populated by `ambientBlobs()` and frozen
+             entirely under prefers-reduced-motion — the rule is in the module
+             rather than only in the stylesheet because it is the one thing here
+             that would otherwise be pretty instead of calm. -->
         <section id="view-focus" class="view view-focus" role="tabpanel" hidden>
+          <div id="focus-ambient" class="focus-ambient" aria-hidden="true"></div>
           <div class="focus-col">
-            <div class="composer focus-card">
+            <div class="glass focus-card">
               <div class="focus-head">
                 <h3>Focus session</h3>
                 <span class="muted">One thing, for as long as you chose. Stays on this machine.</span>
@@ -376,10 +390,19 @@
                 </div>
               </div>
 
-              <!-- Running: the clock, and two honest ways out -->
+              <!-- Running: the ring, the clock, and two honest ways out.
+                   The ring *empties* as the session runs; a ring that filled up
+                   would invite "how much have I earned", which is the scoring
+                   this pillar refuses. Geometry from `ringGeometry()`. -->
               <div id="focus-running" hidden>
+                <div class="focus-dial">
+                  <svg class="focus-ring" viewBox="0 0 128 128" aria-hidden="true">
+                    <circle class="focus-ring-track" cx="64" cy="64" r="56" />
+                    <circle id="focus-ring-arc" class="focus-ring-arc" cx="64" cy="64" r="56" />
+                  </svg>
+                  <p id="focus-clock" class="focus-clock" aria-live="off">0:00</p>
+                </div>
                 <p id="focus-running-intent" class="focus-running-intent"></p>
-                <p id="focus-clock" class="focus-clock" aria-live="off">0:00</p>
                 <div class="focus-actions">
                   <button id="focus-done" class="btn btn-primary">Done</button>
                   <button id="focus-stop" class="btn btn-ghost">Stop early</button>
@@ -393,52 +416,130 @@
               <p id="focus-reflection" class="focus-reflection" hidden></p>
             </div>
 
-            <div class="composer focus-card">
+            <!-- The stretch break. Offered on the half hour of a long session
+                 (`stretch_break_due`), and always available on purpose: the
+                 body attached to the attention does not only need moving when a
+                 timer says so. -->
+            <div class="glass focus-card focus-stretch" id="stretch-card">
+              <div class="focus-head">
+                <h3>Stretch break</h3>
+                <span class="muted" id="stretch-blurb">A minute or two, sitting down.</span>
+              </div>
+
+              <div id="stretch-idle">
+                <p id="stretch-offer" class="focus-prompt" hidden></p>
+                <div id="stretch-routines" class="chip-row" role="group" aria-label="Stretch routine">
+                  <!-- chips injected from the engine's routine list -->
+                </div>
+                <div class="composer-foot">
+                  <span class="muted sm">
+                    Nothing about a stretch is recorded. Stop any time — soreness
+                    is a reason to stop, not to push.
+                  </span>
+                  <button id="stretch-start" class="btn btn-primary">Start</button>
+                </div>
+              </div>
+
+              <!-- Running: the figure, the instruction, the count.
+                   The figure's pose is `guidePose()`, so it is in time with the
+                   instruction rather than near it. -->
+              <div id="stretch-running" hidden>
+                <div class="stretch-stage">
+                  <svg id="stretch-guide" class="stretch-guide" viewBox="0 0 120 140" aria-hidden="true">
+                    <!-- A diagram, not a person: a head, a spine, two shoulders.
+                         `#stretch-guide-body` is what `guidePose` transforms. -->
+                    <g id="stretch-guide-body" class="stretch-guide-body">
+                      <circle class="sg-head" cx="60" cy="34" r="17" />
+                      <line class="sg-neck" x1="60" y1="51" x2="60" y2="66" />
+                      <line class="sg-shoulders" x1="30" y1="70" x2="90" y2="70" />
+                      <line class="sg-spine" x1="60" y1="66" x2="60" y2="112" />
+                      <line class="sg-arm-l" x1="30" y1="70" x2="22" y2="100" />
+                      <line class="sg-arm-r" x1="90" y1="70" x2="98" y2="100" />
+                    </g>
+                  </svg>
+                  <p id="stretch-count" class="stretch-count" aria-live="off">0</p>
+                </div>
+                <p id="stretch-instruction" class="stretch-instruction"></p>
+                <div class="stretch-foot">
+                  <span id="stretch-step" class="muted sm"></span>
+                  <button id="stretch-stop" class="btn btn-ghost">Stop</button>
+                </div>
+                <div class="stretch-progress" aria-hidden="true">
+                  <span id="stretch-progress-fill" class="stretch-progress-fill"></span>
+                </div>
+              </div>
+
+              <p id="stretch-done" class="focus-reflection" hidden></p>
+            </div>
+
+            <!-- The shelf. What replaced "paste an article": rows arrive from a
+                 share, a paste, or an import of the user's own platform export,
+                 and the reader opens one of them. A row with no text offers its
+                 link and somewhere to paste the article — never a "Read" button
+                 with nothing behind it, because nothing here fetches a page. -->
+            <div class="glass focus-card" id="shelf-card">
+              <div class="focus-head">
+                <h3>Reading shelf</h3>
+                <span class="muted" id="shelf-count"></span>
+              </div>
+
+              <div id="shelf-add" class="shelf-add">
+                <input
+                  id="shelf-input"
+                  class="input"
+                  maxlength="4000"
+                  placeholder="Paste a link, or an article you want to read properly…"
+                />
+                <button id="shelf-save" class="btn btn-primary">Save</button>
+              </div>
+              <p class="hint sm">
+                Or bring the ones you already have: pick the saved-posts file out
+                of your Instagram, X, Facebook, Reddit or Pocket data export. It
+                is read on this machine and nothing is sent anywhere. An import is
+                a snapshot, not a sync.
+              </p>
+              <div class="shelf-import">
+                <label class="btn btn-ghost" for="shelf-file">Import an export file…</label>
+                <input
+                  id="shelf-file"
+                  type="file"
+                  accept=".json,.js,.csv,.tsv,.html,.htm,.txt"
+                  hidden
+                />
+                <span id="shelf-import-status" class="muted sm"></span>
+              </div>
+
+              <ul id="shelf-list" class="shelf-list"></ul>
+              <div id="shelf-empty" class="empty sm">
+                <p>Nothing on the shelf yet.</p>
+              </div>
+            </div>
+
+            <!-- The reader: one chunk at a time, and nothing else to do. -->
+            <div class="glass focus-card" id="reader-card" hidden>
+              <div class="focus-head">
+                <h4 id="reader-open-title" class="reader-open-title"></h4>
+                <span id="reader-source" class="muted sm"></span>
+              </div>
+              <p id="reader-chunk" class="reader-chunk"></p>
+              <p id="reader-finished" class="hint sm" hidden>
+                That's the end. Worth a line about it?
+              </p>
+              <div class="reader-foot">
+                <button id="reader-prev" class="btn btn-ghost">Back</button>
+                <span id="reader-progress" class="muted"></span>
+                <button id="reader-next" class="btn btn-primary">Next</button>
+              </div>
+              <button id="reader-close" class="btn btn-ghost btn-block">Close this read</button>
+            </div>
+
+            <div class="glass focus-card">
               <div class="focus-head">
                 <h3>Recent sessions</h3>
               </div>
               <ul id="focus-history" class="focus-history"></ul>
               <div id="focus-history-empty" class="empty sm">
                 <p>No sessions yet.</p>
-              </div>
-            </div>
-
-            <div class="composer focus-card">
-              <div class="focus-head">
-                <h3>Long read</h3>
-              </div>
-
-              <!-- Nothing loaded: paste something -->
-              <div id="reader-compose">
-                <input id="reader-title" class="input" maxlength="200" placeholder="Title (optional)" />
-                <textarea
-                  id="reader-text"
-                  class="textarea"
-                  rows="5"
-                  placeholder="Paste something worth your attention…"
-                ></textarea>
-                <div class="composer-foot">
-                  <span class="muted">
-                    Stored encrypted, like your journal. Comrade never fetches it
-                    from the web for you.
-                  </span>
-                  <button id="reader-save" class="btn btn-primary">Start reading</button>
-                </div>
-              </div>
-
-              <!-- Loaded: one chunk at a time -->
-              <div id="reader-open" hidden>
-                <h4 id="reader-open-title" class="reader-open-title"></h4>
-                <p id="reader-chunk" class="reader-chunk"></p>
-                <p id="reader-finished" class="hint sm" hidden>
-                  That's the end. Worth a line about it?
-                </p>
-                <div class="reader-foot">
-                  <button id="reader-prev" class="btn btn-ghost">Back</button>
-                  <span id="reader-progress" class="muted"></span>
-                  <button id="reader-next" class="btn btn-primary">Next</button>
-                </div>
-                <button id="reader-clear" class="btn btn-ghost btn-block">Close this read</button>
               </div>
             </div>
           </div>

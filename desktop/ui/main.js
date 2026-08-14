@@ -137,6 +137,18 @@
     })
     .catch(() => {});
 
+  // ── Stretch break decisions (desktop/ui/stretch_view.mjs) ──────────────────
+  // The words for each movement, and the pose maths for the animated guide.
+  // The choreography itself — which movements, how long, when a break is due —
+  // is `comrade_core::stretch`, reached over the bridge.
+  let stretchView = null;
+  const stretchReady = import("./stretch_view.mjs");
+  stretchReady
+    .then((m) => {
+      stretchView = m;
+    })
+    .catch(() => {});
+
   // ── In-chat command decisions (desktop/ui/chat_commands.mjs) ───────────────
   // What the composer does with a parsed command, the `/` picker's rows, and
   // the sentences for the cases desktop cannot serve. The *grammar* is
@@ -335,6 +347,24 @@
       reflection: null,
       reading: null,
       tick: null,
+      // The reading shelf: rows from a share, a paste, or an import of the
+      // user's own platform export (comrade_core::library).
+      shelf: [],
+      // A stretch break. `elapsed` is this file's second counter and the engine
+      // is asked what that second means (`stretch_step_at`) — the same division
+      // the focus clock draws, so neither frontend steps its own timeline.
+      stretch: {
+        routines: [],
+        chosen: null,
+        elapsed: 0,
+        cursor: null,
+        tick: null,
+        done: false,
+        // Which break mark has already been offered in this session, so the
+        // offer cannot reappear every second (gate 3: an offer that nags is a
+        // feature people switch off).
+        offeredMark: null,
+      },
     },
   };
 
@@ -728,11 +758,19 @@
       // one's session, history and half-read text rather than leaving them on
       // screen under the new npub.
       stopFocusTick();
+      stopStretchTick();
       state.focus.active = null;
       state.focus.history = [];
       state.focus.reading = null;
       state.focus.reflection = null;
       state.focus.chosen = null;
+      // Another identity's shelf is not this one's, and a half-run stretch is
+      // nobody's — it is not stored anywhere to be resumed.
+      state.focus.shelf = [];
+      state.focus.stretch.cursor = null;
+      state.focus.stretch.elapsed = 0;
+      state.focus.stretch.done = false;
+      state.focus.stretch.offeredMark = null;
       showToast(`Vault unlocked · ${shortNpub(id.npub)}`, "success");
 
       const ws = await safeInvoke("current_workspace", undefined, {
@@ -954,7 +992,13 @@
     // left running behind another tab is still authoritative in the engine,
     // which is where the remaining time comes from on the next paint.
     if (name === "focus") loadFocus();
-    else stopFocusTick();
+    else {
+      stopFocusTick();
+      // A stretch break behind another tab is a countdown nobody is following,
+      // so leaving the tab ends it rather than pausing it. There is nothing to
+      // resume: no record of a break is kept anywhere.
+      stopStretchTick();
+    }
   }
 
   // ── Profile page ──────────────────────────────────────────────────────────
@@ -4228,14 +4272,17 @@
     if (!state.identity) return; // vault still locked; the tab paints on unlock
     if (!focusView) await focusReady.catch(() => {});
     try {
-      const [presets, suggested, prompt, active, history, reading] = await Promise.all([
-        safeInvoke("focus_presets", undefined, { silent: true }).catch(() => []),
-        safeInvoke("suggested_focus_minutes"),
-        safeInvoke("focus_prompt"),
-        safeInvoke("active_focus_session"),
-        safeInvoke("focus_sessions"),
-        safeInvoke("reading"),
-      ]);
+      const [presets, suggested, prompt, active, history, reading, shelf, routines] =
+        await Promise.all([
+          safeInvoke("focus_presets", undefined, { silent: true }).catch(() => []),
+          safeInvoke("suggested_focus_minutes"),
+          safeInvoke("focus_prompt"),
+          safeInvoke("active_focus_session"),
+          safeInvoke("focus_sessions"),
+          safeInvoke("reading"),
+          safeInvoke("library_items"),
+          safeInvoke("stretch_routines", undefined, { silent: true }).catch(() => []),
+        ]);
       state.focus.presets = Array.isArray(presets) ? presets : [];
       state.focus.suggested = suggested;
       state.focus.prompt = prompt || "";
@@ -4243,11 +4290,47 @@
       // Only finished sessions are history; the running one has its own card.
       state.focus.history = (Array.isArray(history) ? history : []).filter((s) => s.outcome);
       state.focus.reading = reading || null;
+      state.focus.shelf = Array.isArray(shelf) ? shelf : [];
+      state.focus.stretch.routines = Array.isArray(routines) ? routines : [];
+      paintAmbient();
       renderFocus();
+      renderShelf();
       renderReader();
+      renderStretch();
     } catch {
       /* toasted */
     }
+  }
+
+  /**
+   * Lay the drifting gradients out behind the tab, once.
+   *
+   * The blob list and the reduced-motion rule are `ambientBlobs()`'s; this only
+   * turns them into elements. Idempotent because `loadFocus` runs on every visit
+   * to the tab and re-creating three blurred divs would restart their drift from
+   * the same frame each time — which is the one way to make a background that
+   * never repeats look like it does.
+   */
+  function paintAmbient() {
+    const host = $("#focus-ambient");
+    if (!host || !focusView || host.childElementCount > 0) return;
+    const reduce =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    host.replaceChildren(
+      ...focusView.ambientBlobs(reduce).map((b) => {
+        const div = el("div", { class: "focus-blob" });
+        div.style.left = `${b.x}%`;
+        div.style.top = `${b.y}%`;
+        div.style.width = `${b.size}%`;
+        div.style.height = `${b.size}%`;
+        div.style.transform = "translate(-50%, -50%)";
+        div.style.setProperty("--drift-duration", `${b.durationMs}ms`);
+        div.style.animationDuration = `${b.durationMs}ms`;
+        div.style.animationDelay = `${b.delayMs}ms`;
+        return div;
+      }),
+    );
   }
 
   function renderFocus() {
@@ -4261,7 +4344,7 @@
     if (running) {
       $("#focus-running-intent").textContent =
         (running.intent || "").trim() || "This block, on one thing.";
-      $("#focus-clock").textContent = focusView.formatCountdown(running.remaining_secs);
+      paintClock(running);
       startFocusTick();
     } else {
       stopFocusTick();
@@ -4334,7 +4417,8 @@
         return;
       }
       state.focus.active = active;
-      if (focusView) $("#focus-clock").textContent = focusView.formatCountdown(active.remaining_secs);
+      paintClock(active);
+      maybeOfferStretch(active);
     }, 1000);
   }
 
@@ -4361,6 +4445,10 @@
       });
       state.focus.active = started;
       state.focus.reflection = null;
+      // A new session has its own marks; carrying the last one's over would
+      // silence the first offer of this one.
+      state.focus.stretch.offeredMark = null;
+      $("#stretch-offer").hidden = true;
       $("#focus-intent").value = "";
       renderFocus();
     } catch {
@@ -4395,45 +4483,219 @@
     }
   }
 
-  // ── Long read ─────────────────────────────────────────────────────────────
-
-  function renderReader() {
-    if (!focusView) return;
-    const r = state.focus.reading;
-    $("#reader-compose").hidden = !!r;
-    $("#reader-open").hidden = !r;
-    if (!r) return;
-
-    const nav = focusView.readerNav(r.position, r.chunks.length);
-    $("#reader-open-title").textContent = r.title || "Long read";
-    $("#reader-chunk").textContent = r.chunks[nav.position] || "";
-    $("#reader-progress").textContent = nav.label;
-    $("#reader-prev").disabled = !nav.canPrev;
-    $("#reader-next").disabled = !nav.canNext;
-    $("#reader-finished").hidden = !nav.atEnd;
+  /**
+   * The clock and the ring, from one session DTO.
+   *
+   * Both read the *engine's* remaining seconds — the ring is a second rendering
+   * of the same number, not a second source for it. The total comes from the
+   * plan rather than from the largest remaining value seen, so a session joined
+   * halfway through (tab opened late, machine woken) draws a ring that is
+   * already part-empty instead of one that starts full and lies.
+   */
+  function paintClock(running) {
+    if (!focusView || !running) return;
+    $("#focus-clock").textContent = focusView.formatCountdown(running.remaining_secs);
+    const arc = $("#focus-ring-arc");
+    if (!arc) return;
+    const g = focusView.ringGeometry(running.remaining_secs, (running.planned_minutes || 0) * 60);
+    arc.setAttribute("stroke-dasharray", String(g.dash));
+    arc.setAttribute("stroke-dashoffset", String(g.offset));
   }
 
-  async function handleReaderSave() {
-    const text = $("#reader-text").value;
-    if (!text.trim()) {
-      showToast("Paste something to read first", "warn");
+  // ── The reading shelf ─────────────────────────────────────────────────────
+  //
+  // What replaced the paste box. Rows arrive from a paste, or from an import of
+  // the user's own Instagram / X / Facebook / Reddit / Pocket export — read on
+  // this machine, sent nowhere. Which of those a pasted string is, and how each
+  // archive format is read, is `comrade_core::library`'s answer; this file draws
+  // rows and reports clicks.
+  //
+  // Nothing here fetches a URL. A row with no text is a *bookmark*: it offers
+  // its link, and that is the honest end of it.
+
+  function renderShelf() {
+    if (!focusView) return;
+    const shelf = state.focus.shelf;
+    $("#shelf-count").textContent =
+      shelf.length === 0 ? "" : shelf.length === 1 ? "1 saved" : `${shelf.length} saved`;
+    $("#shelf-empty").hidden = shelf.length > 0;
+    $("#shelf-list").replaceChildren(
+      ...shelf.map((item) => {
+        const row = focusView.shelfRow(item);
+        const actions = [];
+        if (row.canRead) {
+          actions.push(
+            el("button", {
+              class: "btn btn-ghost sm",
+              type: "button",
+              text: item.position > 0 && !item.finished_at ? "Resume" : "Read",
+              onClick: () => handleShelfOpen(item.id),
+            }),
+          );
+        }
+        if (row.canOpenLink) {
+          // The link opens in the *system* browser, deliberately: an in-app
+          // webview would make Comrade the thing that fetched the page, which
+          // is the line this whole shelf is built not to cross.
+          actions.push(
+            el("button", {
+              class: "btn btn-ghost sm",
+              type: "button",
+              text: "Open link",
+              onClick: () => handleShelfLink(item.url),
+            }),
+          );
+        }
+        actions.push(
+          el("button", {
+            class: "btn btn-ghost sm",
+            type: "button",
+            text: "Remove",
+            onClick: () => handleShelfDelete(item.id),
+          }),
+        );
+        return el(
+          "li",
+          {
+            class: "shelf-row",
+            "data-open": item.is_open ? "true" : "false",
+            "data-finished": item.finished_at ? "true" : "false",
+          },
+          [
+            el("span", { class: "shelf-row-main" }, [
+              el("span", { class: "shelf-row-title", text: row.title, title: item.url || row.title }),
+              el("span", {
+                class: "shelf-row-meta",
+                text: row.progressLabel && item.position > 0
+                  ? `${row.meta} · ${row.progressLabel}`
+                  : row.meta,
+              }),
+            ]),
+            el("span", { class: "shelf-row-actions" }, actions),
+          ],
+        );
+      }),
+    );
+  }
+
+  /**
+   * Save whatever is in the box.
+   *
+   * One command for both shapes: `save_shared` hands the string to
+   * `library::parse_shared`, which decides whether it is a link or an article.
+   * Desktop has no share sheet, but "paste whatever you have" is the same
+   * decision, and letting this file draw that line would be a second rule to
+   * drift from Android's.
+   */
+  async function handleShelfSave() {
+    const input = $("#shelf-input");
+    const body = input.value;
+    if (!body.trim()) {
+      showToast("Paste a link or some text first", "warn");
       return;
     }
-    const btn = $("#reader-save");
+    const btn = $("#shelf-save");
     setBusy(btn, true);
     try {
-      state.focus.reading = await safeInvoke("save_reading", {
-        title: $("#reader-title").value.trim(),
-        text,
-      });
-      $("#reader-title").value = "";
-      $("#reader-text").value = "";
-      renderReader();
+      const saved = await safeInvoke("save_shared", { subject: null, body });
+      if (!saved) {
+        showToast("Nothing in that worth saving", "warn");
+        return;
+      }
+      input.value = "";
+      state.focus.shelf = await safeInvoke("library_items");
+      renderShelf();
     } catch {
       /* toasted */
     } finally {
       setBusy(btn, false);
     }
+  }
+
+  /**
+   * Import an export archive.
+   *
+   * The **file is read here**, in the webview, and its text is passed to the
+   * command — a command that took a path would be an arbitrary-file-read
+   * primitive reachable from JavaScript, which is a much larger thing to add
+   * than an import button.
+   */
+  async function handleShelfImport(file) {
+    if (!file || !focusView) return;
+    const status = $("#shelf-import-status");
+    status.textContent = `Reading ${file.name}…`;
+    try {
+      const payload = await file.text();
+      const report = await safeInvoke("import_saves", { payload });
+      status.textContent = focusView.importSummary(report);
+      state.focus.shelf = await safeInvoke("library_items");
+      renderShelf();
+    } catch {
+      // `safeInvoke` has toasted the engine's own sentence (the size cap, a
+      // locked vault); this line is for the read itself failing.
+      status.textContent = "That file could not be read.";
+    } finally {
+      // So picking the same file twice in a row still fires a change event.
+      $("#shelf-file").value = "";
+    }
+  }
+
+  async function handleShelfOpen(id) {
+    try {
+      const opened = await safeInvoke("open_saved_item", { id });
+      if (!opened) {
+        // The honest case, not a failure: an imported bookmark has no text, and
+        // Comrade will not go and get it.
+        showToast("That one is a link only — open it, or paste the text in", "warn");
+        return;
+      }
+      state.focus.reading = opened;
+      state.focus.shelf = await safeInvoke("library_items");
+      renderShelf();
+      renderReader();
+      $("#reader-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch {
+      /* toasted */
+    }
+  }
+
+  function handleShelfLink(url) {
+    if (!url) return;
+    // `window.open` goes through the Tauri shell's own external-link handling;
+    // nothing in this app renders a remote page itself.
+    window.open(url, "_blank", "noopener");
+  }
+
+  async function handleShelfDelete(id) {
+    try {
+      await safeInvoke("delete_saved_item", { id });
+      state.focus.shelf = await safeInvoke("library_items");
+      if (state.focus.reading && state.focus.reading.item_id === id) {
+        state.focus.reading = null;
+      }
+      renderShelf();
+      renderReader();
+    } catch {
+      /* toasted */
+    }
+  }
+
+  // ── The reader ────────────────────────────────────────────────────────────
+
+  function renderReader() {
+    if (!focusView) return;
+    const r = state.focus.reading;
+    $("#reader-card").hidden = !r;
+    if (!r) return;
+
+    const nav = focusView.readerNav(r.position, r.chunks.length);
+    $("#reader-open-title").textContent = r.title || "Long read";
+    $("#reader-source").textContent = focusView.sourceLabel(r.source);
+    $("#reader-chunk").textContent = r.chunks[nav.position] || "";
+    $("#reader-progress").textContent = nav.label;
+    $("#reader-prev").disabled = !nav.canPrev;
+    $("#reader-next").disabled = !nav.canNext;
+    $("#reader-finished").hidden = !nav.atEnd;
   }
 
   async function handleReaderStep(delta) {
@@ -4453,20 +4715,198 @@
       if (updated) {
         state.focus.reading = updated;
         renderReader();
+        // Reaching the end stamps a finish on the row, so the shelf's line
+        // about it is now out of date.
+        if (updated.position + 1 >= updated.chunks.length) {
+          state.focus.shelf = await safeInvoke("library_items");
+          renderShelf();
+        }
       }
     } catch {
       /* toasted; the optimistic position stands until the next load */
     }
   }
 
-  async function handleReaderClear() {
+  /** Close the reader. The article stays on the shelf, and so does the position. */
+  async function handleReaderClose() {
     try {
-      await safeInvoke("clear_reading");
+      await safeInvoke("close_reading");
       state.focus.reading = null;
+      state.focus.shelf = await safeInvoke("library_items");
+      renderShelf();
       renderReader();
     } catch {
       /* toasted */
     }
+  }
+
+  // ── Stretch break ─────────────────────────────────────────────────────────
+  //
+  // The body attached to the attention (`comrade_core::stretch`). Six routines,
+  // 45–130 seconds each. Nothing about having taken one is stored — the same
+  // call the breathing screen makes, and for the same reason: a count would turn
+  // a break into a task.
+
+  function renderStretch() {
+    if (!stretchView || !focusView) return;
+    const st = state.focus.stretch;
+    const running = st.cursor !== null && !st.done;
+
+    $("#stretch-idle").hidden = running;
+    $("#stretch-running").hidden = !running;
+    $("#stretch-done").hidden = !st.done;
+    if (st.done) {
+      $("#stretch-done").textContent = "That's the set. Back to it when you're ready.";
+    }
+
+    if (!running) {
+      const chosen = st.chosen || st.routines[0]?.key || null;
+      $("#stretch-blurb").textContent = chosen ? stretchView.routineCopy(chosen).blurb : "";
+      $("#stretch-routines").replaceChildren(
+        ...st.routines.map((r) =>
+          el("button", {
+            class: "chip",
+            type: "button",
+            text: stretchView.routineCopy(r.key).name,
+            "aria-pressed": r.key === chosen ? "true" : "false",
+            onClick: () => {
+              state.focus.stretch.chosen = r.key;
+              state.focus.stretch.done = false;
+              renderStretch();
+            },
+          }),
+        ),
+      );
+      $("#stretch-start").disabled = chosen == null;
+      return;
+    }
+
+    const cursor = st.cursor;
+    const routine = st.routines.find((r) => r.key === st.chosen);
+    $("#stretch-instruction").textContent = stretchView.stepCopy(cursor.step.key);
+    $("#stretch-count").textContent = stretchView.stepClock(cursor.secs_left_in_step);
+    $("#stretch-step").textContent = stretchView.stepLabel(cursor.index, routine?.steps.length ?? 0);
+    $("#stretch-progress-fill").style.width = `${Math.round((cursor.progress || 0) * 100)}%`;
+
+    const pose = stretchView.guidePose(cursor.step, cursor.secs_into_step);
+    const body = $("#stretch-guide-body");
+    if (body) {
+      body.setAttribute(
+        "transform",
+        `translate(${pose.tiltX} ${pose.tiltY}) rotate(${pose.rotate} 60 112) scale(${pose.scale})`,
+      );
+    }
+  }
+
+  function handleStretchStart(routineKey) {
+    const st = state.focus.stretch;
+    st.chosen = routineKey || st.chosen || st.routines[0]?.key || null;
+    if (!st.chosen) return;
+    st.elapsed = 0;
+    st.done = false;
+    st.cursor = null;
+    $("#stretch-offer").hidden = true;
+    stepStretch();
+    startStretchTick();
+  }
+
+  /**
+   * Ask the engine what this second of the routine means.
+   *
+   * Once a second, like the focus clock, and for the same reason: the walk over
+   * the steps lives in `comrade_core::stretch` so that Android and desktop
+   * cannot step different timelines. `null` back is the routine being over.
+   */
+  async function stepStretch() {
+    const st = state.focus.stretch;
+    if (!st.chosen) return;
+    let cursor = null;
+    try {
+      cursor = await safeInvoke(
+        "stretch_step_at",
+        { routineKey: st.chosen, elapsedSecs: st.elapsed },
+        { silent: true },
+      );
+    } catch {
+      return; // transient; the next tick asks again
+    }
+    if (!cursor) {
+      stopStretchTick();
+      st.cursor = null;
+      st.done = true;
+      renderStretch();
+      return;
+    }
+    st.cursor = cursor;
+    renderStretch();
+  }
+
+  function startStretchTick() {
+    if (state.focus.stretch.tick) return;
+    state.focus.stretch.tick = setInterval(() => {
+      // A routine is a minute of someone's attention; running it behind another
+      // tab would be counting down a break nobody is taking.
+      if (document.body.dataset.screen !== "app" || $("#view-focus").hidden) return;
+      state.focus.stretch.elapsed += 1;
+      stepStretch();
+    }, 1000);
+  }
+
+  function stopStretchTick() {
+    if (!state.focus.stretch.tick) return;
+    clearInterval(state.focus.stretch.tick);
+    state.focus.stretch.tick = null;
+  }
+
+  /** Stop mid-routine. Nothing is recorded, so there is nothing to record. */
+  function handleStretchStop() {
+    stopStretchTick();
+    const st = state.focus.stretch;
+    st.cursor = null;
+    st.elapsed = 0;
+    st.done = false;
+    renderStretch();
+  }
+
+  /**
+   * Offer a stretch at the marks a long session has.
+   *
+   * The engine decides whether one is due (`stretch_break_due`), including that
+   * the last minutes of a session are left alone and that the same mark is never
+   * offered twice. This only shows the line — it does not start anything, because
+   * a break that began on its own would be an interruption rather than an offer.
+   */
+  async function maybeOfferStretch(running) {
+    if (!stretchView || !running || state.focus.stretch.cursor !== null) return;
+    const elapsedMinutes = Math.floor(
+      Math.max(0, running.planned_minutes * 60 - running.remaining_secs) / 60,
+    );
+    let mark = null;
+    try {
+      mark = await safeInvoke(
+        "stretch_break_due",
+        {
+          plannedMinutes: running.planned_minutes,
+          elapsedMinutes,
+          lastOffered: state.focus.stretch.offeredMark,
+        },
+        { silent: true },
+      );
+    } catch {
+      return;
+    }
+    if (mark == null) return;
+    state.focus.stretch.offeredMark = mark;
+    try {
+      const suggested = await safeInvoke("suggested_stretch_routine", undefined, { silent: true });
+      if (suggested) state.focus.stretch.chosen = suggested;
+    } catch {
+      /* the first routine in the list is a fine fallback */
+    }
+    const offer = $("#stretch-offer");
+    offer.textContent = `${mark} minutes in. Two minutes of moving, if you want it — the session keeps running.`;
+    offer.hidden = false;
+    renderStretch();
   }
 
   // ── Watch/listen together ─────────────────────────────────────────────────
@@ -6216,10 +6656,18 @@
     $("#focus-start").addEventListener("click", handleFocusStart);
     $("#focus-done").addEventListener("click", () => handleFocusFinish(true));
     $("#focus-stop").addEventListener("click", () => handleFocusFinish(false));
-    $("#reader-save").addEventListener("click", handleReaderSave);
     $("#reader-next").addEventListener("click", () => handleReaderStep(1));
     $("#reader-prev").addEventListener("click", () => handleReaderStep(-1));
-    $("#reader-clear").addEventListener("click", handleReaderClear);
+    $("#reader-close").addEventListener("click", handleReaderClose);
+    $("#shelf-save").addEventListener("click", handleShelfSave);
+    $("#shelf-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleShelfSave();
+    });
+    $("#shelf-file").addEventListener("change", (e) =>
+      handleShelfImport(e.target.files && e.target.files[0]),
+    );
+    $("#stretch-start").addEventListener("click", () => handleStretchStart(null));
+    $("#stretch-stop").addEventListener("click", handleStretchStop);
     $("#dm-input").addEventListener("input", (e) => {
       reportDraftEdit();
       // Withdrawn here rather than inside the debounced handler below: a question
@@ -6477,7 +6925,40 @@
     // Couple Sandbox behave believably in browser preview.
     let mockSakha = { paired: false, partnerNpub: null, role: null, ledger: "" };
     // Focus practice state for browser preview (see the `focus_*` cases below).
-    const mockFocus = { active: null, sessions: [], reading: null };
+    const mockFocus = { active: null, sessions: [], reading: null, shelf: [], nextId: 1 };
+
+    /**
+     * A stand-in for `comrade_core::stretch`'s tables, so browser preview can
+     * run a routine.
+     *
+     * Two steps rather than six: this exists to make the guide and the
+     * countdown visible without a vault, not to be a second copy of the
+     * choreography. The real one is the engine's, and preview drawing a
+     * shorter routine is a much smaller lie than preview drifting from it.
+     */
+    const mockStretch = [
+      {
+        key: "neck",
+        total_seconds: 20,
+        steps: [
+          { key: "neck_tilt_left", seconds: 10, part: "neck", side: "left", motion: "hold" },
+          { key: "neck_tilt_right", seconds: 10, part: "neck", side: "right", motion: "hold" },
+        ],
+      },
+      {
+        key: "shoulders",
+        total_seconds: 10,
+        steps: [
+          {
+            key: "shoulder_roll_back",
+            seconds: 10,
+            part: "shoulders",
+            side: "center",
+            motion: "cycle",
+          },
+        ],
+      },
+    ];
 
     const invoke = async (cmd, args = {}) => {
       await delay(120);
@@ -6826,31 +7307,146 @@
         }
         case "focus_sessions":
           return mockFocus.sessions.slice();
-        case "save_reading":
-          mockFocus.reading = {
-            title: args.title || "",
-            // A stand-in for `attention::chunk_reading`, which splits on
-            // paragraph boundaries. Same shape, not the same algorithm.
-            chunks: String(args.text)
-              .split(/\n{2,}/)
-              .filter((c) => c.trim()),
+        // The reading shelf. A stand-in for `comrade_core::library` shaped
+        // closely enough to exercise the two row types that matter — a
+        // bookmark with no text and an article with some — because the "link
+        // only" row is the one whose UI is easiest to get wrong.
+        case "library_items":
+          return mockFocus.shelf.map((i) => ({
+            ...i,
+            is_open: mockFocus.reading?.item_id === i.id,
+          }));
+        case "save_shared":
+        case "save_link":
+        case "save_text": {
+          const body = String(args.body ?? args.text ?? args.url ?? "");
+          const url = (body.match(/https?:\/\/\S+/) || [null])[0];
+          const prose = url ? body.replace(url, " ").trim() : body.trim();
+          // The same threshold the engine uses to tell a shared link from a
+          // shared passage (`library::SHARED_TEXT_MIN_CHARS`).
+          const isText = prose.length >= 400;
+          if (!url && !prose) return null;
+          const chunks = isText
+            ? String(body)
+                .split(/\n{2,}/)
+                .filter((c) => c.trim())
+            : [];
+          const item = {
+            id: `mocksave_${mockFocus.nextId++}`,
+            title: args.title || args.subject || (url ? url.replace(/^https?:\/\//, "") : prose.slice(0, 60)),
+            url: url || null,
+            source: url && /instagram/.test(url) ? "instagram" : url ? "web" : "pasted",
+            has_text: isText,
+            estimated_minutes: isText ? Math.max(1, Math.round(prose.split(/\s+/).length / 220)) : 0,
+            chunk_count: chunks.length,
             position: 0,
+            saved_at: nowSecs(),
+            opened_at: null,
+            finished_at: null,
+            is_open: false,
+          };
+          item._chunks = chunks.length ? chunks : [body];
+          mockFocus.shelf.unshift(item);
+          return item;
+        }
+        case "import_saves": {
+          const urls = [...String(args.payload).matchAll(/https?:\/\/[^\s"',\]]+/g)].map(
+            (m) => m[0],
+          );
+          let added = 0;
+          let duplicates = 0;
+          for (const url of urls) {
+            if (mockFocus.shelf.some((i) => i.url === url)) {
+              duplicates += 1;
+              continue;
+            }
+            added += 1;
+            mockFocus.shelf.push({
+              id: `mocksave_${mockFocus.nextId++}`,
+              title: "",
+              url,
+              source: /instagram/.test(url) ? "instagram" : "web",
+              has_text: false,
+              estimated_minutes: 0,
+              chunk_count: 0,
+              position: 0,
+              saved_at: nowSecs(),
+              opened_at: null,
+              finished_at: null,
+              is_open: false,
+            });
+          }
+          return { format: "url_list", added, duplicates, skipped: 0, truncated: false, fell_back: false };
+        }
+        case "open_saved_item": {
+          const item = mockFocus.shelf.find((i) => i.id === args.id);
+          if (!item || !item.has_text) return null;
+          mockFocus.reading = {
+            item_id: item.id,
+            title: item.title,
+            chunks: item._chunks,
+            position: item.position,
+            url: item.url,
+            source: item.source,
           };
           return mockFocus.reading;
+        }
+        case "delete_saved_item": {
+          const before = mockFocus.shelf.length;
+          mockFocus.shelf = mockFocus.shelf.filter((i) => i.id !== args.id);
+          if (mockFocus.reading?.item_id === args.id) mockFocus.reading = null;
+          return mockFocus.shelf.length < before;
+        }
         case "reading":
           return mockFocus.reading;
-        case "set_reading_position":
+        case "set_reading_position": {
           if (!mockFocus.reading) return null;
           mockFocus.reading.position = Math.min(
             Math.max(0, args.position),
             mockFocus.reading.chunks.length - 1,
           );
+          const row = mockFocus.shelf.find((i) => i.id === mockFocus.reading.item_id);
+          if (row) {
+            row.position = mockFocus.reading.position;
+            if (row.position + 1 >= mockFocus.reading.chunks.length) row.finished_at = nowSecs();
+          }
           return mockFocus.reading;
-        case "clear_reading": {
+        }
+        case "close_reading": {
           const had = !!mockFocus.reading;
           mockFocus.reading = null;
           return had;
         }
+        case "stretch_routines":
+          return mockStretch;
+        case "stretch_step_at": {
+          const routine = mockStretch.find((r) => r.key === args.routineKey);
+          if (!routine) throw `mock backend: unknown routine '${args.routineKey}'`;
+          let boundary = 0;
+          for (let i = 0; i < routine.steps.length; i += 1) {
+            const step = routine.steps[i];
+            if (args.elapsedSecs < boundary + step.seconds) {
+              return {
+                index: i,
+                step,
+                secs_into_step: args.elapsedSecs - boundary,
+                secs_left_in_step: boundary + step.seconds - args.elapsedSecs,
+                secs_left_total: routine.total_seconds - args.elapsedSecs,
+                progress: args.elapsedSecs / routine.total_seconds,
+              };
+            }
+            boundary += step.seconds;
+          }
+          return null; // over, same as the engine
+        }
+        case "suggested_stretch_routine":
+          return mockStretch[mockFocus.sessions.length % mockStretch.length].key;
+        case "stretch_break_marks":
+          return args.plannedMinutes > 30 ? [30] : [];
+        case "stretch_break_due":
+          // Preview has no patience for half an hour: offer once, a minute in,
+          // so the card can actually be seen. The real rule is the engine's.
+          return args.elapsedMinutes >= 1 && args.lastOffered == null ? 1 : null;
         // Large attachments. The 10 MB here is a stand-in for
         // `comrade_core::handoff::route_for_bytes`, which is the only place the
         // real answer comes from — this exists so browser preview can open the

@@ -1868,16 +1868,108 @@ code {
 }
 
 /* ─────────────────────────────── Focus ──────────────────────────────────
-   Attention practice (docs/ATTENTION.md phase 2). Deliberately the plainest
-   surface in the app: no progress ring, no streak, no colour that means
-   "worse". Gate 3 says the practice is rebuilt by spending attention, not by
-   playing a game about spending it, and a UI that celebrated a completion
-   would be the game. The one visual emphasis is the countdown, because that
-   is the thing being looked at. */
+   Attention practice (docs/ATTENTION.md phase 2), and the one tab in this app
+   with a mood.
+
+   It used to be the plainest surface here, on the reasoning that gate 3 forbids
+   celebrating a completion and a plain screen cannot celebrate anything. The
+   premise is right and the conclusion was too strong: what gate 3 forbids is
+   *reward mechanics* — a score, a streak, a colour that means worse — and none
+   of those is the same thing as the surface being pleasant to sit in front of.
+   Opera Air is the reference for the difference: soft light, slow motion,
+   translucency, nothing to beat.
+
+   Two adaptations rather than a copy. That browser is light and airy, and this
+   app is dark-mode-first: flipping this one tab to white would strobe someone's
+   eyes on every tab switch at night, so the same idea is rendered in this app's
+   own key — soft luminous dark, bloom instead of glare. And every animation
+   here stops dead under prefers-reduced-motion, because this is the tab someone
+   opens when they are already scattered.
+
+   What is still refused: a filling progress bar for the session, any red state,
+   any number that accumulates. The ring *empties*. */
 
 .view-focus {
   overflow-y: auto;
   padding: 16px;
+  /* The ambient layer is positioned against this. */
+  position: relative;
+  isolation: isolate;
+}
+
+/* Three big soft gradients drifting behind everything, from `ambientBlobs()`.
+   Blurred far past the point of being a shape: the eye should never resolve one,
+   because catching the background is the opposite of the point. */
+.focus-ambient {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.focus-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.42;
+  will-change: transform;
+  /* The drift is deliberately larger than it looks: at this blur radius a 6%
+     translation is a slow change in where the light is, not a moving object. */
+  animation-name: focus-drift;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+
+.focus-blob:nth-child(1) {
+  background: radial-gradient(circle, var(--accent-2), transparent 68%);
+}
+
+.focus-blob:nth-child(2) {
+  background: radial-gradient(circle, var(--accent), transparent 70%);
+}
+
+.focus-blob:nth-child(3) {
+  background: radial-gradient(circle, var(--good), transparent 72%);
+  opacity: 0.22;
+}
+
+@keyframes focus-drift {
+  from {
+    transform: translate3d(-3%, 2%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(4%, -3%, 0) scale(1.08);
+  }
+}
+
+/* A duration of 0 is how `ambientBlobs(true)` says "hold still"; an animation
+   with no duration still runs its first frame for ever, which is what is
+   wanted — the layout is identical, only the motion is gone. */
+.focus-blob[style*="--drift-duration: 0ms"] {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus-blob {
+    animation: none;
+  }
+}
+
+/* Glass: the panel over the ambient layer. `backdrop-filter` is the whole
+   effect, and the background colour behind it is the fallback for a webview
+   that does not have it — without one, an unsupported blur reads as a
+   transparent card with text floating over a gradient. */
+.glass {
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 60%, transparent);
+  border-radius: 20px;
+  padding: 16px;
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+  box-shadow: 0 1px 0 color-mix(in srgb, #fff 6%, transparent) inset,
+    0 18px 50px -30px rgba(0, 0, 0, 0.7);
 }
 
 .focus-col {
@@ -2009,6 +2101,239 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+/* ── The countdown dial ─────────────────────────────────────────────────── */
+
+.focus-dial {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  margin: 4px auto 10px;
+  display: grid;
+  place-items: center;
+}
+
+.focus-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* -90deg so the ring drains from the top, which is where an eye starts. */
+  transform: rotate(-90deg);
+}
+
+.focus-ring-track,
+.focus-ring-arc {
+  fill: none;
+  stroke-width: 6;
+  stroke-linecap: round;
+}
+
+.focus-ring-track {
+  stroke: color-mix(in srgb, var(--border-strong) 55%, transparent);
+}
+
+.focus-ring-arc {
+  stroke: var(--accent-2);
+  /* A second is a long time for a stroke to travel, so the transition is short
+     enough to land before the next tick and long enough not to be a step. */
+  transition: stroke-dashoffset 700ms linear;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent-2) 55%, transparent));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus-ring-arc {
+    transition: none;
+  }
+}
+
+/* ── Stretch break ──────────────────────────────────────────────────────── */
+
+.stretch-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 6px 0 2px;
+}
+
+.stretch-guide {
+  width: 132px;
+  height: 154px;
+}
+
+/* The transform origin is the base of the spine: a figure that leans from its
+   centre pivots its hips out from under itself, which is not what any of these
+   movements look like. */
+.stretch-guide-body {
+  transform-origin: 60px 112px;
+  transition: transform 260ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stretch-guide-body {
+    transition: none;
+  }
+}
+
+.sg-head {
+  fill: none;
+  stroke: var(--accent-2);
+  stroke-width: 3;
+}
+
+.stretch-guide line {
+  stroke: var(--text-dim);
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+.stretch-count {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  color: var(--text-dim);
+}
+
+.stretch-instruction {
+  margin: 6px 0 10px;
+  font-size: 15px;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--text);
+  /* Two rows reserved: the instructions are not all one line, and a centred
+     column that reflows on every step is the thing that reads as jitter. The
+     breathing screen's calming line reserves rows for the same reason. */
+  min-height: 3em;
+}
+
+.stretch-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stretch-progress {
+  height: 3px;
+  margin-top: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-strong) 45%, transparent);
+  overflow: hidden;
+}
+
+.stretch-progress-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent-2);
+  transition: width 700ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stretch-progress-fill {
+    transition: none;
+  }
+}
+
+/* ── The reading shelf ──────────────────────────────────────────────────── */
+
+.shelf-add {
+  display: flex;
+  gap: 8px;
+}
+
+.shelf-add .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.shelf-import {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.shelf-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Long enough to be a shelf, short enough not to be a feed: an import can add
+     two thousand rows, and a panel that scrolled for ever would be the infinite
+     list this whole pillar exists to get someone out of. */
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.shelf-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+}
+
+.shelf-row[data-open="true"] {
+  border-color: color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+
+.shelf-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.shelf-row-title {
+  display: block;
+  font-size: 14px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A finished piece is struck through rather than hidden or moved: it stays
+   findable, and nothing counts how many there are. */
+.shelf-row[data-finished="true"] .shelf-row-title {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--muted);
+}
+
+.shelf-row-meta {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.shelf-row-actions {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* A shelf row holds up to three of these, so they have to be small. `.sm` is
+   per-component in this stylesheet rather than a utility, so the button and the
+   caption each need their own — a bare `class="btn sm"` styles nothing, which is
+   the kind of thing that only shows up on screen. */
+.btn.sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.muted.sm {
+  font-size: 11px;
 }
 
 /* ─────────────────────────── Empty / loading ─────────────────────────── */
