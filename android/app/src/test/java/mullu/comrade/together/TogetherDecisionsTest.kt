@@ -9,6 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -667,13 +668,14 @@ class TogetherDecisionsTest {
         artist: String = "",
         album: String? = null,
         durationMs: Long = 187_000,
+        albumId: Long? = 1L,
     ) = TogetherDecisions.Track(
         uri = "content://media/external/audio/media/$title",
         title = title,
         artist = artist,
         album = album,
         durationMs = durationMs,
-        albumId = 1L,
+        albumId = albumId,
     )
 
     @Test
@@ -734,6 +736,166 @@ class TogetherDecisionsTest {
     fun searchingIgnoresCase() {
         val library = listOf(track("Kun Faya Kun", "A. R. Rahman"))
         assertEquals(1, TogetherDecisions.filterTracks(library, "RAHMAN").size)
+    }
+
+    // ── The library as albums ───────────────────────────────────────────────
+
+    /**
+     * Title-ordered, the way `MusicLibrary.page` hands it over — and
+     * deliberately *not* in album order, so a grouping that kept the arrival
+     * order fails the test below instead of passing it by luck.
+     */
+    private val collection = listOf(
+        track("Aadat", "Atif Aslam", "Jal Pari", albumId = 20L),
+        track("Kun Faya Kun", "A. R. Rahman", "Rockstar", albumId = 10L),
+        track("Nadaan Parindey", "A. R. Rahman", "Rockstar", albumId = 10L),
+        track("Sadda Haq", "Mohit Chauhan", "Rockstar", albumId = 10L),
+        track("Tera Mera Rishta", "Mustafa Zahid", "Awarapan", albumId = 30L),
+    )
+
+    @Test
+    fun aLibraryBrowsesAsRecordsAndNotAsOneRecordsThirdSong() {
+        val albums = TogetherDecisions.albumsOf(collection)
+        // Alphabetical by album. Arrival order is Jal Pari, Rockstar, Awarapan —
+        // because the provider sorts by *track* title, so grouping alone orders
+        // records by whichever of their songs happens to come first.
+        assertEquals(listOf("Awarapan", "Jal Pari", "Rockstar"), albums.map { it.title })
+        val rockstar = albums.last()
+        // Inside a record, the order it arrived in is kept.
+        assertEquals(
+            listOf("Kun Faya Kun", "Nadaan Parindey", "Sadda Haq"),
+            rockstar.tracks.map { it.title },
+        )
+        // The tile's artwork is the first track's, which is the only one a
+        // grouping function can name without doing IO.
+        assertEquals("Kun Faya Kun", rockstar.cover.title)
+    }
+
+    @Test
+    fun anAlbumIsByOnePersonOrBySeveralOrByNobody() {
+        val albums = TogetherDecisions.albumsOf(collection).associateBy { it.title }
+        assertEquals(
+            TogetherDecisions.AlbumArtist.One("Atif Aslam"),
+            albums.getValue("Jal Pari").artist,
+        )
+        // A record with a guest on one track is not "by A. R. Rahman", and
+        // saying so would be contradicted by its own third row.
+        assertEquals(TogetherDecisions.AlbumArtist.Various, albums.getValue("Rockstar").artist)
+        // Nobody said, which is not the same claim as "various".
+        val untagged = TogetherDecisions.albumsOf(
+            listOf(
+                track("track01", artist = TogetherDecisions.MEDIASTORE_UNKNOWN, album = "Rip"),
+                track("track02", artist = "", album = "Rip"),
+            ),
+        )
+        assertEquals(TogetherDecisions.AlbumArtist.Unknown, untagged.single().artist)
+    }
+
+    @Test
+    fun twoRecordsThatShareANameStayApartWhenMediaStoreKnowsTheyAreTwo() {
+        // The reason the album id is the key and the title only the fallback.
+        val albums = TogetherDecisions.albumsOf(
+            listOf(
+                track("Song A", "One Band", "Greatest Hits", albumId = 1L),
+                track("Song B", "Another Band", "Greatest Hits", albumId = 2L),
+            ),
+        )
+        assertEquals(2, albums.size)
+        assertEquals(listOf("Greatest Hits", "Greatest Hits"), albums.map { it.title })
+        assertNotEquals(albums[0].key, albums[1].key)
+    }
+
+    @Test
+    fun withNoAlbumIdTheNameIsTheKey() {
+        // A stated limit rather than a hidden one: two untagged records that
+        // share a name merge, and splitting them by artist would scatter an
+        // untagged compilation into one tile per guest instead.
+        val albums = TogetherDecisions.albumsOf(
+            listOf(
+                track("Song A", "One Band", "Greatest Hits", albumId = null),
+                track("Song B", "Another Band", "greatest hits", albumId = null),
+            ),
+        )
+        assertEquals(1, albums.size)
+        assertEquals(2, albums.single().tracks.size)
+    }
+
+    @Test
+    fun theTracksThatNameNoAlbumAreKeptAndComeLast() {
+        val albums = TogetherDecisions.albumsOf(
+            listOf(
+                track("Loose One", albumId = null),
+                // `<unknown>` is the provider's placeholder, not an album called
+                // that — the same rule the subtitle follows.
+                track("Loose Two", album = TogetherDecisions.MEDIASTORE_UNKNOWN, albumId = null),
+                track("Zebra", album = "Zoology", albumId = 5L),
+            ),
+        )
+        assertEquals(listOf("Zoology", null), albums.map { it.title })
+        val leftovers = albums.last()
+        assertEquals(TogetherDecisions.NO_ALBUM_KEY, leftovers.key)
+        assertEquals(listOf("Loose One", "Loose Two"), leftovers.tracks.map { it.title })
+    }
+
+    @Test
+    fun everyTrackLandsInExactlyOneAlbum() {
+        // The property worth pinning: a grouping that quietly dropped what it
+        // could not classify would make part of someone's music unreachable, and
+        // the only symptom would be a library that looks smaller than it is.
+        val awkward = collection + listOf(
+            track("No Album", albumId = null),
+            track("Blank Album", album = "   ", albumId = null),
+            track("Same Name", album = "Rockstar", albumId = 99L),
+        )
+        val grouped = TogetherDecisions.albumsOf(awkward).flatMap { it.tracks }
+        assertEquals(awkward.size, grouped.size)
+        assertEquals(awkward.map { it.uri }.toSet(), grouped.map { it.uri }.toSet())
+    }
+
+    @Test
+    fun anAlbumWithNoTracksIsNotAnAlbum() {
+        // `cover` reads first(); the invariant is refused at construction rather
+        // than pushed to the screen as a nullability it cannot draw.
+        assertThrows(IllegalArgumentException::class.java) {
+            TogetherDecisions.Album(
+                key = "id:1",
+                title = "Rockstar",
+                artist = TogetherDecisions.AlbumArtist.Unknown,
+                tracks = emptyList(),
+            )
+        }
+    }
+
+    @Test
+    fun theAlbumIdWinsOverTheName() {
+        assertEquals("id:7", TogetherDecisions.albumKeyOf(track("x", album = "Rockstar", albumId = 7L)))
+        assertEquals(
+            "name:rockstar",
+            TogetherDecisions.albumKeyOf(track("x", album = "Rockstar", albumId = null)),
+        )
+        assertEquals(
+            TogetherDecisions.NO_ALBUM_KEY,
+            TogetherDecisions.albumKeyOf(track("x", album = null, albumId = null)),
+        )
+    }
+
+    @Test
+    fun typingSwitchesFromCoversToTracks() {
+        // A search is for a song at least as often as for a record, and a grid of
+        // covers cannot show which track matched.
+        for (nothingTyped in listOf("", "   ")) {
+            val view = TogetherDecisions.browse(collection, nothingTyped)
+            assertTrue("$nothingTyped should browse covers", view is TogetherDecisions.Browse.Albums)
+        }
+        val searched = TogetherDecisions.browse(collection, "rahman")
+        assertEquals(
+            TogetherDecisions.Browse.Tracks(TogetherDecisions.filterTracks(collection, "rahman")),
+            searched,
+        )
+        assertEquals(
+            listOf("Kun Faya Kun", "Nadaan Parindey"),
+            (searched as TogetherDecisions.Browse.Tracks).tracks.map { it.title },
+        )
     }
 
     // ── What is on offer ────────────────────────────────────────────────────
@@ -878,6 +1040,88 @@ class TogetherDecisionsTest {
             TogetherDecisions.StartStep.ConfirmTakeover(ana),
             TogetherDecisions.startStep(pairing = ana, sessionLive = true, weLead = false),
         )
+    }
+
+    @Test
+    fun tappingASongInYourOwnLibraryPlaysIt() {
+        // §18's argument, one screen earlier: a music player that stops to ask
+        // who with before a single note plays is unusable exactly when it is most
+        // useful. The other routes — a pasted link, a picked file — still ask,
+        // because those gestures are aimed at somebody.
+        assertEquals(
+            TogetherDecisions.StartStep.PlayNow(TogetherDecisions.ALONE),
+            TogetherDecisions.startStepInLibrary(
+                pairing = null,
+                choosingPerson = false,
+                sessionLive = false,
+                weLead = false,
+            ),
+        )
+        // And the sheet is still there for whoever asks for it.
+        assertEquals(
+            TogetherDecisions.StartStep.AskWho,
+            TogetherDecisions.startStepInLibrary(
+                pairing = null,
+                choosingPerson = true,
+                sessionLive = false,
+                weLead = false,
+            ),
+        )
+    }
+
+    @Test
+    fun thePersonButtonIsTheWayOutOfListeningAlone() {
+        // The case `startStep` cannot answer: already paired with nobody, so it
+        // says PlayNow and a solo session would have no route to a shared one
+        // short of ending it.
+        assertEquals(
+            TogetherDecisions.StartStep.PlayNow(TogetherDecisions.ALONE),
+            TogetherDecisions.startStep(
+                pairing = TogetherDecisions.ALONE,
+                sessionLive = true,
+                weLead = true,
+            ),
+        )
+        assertTrue(TogetherDecisions.mayChoosePerson(TogetherDecisions.ALONE))
+        assertEquals(
+            TogetherDecisions.StartStep.AskWho,
+            TogetherDecisions.startStepInLibrary(
+                pairing = TogetherDecisions.ALONE,
+                choosingPerson = true,
+                sessionLive = true,
+                weLead = true,
+            ),
+        )
+    }
+
+    @Test
+    fun thereIsNobodyToOfferOnceThereIsSomebody() {
+        // §16's rule: the person is chosen once per session. So the button is not
+        // on screen, and an armed flag surviving from before cannot smuggle the
+        // sheet back in and swap a peer mid-session.
+        assertTrue(TogetherDecisions.mayChoosePerson(null))
+        assertFalse(TogetherDecisions.mayChoosePerson(ana))
+        for (choosing in listOf(true, false)) {
+            assertEquals(
+                "an armed person button must not change a paired session",
+                TogetherDecisions.StartStep.ConfirmTakeover(ana),
+                TogetherDecisions.startStepInLibrary(
+                    pairing = ana,
+                    choosingPerson = choosing,
+                    sessionLive = true,
+                    weLead = false,
+                ),
+            )
+            assertEquals(
+                TogetherDecisions.StartStep.PlayNow(ana),
+                TogetherDecisions.startStepInLibrary(
+                    pairing = ana,
+                    choosingPerson = choosing,
+                    sessionLive = true,
+                    weLead = true,
+                ),
+            )
+        }
     }
 
     @Test

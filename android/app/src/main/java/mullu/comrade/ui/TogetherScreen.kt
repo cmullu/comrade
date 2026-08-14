@@ -19,6 +19,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -28,6 +29,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -74,6 +79,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -458,6 +464,14 @@ private sealed interface Chosen {
     data class Track(
         val track: TogetherDecisions.Track,
         val queue: List<TogetherDecisions.Track>,
+        /**
+         * Picked out of the phone's own library, which plays rather than asking
+         * who with — [TogetherDecisions.startStepInLibrary]'s rule and the
+         * reasoning behind it. A catalogue search produces the same
+         * [TogetherDecisions.Track] and is **not** the library, so the flag is
+         * carried rather than inferred from the type.
+         */
+        val fromLibrary: Boolean,
     ) : Chosen
 
     /** A YouTube video or a public media URL, already classified by core. */
@@ -497,6 +511,11 @@ private fun PlayerHome(
     val context = LocalContext.current
     var step by remember { mutableStateOf<HomeStep>(HomeStep.Choosing) }
     var chosen by remember { mutableStateOf<Chosen?>(null) }
+    // The person button in the library, armed. Held here rather than in the
+    // browser because the sheet it leads to is drawn from here, and it is cleared
+    // when a session actually starts — otherwise the tap *after* the one that
+    // asked would ask again, having been answered.
+    var choosingPerson by remember { mutableStateOf(false) }
     // Chosen, and waiting for a yes because it would stop what they put on.
     var confirming by remember { mutableStateOf<Pair<Chosen, TogetherDecisions.Pairing>?>(null) }
     val pairing by TogetherManager.pairing.collectAsState()
@@ -547,7 +566,20 @@ private fun PlayerHome(
                     askToReadLibrary.launch(MediaLibraryAccess.permissionFor(Build.VERSION.SDK_INT))
                 },
                 onBack = { step = HomeStep.Choosing },
-                onPlay = { track, shown -> chosen = Chosen.Track(track, shown) },
+                // Both halves gated on the same answer, so an armed flag cannot
+                // outlive the button: an invitation accepted while this screen is
+                // open puts a real person in the session, and a note still
+                // promising to ask who with would be a promise
+                // `startStepInLibrary` no longer keeps.
+                choosingPerson = choosingPerson && TogetherDecisions.mayChoosePerson(pairing),
+                onChoosePerson = if (TogetherDecisions.mayChoosePerson(pairing)) {
+                    { choosingPerson = !choosingPerson }
+                } else {
+                    null
+                },
+                onPlay = { track, shown ->
+                    chosen = Chosen.Track(track, shown, fromLibrary = true)
+                },
             )
 
             is HomeStep.Linking -> LinkField(
@@ -557,7 +589,9 @@ private fun PlayerHome(
 
             is HomeStep.Searching -> SearchByName(
                 onBack = { step = HomeStep.Choosing },
-                onPlay = { chosenTrack, shown -> chosen = Chosen.Track(chosenTrack, shown) },
+                onPlay = { chosenTrack, shown ->
+                    chosen = Chosen.Track(chosenTrack, shown, fromLibrary = false)
+                },
             )
         }
     }
@@ -565,22 +599,43 @@ private fun PlayerHome(
     // What happens next to whatever was just chosen. The three answers are
     // `TogetherDecisions.startStep`'s, so the sheet, the question and the
     // straight-to-playing case cannot disagree about which applies.
+    //
+    // **Two rules, and only the library's changed.** A tap in your own
+    // collection plays — `startStepInLibrary`, and §18's argument for why. A
+    // pasted link or a picked file is a gesture aimed at somebody, so those still
+    // ask through `startStep` exactly as before.
     chosen?.let { what ->
+        val sessionLive = live is TogetherManager.UiState.Live
+        val weLead = (live as? TogetherManager.UiState.Live)?.weLead ?: false
         when (
-            val next = TogetherDecisions.startStep(
-                pairing = pairing,
-                sessionLive = live is TogetherManager.UiState.Live,
-                weLead = (live as? TogetherManager.UiState.Live)?.weLead ?: false,
-            )
+            val next = if (what is Chosen.Track && what.fromLibrary) {
+                TogetherDecisions.startStepInLibrary(
+                    pairing = pairing,
+                    choosingPerson = choosingPerson,
+                    sessionLive = sessionLive,
+                    weLead = weLead,
+                )
+            } else {
+                TogetherDecisions.startStep(
+                    pairing = pairing,
+                    sessionLive = sessionLive,
+                    weLead = weLead,
+                )
+            }
         ) {
             // The second step, over whichever of the three is showing. A sheet
             // rather than a screen because the thing they just chose is still
             // behind it, which is the difference between "and who with?" and
             // starting over.
+            //
+            // Dismissing it leaves the person button armed on purpose: closing
+            // the sheet without picking anybody is "not them", not "never mind"
+            // — the question has not been answered yet.
             is TogetherDecisions.StartStep.AskWho -> ListenWithSheet(
                 onDismiss = { chosen = null },
                 onChosen = { listener ->
                     chosen = null
+                    choosingPerson = false
                     failed = !startWith(
                         context,
                         what,
@@ -591,6 +646,7 @@ private fun PlayerHome(
                 },
                 onAlone = {
                     chosen = null
+                    choosingPerson = false
                     // The same call as any other, with the pairing that has
                     // nobody in it — which is what keeps listening alone from
                     // being a second implementation of the player.
@@ -841,22 +897,33 @@ private fun SourceCard(
 }
 
 /**
- * The phone's own music, as a list.
+ * The phone's own music — the collection as covers, and a query as a list.
  *
  * Read on a background thread and once per grant, not per recomposition: a
  * `MediaStore` query with two thousand rows in it is not something to run while
- * somebody types into the search field. The filtering is
- * [TogetherDecisions.filterTracks] over the list already in memory, which is why
- * typing is instant and why the behaviour is testable.
+ * somebody types into the search field. Which of the two views is showing is
+ * [TogetherDecisions.browse]'s answer and the grouping is
+ * [TogetherDecisions.albumsOf]'s, both over the list already in memory — which
+ * is why typing is instant and why the behaviour is checked before CI.
+ *
+ * @param choosingPerson the person button is armed, so the next pick asks who
+ *   with rather than playing. The caller gates it on the same answer as
+ *   [onChoosePerson], so it is never `true` while that is `null` — this file may
+ *   draw the armed note without checking twice.
+ * @param onChoosePerson arm or disarm that button, or `null` when there is
+ *   nobody to offer — which is [TogetherDecisions.mayChoosePerson]'s call and
+ *   not this file's.
  */
 @Composable
 private fun LibraryBrowser(
     libraryGranted: Boolean,
     onAsk: () -> Unit,
     onBack: () -> Unit,
+    choosingPerson: Boolean,
+    onChoosePerson: (() -> Unit)?,
     /**
-     * The track, **and the list it came out of** — which is the list as the
-     * search field had narrowed it, not the whole library. That is what the
+     * The track, **and the list it came out of** — the album it was opened from,
+     * or the library as the search field had narrowed it. That is what the
      * person was looking at when they chose, so it is what next should mean.
      */
     onPlay: (TogetherDecisions.Track, List<TogetherDecisions.Track>) -> Unit,
@@ -864,6 +931,10 @@ private fun LibraryBrowser(
     val context = LocalContext.current
     var page by remember { mutableStateOf<MusicLibrary.Page?>(null) }
     var query by remember { mutableStateOf("") }
+    // Which record is open, held as its key rather than as the album itself: the
+    // library is re-read when a permission is granted, and a held `Album` would
+    // go on drawing the tracks of a list that no longer exists.
+    var openAlbum by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(libraryGranted) {
         page = if (libraryGranted) {
@@ -876,8 +947,45 @@ private fun LibraryBrowser(
     // held after the browser is gone is memory nothing is looking at.
     DisposableEffect(Unit) { onDispose { MusicLibrary.forgetArtwork() } }
 
+    val loaded = page
+    val view = remember(loaded, query) {
+        TogetherDecisions.browse(loaded?.tracks.orEmpty(), query)
+    }
+    // Resolved out of the view rather than remembered beside it, so a record
+    // that stopped existing between two reads closes itself instead of showing
+    // an empty screen with a back button.
+    //
+    // Deliberately *not* wrapped in `remember`: the keys would have to include
+    // `view`, and comparing that means a structural equals over every track in
+    // the library on each recomposition — more expensive than the scan it would
+    // be caching, which is one pass over a few hundred albums.
+    val open = (view as? TogetherDecisions.Browse.Albums)
+        ?.albums
+        ?.firstOrNull { it.key == openAlbum }
+    val noAlbum = stringResource(R.string.together_album_none)
+
     Column(Modifier.fillMaxSize()) {
-        BrowserHeader(stringResource(R.string.together_source_phone), onBack)
+        BrowserHeader(
+            title = open?.let { it.title ?: noAlbum }
+                ?: stringResource(R.string.together_source_phone),
+            // One step up, not out: inside a record, back closes the record. A
+            // back arrow that left the whole browser from two levels down is the
+            // navigation bug every drill-in gets wrong once.
+            onBack = { if (open != null) openAlbum = null else onBack() },
+            choosingPerson = choosingPerson,
+            onChoosePerson = onChoosePerson,
+        )
+        if (choosingPerson) {
+            // The tint on the button says *armed*; this says what armed means.
+            // A toggle whose only feedback is a colour is a toggle nobody is
+            // sure they pressed.
+            Text(
+                stringResource(R.string.together_choosing_person_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+        }
         if (!libraryGranted) {
             // Asking, not an empty list: "no music here" and "not allowed to
             // look" are different sentences with different next steps, the same
@@ -911,19 +1019,20 @@ private fun LibraryBrowser(
             }
             return@Column
         }
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            singleLine = true,
-            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-            placeholder = { Text(stringResource(R.string.together_library_search)) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-        )
-        val loaded = page
-        val shown = remember(loaded, query) {
-            TogetherDecisions.filterTracks(loaded?.tracks.orEmpty(), query)
+        // Not while a record is open: everything on that screen is one album's
+        // worth, so there is nothing there to narrow, and a field that switched
+        // the view out from under the record would make back mean two things.
+        if (open == null) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                placeholder = { Text(stringResource(R.string.together_library_search)) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+            )
         }
         when {
             loaded == null -> Text(
@@ -932,45 +1041,92 @@ private fun LibraryBrowser(
                 color = TogetherMuted,
             )
 
-            shown.isEmpty() -> Text(
-                stringResource(
-                    if (loaded.tracks.isEmpty()) {
-                        R.string.together_library_empty
-                    } else {
-                        R.string.together_library_no_match
-                    },
-                ),
+            // One record, opened from the grid. Its own tracks are the queue,
+            // which is what the person was looking at when they chose.
+            open != null -> LazyColumn(Modifier.fillMaxSize()) {
+                items(open.tracks, key = { it.uri }) { track ->
+                    TrackRow(track, onClick = { onPlay(track, open.tracks) })
+                }
+                if (loaded.truncated) item(key = "truncated") { TruncatedNote() }
+            }
+
+            // The two "nothing" sentences, which are different sentences: with
+            // nothing typed an empty answer means the phone has no music, and
+            // with something typed it means that query found none. That used to
+            // be two conditions read off one list; now it falls out of which
+            // view [TogetherDecisions.browse] returned.
+            view is TogetherDecisions.Browse.Albums && view.albums.isEmpty() -> Text(
+                stringResource(R.string.together_library_empty),
                 style = MaterialTheme.typography.bodyMedium,
                 color = TogetherMuted,
             )
 
-            else -> LazyColumn(Modifier.fillMaxSize()) {
+            view is TogetherDecisions.Browse.Tracks && view.tracks.isEmpty() -> Text(
+                stringResource(R.string.together_library_no_match),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TogetherMuted,
+            )
+
+            view is TogetherDecisions.Browse.Albums -> LazyVerticalGrid(
+                // Adaptive rather than a fixed column count, so the same code
+                // draws two columns on a phone and five on a tablet or in
+                // landscape — the alternative is a screen-width breakpoint this
+                // file would have to guess.
+                columns = GridCells.Adaptive(minSize = GRID_TILE_DP.dp),
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
+            ) {
                 // A stable key, like every data-driven list in this app: without
-                // one, row state reattaches to the wrong item as the filter
-                // narrows.
-                items(shown, key = { it.uri }) { track ->
-                    TrackRow(track, onClick = { onPlay(track, shown) })
+                // one, tile state reattaches to the wrong item as the library is
+                // re-read.
+                items(view.albums, key = { it.key }) { album ->
+                    AlbumTile(album, noAlbum = noAlbum, onClick = { openAlbum = album.key })
                 }
                 if (loaded.truncated) {
-                    item(key = "truncated") {
-                        // Said out loud. A list silently cut off reads as "that
-                        // is all your music", and the person whose album is past
-                        // the cut concludes the feature cannot see it.
-                        Text(
-                            stringResource(R.string.together_library_truncated),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TogetherMuted,
-                            modifier = Modifier.padding(16.dp),
-                        )
-                    }
+                    item(key = "truncated", span = { GridItemSpan(maxLineSpan) }) { TruncatedNote() }
                 }
+            }
+
+            view is TogetherDecisions.Browse.Tracks -> LazyColumn(Modifier.fillMaxSize()) {
+                items(view.tracks, key = { it.uri }) { track ->
+                    TrackRow(track, onClick = { onPlay(track, view.tracks) })
+                }
+                if (loaded.truncated) item(key = "truncated") { TruncatedNote() }
             }
         }
     }
 }
 
+/**
+ * Said out loud, at the end of whichever view is showing.
+ *
+ * A list silently cut off reads as "that is all your music", and the person
+ * whose album is past the cut concludes the feature cannot see it.
+ */
 @Composable
-private fun BrowserHeader(title: String, onBack: () -> Unit) {
+private fun TruncatedNote() {
+    Text(
+        stringResource(R.string.together_library_truncated),
+        style = MaterialTheme.typography.bodySmall,
+        color = TogetherMuted,
+        modifier = Modifier.padding(16.dp),
+    )
+}
+
+/**
+ * @param onChoosePerson the person button, or `null` when there is nobody left
+ *   to offer — [TogetherDecisions.mayChoosePerson] decides, and the routing asks
+ *   it again, so the button and the action cannot disagree about when it applies.
+ */
+@Composable
+private fun BrowserHeader(
+    title: String,
+    onBack: () -> Unit,
+    choosingPerson: Boolean = false,
+    onChoosePerson: (() -> Unit)? = null,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -984,8 +1140,100 @@ private fun BrowserHeader(title: String, onBack: () -> Unit) {
                 tint = TogetherText,
             )
         }
-        Text(title, style = MaterialTheme.typography.titleLarge, color = TogetherText)
+        Text(
+            title,
+            style = MaterialTheme.typography.titleLarge,
+            color = TogetherText,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        onChoosePerson?.let { choose ->
+            IconButton(onClick = choose) {
+                Icon(
+                    Icons.Filled.Person,
+                    contentDescription = stringResource(R.string.together_choose_person),
+                    tint = if (choosingPerson) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        TogetherMuted
+                    },
+                )
+            }
+        }
     }
+}
+
+/**
+ * One record in the grid: its cover, its name, and who it is by.
+ *
+ * @param noAlbum what to call the group whose files name no album. Passed in
+ *   rather than read here so the header and the tile cannot call it two
+ *   different things.
+ */
+@Composable
+private fun AlbumTile(
+    album: TogetherDecisions.Album,
+    noAlbum: String,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Cover(
+            uri = album.cover.uri,
+            albumId = album.cover.albumId,
+            requestDp = GRID_COVER_DP,
+            corner = 12.dp,
+            glyphDp = 34,
+            // Square, and sized by the column rather than by a fixed number:
+            // `GridCells.Adaptive` decides the width, and a tile that set its
+            // own would stop being square on every screen but one.
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f),
+        )
+        Text(
+            album.title ?: noAlbum,
+            style = MaterialTheme.typography.bodyMedium,
+            color = TogetherText,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            albumSubtitle(album),
+            style = MaterialTheme.typography.bodySmall,
+            color = TogetherMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * The line under an album's name.
+ *
+ * The three artist answers are [TogetherDecisions.AlbumArtist]'s, and each gets
+ * its own sentence: naming one person, saying they differ, or saying nothing at
+ * all. "Various artists" over four untagged rips would be inventing the one
+ * fact the files withheld, which is why `Unknown` is not folded into `Various`.
+ */
+@Composable
+private fun albumSubtitle(album: TogetherDecisions.Album): String {
+    val count = pluralStringResource(
+        R.plurals.together_album_tracks,
+        album.tracks.size,
+        album.tracks.size,
+    )
+    val artist = when (val by = album.artist) {
+        is TogetherDecisions.AlbumArtist.One -> by.name
+        TogetherDecisions.AlbumArtist.Various -> stringResource(R.string.together_album_various)
+        TogetherDecisions.AlbumArtist.Unknown -> null
+    }
+    return listOfNotNull(artist, count).joinToString(TogetherDecisions.SUBTITLE_SEPARATOR)
 }
 
 @Composable
@@ -2282,6 +2530,27 @@ private fun Sleeve(s: TogetherManager.UiState.Live) {
  */
 private const val SLEEVE_COVER_DP = 320
 private const val ROW_COVER_DP = 48
+
+/**
+ * The narrowest a cover tile may be before the grid drops a column.
+ *
+ * Chosen so a 360 dp phone gets two columns with room for the name under each,
+ * and a tablet or a landscape phone gets as many as fit — which is what
+ * `GridCells.Adaptive` is for, and it is why this is a minimum rather than a
+ * column count.
+ */
+private const val GRID_TILE_DP = 152
+
+/**
+ * What the provider is asked for, per tile.
+ *
+ * Deliberately smaller than [GRID_TILE_DP] would suggest at 3× density: these
+ * are decoded a screenful at a time and cached, and asking for the full pixel
+ * width of every tile is how a grid turns into several megabytes of bitmaps.
+ * `loadThumbnail` scales for us and a cover is a photograph, so the difference
+ * is not visible at this size.
+ */
+private const val GRID_COVER_DP = 144
 
 /**
  * Scrubber and transport.

@@ -731,10 +731,21 @@ object TogetherDecisions {
      * treated as absent here, where every caller inherits the answer.
      */
     fun trackSubtitle(track: Track): String = listOfNotNull(
-        track.artist.takeIf { it.isNotBlank() && it != MEDIASTORE_UNKNOWN },
-        track.album?.takeIf { it.isNotBlank() && it != MEDIASTORE_UNKNOWN },
+        named(track.artist),
+        named(track.album),
         track.durationMs.takeIf { it > 0 }?.let { clock(it) },
     ).joinToString(SUBTITLE_SEPARATOR)
+
+    /**
+     * A tag as something to show someone, or `null` when the file did not
+     * really say.
+     *
+     * One rule in one place, because three callers now need it and a fourth
+     * that spelled it differently would put the literal string `<unknown>` on
+     * screen for one of them and not the others.
+     */
+    fun named(tag: String?): String? =
+        tag?.takeIf { it.isNotBlank() && it != MEDIASTORE_UNKNOWN }
 
     /** `MediaStore`'s placeholder for a tag the file does not carry. */
     const val MEDIASTORE_UNKNOWN = "<unknown>"
@@ -768,6 +779,175 @@ object TogetherDecisions {
             words.all { haystack.contains(it) }
         }
     }
+
+    // ── The library as albums, because that is how a collection is browsed ───
+    //
+    // A flat title-ordered list of two thousand tracks is a search result, not a
+    // library: it puts one record's third song next to a different record's
+    // third song, and the only way to find an album is to remember the name of
+    // something on it. A collection is browsed by cover — which is also the one
+    // piece of metadata a phone reliably has, since `MediaStore` gives artwork
+    // per album and nothing per track.
+    //
+    // So albums are what the browser shows and the flat list is what a *query*
+    // produces. [browse] is the single place that chooses between them, which is
+    // what keeps the screen from having a fourth opinion about it.
+
+    /** Who an album is by, which is three different answers and not two. */
+    sealed interface AlbumArtist {
+        /** Every track that said anything said the same thing. */
+        data class One(val name: String) : AlbumArtist
+
+        /**
+         * They disagree — a compilation, or a record with a guest credited per
+         * track. Naming the first one would be a claim about the album that one
+         * of its own tracks contradicts.
+         */
+        data object Various : AlbumArtist
+
+        /**
+         * Nobody said.
+         *
+         * Deliberately not folded into [Various]: an untagged rip is not a
+         * compilation, and a tile reading "Various artists" over four songs from
+         * one gig would be inventing the one fact the files withheld.
+         */
+        data object Unknown : AlbumArtist
+    }
+
+    /**
+     * One album's worth of the library, ready to draw as a tile.
+     *
+     * [title] is `null` for the one group that is not an album: tracks whose
+     * files name none. They are kept rather than dropped — a phone full of
+     * untagged rips would otherwise browse as an empty library — and the screen
+     * names that group, because this file has no strings in it.
+     */
+    data class Album(
+        val key: String,
+        val title: String?,
+        val artist: AlbumArtist,
+        val tracks: List<Track>,
+    ) {
+        init {
+            // Only [albumsOf] builds these and it builds them out of a grouping,
+            // so an empty one cannot arise there. Refused rather than tolerated
+            // because [cover] reads `first()`, and a lenient `firstOrNull` would
+            // push a nullability the screen has nothing useful to do with.
+            require(tracks.isNotEmpty()) { "an album with no tracks is not an album" }
+        }
+
+        /**
+         * The track whose artwork stands for the album.
+         *
+         * The first, not a search for one that has a cover: whether a file has
+         * artwork is not knowable without asking `MediaStore`, which is IO, and
+         * a grouping function that did IO would stop being testable — the whole
+         * reason this file is worth having.
+         */
+        val cover: Track get() = tracks.first()
+    }
+
+    /** The group tracks land in when their file names no album at all. */
+    const val NO_ALBUM_KEY = "none"
+
+    /**
+     * The library, grouped into albums, in the order they are offered.
+     *
+     * Sorted by album title rather than left in the order the tracks arrived.
+     * That is the opposite of [filterTracks]' rule and for the same underlying
+     * reason: this list is not re-computed under a moving finger — a query
+     * switches to [Browse.Tracks] instead of re-ranking these — so alphabetical
+     * is a help here where it would be a jumping list there. The provider's
+     * track order is title-ordered, so grouping alone would sort records by
+     * whichever of their songs happens to come first in the alphabet.
+     *
+     * **Every track lands in exactly one album**, which is pinned by a test
+     * rather than left to reading: a grouping that silently dropped the rows it
+     * could not classify would make part of someone's music unreachable, and the
+     * only symptom would be a library that looks smaller than it is.
+     */
+    fun albumsOf(tracks: List<Track>): List<Album> {
+        val groups = LinkedHashMap<String, MutableList<Track>>()
+        for (track in tracks) groups.getOrPut(albumKeyOf(track)) { mutableListOf() } += track
+        return groups.map { (key, rows) ->
+            Album(
+                key = key,
+                // The first row that named it. They agree by construction when
+                // the key came from an album id; when it came from the title
+                // they are the same string.
+                title = rows.firstNotNullOfOrNull { named(it.album) },
+                artist = albumArtistOf(rows),
+                // Within an album, the provider's order is kept — which is title
+                // order, not track order, because `MediaStore.Audio.Media.TRACK`
+                // is not in the projection. A stated gap: it is the one thing
+                // that would make an album read as the record does.
+                tracks = rows.toList(),
+            )
+        }.sortedWith(
+            compareBy(
+                // The no-album group last, wherever its name would have put it:
+                // it is the leftovers, and leftovers do not belong between two
+                // records.
+                { it.title == null },
+                { it.title?.lowercase() ?: "" },
+            ),
+        )
+    }
+
+    /**
+     * Which album a track belongs to.
+     *
+     * The album id when there is one, because two records can share a name and
+     * `MediaStore` is the only thing that knows they are different. The title is
+     * the fallback and it is deliberately the *whole* key: a name collision
+     * between two untagged records merges them into one tile, which is accepted
+     * rather than fixed by adding the artist — this path is the untagged
+     * remainder, and splitting *that* by artist would scatter a compilation
+     * nobody tagged into one tile per guest, which is the worse of the two
+     * wrong answers.
+     */
+    fun albumKeyOf(track: Track): String {
+        track.albumId?.let { return "id:$it" }
+        val title = named(track.album) ?: return NO_ALBUM_KEY
+        return "name:${title.lowercase()}"
+    }
+
+    private fun albumArtistOf(tracks: List<Track>): AlbumArtist {
+        // Case-insensitively distinct, keeping the first spelling: two rips of
+        // one record that disagree about capitalisation are not a compilation.
+        val names = tracks.mapNotNull { named(it.artist) }.distinctBy { it.lowercase() }
+        return when {
+            names.isEmpty() -> AlbumArtist.Unknown
+            names.size == 1 -> AlbumArtist.One(names.first())
+            else -> AlbumArtist.Various
+        }
+    }
+
+    /** What the library browser is showing. */
+    sealed interface Browse {
+        /** Nothing typed: the collection, by cover. */
+        data class Albums(val albums: List<Album>) : Browse
+
+        /** A query: the matching tracks, in the provider's order. */
+        data class Tracks(val tracks: List<Track>) : Browse
+    }
+
+    /**
+     * Covers to browse, or tracks to pick from — decided by whether anything has
+     * been typed.
+     *
+     * A search is for a song at least as often as for a record, and an album
+     * grid cannot show which of an album's tracks matched. So typing switches to
+     * the list, which is also why the grid never has to re-rank: it is only ever
+     * the whole library.
+     */
+    fun browse(tracks: List<Track>, query: String): Browse =
+        if (query.isBlank()) {
+            Browse.Albums(albumsOf(tracks))
+        } else {
+            Browse.Tracks(filterTracks(tracks, query))
+        }
 
     /**
      * What the Together tab can offer, given what it is allowed to do.
@@ -1174,6 +1354,56 @@ object TogetherDecisions {
         isAlone(pairing) -> StartStep.PlayNow(pairing)
         sessionLive && !weLead -> StartStep.ConfirmTakeover(pairing)
         else -> StartStep.PlayNow(pairing)
+    }
+
+    /**
+     * Whether there is anyone to offer to listen with.
+     *
+     * `false` once a real person is in the session, which is §16's rule — the
+     * person is chosen once per session, not once per track — so the button that
+     * offers it must go away rather than sit there implying a peer can be
+     * swapped mid-session. Listening **alone** is not that case: nobody is being
+     * dropped, so the offer stands.
+     *
+     * Both the button's visibility and [startStepInLibrary] read this, so they
+     * cannot disagree about when it applies — the same reason
+     * `PlaybackModeDecision.ownershipFor` is asked twice rather than inlined
+     * once.
+     */
+    fun mayChoosePerson(pairing: Pairing?): Boolean = pairing == null || isAlone(pairing)
+
+    /**
+     * [startStep], for a tap in the phone's own library — where a tap plays.
+     *
+     * **This is the library's rule and not the tab's**, and the difference is
+     * the point. Pasting a link or picking a file is a gesture aimed at somebody
+     * ("watch this with me"), so those routes still ask through [startStep] and
+     * are unchanged. Tapping a song in your own collection is what a music
+     * player is for, and §18's argument — that a music player insisting on a
+     * second person is unusable exactly when it is most useful — applies to the
+     * *first* tap just as much as to the session it starts. Asking "and who
+     * with?" before a single note plays is that same insistence, one screen
+     * earlier.
+     *
+     * So the sheet becomes something asked for rather than something imposed:
+     * [choosingPerson] is the person button having been tapped, and it is the
+     * only route from listening alone to listening with someone — which is why
+     * it is honoured even when [pairing] is already [ALONE], where [startStep]
+     * would answer `PlayNow` and there would be no way out of a solo session
+     * short of ending it.
+     */
+    fun startStepInLibrary(
+        pairing: Pairing?,
+        choosingPerson: Boolean,
+        sessionLive: Boolean,
+        weLead: Boolean,
+    ): StartStep = when {
+        choosingPerson && mayChoosePerson(pairing) -> StartStep.AskWho
+        // Nobody chosen and nobody asked for: play it. The pairing with nobody
+        // in it, so this is the same call every other route makes and not a
+        // second kind of session — see [ALONE].
+        pairing == null -> StartStep.PlayNow(ALONE)
+        else -> startStep(pairing, sessionLive, weLead)
     }
 
     /**

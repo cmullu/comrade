@@ -148,7 +148,14 @@ object MusicLibrary {
      * Call this off the main thread: both paths do IO.
      */
     fun artwork(context: Context, uri: String, albumId: Long?, sizePx: Int): Bitmap? {
-        val key = albumId?.toString() ?: uri
+        // **The size is part of the key, and leaving it out was a bug the album
+        // grid made visible.** Three sizes are asked for now — a 48 dp row, a
+        // 144 dp tile and the 320 dp sleeve — and a key that named only the album
+        // handed whichever was decoded first to all three. Browsing rows and then
+        // opening a record drew the sleeve from a 48 px thumbnail, upscaled;
+        // going the other way held a sleeve-sized bitmap for every row. Neither
+        // reads as a caching bug from a screenshot.
+        val key = "${albumId?.toString() ?: uri}@$sizePx"
         cache.get(key)?.let { return it }
         val loaded = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
@@ -198,15 +205,21 @@ object MusicLibrary {
         }.getOrNull()
     }
 
-    private const val CACHE_BYTES = 4 * 1024 * 1024
+    private const val CACHE_BYTES = 12 * 1024 * 1024
 
     /**
      * Covers already decoded, so scrolling back up does not decode them again.
      *
      * Sized in bytes rather than in entries, which is the only bound that means
      * anything for bitmaps — 64 rows of wildly different cover sizes is not a
-     * memory budget. Four megabytes is roughly a screenful of list thumbnails
-     * several times over, and `LruCache` evicts rather than growing.
+     * memory budget. `LruCache` evicts rather than growing.
+     *
+     * **Four megabytes was right for a list of 48 dp thumbnails and is not right
+     * for a grid of covers.** A 144 dp tile on a 3× screen is a 432 px square,
+     * which is about 750 kB as `ARGB_8888`; a screenful of six is 4.5 MB, so the
+     * old budget could not hold even one screen and scrolling re-decoded every
+     * tile it had just evicted. Twelve holds roughly four screenfuls, which is
+     * what makes a flick back up free.
      */
     private val cache = object : LruCache<String, Bitmap>(CACHE_BYTES) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount

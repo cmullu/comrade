@@ -2589,3 +2589,132 @@ then explains a licence, which is worse than not offering one.
 - **Adapters for the pluggable tier.** §20's seam is still empty.
 - **Playlists, favourites, queue and history.** Still nothing at all, and still
   the largest gap between this and a music player.
+
+## 22. Browsing a collection, and a tap that plays
+
+_Added 2026-08-14, owner request: the library as a grid of covers, and a tap that
+listens alone rather than asking who with._
+
+### A flat list of two thousand tracks is a search result, not a library
+
+`MusicLibrary.page` reads `MediaStore` ordered by **track** title, and the
+browser drew exactly that: one record's third song next to a different record's
+third song, in one column, 48 dp thumbnail on the left. It is the right shape for
+a result set and the wrong one for a collection — the only way to find an album
+in it is to remember the name of something on it, and the cover, which is the one
+piece of metadata a phone reliably has, was too small to recognise.
+
+So the browse surface is albums, and the flat list is what a **query** produces.
+`TogetherDecisions.browse` is the single place that chooses:
+
+| Typed | Shown |
+| --- | --- |
+| nothing | `Browse.Albums` — `albumsOf(tracks)`, a grid of covers |
+| anything | `Browse.Tracks` — `filterTracks`, exactly as before |
+
+Typing switches to the list because a search is for a song at least as often as
+for a record, and a grid of covers cannot show *which* of an album's tracks
+matched. That split also pays for itself twice: the grid is only ever the whole
+library, so it never re-ranks under a moving finger, and the two "nothing"
+sentences — "no music on this phone" versus "nothing matches that" — stop being
+two conditions read off one list and fall out of which view came back.
+
+**The grouping is the part worth arguing with**, and it is all in the pure file:
+
+- **The album id is the key; the title is only the fallback.** Two records can
+  share a name and `MediaStore` is the only thing that knows they are different.
+  Where there is no id, the lowercased title is the *whole* key — so two untagged
+  records called *Greatest Hits* merge. Accepted rather than fixed by adding the
+  artist: the id-less path is the untagged remainder, and splitting *that* by
+  artist would scatter a compilation nobody tagged into one tile per guest.
+- **Alphabetical by album, not the order the tracks arrived in.** The opposite of
+  `filterTracks`' rule, for the same underlying reason — this list is not
+  recomputed under a finger, so ordering helps here where it would jump there.
+  Grouping alone would have sorted records by whichever of their songs came first
+  in the alphabet, which reads as no order at all. Inside a record the provider's
+  order is kept, which is title order and **not** track order: `TRACK` is not in
+  the projection, and that is the one thing that would make an album read the way
+  the record does.
+- **Tracks that name no album are kept, in one group, last.** A phone full of
+  untagged rips would otherwise browse as an empty library. The group's `title` is
+  `null` and the screen names it, because that file has no strings in it. That
+  every track lands in exactly one album is pinned by a test rather than left to
+  reading: a grouping that silently dropped what it could not classify would make
+  part of someone's music unreachable, and the only symptom would be a library
+  that looks smaller than it is.
+- **"Various artists" and "nobody said" are different answers.**
+  `AlbumArtist.One` / `Various` / `Unknown`, three arms rather than two. A tile
+  reading *Various artists* over four untagged rips invents the one fact the files
+  withheld, so `Unknown` says nothing at all instead.
+
+### The cover cache was size-blind, and the grid is what made it visible
+
+`MusicLibrary.artwork` keyed on the album id alone. With one request size that is
+invisible; with three — a 48 dp row, a 144 dp tile, the 320 dp sleeve — whichever
+was decoded first was handed to all three. Browsing rows and then opening a
+record drew the sleeve from a 48 px thumbnail, upscaled; going the other way held
+a sleeve-sized bitmap for every row. The key now carries the size, and the budget
+went from 4 MB to 12: a 144 dp tile at 3× is a 432 px square, about 750 kB as
+`ARGB_8888`, so a screenful of six is 4.5 MB and the old budget could not hold
+even one screen — it re-decoded every tile it had just evicted. Neither half of
+that reads as a caching bug from a screenshot, which is why it is written down
+here rather than only in the diff.
+
+### A tap plays. Asking who with is something you ask for
+
+§18 made a session with nobody in it a first-class pairing, so the tab works as
+an ordinary music player once something is playing. It still opened with a
+question: choose a song, and *"and who with?"* came up before a note played.
+That is the same insistence §18 removed, one screen earlier — a music player
+that will not play until you have named a friend.
+
+So `startStepInLibrary` is the library's rule:
+
+| Paired with | Person button | Answer |
+| --- | --- | --- |
+| nobody yet | not armed | `PlayNow(ALONE)` — **the change** |
+| nobody yet | armed | `AskWho` — the sheet, as before |
+| `ALONE` | armed | `AskWho` |
+| `ALONE` | not armed | `PlayNow(ALONE)` |
+| a person | either | `startStep`'s answer, unchanged |
+
+**Only the library's rule changed.** A pasted link and a picked file are gestures
+aimed at somebody — *watch this with me* — so those routes still ask through
+`startStep`, and so does a catalogue search, which produces the same
+`TogetherDecisions.Track` and is not the library. `Chosen.Track` carries
+`fromLibrary` rather than the screen inferring it from the type.
+
+Two things this had to avoid being:
+
+- **A one-way door.** `startStep` answers `PlayNow` for a pairing that is already
+  `ALONE`, so honouring the button only when nobody is chosen would have left a
+  solo session with no route to a shared one short of ending it. It is honoured
+  whenever `mayChoosePerson` is true, which is *nobody yet or nobody in it*.
+- **A button that lies.** Once a real person is in the session §16's rule holds —
+  the person is chosen once per session, not once per track — so there is nobody
+  left to offer and the button is not drawn. Both its visibility and the routing
+  ask `mayChoosePerson`, the same doubled question `PlaybackModeDecision.
+  ownershipFor` is asked, so they cannot disagree. A flag left armed from before
+  cannot smuggle the sheet back in and swap a peer mid-session; there is a test
+  for exactly that.
+
+The armed state survives a dismissed sheet — closing it without picking anybody
+is "not them", not "never mind" — and clears when a session actually starts, so
+the tap *after* the one that asked does not ask again.
+
+### What is checked here, and what is not
+
+The grouping, the ordering, the three artist answers, the leftovers, the
+every-track-lands-somewhere property and all six rows of the table above are
+`TogetherDecisionsTest`: **117 tests, green in this sandbox** in about a minute,
+up from 105. Each new behaviour was checked by removing it and watching the test
+go red, because a test that cannot fail is not a test.
+
+`TogetherScreen.kt` and `MusicLibrary.kt` **type-check** here — the Compose lane
+resolves all 128 sources against real Compose 1.6.1 and Material3 1.2.0, and `R`
+is generated from the real resource files, so the new plural and the two new
+strings are checked to exist. That is the whole of what has been verified: no
+device has drawn this grid, no `MediaStore` has answered it, and nothing here has
+run a `LazyVerticalGrid` or decoded a cover. How it *looks* — tile size, how the
+adaptive column count lands on a real 360 dp phone, whether 144 dp of cover is
+enough — is CI's and then a handset's.

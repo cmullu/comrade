@@ -1297,6 +1297,47 @@ is small; the content problem is the real constraint:
 >   still starts a session per thing played. Recorded rather than implied,
 >   because the shared-decision convention makes silence read as agreement.
 
+> **Together, 2026-08-14 — the library browses as a collection, and a tap plays.**
+> `docs/TOGETHER.md` §22. Two owner-requested changes and one bug found under
+> them.
+>
+> The browser drew `MediaStore`'s track-title order as one flat column, which is
+> the shape of a search result rather than of a collection. It is now a grid of
+> covers with a drill-in per record, and the flat list is what a *query* produces
+> — `TogetherDecisions.browse` / `albumsOf` / `AlbumArtist`
+> (`android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt`), with
+> the id-over-title keying, the alphabetical album order, the kept-and-last
+> leftovers group and the three artist answers all pinned by tests.
+> `TogetherDecisions` is **117** JVM tests, up from 105.
+>
+> And tapping a song in your own library now plays it instead of asking who with
+> — `startStepInLibrary` / `mayChoosePerson`, §18's argument applied one screen
+> earlier. Only the library's rule changed: a pasted link, a picked file and a
+> catalogue search still ask through `startStep`.
+>
+> **Resolved here:** `MusicLibrary.artwork` keyed its cache on the album id alone,
+> so with three request sizes in play (48 dp row, 144 dp tile, 320 dp sleeve)
+> whichever decoded first was served to all three — a sleeve drawn from a 48 px
+> thumbnail after a browse, or a sleeve-sized bitmap per row going the other way.
+> The key carries the size and the budget went 4 MB → 12 MB, which is one
+> screenful of grid covers with room to flick back
+> (`MusicLibrary.kt`, `artwork` and `CACHE_BYTES`). No regression test: it needs a
+> `ContentResolver`, and there is no Robolectric lane in this repo.
+>
+> Three gaps this leaves:
+>
+> - **An album is in title order, not track order.**
+>   `MediaStore.Audio.Media.TRACK` is not in `MusicLibrary.page`'s projection, so
+>   a record's own sequence — the one thing that would make it read as the album
+>   does — is not available to `albumsOf`. Adding the column is small; deciding
+>   what to do with the disc-number encoding it carries is not.
+> - **Nothing here has been drawn.** Both files type-check via
+>   `.claude/scripts/android-typecheck-compose.sh` and the pure half runs, but no
+>   device has laid out the grid or decoded a cover into it. Tile size and how the
+>   adaptive column count lands on a 360 dp phone are unverified by construction.
+> - **The grid is Android's alone**, like the rest of §16 and §18. `desktop/ui`
+>   has no library to browse and `app/` has no together surface at all.
+
 ---
 
 ## Appendix — Review coverage
