@@ -72,6 +72,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_AttachmentHandoff value)? attachmentHandoff,
     TResult Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
+    TResult Function(BridgeEvent_TopicsChanged value)? topicsChanged,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -118,6 +119,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
         return ledgerUpdated(_that);
+      case BridgeEvent_TopicsChanged() when topicsChanged != null:
+        return topicsChanged(_that);
       case _:
         return orElse();
     }
@@ -171,6 +174,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(BridgeEvent_MeshStatusChanged value)
         meshStatusChanged,
     required TResult Function(BridgeEvent_LedgerUpdated value) ledgerUpdated,
+    required TResult Function(BridgeEvent_TopicsChanged value) topicsChanged,
   }) {
     final _that = this;
     switch (_that) {
@@ -214,6 +218,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated():
         return ledgerUpdated(_that);
+      case BridgeEvent_TopicsChanged():
+        return topicsChanged(_that);
     }
   }
 
@@ -253,6 +259,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_AttachmentHandoff value)? attachmentHandoff,
     TResult? Function(BridgeEvent_MeshStatusChanged value)? meshStatusChanged,
     TResult? Function(BridgeEvent_LedgerUpdated value)? ledgerUpdated,
+    TResult? Function(BridgeEvent_TopicsChanged value)? topicsChanged,
   }) {
     final _that = this;
     switch (_that) {
@@ -298,6 +305,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return meshStatusChanged(_that);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
         return ledgerUpdated(_that);
+      case BridgeEvent_TopicsChanged() when topicsChanged != null:
+        return topicsChanged(_that);
       case _:
         return null;
     }
@@ -339,6 +348,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(AttachmentHandoffDto field0)? attachmentHandoff,
     TResult Function(MeshStatusDto field0)? meshStatusChanged,
     TResult Function(String ledger)? ledgerUpdated,
+    TResult Function(String peer)? topicsChanged,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -385,6 +395,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
         return ledgerUpdated(_that.ledger);
+      case BridgeEvent_TopicsChanged() when topicsChanged != null:
+        return topicsChanged(_that.peer);
       case _:
         return orElse();
     }
@@ -429,6 +441,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(AttachmentHandoffDto field0) attachmentHandoff,
     required TResult Function(MeshStatusDto field0) meshStatusChanged,
     required TResult Function(String ledger) ledgerUpdated,
+    required TResult Function(String peer) topicsChanged,
   }) {
     final _that = this;
     switch (_that) {
@@ -472,6 +485,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated():
         return ledgerUpdated(_that.ledger);
+      case BridgeEvent_TopicsChanged():
+        return topicsChanged(_that.peer);
     }
   }
 
@@ -512,6 +527,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(AttachmentHandoffDto field0)? attachmentHandoff,
     TResult? Function(MeshStatusDto field0)? meshStatusChanged,
     TResult? Function(String ledger)? ledgerUpdated,
+    TResult? Function(String peer)? topicsChanged,
   }) {
     final _that = this;
     switch (_that) {
@@ -557,6 +573,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return meshStatusChanged(_that.field0);
       case BridgeEvent_LedgerUpdated() when ledgerUpdated != null:
         return ledgerUpdated(_that.ledger);
+      case BridgeEvent_TopicsChanged() when topicsChanged != null:
+        return topicsChanged(_that.peer);
       case _:
         return null;
     }
@@ -1975,6 +1993,71 @@ class _$BridgeEvent_LedgerUpdatedCopyWithImpl<$Res>
       ledger: null == ledger
           ? _self.ledger
           : ledger // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_TopicsChanged extends BridgeEvent {
+  const BridgeEvent_TopicsChanged({required this.peer}) : super._();
+
+  final String peer;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_TopicsChangedCopyWith<BridgeEvent_TopicsChanged> get copyWith =>
+      _$BridgeEvent_TopicsChangedCopyWithImpl<BridgeEvent_TopicsChanged>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_TopicsChanged &&
+            (identical(other.peer, peer) || other.peer == peer));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, peer);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.topicsChanged(peer: $peer)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_TopicsChangedCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_TopicsChangedCopyWith(BridgeEvent_TopicsChanged value,
+          $Res Function(BridgeEvent_TopicsChanged) _then) =
+      _$BridgeEvent_TopicsChangedCopyWithImpl;
+  @useResult
+  $Res call({String peer});
+}
+
+/// @nodoc
+class _$BridgeEvent_TopicsChangedCopyWithImpl<$Res>
+    implements $BridgeEvent_TopicsChangedCopyWith<$Res> {
+  _$BridgeEvent_TopicsChangedCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_TopicsChanged _self;
+  final $Res Function(BridgeEvent_TopicsChanged) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? peer = null,
+  }) {
+    return _then(BridgeEvent_TopicsChanged(
+      peer: null == peer
+          ? _self.peer
+          : peer // ignore: cast_nullable_to_non_nullable
               as String,
     ));
   }

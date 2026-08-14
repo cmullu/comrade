@@ -78,8 +78,8 @@ pub use runtime::{
     MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
     PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
     RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
-    TogetherShareDto, TurnServerStatusDto,
+    ThreadDto, ThreadSummaryDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    TogetherSessionDto, TogetherShareDto, TopicDto, TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

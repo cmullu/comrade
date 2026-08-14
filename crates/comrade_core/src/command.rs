@@ -304,6 +304,28 @@ pub enum ChatCommand {
         action: AppAction,
         targets: Vec<Mention>,
     },
+    /// File a thread under a topic — `/assign #deposit`, and the one command
+    /// whose argument is a `#` rather than an `@`.
+    ///
+    /// Carries the [`crate::topic::TopicRef`]s the argument names, spans and
+    /// all, for the same reason [`Self::Task`] carries [`Mention`]s: the
+    /// composer draws a chip over its own input box without knowing where the
+    /// command name ended. `topics` is empty when the argument named nothing
+    /// usable — `/assign` alone, or `/assign #🏠` — which is a question for the
+    /// composer to ask rather than an error for the grammar to invent. Both
+    /// shipping frontends answer it by opening the topic picker, so a bare
+    /// `/assign` is the discoverable way in rather than a refusal.
+    ///
+    /// **Which thread is not in here.** The grammar sees text; the thread comes
+    /// from what the composer has selected, and a frontend that had to guess
+    /// would file the wrong conversation. `docs/CHAT_THREADS.md` §3 has the
+    /// rule the frontends share.
+    ///
+    /// The verb is back, and this is not a reversal of the note on
+    /// [`AppAction::offer_line`]. `/assign` was dropped for *actions* because
+    /// you cannot assign somebody a breath. A topic is a filing cabinet, not a
+    /// person: assigning a thread to one claims nothing about anybody's state.
+    AssignTopic { topics: Vec<crate::topic::TopicRef> },
     /// `/pay` — recognised so it is not reported as unknown, then left to
     /// [`crate::vault::extract_upi_intents`], which already owns it.
     Pay,
@@ -386,6 +408,13 @@ pub fn catalog() -> Vec<CommandSpec> {
             "<what needs doing> [@who]",
             "Name a piece of work — yours, or ask a comrade",
             true
+        ),
+        spec!(
+            "assign",
+            ["topic", "file"],
+            "#topic",
+            "File the message you replied to under a topic",
+            false
         ),
         spec!(
             "comrade-breathe",
@@ -519,6 +548,9 @@ pub fn parse(text: &str) -> ChatCommand {
                 assignees: shifted(found, rest_at),
             }
         }
+        Some("assign") => ChatCommand::AssignTopic {
+            topics: shifted_topics(crate::topic::topic_refs(rest), rest_at),
+        },
         Some("tara") => ChatCommand::AskTara {
             text: rest.to_string(),
         },
@@ -561,6 +593,21 @@ fn offer_to(action: AppAction, rest: &str, rest_at: u32) -> ChatCommand {
     }
 }
 
+/// [`shifted`] for topic references. Two functions rather than one generic,
+/// because [`Mention`] and [`crate::topic::TopicRef`] are FFI records with no
+/// shared trait and inventing one to save four lines would put a trait in the
+/// uniffi surface.
+fn shifted_topics(found: Vec<crate::topic::TopicRef>, by: u32) -> Vec<crate::topic::TopicRef> {
+    found
+        .into_iter()
+        .map(|t| crate::topic::TopicRef {
+            start: t.start + by,
+            end: t.end + by,
+            ..t
+        })
+        .collect()
+}
+
 /// Move every span forward by `by`, translating argument-relative offsets into
 /// offsets in the caller's own string.
 fn shifted(found: Vec<Mention>, by: u32) -> Vec<Mention> {
@@ -597,6 +644,7 @@ fn resolve_name(token: &str) -> Option<&'static str> {
         ("youtube", &["yt"]),
         ("apple", &["applemusic"]),
         ("task", &["todo"]),
+        ("assign", &["topic", "file"]),
         ("tara", &[]),
         ("breathe", &["breath"]),
         ("focus", &[]),
@@ -1075,6 +1123,57 @@ mod tests {
         // The command itself stays `vault::extract_upi_intents`'s job; all this
         // has to do is not call it a typo.
         assert_eq!(parse("/pay 250 to friend@upi"), ChatCommand::Pay);
+    }
+
+    #[test]
+    fn assign_names_the_topic_and_where_it_sits_in_the_draft() {
+        let text = "/assign #flat-deposit";
+        match parse(text) {
+            ChatCommand::AssignTopic { topics } => {
+                assert_eq!(topics.len(), 1);
+                assert_eq!(topics[0].slug, "flat-deposit");
+                // The span must address the *composer's* string, not the
+                // argument — this is what a chip is drawn over.
+                assert_eq!(
+                    &text[topics[0].start as usize..topics[0].end as usize],
+                    "#flat-deposit"
+                );
+            }
+            other => panic!("expected an assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assign_folds_the_spelling_and_takes_the_aliases() {
+        for spelling in ["/assign #Deposit", "/topic #Deposit", "/file #Deposit"] {
+            match parse(spelling) {
+                ChatCommand::AssignTopic { topics } => {
+                    assert_eq!(topics[0].slug, "deposit", "{spelling}")
+                }
+                other => panic!("expected an assign for {spelling}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn assign_with_nothing_usable_is_still_an_assign() {
+        // Empty `topics` is the composer's cue to open the picker, so this must
+        // not come back as `Unknown` or fall through to a plain send — either
+        // would make a bare `/assign` look like a typo.
+        for text in ["/assign", "/assign 🏠", "/assign #"] {
+            assert_eq!(
+                parse(text),
+                ChatCommand::AssignTopic { topics: Vec::new() },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hash_in_an_ordinary_message_is_not_a_command() {
+        // The whole point of the leading-token rules: `#` only means a topic
+        // inside `/assign`, and a message about a hashtag is a message.
+        assert_eq!(parse("filing this under #deposit"), ChatCommand::Plain);
     }
 
     #[test]

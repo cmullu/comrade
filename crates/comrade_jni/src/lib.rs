@@ -90,8 +90,8 @@ use comrade_ui::{
     MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto, MessageRequestDto,
     MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto,
     PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto,
-    TaraChatDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto,
-    UiError, UpiIntentDto, WorkspaceDto,
+    TaraChatDto, TaraMessageDto, TaskDto, TaskState, ThreadDto, ThreadSummaryDto,
+    TogetherSessionDto, TopicDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1198,6 +1198,77 @@ impl Comrade {
     pub async fn set_task_state(&self, id: String, state: TaskState) -> Result<TaskDto, UiError> {
         let handles = self.inner.read().await.handles();
         handles.set_task_state(&id, state).await
+    }
+
+    // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+
+    /// Every topic in this conversation, oldest first, with live counts.
+    /// Closed ones are included — the archive has to be reachable.
+    pub fn topics(&self, peer: String) -> Result<Vec<TopicDto>, UiError> {
+        self.inner.blocking_read().topics(&peer)
+    }
+
+    /// Every thread in this conversation, most recently active first.
+    /// `topic_slug` of `None` is *all* threads, not the unfiled ones.
+    pub fn threads(
+        &self,
+        peer: String,
+        topic_slug: Option<String>,
+    ) -> Result<Vec<ThreadSummaryDto>, UiError> {
+        self.inner.blocking_read().threads(&peer, topic_slug)
+    }
+
+    /// One thread in full. `root_id` may name any message in it.
+    pub fn thread(&self, peer: String, root_id: String) -> Result<ThreadDto, UiError> {
+        self.inner.blocking_read().thread(&peer, &root_id)
+    }
+
+    /// The id of the thread a message belongs to — what a frontend calls before
+    /// opening a sheet from a tapped bubble.
+    pub fn thread_root(&self, peer: String, message_id: String) -> Result<String, UiError> {
+        self.inner.blocking_read().thread_root(&peer, &message_id)
+    }
+
+    /// Name a topic and tell the peer. Idempotent: naming one that exists
+    /// returns it, because the slug is the id.
+    pub async fn create_topic(&self, peer: String, name: String) -> Result<TopicDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.create_topic(&peer, &name).await
+    }
+
+    /// File the thread containing `message_id` under `topic_name`, creating the
+    /// topic if it is new — or, with `None`, take it out of wherever it was.
+    pub async fn assign_thread(
+        &self,
+        peer: String,
+        message_id: String,
+        topic_name: Option<String>,
+    ) -> Result<ThreadSummaryDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.assign_thread(&peer, &message_id, topic_name).await
+    }
+
+    /// Archive a topic, or bring it back.
+    pub async fn set_topic_closed(
+        &self,
+        peer: String,
+        slug: String,
+        closed: bool,
+    ) -> Result<TopicDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.set_topic_closed(&peer, &slug, closed).await
+    }
+
+    /// Reply inside a thread — addressed to the thread's root, whichever
+    /// message in it the caller happens to name.
+    pub async fn send_thread_reply(
+        &self,
+        peer: String,
+        root_id: String,
+        content: String,
+    ) -> Result<MessageDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.send_thread_reply(&peer, &root_id, &content).await
     }
 
     /// Offer an in-app action to comrades. The outcome names who was told and

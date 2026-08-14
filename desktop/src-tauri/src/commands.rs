@@ -21,7 +21,8 @@ use comrade_ui::{
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
     MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
     PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraChatDto,
-    TaraMessageDto, TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    TaraMessageDto, TaskDto, TaskState, ThreadDto, ThreadSummaryDto, TopicDto, TurnServerStatusDto,
+    UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -1141,6 +1142,125 @@ pub fn play_route(
         link,
         access.unwrap_or_else(comrade_ui::ServiceAccess::none),
     )
+}
+
+// ── Threads and topics (see `comrade_core::topic`) ───────────────────────────
+
+/// Every topic in `peer`'s conversation, oldest first, with live counts.
+/// Closed ones are included — the archive has to be reachable.
+#[tauri::command]
+pub async fn topics(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+) -> Result<Vec<TopicDto>, String> {
+    state.read().await.topics(&peer).map_err(|e| e.to_string())
+}
+
+/// Every thread in `peer`'s conversation, most recently active first.
+/// `topic_slug` of `None` is *all* threads, not the unfiled ones.
+#[tauri::command]
+pub async fn threads(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    topic_slug: Option<String>,
+) -> Result<Vec<ThreadSummaryDto>, String> {
+    state
+        .read()
+        .await
+        .threads(&peer, topic_slug)
+        .map_err(|e| e.to_string())
+}
+
+/// One thread in full. `root_id` may name any message in it — the walk up the
+/// reply chain happens in core, so this window and the phone cannot disagree
+/// about which thread a bubble belongs to.
+#[tauri::command]
+pub async fn thread(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    root_id: String,
+) -> Result<ThreadDto, String> {
+    state
+        .read()
+        .await
+        .thread(&peer, &root_id)
+        .map_err(|e| e.to_string())
+}
+
+/// The id of the thread a message belongs to.
+#[tauri::command]
+pub async fn thread_root(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    message_id: String,
+) -> Result<String, String> {
+    state
+        .read()
+        .await
+        .thread_root(&peer, &message_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Name a topic and tell the peer. Idempotent: naming one that exists returns
+/// it, because the slug is the id.
+#[tauri::command]
+pub async fn create_topic(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    name: String,
+) -> Result<TopicDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .create_topic(&peer, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// File the thread containing `message_id` under `topic_name`, creating the
+/// topic if it is new — or, with `None`, take it out of wherever it was.
+#[tauri::command]
+pub async fn assign_thread(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    message_id: String,
+    topic_name: Option<String>,
+) -> Result<ThreadSummaryDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .assign_thread(&peer, &message_id, topic_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Archive a topic, or bring it back.
+#[tauri::command]
+pub async fn set_topic_closed(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    slug: String,
+    closed: bool,
+) -> Result<TopicDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .set_topic_closed(&peer, &slug, closed)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Reply inside a thread — addressed to the thread's root, whichever message in
+/// it the caller happens to name.
+#[tauri::command]
+pub async fn send_thread_reply(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    root_id: String,
+    content: String,
+) -> Result<MessageDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .send_thread_reply(&peer, &root_id, &content)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Name a piece of work. `peer` of `None` is a note to self — no relay.

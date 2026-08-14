@@ -13,6 +13,7 @@
  *   presence— comrade presence beacons (online/offline, to chosen peers only)
  *   nudge   — "they nearly wrote to you": one signal for an abandoned draft
  *   together— sync-play control channel (watch/listen together; no media moves)
+ *   topic   — threads inside a conversation, and the topics they are filed under
  *   share   — chunked, resumable, playable-early P2P file transfer (no server)
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
@@ -71,6 +72,7 @@ pub mod seen;
 pub mod share;
 pub mod tara;
 pub mod together;
+pub mod topic;
 pub mod vault;
 
 pub use error::CoreError;
