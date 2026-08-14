@@ -16,10 +16,13 @@ import { readFileSync } from "node:fs";
 
 import {
   COULD_NOT_PLAY,
+  MEDIA_SUFFIXES,
   NOT_HTTPS,
+  NOT_MEDIA,
   STREAM,
   WORDS,
   durationMsFrom,
+  namesMedia,
   planStream,
   streamContent,
   streamTitle,
@@ -144,6 +147,35 @@ test("a refusal never echoes the link back into the sentence", () => {
   assert.doesNotMatch(plan.message, /alert|document\.cookie/);
 });
 
+// ── A page about the thing is not the thing ──────────────────────────────────
+
+test("a page link is refused before a session opens on it, by name", () => {
+  // The flow this replaces: `/play https://example.com/episodes/42` opened a
+  // session, *invited the other person to it*, pointed the element at an HTML
+  // document, and failed seconds later with COULD_NOT_PLAY — after the
+  // invitation had already gone out. Android has refused this at the paste
+  // since §16 (core's `TogetherContent::stream`); this is desktop agreeing.
+  for (const url of [
+    "https://example.com/episodes/42",
+    "https://example.com/show.html",
+    "https://example.com/watch?file=a.mp3",
+    "https://example.mp3",
+  ]) {
+    const plan = planStream(url, UNRESOLVED);
+    assert.equal(plan.kind, NOT_MEDIA, url);
+    assert.ok(plan.message, url);
+    // Refused here, so nothing reaches core and nobody is invited.
+    assert.equal(plan.url, undefined, url);
+    // Like the scheme refusal: the URL itself never rides back in the sentence.
+    assert.doesNotMatch(plan.message, /example/, url);
+  }
+});
+
+test("the page-link sentence names the fix, not just the failure", () => {
+  const plan = planStream("https://example.com/episodes/42", UNRESOLVED);
+  assert.match(plan.message, /direct link|\.mp3/i);
+});
+
 // ── Nothing is tidied on the way to core ─────────────────────────────────────
 
 test("the URL handed to core is byte-identical to what was typed", () => {
@@ -157,7 +189,9 @@ test("the URL handed to core is byte-identical to what was typed", () => {
     "https://example.com/a%2zb.mp3",
     "https://user:pass@example.com/a.mp3",
     "https://example.com@evil.test/a.mp3",
-    "https://192.168.1.1/admin",
+    // Suffixed so it passes the media line and reaches core — which refuses
+    // the LAN address. The point here is that it reaches core *intact*.
+    "https://192.168.1.1/admin.mp3",
     // A control character, not a space: a space would make this a phrase.
     // Core refuses this one; the point is that we hand it over intact.
     "https://example.com/a\u0000b.mp3",
@@ -174,7 +208,7 @@ test("core is left to refuse what core refuses", () => {
   // them on is correct — the refusal comes back from `together_start` and
   // nothing has been played. What would be wrong is a second, drifting copy of
   // that check here that one day says yes where core says no.
-  for (const url of ["https:///a.mp3", "https://localhost/a.mp3", "https://router/reboot"]) {
+  for (const url of ["https:///a.mp3", "https://localhost/a.mp3", "https://router/reboot.mkv"]) {
     assert.equal(planStream(url, UNRESOLVED).kind, STREAM, url);
   }
 });
@@ -308,6 +342,7 @@ test("no sentence here claims two players are synced", () => {
     COULD_NOT_PLAY,
     planStream("http://example.com/a.mp3", UNRESOLVED).message,
     planStream("javascript:alert(1)", UNRESOLVED).message,
+    planStream("https://example.com/episodes/42", UNRESOLVED).message,
   ];
   for (const s of sentences) {
     assert.ok(s, "a refusal with no sentence is the bug /play already had");
@@ -372,13 +407,83 @@ test("the content we build is the shape core declared", () => {
   );
 });
 
-test("every URL core calls an ordinary episode is offered to core as one", () => {
-  // The mis-route this guards: desktop deciding a real podcast URL is words,
-  // and answering a paste with a file picker. Includes `https://example.com`,
-  // which has no path and no extension — so a "must end in .mp3" rule here
-  // would fail this test, which is why there is no such rule.
-  for (const url of rustVectors("an_ordinary_episode_url_is_accepted", 4)) {
-    assert.equal(planStream(url, UNRESOLVED).kind, STREAM, url);
+/**
+ * The vector lists of a Rust test with more than one `for url in` loop, in
+ * order. Same crude honesty as [`rustVectors`]: a reshaped test throws rather
+ * than silently checking nothing.
+ */
+function rustVectorGroups(fnName, leastGroups) {
+  const start = RUST.indexOf(`fn ${fnName}(`);
+  assert.notEqual(start, -1, `could not find "fn ${fnName}" in together.rs — renamed?`);
+  const body = RUST.slice(start, RUST.indexOf("\n    }", start));
+  const groups = body
+    .split("for url in")
+    .slice(1)
+    .map((segment) =>
+      [...segment.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+        .map((m) => unescapeRust(m[1]))
+        .filter((s) => !s.includes("{")),
+    );
+  assert.ok(
+    groups.length >= leastGroups,
+    `expected at least ${leastGroups} vector groups in ${fnName}, found ${groups.length}`,
+  );
+  return groups;
+}
+
+test("the media-suffix list is core's, byte for byte", () => {
+  // `namesMedia` is a mirror of `direct_media_url`, and this is what keeps it
+  // one: an extension added in core without landing here would quietly send
+  // real episodes down the search path, and this test makes that a red build.
+  const declared = RUST.match(
+    /const STREAM_MEDIA_SUFFIXES\s*:\s*\[&str;\s*\d+\]\s*=\s*\[([^\]]+)\]/,
+  );
+  assert.ok(declared, "could not find STREAM_MEDIA_SUFFIXES in together.rs — renamed?");
+  const suffixes = [...declared[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...MEDIA_SUFFIXES], suffixes);
+});
+
+test("every URL core opens a stream on is offered to core as one", () => {
+  // The mis-route this guards: desktop deciding a real podcast URL is words —
+  // or, since the media-suffix line landed here, a page — and answering a
+  // paste with a refusal. The vectors are the accept loop of core's own
+  // `direct_media_url` test, so the two sides cannot disagree about what an
+  // episode is without this going red.
+  const [accepted, refused] = rustVectorGroups("only_a_url_that_names_media_becomes_a_stream", 2);
+  assert.ok(accepted.length >= 4, `only ${accepted.length} accept vectors found`);
+  for (const url of accepted) {
+    const plan = planStream(url, UNRESOLVED);
+    assert.equal(plan.kind, STREAM, url);
+    assert.equal(plan.url, url, url);
+  }
+  // And the refuse loop: nothing core calls a non-episode may open a session
+  // from here. Either this window refuses it itself (a page link, a hostile
+  // scheme, a phrase) or it goes to core byte-identical for core's own refusal
+  // — what it must never do is become a *different* string that passes.
+  assert.ok(refused.length >= 8, `only ${refused.length} refuse vectors found`);
+  let refusedAsPages = 0;
+  for (const url of refused) {
+    const plan = planStream(url, UNRESOLVED);
+    if (plan.kind === STREAM) assert.equal(plan.url, url, url);
+    if (plan.kind === NOT_MEDIA) refusedAsPages += 1;
+  }
+  // The page-link cases are the ones this window is entitled to answer without
+  // a round trip, and they are the point of the rule — none refused here means
+  // the mirror is not running.
+  assert.ok(refusedAsPages >= 4, `only ${refusedAsPages} page links refused here`);
+});
+
+test("the mirror answers exactly what core's suffix rule answers", () => {
+  // Shape edges the vectors above may not cover, pinned directly: the suffix
+  // must sit in the path (not the host), the query string is the server's, and
+  // the lowering is ASCII-only like `to_ascii_lowercase`.
+  assert.equal(namesMedia("https://example.com/EPISODE.MP3"), true);
+  assert.equal(namesMedia("https://example.com/ep.mp3?token=abc#t=9"), true);
+  assert.equal(namesMedia("https://example.mp3"), false);
+  assert.equal(namesMedia("https://example.mp3?x=1"), false);
+  assert.equal(namesMedia("https://example.com/watch?file=a.mp3"), false);
+  for (const suffix of MEDIA_SUFFIXES) {
+    assert.equal(namesMedia(`https://example.com/a${suffix}`), true, suffix);
   }
 });
 
@@ -405,7 +510,9 @@ test("a URL longer than core will take is still core's to refuse", () => {
     RUST.match(/pub const STREAM_URL_MAX_LEN\s*:\s*usize\s*=\s*([0-9_]+)\s*;/)?.[1].replace(/_/g, ""),
   );
   assert.ok(max > 0, "could not find STREAM_URL_MAX_LEN in together.rs — renamed?");
-  const long = `https://example.com/${"a".repeat(max)}`;
+  // Suffixed so it passes the media line here — the length is the one rule
+  // this window deliberately does not copy.
+  const long = `https://example.com/${"a".repeat(max)}.mp3`;
   assert.equal(planStream(long, UNRESOLVED).kind, STREAM);
 });
 

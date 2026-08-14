@@ -1963,11 +1963,18 @@ YouTube is `TogetherDecisions.classifyLink`, because `https://youtu.be/…` is a
 valid HTTPS URL too and a stream check running first would point a player at a
 web page.
 
-**Desktop still cannot tell a page link from an episode** before playing it — it
-hands any HTTPS URL to core and reports `COULD_NOT_PLAY` from the media element
-several seconds later. `direct_media_url` is in core and shared, so closing that
-is a small change in `stream_link.mjs`; it is not made here, and this paragraph
-is the record that Android is ahead rather than that the two agree.
+~~**Desktop still cannot tell a page link from an episode** before playing it~~
+**Closed 2026-08-14.** `planStream` now draws core's media-suffix line before a
+session opens: a pasted page link is refused at the paste, by name, instead of
+opening a session, inviting the other person to it, and failing out of the media
+element seconds later. Desktop has no FFI call to `TogetherContent::stream`, so
+the rule is a **mirror** (`namesMedia` in `stream_link.mjs`), and what keeps a
+mirror honest is the pin: `stream_link.test.mjs` reads `STREAM_MEDIA_SUFFIXES`
+and the accept/refuse vectors of `only_a_url_that_names_media_becomes_a_stream`
+out of `together.rs` itself, so an extension added in core without landing in the
+mirror is a red test rather than a desktop that quietly sends real episodes down
+the refusal path. `COULD_NOT_PLAY` stays, for the miss no pure function can
+catch — a suffixed URL that turns out to be a page.
 
 ### What is checked before CI, and what is not
 
