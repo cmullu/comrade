@@ -91,6 +91,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayPolicy dco_decode_box_autoadd_relay_policy(dynamic raw);
 
   @protected
+  RideSignalDto dco_decode_box_autoadd_ride_signal_dto(dynamic raw);
+
+  @protected
   ShareOffer dco_decode_box_autoadd_share_offer(dynamic raw);
 
   @protected
@@ -114,6 +117,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int dco_decode_box_autoadd_u_16(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
   BigInt dco_decode_box_autoadd_u_64(dynamic raw);
@@ -308,6 +314,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_16(dynamic raw);
 
   @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
 
   @protected
@@ -333,6 +342,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayPolicy dco_decode_relay_policy(dynamic raw);
+
+  @protected
+  RideSignalDto dco_decode_ride_signal_dto(dynamic raw);
 
   @protected
   ShareOffer dco_decode_share_offer(dynamic raw);
@@ -493,6 +505,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayPolicy sse_decode_box_autoadd_relay_policy(SseDeserializer deserializer);
 
   @protected
+  RideSignalDto sse_decode_box_autoadd_ride_signal_dto(
+      SseDeserializer deserializer);
+
+  @protected
   ShareOffer sse_decode_box_autoadd_share_offer(SseDeserializer deserializer);
 
   @protected
@@ -521,6 +537,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_box_autoadd_u_16(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
@@ -735,6 +754,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
@@ -760,6 +782,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayPolicy sse_decode_relay_policy(SseDeserializer deserializer);
+
+  @protected
+  RideSignalDto sse_decode_ride_signal_dto(SseDeserializer deserializer);
 
   @protected
   ShareOffer sse_decode_share_offer(SseDeserializer deserializer);
@@ -936,6 +961,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       RelayPolicy self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_ride_signal_dto(
+      RideSignalDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_share_offer(
       ShareOffer self, SseSerializer serializer);
 
@@ -965,6 +994,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
@@ -1193,6 +1225,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
 
   @protected
@@ -1219,6 +1254,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_relay_policy(RelayPolicy self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ride_signal_dto(RideSignalDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_share_offer(ShareOffer self, SseSerializer serializer);

@@ -67,6 +67,9 @@ use comrade_core::presence::{
     is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
     PRESENCE_HEARTBEAT_SECS, PRESENCE_SWEEP_SECS,
 };
+use comrade_core::ride::{
+    parse_ride_envelope, ride_expires_at, RideEnvelope, RideManeuver, RidePhrase, RideSignal,
+};
 use comrade_core::saathi::SaathiEngine;
 use comrade_core::sabha::{
     display_name_of, ChitthiCallback, FeedFilterSpec, FeedScope, SabhaEngine, DEFAULT_RELAYS,
@@ -544,6 +547,38 @@ pub struct TogetherShareDto {
     pub session_id: String,
     pub peer: String,
     pub signal: ShareSignal,
+}
+
+/// One ride signal from the other seat of the motorcycle, ready to render —
+/// see [`comrade_core::ride`].
+///
+/// Flattened to strings and options rather than mirroring the core enums,
+/// for the reason [`TogetherShareDto`]'s doc gives in reverse: the frontends
+/// key decision tables on the wire names (`RidePhrase::as_str`), and a
+/// bridged enum would put a Kotlin `when`, a Dart `switch` and a regenerated
+/// bridge behind every phrase added to the catalog. `kind` says which of the
+/// two field groups is populated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct RideSignalDto {
+    pub peer: String,
+    /// Display name at the time of the event (alias → published handle), so a
+    /// glance card can be drawn without a store round-trip.
+    pub name: Option<String>,
+    /// `"quick"` or `"route"` — [`comrade_core::ride::RideSignal`]'s tag.
+    pub kind: String,
+    /// The catalog phrase's wire name, for `kind == "quick"`.
+    pub phrase: Option<String>,
+    /// The maneuver's wire name, for `kind == "route"`.
+    pub maneuver: Option<String>,
+    pub distance_m: Option<u32>,
+    pub note: Option<String>,
+    /// `"urgent"`, `"notice"` or `"info"` — decided in core
+    /// ([`comrade_core::ride::RideUrgency`]), so two phones cannot disagree
+    /// about whether "pull over" is worth a buzz.
+    pub urgency: String,
+    /// The signal's true send time (unix seconds), like
+    /// [`CallSignalDto::created_at`]: what a frontend ages the card out by.
+    pub created_at: u64,
 }
 
 // ── In-chat commands (see `comrade_core::command`) ───────────────────────────
@@ -2011,6 +2046,14 @@ pub enum BridgeEvent {
         /// so a notification can be raised without a store round-trip.
         name: Option<String>,
     },
+    /// The other seat of the motorcycle said one of the few things worth
+    /// saying at speed — see [`comrade_core::ride`]. Emitted only from an
+    /// accepted conversation and only while the signal is still fresh: a
+    /// backfilled "left in 400 m" from Tuesday raises nothing.
+    ///
+    /// One variant for the whole vocabulary rather than one per phrase — the
+    /// tax [`Self::TogetherShare`] warns about, avoided the same way.
+    RideSignal(RideSignalDto),
     /// Someone asked to watch or listen to something together.
     TogetherInvited(TogetherInviteDto),
     /// They accepted our invitation, so the session is live on both sides.
@@ -4406,6 +4449,28 @@ impl ComradeRuntime {
         self.handles().nudge_comrades().await
     }
 
+    // ── Ride signals (driver + pillion — see `comrade_core::ride`) ───────────
+
+    /// Say one catalog phrase to the other seat of the motorcycle. Delegates
+    /// to [`RuntimeHandles::ride_send_quick`].
+    pub async fn ride_send_quick(&self, target: &str, phrase: &str) -> Result<(), UiError> {
+        self.handles().ride_send_quick(target, phrase).await
+    }
+
+    /// Suggest the next maneuver to the person steering. Delegates to
+    /// [`RuntimeHandles::ride_send_route`].
+    pub async fn ride_send_route(
+        &self,
+        target: &str,
+        maneuver: &str,
+        distance_m: Option<u32>,
+        note: Option<String>,
+    ) -> Result<(), UiError> {
+        self.handles()
+            .ride_send_route(target, maneuver, distance_m, note)
+            .await
+    }
+
     // ── Journal (wellbeing pillar #1 — strictly local, never networked) ──────
 
     /// Save a new journal entry. `mood` is an optional self-reported marker.
@@ -6505,6 +6570,62 @@ impl RuntimeHandles {
             .filter_map(|npub| PublicKey::parse(npub).ok())
             .collect();
         deliver_nudges(&vault, recipients).await
+    }
+
+    // ── Ride signals (driver + pillion — see `comrade_core::ride`) ───────────
+
+    /// Say one catalog phrase to the other seat. `phrase` is the wire name
+    /// ([`RidePhrase::as_str`]); an unknown one is refused here rather than
+    /// sent, because the receiver would drop it whole anyway and "it sent"
+    /// would be a lie.
+    pub async fn ride_send_quick(&self, target: &str, phrase: &str) -> Result<(), UiError> {
+        let phrase = RidePhrase::parse(phrase)
+            .ok_or_else(|| UiError::Engine(format!("not a ride phrase: {phrase}")))?;
+        self.ride_send(target, RideSignal::Quick { phrase }).await
+    }
+
+    /// Suggest the next maneuver to the person steering. `maneuver` is the
+    /// wire name ([`RideManeuver::as_str`]); the note is trimmed and an empty
+    /// one becomes no note, so a cleared composer field does not travel as
+    /// `""`.
+    pub async fn ride_send_route(
+        &self,
+        target: &str,
+        maneuver: &str,
+        distance_m: Option<u32>,
+        note: Option<String>,
+    ) -> Result<(), UiError> {
+        let maneuver = RideManeuver::parse(maneuver)
+            .ok_or_else(|| UiError::Engine(format!("not a ride maneuver: {maneuver}")))?;
+        let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        self.ride_send(
+            target,
+            RideSignal::Route {
+                maneuver,
+                distance_m,
+                note,
+            },
+        )
+        .await
+    }
+
+    /// The shared tail of both ride sends: the send-side half of the
+    /// admissibility check ([`RideSignal::admissible`] — the receive-side half
+    /// is inside [`parse_ride_envelope`]), then straight to the vault via
+    /// [`Self::send_control_envelope`]. No outbox retry, deliberately: a ride
+    /// signal is a claim about now, and "left in 400 m" delivered by a retry
+    /// ten minutes later is not late, it is wrong. A send that fails is the
+    /// sender's to repeat, and they are holding the phone that failed.
+    async fn ride_send(&self, target: &str, signal: RideSignal) -> Result<(), UiError> {
+        if !signal.admissible() {
+            return Err(UiError::Engine(
+                "ride note too long, or distance beyond the next maneuver".into(),
+            ));
+        }
+        let json = RideEnvelope::new(signal)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        self.send_control_envelope(target, &json).await
     }
 
     // ── Tasks and offers (see `comrade_core::karya`, `comrade_core::command`) ─
@@ -9125,6 +9246,63 @@ fn handle_nudge(
     });
 }
 
+/// Surface one incoming ride signal, if it is still worth acting on.
+///
+/// The replay story is the nudge's, not the together session's, because there
+/// is no session: the **freshness gate** is what keeps a two-day-old
+/// backfilled "left in 400 m" off a moving driver's screen (measured from send
+/// time, peer TTL clamped — [`comrade_core::ride::ride_expires_at`]), and the
+/// **event-id set** is what keeps a relay's at-least-once redelivery from
+/// buzzing twice for one tap. Everything about *what* may travel — the
+/// catalog, the note cap, the distance cap — was already enforced by
+/// [`parse_ride_envelope`] before this is called.
+fn handle_ride(
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    tx: &broadcast::Sender<BridgeEvent>,
+    dedup: &SeenSet,
+    peer_npub: &str,
+    event_id: &str,
+    created_at: u64,
+    env: RideEnvelope,
+) {
+    if !is_fresh_at(ride_expires_at(created_at, env.ttl_secs), now_secs()) {
+        tracing::debug!(peer = %peer_npub, created_at, "dropping stale ride signal");
+        return;
+    }
+    if dedup.already_seen(event_id) {
+        tracing::debug!(%event_id, "dropping duplicate ride signal");
+        return;
+    }
+    let urgency = env.signal.urgency().as_str().to_string();
+    let (kind, phrase, maneuver, distance_m, note) = match env.signal {
+        RideSignal::Quick { phrase } => {
+            ("quick", Some(phrase.as_str().to_string()), None, None, None)
+        }
+        RideSignal::Route {
+            maneuver,
+            distance_m,
+            note,
+        } => (
+            "route",
+            None,
+            Some(maneuver.as_str().to_string()),
+            distance_m,
+            note,
+        ),
+    };
+    let _ = tx.send(BridgeEvent::RideSignal(RideSignalDto {
+        peer: peer_npub.to_string(),
+        name: store.and_then(|s| presence_display_name(s, peer_npub)),
+        kind: kind.to_string(),
+        phrase,
+        maneuver,
+        distance_m,
+        note,
+        urgency,
+        created_at,
+    }));
+}
+
 /// Apply one incoming together envelope to the live session.
 ///
 /// Every replay guard this feature has meets here. In order: the **age gate**,
@@ -10233,6 +10411,26 @@ fn dispatch_incoming_dm(
                 &msg.event_id,
                 msg.created_at,
                 nudge,
+            );
+        }
+        return;
+    }
+
+    // 4a) Ride signal — one seat of a motorcycle to the other. Gated exactly
+    //     like a nudge: a stranger must not be able to put "pull over" on a
+    //     moving driver's screen, and returning either way keeps an ungated
+    //     one from surfacing as a message request full of JSON. Freshness and
+    //     dedup live in `handle_ride`.
+    if let Some(env) = parse_ride_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            handle_ride(
+                store,
+                tx,
+                dedup,
+                &peer_npub,
+                &msg.event_id,
+                msg.created_at,
+                env,
             );
         }
         return;
@@ -15931,6 +16129,114 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Ok(BridgeEvent::IncomingCallSignal(_))),
             "a call signal from a peer whose clock is ahead of ours must ring",
+        );
+    }
+
+    // ── Ride signals (see `comrade_core::ride`) ───────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_drops_a_stale_ride_signal_and_dedups_a_fresh_one() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                last_read_at: 0,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let envelope = RideEnvelope::new(RideSignal::Route {
+            maneuver: RideManeuver::Left,
+            distance_m: Some(400),
+            note: Some("after the petrol pump".into()),
+        })
+        .to_json()
+        .unwrap();
+
+        // The worst bug this feature could have: a two-day-old backfilled
+        // "left in 400 m" rendered huge on a moving driver's screen.
+        let mut stale = incoming(&hex, "r1", &envelope);
+        stale.created_at = now_secs().saturating_sub(7200);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, stale);
+        assert!(
+            rx.try_recv().is_err(),
+            "a ride signal older than its TTL must not reach the bus"
+        );
+
+        // A fresh signal reaches the bus once, fully decomposed and carrying
+        // core's urgency verdict; the same wrapper event id redelivered
+        // (at-least-once relay delivery) must not buzz twice for one tap.
+        let mut fresh = incoming(&hex, "r2", &envelope);
+        fresh.created_at = now_secs();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &route,
+            fresh.clone(),
+        );
+        let BridgeEvent::RideSignal(dto) = rx.try_recv().unwrap() else {
+            panic!("a fresh ride signal must surface as BridgeEvent::RideSignal");
+        };
+        assert_eq!(dto.peer, peer);
+        assert_eq!(dto.kind, "route");
+        assert_eq!(dto.maneuver.as_deref(), Some("left"));
+        assert_eq!(dto.distance_m, Some(400));
+        assert_eq!(dto.note.as_deref(), Some("after the petrol pump"));
+        assert_eq!(dto.phrase, None);
+        assert_eq!(dto.urgency, "notice");
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, fresh);
+        assert!(
+            rx.try_recv().is_err(),
+            "the same wrapper event id must only ever dispatch one RideSignal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_strangers_ride_signal_is_dropped_not_surfaced() {
+        // The gate that matters most: an unaccepted peer must not be able to
+        // put "pull over" on a moving driver's screen — and the attempt must
+        // not fall through to the message-request path either, which would
+        // surface a request preview full of JSON.
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, _peer) = stranger();
+
+        let envelope = RideEnvelope::new(RideSignal::Quick {
+            phrase: RidePhrase::PullOver,
+        })
+        .to_json()
+        .unwrap();
+        let mut msg = incoming(&hex, "r3", &envelope);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(
+            rx.try_recv().is_err(),
+            "an unaccepted peer's ride signal must not surface at all"
         );
     }
 

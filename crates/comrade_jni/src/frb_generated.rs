@@ -3606,6 +3606,9 @@ const _: fn() = || {
             let _: String = peer;
             let _: Option<String> = name;
         }
+        crate::api::BridgeEvent::RideSignal(field0) => {
+            let _: crate::api::RideSignalDto = field0;
+        }
         crate::api::BridgeEvent::TogetherInvited(field0) => {
             let _: crate::api::TogetherInviteDto = field0;
         }
@@ -3906,6 +3909,18 @@ const _: fn() = || {
         }
         crate::api::RelayPolicy::AskEachTime => {}
         crate::api::RelayPolicy::Always => {}
+    }
+    {
+        let RideSignalDto = None::<crate::api::RideSignalDto>.unwrap();
+        let _: String = RideSignalDto.peer;
+        let _: Option<String> = RideSignalDto.name;
+        let _: String = RideSignalDto.kind;
+        let _: Option<String> = RideSignalDto.phrase;
+        let _: Option<String> = RideSignalDto.maneuver;
+        let _: Option<u32> = RideSignalDto.distance_m;
+        let _: Option<String> = RideSignalDto.note;
+        let _: String = RideSignalDto.urgency;
+        let _: u64 = RideSignalDto.created_at;
     }
     {
         let ShareOffer = None::<crate::api::ShareOffer>.unwrap();
@@ -4260,10 +4275,14 @@ impl SseDecode for crate::api::BridgeEvent {
                 };
             }
             10 => {
+                let mut var_field0 = <crate::api::RideSignalDto>::sse_decode(deserializer);
+                return crate::api::BridgeEvent::RideSignal(var_field0);
+            }
+            11 => {
                 let mut var_field0 = <crate::api::TogetherInviteDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::TogetherInvited(var_field0);
             }
-            11 => {
+            12 => {
                 let mut var_sessionId = <String>::sse_decode(deserializer);
                 let mut var_peer = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::TogetherJoined {
@@ -4271,15 +4290,15 @@ impl SseDecode for crate::api::BridgeEvent {
                     peer: var_peer,
                 };
             }
-            12 => {
+            13 => {
                 let mut var_field0 = <crate::api::TogetherCommandDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::TogetherCommand(var_field0);
             }
-            13 => {
+            14 => {
                 let mut var_field0 = <crate::api::TogetherCorrectionDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::TogetherCorrection(var_field0);
             }
-            14 => {
+            15 => {
                 let mut var_sessionId = <String>::sse_decode(deserializer);
                 let mut var_peer = <String>::sse_decode(deserializer);
                 let mut var_byPeer = <bool>::sse_decode(deserializer);
@@ -4289,11 +4308,11 @@ impl SseDecode for crate::api::BridgeEvent {
                     by_peer: var_byPeer,
                 };
             }
-            15 => {
+            16 => {
                 let mut var_field0 = <crate::api::TogetherShareDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::TogetherShare(var_field0);
             }
-            16 => {
+            17 => {
                 let mut var_sessionId = <String>::sse_decode(deserializer);
                 let mut var_json = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::TogetherOutbound {
@@ -4301,19 +4320,19 @@ impl SseDecode for crate::api::BridgeEvent {
                     json: var_json,
                 };
             }
-            17 => {
+            18 => {
                 let mut var_field0 = <crate::api::AttachmentHandoffDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::AttachmentHandoff(var_field0);
             }
-            18 => {
+            19 => {
                 let mut var_field0 = <crate::api::MeshStatusDto>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::MeshStatusChanged(var_field0);
             }
-            19 => {
+            20 => {
                 let mut var_ledger = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::LedgerUpdated { ledger: var_ledger };
             }
-            20 => {
+            21 => {
                 let mut var_peer = <String>::sse_decode(deserializer);
                 return crate::api::BridgeEvent::TopicsChanged { peer: var_peer };
             }
@@ -5209,6 +5228,17 @@ impl SseDecode for Option<u16> {
     }
 }
 
+impl SseDecode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<u32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<u64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -5383,6 +5413,32 @@ impl SseDecode for crate::api::RelayPolicy {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseDecode for crate::api::RideSignalDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_peer = <String>::sse_decode(deserializer);
+        let mut var_name = <Option<String>>::sse_decode(deserializer);
+        let mut var_kind = <String>::sse_decode(deserializer);
+        let mut var_phrase = <Option<String>>::sse_decode(deserializer);
+        let mut var_maneuver = <Option<String>>::sse_decode(deserializer);
+        let mut var_distanceM = <Option<u32>>::sse_decode(deserializer);
+        let mut var_note = <Option<String>>::sse_decode(deserializer);
+        let mut var_urgency = <String>::sse_decode(deserializer);
+        let mut var_createdAt = <u64>::sse_decode(deserializer);
+        return crate::api::RideSignalDto {
+            peer: var_peer,
+            name: var_name,
+            kind: var_kind,
+            phrase: var_phrase,
+            maneuver: var_maneuver,
+            distance_m: var_distanceM,
+            note: var_note,
+            urgency: var_urgency,
+            created_at: var_createdAt,
+        };
     }
 }
 
@@ -6134,52 +6190,55 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::BridgeEvent> {
                 name.into_into_dart().into_dart(),
             ]
             .into_dart(),
-            crate::api::BridgeEvent::TogetherInvited(field0) => {
+            crate::api::BridgeEvent::RideSignal(field0) => {
                 [10.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::BridgeEvent::TogetherInvited(field0) => {
+                [11.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::BridgeEvent::TogetherJoined { session_id, peer } => [
-                11.into_dart(),
+                12.into_dart(),
                 session_id.into_into_dart().into_dart(),
                 peer.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::BridgeEvent::TogetherCommand(field0) => {
-                [12.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+                [13.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
             crate::api::BridgeEvent::TogetherCorrection(field0) => {
-                [13.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+                [14.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
             crate::api::BridgeEvent::TogetherEnded {
                 session_id,
                 peer,
                 by_peer,
             } => [
-                14.into_dart(),
+                15.into_dart(),
                 session_id.into_into_dart().into_dart(),
                 peer.into_into_dart().into_dart(),
                 by_peer.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::BridgeEvent::TogetherShare(field0) => {
-                [15.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+                [16.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
             crate::api::BridgeEvent::TogetherOutbound { session_id, json } => [
-                16.into_dart(),
+                17.into_dart(),
                 session_id.into_into_dart().into_dart(),
                 json.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::BridgeEvent::AttachmentHandoff(field0) => {
-                [17.into_dart(), field0.into_into_dart().into_dart()].into_dart()
-            }
-            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
                 [18.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::BridgeEvent::MeshStatusChanged(field0) => {
+                [19.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                [19.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
+                [20.into_dart(), ledger.into_into_dart().into_dart()].into_dart()
             }
             crate::api::BridgeEvent::TopicsChanged { peer } => {
-                [20.into_dart(), peer.into_into_dart().into_dart()].into_dart()
+                [21.into_dart(), peer.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -7069,6 +7128,34 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::RelayPolicy>>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::RideSignalDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.peer.into_into_dart().into_dart(),
+            self.0.name.into_into_dart().into_dart(),
+            self.0.kind.into_into_dart().into_dart(),
+            self.0.phrase.into_into_dart().into_dart(),
+            self.0.maneuver.into_into_dart().into_dart(),
+            self.0.distance_m.into_into_dart().into_dart(),
+            self.0.note.into_into_dart().into_dart(),
+            self.0.urgency.into_into_dart().into_dart(),
+            self.0.created_at.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::RideSignalDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::RideSignalDto>>
+    for crate::api::RideSignalDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::RideSignalDto> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::ShareOffer> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -7764,21 +7851,25 @@ impl SseEncode for crate::api::BridgeEvent {
                 <String>::sse_encode(peer, serializer);
                 <Option<String>>::sse_encode(name, serializer);
             }
-            crate::api::BridgeEvent::TogetherInvited(field0) => {
+            crate::api::BridgeEvent::RideSignal(field0) => {
                 <i32>::sse_encode(10, serializer);
+                <crate::api::RideSignalDto>::sse_encode(field0, serializer);
+            }
+            crate::api::BridgeEvent::TogetherInvited(field0) => {
+                <i32>::sse_encode(11, serializer);
                 <crate::api::TogetherInviteDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::TogetherJoined { session_id, peer } => {
-                <i32>::sse_encode(11, serializer);
+                <i32>::sse_encode(12, serializer);
                 <String>::sse_encode(session_id, serializer);
                 <String>::sse_encode(peer, serializer);
             }
             crate::api::BridgeEvent::TogetherCommand(field0) => {
-                <i32>::sse_encode(12, serializer);
+                <i32>::sse_encode(13, serializer);
                 <crate::api::TogetherCommandDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::TogetherCorrection(field0) => {
-                <i32>::sse_encode(13, serializer);
+                <i32>::sse_encode(14, serializer);
                 <crate::api::TogetherCorrectionDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::TogetherEnded {
@@ -7786,34 +7877,34 @@ impl SseEncode for crate::api::BridgeEvent {
                 peer,
                 by_peer,
             } => {
-                <i32>::sse_encode(14, serializer);
+                <i32>::sse_encode(15, serializer);
                 <String>::sse_encode(session_id, serializer);
                 <String>::sse_encode(peer, serializer);
                 <bool>::sse_encode(by_peer, serializer);
             }
             crate::api::BridgeEvent::TogetherShare(field0) => {
-                <i32>::sse_encode(15, serializer);
+                <i32>::sse_encode(16, serializer);
                 <crate::api::TogetherShareDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::TogetherOutbound { session_id, json } => {
-                <i32>::sse_encode(16, serializer);
+                <i32>::sse_encode(17, serializer);
                 <String>::sse_encode(session_id, serializer);
                 <String>::sse_encode(json, serializer);
             }
             crate::api::BridgeEvent::AttachmentHandoff(field0) => {
-                <i32>::sse_encode(17, serializer);
+                <i32>::sse_encode(18, serializer);
                 <crate::api::AttachmentHandoffDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::MeshStatusChanged(field0) => {
-                <i32>::sse_encode(18, serializer);
+                <i32>::sse_encode(19, serializer);
                 <crate::api::MeshStatusDto>::sse_encode(field0, serializer);
             }
             crate::api::BridgeEvent::LedgerUpdated { ledger } => {
-                <i32>::sse_encode(19, serializer);
+                <i32>::sse_encode(20, serializer);
                 <String>::sse_encode(ledger, serializer);
             }
             crate::api::BridgeEvent::TopicsChanged { peer } => {
-                <i32>::sse_encode(20, serializer);
+                <i32>::sse_encode(21, serializer);
                 <String>::sse_encode(peer, serializer);
             }
             _ => {
@@ -8538,6 +8629,16 @@ impl SseEncode for Option<u16> {
     }
 }
 
+impl SseEncode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <u32>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<u64> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -8664,6 +8765,21 @@ impl SseEncode for crate::api::RelayPolicy {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseEncode for crate::api::RideSignalDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.peer, serializer);
+        <Option<String>>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.kind, serializer);
+        <Option<String>>::sse_encode(self.phrase, serializer);
+        <Option<String>>::sse_encode(self.maneuver, serializer);
+        <Option<u32>>::sse_encode(self.distance_m, serializer);
+        <Option<String>>::sse_encode(self.note, serializer);
+        <String>::sse_encode(self.urgency, serializer);
+        <u64>::sse_encode(self.created_at, serializer);
     }
 }
 

@@ -62,6 +62,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
     TResult Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult Function(BridgeEvent_ComradeNudge value)? comradeNudge,
+    TResult Function(BridgeEvent_RideSignal value)? rideSignal,
     TResult Function(BridgeEvent_TogetherInvited value)? togetherInvited,
     TResult Function(BridgeEvent_TogetherJoined value)? togetherJoined,
     TResult Function(BridgeEvent_TogetherCommand value)? togetherCommand,
@@ -99,6 +100,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that);
+      case BridgeEvent_RideSignal() when rideSignal != null:
+        return rideSignal(_that);
       case BridgeEvent_TogetherInvited() when togetherInvited != null:
         return togetherInvited(_that);
       case BridgeEvent_TogetherJoined() when togetherJoined != null:
@@ -158,6 +161,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(BridgeEvent_ComradePresence value)
         comradePresence,
     required TResult Function(BridgeEvent_ComradeNudge value) comradeNudge,
+    required TResult Function(BridgeEvent_RideSignal value) rideSignal,
     required TResult Function(BridgeEvent_TogetherInvited value)
         togetherInvited,
     required TResult Function(BridgeEvent_TogetherJoined value) togetherJoined,
@@ -198,6 +202,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge():
         return comradeNudge(_that);
+      case BridgeEvent_RideSignal():
+        return rideSignal(_that);
       case BridgeEvent_TogetherInvited():
         return togetherInvited(_that);
       case BridgeEvent_TogetherJoined():
@@ -249,6 +255,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(BridgeEvent_PeerProfileUpdated value)? peerProfileUpdated,
     TResult? Function(BridgeEvent_ComradePresence value)? comradePresence,
     TResult? Function(BridgeEvent_ComradeNudge value)? comradeNudge,
+    TResult? Function(BridgeEvent_RideSignal value)? rideSignal,
     TResult? Function(BridgeEvent_TogetherInvited value)? togetherInvited,
     TResult? Function(BridgeEvent_TogetherJoined value)? togetherJoined,
     TResult? Function(BridgeEvent_TogetherCommand value)? togetherCommand,
@@ -285,6 +292,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that);
+      case BridgeEvent_RideSignal() when rideSignal != null:
+        return rideSignal(_that);
       case BridgeEvent_TogetherInvited() when togetherInvited != null:
         return togetherInvited(_that);
       case BridgeEvent_TogetherJoined() when togetherJoined != null:
@@ -338,6 +347,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult Function(String peer, String? name, bool online, BigInt at)?
         comradePresence,
     TResult Function(String peer, String? name)? comradeNudge,
+    TResult Function(RideSignalDto field0)? rideSignal,
     TResult Function(TogetherInviteDto field0)? togetherInvited,
     TResult Function(String sessionId, String peer)? togetherJoined,
     TResult Function(TogetherCommandDto field0)? togetherCommand,
@@ -375,6 +385,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_RideSignal() when rideSignal != null:
+        return rideSignal(_that.field0);
       case BridgeEvent_TogetherInvited() when togetherInvited != null:
         return togetherInvited(_that.field0);
       case BridgeEvent_TogetherJoined() when togetherJoined != null:
@@ -430,6 +442,7 @@ extension BridgeEventPatterns on BridgeEvent {
     required TResult Function(String peer, String? name, bool online, BigInt at)
         comradePresence,
     required TResult Function(String peer, String? name) comradeNudge,
+    required TResult Function(RideSignalDto field0) rideSignal,
     required TResult Function(TogetherInviteDto field0) togetherInvited,
     required TResult Function(String sessionId, String peer) togetherJoined,
     required TResult Function(TogetherCommandDto field0) togetherCommand,
@@ -465,6 +478,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge():
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_RideSignal():
+        return rideSignal(_that.field0);
       case BridgeEvent_TogetherInvited():
         return togetherInvited(_that.field0);
       case BridgeEvent_TogetherJoined():
@@ -516,6 +531,7 @@ extension BridgeEventPatterns on BridgeEvent {
     TResult? Function(String peer, String? name, bool online, BigInt at)?
         comradePresence,
     TResult? Function(String peer, String? name)? comradeNudge,
+    TResult? Function(RideSignalDto field0)? rideSignal,
     TResult? Function(TogetherInviteDto field0)? togetherInvited,
     TResult? Function(String sessionId, String peer)? togetherJoined,
     TResult? Function(TogetherCommandDto field0)? togetherCommand,
@@ -553,6 +569,8 @@ extension BridgeEventPatterns on BridgeEvent {
         return comradePresence(_that.peer, _that.name, _that.online, _that.at);
       case BridgeEvent_ComradeNudge() when comradeNudge != null:
         return comradeNudge(_that.peer, _that.name);
+      case BridgeEvent_RideSignal() when rideSignal != null:
+        return rideSignal(_that.field0);
       case BridgeEvent_TogetherInvited() when togetherInvited != null:
         return togetherInvited(_that.field0);
       case BridgeEvent_TogetherJoined() when togetherJoined != null:
@@ -1300,6 +1318,71 @@ class _$BridgeEvent_ComradeNudgeCopyWithImpl<$Res>
           ? _self.name
           : name // ignore: cast_nullable_to_non_nullable
               as String?,
+    ));
+  }
+}
+
+/// @nodoc
+
+class BridgeEvent_RideSignal extends BridgeEvent {
+  const BridgeEvent_RideSignal(this.field0) : super._();
+
+  final RideSignalDto field0;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $BridgeEvent_RideSignalCopyWith<BridgeEvent_RideSignal> get copyWith =>
+      _$BridgeEvent_RideSignalCopyWithImpl<BridgeEvent_RideSignal>(
+          this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is BridgeEvent_RideSignal &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'BridgeEvent.rideSignal(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $BridgeEvent_RideSignalCopyWith<$Res>
+    implements $BridgeEventCopyWith<$Res> {
+  factory $BridgeEvent_RideSignalCopyWith(BridgeEvent_RideSignal value,
+          $Res Function(BridgeEvent_RideSignal) _then) =
+      _$BridgeEvent_RideSignalCopyWithImpl;
+  @useResult
+  $Res call({RideSignalDto field0});
+}
+
+/// @nodoc
+class _$BridgeEvent_RideSignalCopyWithImpl<$Res>
+    implements $BridgeEvent_RideSignalCopyWith<$Res> {
+  _$BridgeEvent_RideSignalCopyWithImpl(this._self, this._then);
+
+  final BridgeEvent_RideSignal _self;
+  final $Res Function(BridgeEvent_RideSignal) _then;
+
+  /// Create a copy of BridgeEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(BridgeEvent_RideSignal(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as RideSignalDto,
     ));
   }
 }

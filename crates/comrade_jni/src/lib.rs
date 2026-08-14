@@ -1601,6 +1601,34 @@ impl Comrade {
         handles.together_share(signal).await
     }
 
+    /// Say one catalog phrase to the other seat of the motorcycle — see
+    /// [`comrade_core::ride`]. `phrase` is the wire name (`slow_down`,
+    /// `pull_over`, `fuel_soon`, `break_please`, `all_good`); an unknown one is
+    /// refused rather than sent, because the receiver drops it whole anyway.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn ride_send_quick(&self, peer: String, phrase: String) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.ride_send_quick(&peer, &phrase).await
+    }
+
+    /// Suggest the next maneuver to the person steering — `left`, `right`,
+    /// `straight`, `u_turn`, `stop` or `hazard` — optionally with metres to it
+    /// and a short landmark note (capped in core; an over-long note is refused,
+    /// not truncated).
+    pub async fn ride_send_route(
+        &self,
+        peer: String,
+        maneuver: String,
+        distance_m: Option<u32>,
+        note: Option<String>,
+    ) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .ride_send_route(&peer, &maneuver, distance_m, note)
+            .await
+    }
+
     /// Send one step of handing a **large attachment** over — the road a file
     /// takes when it is past [`comrade_core::media::MAX_MEDIA_BYTES`] and the
     /// hosted path cannot carry it.

@@ -798,4 +798,36 @@
          renegotiating that connection \u2014 which would take the picture away. -->
     <string name="together_mic_unavailable">Your microphone can\u2019t join while you\u2019re watching their stream. It\u2019ll work on the next thing you play.</string>
     <string name="together_follow_note">Comrade is following another app on this phone. It can play, pause and place the playhead \u2014 it can\u2019t show you the picture.</string>
+
+    <!--
+      Ride mode (docs/RIDE.md). The wording avoids the word "navigation"
+      everywhere, deliberately: there is no routing engine behind any of this,
+      and a screen that borrowed a satnav's vocabulary would be borrowing a
+      confidence nobody measured. What the pillion sends is a suggestion.
+    -->
+    <string name="ride_title">Riding together</string>
+    <string name="ride_subtitle">For the two of you on one bike. Say the few things the engine drowns out.</string>
+    <string name="ride_note">No location is shared \u2014 only the words you tap. Anything you send stops being shown after a minute, because by then it isn\u2019t true any more.</string>
+    <string name="ride_who_with">Riding with</string>
+    <string name="ride_seat">Your seat</string>
+    <string name="ride_seat_driver">Driving</string>
+    <string name="ride_seat_pillion">Riding pillion</string>
+    <string name="ride_seat_driver_note">Big buttons, spoken alerts, no keyboard.</string>
+    <string name="ride_seat_pillion_note">You get the map, the music and the words.</string>
+    <string name="ride_change_seat">Change seat</string>
+    <string name="ride_say">Say</string>
+    <string name="ride_suggest">Suggest a turn</string>
+    <string name="ride_distance">How far</string>
+    <string name="ride_landmark">Landmark (optional)</string>
+    <string name="ride_send">Send</string>
+    <string name="ride_nothing_yet">Nothing said yet.</string>
+    <string name="ride_music">Music</string>
+    <string name="ride_music_none">Nothing playing. Start something on the Together tab and it\u2019ll show up here.</string>
+    <string name="ride_play">Play</string>
+    <string name="ride_pause">Pause</string>
+    <string name="ride_next">Next</string>
+    <string name="ride_previous">Previous</string>
+    <!-- Said once, where it matters: the mode is only honest if the driver is
+         not reading. -->
+    <string name="ride_driver_note">Keep your eyes up. Anything urgent is spoken and buzzed \u2014 you don\u2019t need to look at this.</string>
 </resources>
