@@ -621,13 +621,21 @@ two hard edges kept: every decorative motion stops under
 Material3 idiom rather than imitating the desktop's glass; the shared parts
 (routine, copy register, no-digits rules) travel through the engine.
 
-Verified in this pass: `cargo fmt --check` and the full `comrade_core` /
-`comrade_storage` / `comrade_ui` / `comrade_jni` test suites, including the
-new library round-trip, migration and vault-locked tests; `node --test
-desktop/ui` (431 cases incl. the new `stretch_view` suite) plus a scripted
-browser-preview walkthrough of the new tab; and the pinned-kotlinc JUnit run
-of `StretchPacingTest`. **Not verified**: the Android type-check lanes were
-interrupted mid-run in the authoring session, so the Compose changes
-(`StretchScreen`, `ReaderScreen`, `FocusScreen`, `MainActivity`) build first
-in CI; the share-sheet flow end-to-end needs a real handset; and the Tauri
-shell lane only CI can build.
+Verified in this pass: `cargo fmt --check`, `clippy --workspace --all-targets
+-D warnings` and `cargo test --workspace` (987 tests) — clippy on a
+freshly-`rustup update`d stable, because the container's snapshot was three
+releases behind CI's and that gap has turned a branch red before; `node --test
+desktop/ui` (436 cases, incl. the new `stretch_view` suite and main's
+`dom_bindings` check, which is what proves the new markup ids are all
+declared) plus a scripted browser-preview walkthrough of the tab, re-run after
+merging main since both sides had touched `main.js`; the pinned-kotlinc JUnit
+run of `StretchPacingTest` alongside `TogetherDecisionsTest` (124 tests); and
+`android-typecheck-compose.sh`, whose frontend came back clean over all 130
+sources — so `StretchScreen`, the rewritten `ReaderScreen`, `FocusScreen` and
+the `MainActivity` wiring resolve against the real Compose/Material3 AARs.
+
+**Not verified**, and only CI or a handset can: `./gradlew test` and `res/`
+correctness; the Tauri shell's clippy lane (no GTK headers here, as ever); and
+the share-sheet flow end to end — the intent filter and the
+offered-never-silently-saved path are reasoned from code and type-checked, but
+nobody has yet shared an Instagram post into a running build.
