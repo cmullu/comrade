@@ -18,6 +18,8 @@ The Rust workspace shows genuinely strong engineering discipline for a prototype
 
 ## Decision log
 
+- **2026-08-14 (the desktop thread had the reply-jump feature and none of it ran, and reading history was interrupted by events that added nothing):** Two defects in the same screen, both invisible to every lane that exists. **(1) The quote jump was dead on arrival.** `goToQuoted` opened with `$("#dm-log")` and the page declares no such id — the thread is `#chat-log`, and the `dm-` prefix belongs to the twelve composer controls *below* it (`index.html:288-325`), which is what makes the slip so easy to read past. `$` returned null, the `if (!log) return` under it swallowed that, and so the quote button rendered, carried a title and an `aria-label`, stopped propagation on click, and did nothing — the failure mode of a wrong selector is a feature that looks finished. The shared rule it was built on (`chat_thread.mjs:quoteScrollTargetId`) was correct, tested, and mirrored in all three frontends the whole time; only the one line that reaches the DOM was wrong, which is precisely the half `node --test` cannot see. **(2) `renderConversation` ended in an unconditional `log.scrollTop = log.scrollHeight`.** Android and Flutter have carried `isNearBottom` since they were written *because* a reader scrolled up in history must not be yanked to the newest line; desktop never got it. The consequence was worse than missing the new-mail case, because that function is not only called for new mail — a delivery tick (`main.js:2009`), a peer rename (`main.js:2018`) and a presence change all rebuild the thread, so an event that added nothing to read still threw you to the bottom. It also destroyed the quote jump's own landing the moment any of those arrived, so the two bugs would have masked each other had the first one worked. **The fix keeps the decision where the other two frontends keep it:** `chat_thread.mjs` gains `isNearBottom({scrollTop, scrollHeight, clientHeight})`, the DOM spelling of Flutter's `isNearBottomByOffset` (travel is `scrollHeight - clientHeight`, same 220px slack, same "nothing to scroll counts as bottom"), and `renderConversation` measures before it wipes and restores after. Switching peers always lands at the bottom — `#chat-log` is one element reused by every conversation, so its offset outlives the thread that produced it and a naive restore would open the new peer at the old peer's scroll position. **The regression test is the part worth keeping.** A dead `$("#id")` is not a visible failure and `main.js` is not unit-testable, so `dom_bindings.test.mjs` checks the binding statically instead: every id `main.js` looks up must be declared in `index.html` or created at runtime by `main.js` itself, with the runtime allowance (`media-lightbox`) re-verified against the code that creates it so it cannot rot into cover for a real one. It fails on the pre-fix tree and catches the whole class, not the one instance. **Still open, and deliberately not fixed here:** desktop remains the only frontend with no day separators and no unread divider — `startsNewDay`, `firstUnreadIndex` and `startsUnread` exist in `ChatThread.kt` and `chat_thread.dart` with tests, and have no desktop counterpart. That is a parity gap in a shipping frontend, not a bug in what shipped, and it wants its own change.
+
 - **2026-08-14 (the journal got a door, and it opens one note at a time):** Task:
   share and render journal notes in chats. The journal is the most private thing
   in the product — sealed at rest, never synced, unreachable from a linked
@@ -279,6 +281,8 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each finding is labele
 | T3 | M | **[fact] Zero tests for `saathi.rs`** — the module with the audit's worst correctness bug (Q1). Its design (spawned swarm task, no injectable transport) resists testing; the command-channel seam exists and could be exercised with two in-process engines. |
 | T4 | M | **[judgment] No cross-engine integration test and no known-answer crypto tests.** Nothing exercises unlock → engine build → broadcast → event-bus delivery against a mock/local relay; crypto tests are all self-round-trips with no fixed vectors (e.g., NIP-04 reference vectors, HKDF/AES KATs). The Rust↔Kotlin JSON contract is pinned by no test on either side, and the `nip96-http` feature is never compiled in CI (`cargo test --workspace` uses default features), so the real uploader can rot silently. |
 | T5 | M | **[fact, found 2026-08-08 reviewing polius/FileSync; half closed 2026-08-08] Nothing tested that a transferred byte arrives, and three of the four `RelayPolicy` branches still cannot be exercised.** The byte half is now covered: `crates/comrade_core/tests/share_byte_round_trip.rs` chunks a seeded buffer, shuffles every frame, duplicates every fifth, aims the malformed-frame guards at a chunk that has genuinely not arrived, and ends on the SHA-256 the offer carried. **Note what it does not cover:** it re-implements the receiver's ordering rather than calling any shipped receiver, so it cannot catch a regression in `FileTransfer.onChunk` — it is a test in Rust about an invariant enforced in Kotlin. **The open half is the sharper one.** `RelayPolicy::DirectOnly` is provable by construction, but `UnderBytes`, `AskEachTime` and `Always` all describe a transfer *through* a relay and there is no way to make ICE choose one when a direct path exists, so those three branches have almost certainly never carried a byte — and Q19's consent handling now depends on `AskEachTime`. `CallManager.testTurnConnectivity` already builds a RELAY-only `PeerConnection` for calls (COMMS-02); transfers have no equivalent. The fix FileSync points at is a forced-ICE override (`web/js/modules/webrtc/mode.js` — `?ice=turn` sets `iceTransportPolicy: 'relay'`). Deliberately not built here: the knob is small but needs an FFI surface and two frontend wirings to enable a test that still needs two devices on different networks, which is the two-installation harness COMMS-03 deferred. Adding the surface without the harness would look like coverage without being it. |
+
+| T6 | M | **[fact, found 2026-08-14] The `Device test` lane is flaky, nothing says so, and the failure it produces reads exactly like a real regression.** `MainActivityUiTest.onboardingLeadsToChatsShell` times out after 120 s with *"the onboarding form is still showing — the submit tap did not take effect"* and no error line: the app reported nothing, the tap simply did not land. Eight of the last twenty `android-apk.yml` runs failed this lane, **twice on `main`** (`729845f`, `91dd3ae`), and a re-run of the identical commit passes — while the sibling `pixel-9` AVD passes first time on the same APK. So the signal is per-AVD timing, not per-commit. The cost is not the red badge: it is that anyone pushing an Android change sees a failure in the one lane that runs their code on a device and has to disprove authorship before they can trust it, which is a full investigation cycle each time. Not fixed here because the fix is a judgment about the test, not a bug: `performClick` on a Compose node with the IME up and Argon2 about to run is inherently racy, and the honest repairs are to retry the submit when the form is still showing after a bounded wait, or to assert the vault opened through the state machine rather than through the shell's text. Either is a change to a test this branch has no other reason to touch. **Exit condition:** the retry (or a `waitUntil` around the tap) lands and the lane goes twenty runs without this failure. |
 
 **Healthy — and worth saying loudly:** this is a genuinely well-tested prototype where tests exist: `comrade_state` (transition graph, history), `comrade_storage` (13 unit + 6 durability tests incl. reboot cycles, wrong-PIN fail-closed, and adversarial scans proving no plaintext ever hits disk), relay router (10 pure-logic tests), media (full pipeline round-trip), `comrade_ui` (lock-gating, Send/Sync compile guarantees, serde round-trips), Kotlin voice parsing. Tests assert behavior, not execution. Roughly: storage/state/relay/media/ui ≈ well covered; vault/sakha ≈ partial (pure parts only); sabha engine, saathi, JNI, desktop JS ≈ uncovered.
 
@@ -1332,6 +1336,62 @@ is small; the content problem is the real constraint:
 >   transport row and the embed-refusal copy are Android's alone; `desktop/ui`
 >   still starts a session per thing played. Recorded rather than implied,
 >   because the shared-decision convention makes silence read as agreement.
+
+> **Together, 2026-08-14 — the library browses as a collection, and a tap plays.**
+> `docs/TOGETHER.md` §22. Two owner-requested changes and one bug found under
+> them.
+>
+> The browser drew `MediaStore`'s track-title order as one flat column, which is
+> the shape of a search result rather than of a collection. It is now a grid of
+> covers with a drill-in per record, and the flat list is what a *query* produces
+> — `TogetherDecisions.browse` / `albumsOf` / `AlbumArtist`
+> (`android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt`), with
+> the id-over-title keying, the alphabetical album order, the kept-and-last
+> leftovers group and the three artist answers all pinned by tests.
+> `TogetherDecisions` is **119** JVM tests, up from 105.
+>
+> And tapping a song in your own library now plays it instead of asking who with
+> — `startStepInLibrary` / `mayChoosePerson`, §18's argument applied one screen
+> earlier. Only the library's rule changed: a pasted link, a picked file and a
+> catalogue search still ask through `startStep`.
+>
+> **Resolved here:** `MusicLibrary.artwork` keyed its cache on the album id alone,
+> so with three request sizes in play (48 dp row, 144 dp tile, 320 dp sleeve)
+> whichever decoded first was served to all three — a sleeve drawn from a 48 px
+> thumbnail after a browse, or a sleeve-sized bitmap per row going the other way.
+> The key carries the size and the budget went 4 MB → 12 MB, which is one
+> screenful of grid covers with room to flick back
+> (`MusicLibrary.kt`, `artwork` and `CACHE_BYTES`). No regression test: it needs a
+> `ContentResolver`, and there is no Robolectric lane in this repo.
+>
+> A `comrade-reviewer` pass over the above found seven things, six of which are
+> fixed in the same branch and are worth naming because none of them is the kind a
+> type-checker or a JVM test can see: the grid's scroll position was discarded on
+> the way back out of a record (`LazyGridState` remembered inside the `when`
+> branch that the drill-in removes); an album's track count was stated as a fact
+> about the record while the 2,000-row page cut had fallen inside it; the
+> truncation note inside an open album told the reader to use a search field that
+> view deliberately does not draw; the cache-budget comment's arithmetic
+> contradicted itself; a comment justified skipping a `remember` with a claim
+> about `equals` that is not true; and the system back gesture did not close an
+> open record, because `MainActivity`'s single `BackHandler` does not cover the
+> Together tab. The seventh — that `MediaStore` may substitute a folder name for a
+> missing `ALBUM` tag, which would make the group-versus-row fix above a no-op —
+> is not answerable in this sandbox and is recorded rather than resolved.
+>
+> Three gaps this leaves:
+>
+> - **An album is in title order, not track order.**
+>   `MediaStore.Audio.Media.TRACK` is not in `MusicLibrary.page`'s projection, so
+>   a record's own sequence — the one thing that would make it read as the album
+>   does — is not available to `albumsOf`. Adding the column is small; deciding
+>   what to do with the disc-number encoding it carries is not.
+> - **Nothing here has been drawn.** Both files type-check via
+>   `.claude/scripts/android-typecheck-compose.sh` and the pure half runs, but no
+>   device has laid out the grid or decoded a cover into it. Tile size and how the
+>   adaptive column count lands on a 360 dp phone are unverified by construction.
+> - **The grid is Android's alone**, like the rest of §16 and §18. `desktop/ui`
+>   has no library to browse and `app/` has no together surface at all.
 
 ---
 

@@ -148,7 +148,14 @@ object MusicLibrary {
      * Call this off the main thread: both paths do IO.
      */
     fun artwork(context: Context, uri: String, albumId: Long?, sizePx: Int): Bitmap? {
-        val key = albumId?.toString() ?: uri
+        // **The size is part of the key, and leaving it out was a bug the album
+        // grid made visible.** Three sizes are asked for now — a 48 dp row, a
+        // 144 dp tile and the 320 dp sleeve — and a key that named only the album
+        // handed whichever was decoded first to all three. Browsing rows and then
+        // opening a record drew the sleeve from a 48 px thumbnail, upscaled;
+        // going the other way held a sleeve-sized bitmap for every row. Neither
+        // reads as a caching bug from a screenshot.
+        val key = "${albumId?.toString() ?: uri}@$sizePx"
         cache.get(key)?.let { return it }
         val loaded = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
@@ -198,15 +205,29 @@ object MusicLibrary {
         }.getOrNull()
     }
 
-    private const val CACHE_BYTES = 4 * 1024 * 1024
+    private const val CACHE_BYTES = 12 * 1024 * 1024
 
     /**
      * Covers already decoded, so scrolling back up does not decode them again.
      *
      * Sized in bytes rather than in entries, which is the only bound that means
      * anything for bitmaps — 64 rows of wildly different cover sizes is not a
-     * memory budget. Four megabytes is roughly a screenful of list thumbnails
-     * several times over, and `LruCache` evicts rather than growing.
+     * memory budget. `LruCache` evicts rather than growing.
+     *
+     * **Four megabytes was right for a list of 48 dp thumbnails and is not right
+     * for a grid of covers.** A 144 dp tile on a 3× screen is a 432 px square,
+     * which is at least 750 kB as `ARGB_8888` — `loadThumbnail` guarantees only
+     * *at least* the size asked for, so that is a floor. A screenful of six is
+     * then about 4.5 MB, and the old budget could not hold even one screen:
+     * scrolling re-decoded every tile it had just evicted.
+     *
+     * Twelve is **two to three** screenfuls, not four, and it is worth stating
+     * what else competes for it now that the key carries the size: the sleeve at
+     * 320 dp is a 960 px square, near 3.7 MB, so a session's own cover is
+     * something like a third of the whole budget on its own. That is the
+     * trade-off accepted for drawing the sleeve at the size it is shown rather
+     * than upscaling a list thumbnail — and `LruCache` evicts, so the cost of
+     * being wrong here is re-decoding, not a crash.
      */
     private val cache = object : LruCache<String, Bitmap>(CACHE_BYTES) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
