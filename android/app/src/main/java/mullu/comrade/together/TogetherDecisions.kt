@@ -818,10 +818,12 @@ object TogetherDecisions {
     /**
      * One album's worth of the library, ready to draw as a tile.
      *
-     * [title] is `null` for the one group that is not an album: tracks whose
-     * files name none. They are kept rather than dropped — a phone full of
+     * [title] is `null` for the one group that is not an album: tracks no row of
+     * which named one. They are kept rather than dropped — a phone full of
      * untagged rips would otherwise browse as an empty library — and the screen
-     * names that group, because this file has no strings in it.
+     * names that group, because this file has no strings in it. Exactly one such
+     * group exists whatever the library looks like; [albumsOf] is where that is
+     * arranged and a test is what holds it.
      */
     data class Album(
         val key: String,
@@ -870,21 +872,51 @@ object TogetherDecisions {
     fun albumsOf(tracks: List<Track>): List<Album> {
         val groups = LinkedHashMap<String, MutableList<Track>>()
         for (track in tracks) groups.getOrPut(albumKeyOf(track)) { mutableListOf() } += track
-        return groups.map { (key, rows) ->
-            Album(
-                key = key,
-                // The first row that named it. They agree by construction when
-                // the key came from an album id; when it came from the title
-                // they are the same string.
-                title = rows.firstNotNullOfOrNull { named(it.album) },
-                artist = albumArtistOf(rows),
-                // Within an album, the provider's order is kept — which is title
-                // order, not track order, because `MediaStore.Audio.Media.TRACK`
-                // is not in the projection. A stated gap: it is the one thing
-                // that would make an album read as the record does.
-                tracks = rows.toList(),
+
+        // **A group is leftovers when no row in it names an album — not when a
+        // row lacks a tag**, and the difference is a whole record.
+        //
+        // One file in a rip losing its `ALBUM` tag is ordinary: a re-encode, an
+        // edit by another app. Deciding per row would take that one track out of
+        // its own record — a tile reading "11 tracks", a queue that can never
+        // reach the twelfth, and the twelfth sitting alone at the bottom of the
+        // library under "not in an album". `MediaStore` still groups it by
+        // `ALBUM_ID`, so it stays there and the *group* is asked for the name.
+        //
+        // Folding every still-untitled group into one is then what lets
+        // [Album.title] promise `null` for exactly one of them — an id is a
+        // number in a column, not evidence that anything was tagged, so an
+        // id-keyed group where nothing was named is not an album either, and two
+        // untitled tiles would be two rows headed the same thing.
+        val albums = mutableListOf<Album>()
+        val leftovers = mutableListOf<Track>()
+        for ((key, rows) in groups) {
+            val title = rows.firstNotNullOfOrNull { named(it.album) }
+            if (title == null) {
+                leftovers += rows
+            } else {
+                albums += Album(
+                    key = key,
+                    title = title,
+                    artist = albumArtistOf(rows),
+                    // Within an album, the provider's order is kept — which is
+                    // title order, not track order, because
+                    // `MediaStore.Audio.Media.TRACK` is not in the projection. A
+                    // stated gap: it is the one thing that would make an album
+                    // read the way the record does.
+                    tracks = rows.toList(),
+                )
+            }
+        }
+        if (leftovers.isNotEmpty()) {
+            albums += Album(
+                key = NO_ALBUM_KEY,
+                title = null,
+                artist = albumArtistOf(leftovers),
+                tracks = leftovers.toList(),
             )
-        }.sortedWith(
+        }
+        return albums.sortedWith(
             compareBy(
                 // The no-album group last, wherever its name would have put it:
                 // it is the leftovers, and leftovers do not belong between two
@@ -896,28 +928,22 @@ object TogetherDecisions {
     }
 
     /**
-     * Which album a track belongs to.
+     * Which group a track belongs to — **not** whether that group is an album.
+     * [albumsOf] decides the second thing, by asking the assembled group whether
+     * anything in it named a record; a row with an id and no `ALBUM` tag belongs
+     * with its siblings, and only a group where *nobody* named one is leftovers.
      *
-     * The album id when there is one, because two records can share a name and
-     * `MediaStore` is the only thing that knows they are different. The title is
-     * the fallback and it is deliberately the *whole* key: a name collision
-     * between two untagged records merges them into one tile, which is accepted
-     * rather than fixed by adding the artist — this path is the untagged
-     * remainder, and splitting *that* by artist would scatter a compilation
-     * nobody tagged into one tile per guest, which is the worse of the two
-     * wrong answers.
+     * The album id first, because two records can share a name and `MediaStore`
+     * is the only thing that knows they are different. The title is the fallback
+     * and it is deliberately the *whole* key: a name collision between two
+     * id-less records merges them into one tile, which is accepted rather than
+     * fixed by adding the artist — this path is the untagged remainder, and
+     * splitting *that* by artist would scatter a compilation nobody tagged into
+     * one tile per guest, which is the worse of the two wrong answers.
      */
     fun albumKeyOf(track: Track): String {
-        // The name is asked about **first**, and that ordering is the whole
-        // reason [Album.title] can promise to be `null` for exactly one group.
-        // A row with an album id and no album name does happen — an id is a
-        // number in a column, not evidence that anything was tagged — and
-        // keying it by that id would make a second untitled group, drawn under
-        // the same "not in an album" heading as the first. Two tiles with one
-        // name is not a thing to explain to somebody; an unnamed album is not
-        // an album, whatever the provider numbered it.
-        val title = named(track.album) ?: return NO_ALBUM_KEY
         track.albumId?.let { return "id:$it" }
+        val title = named(track.album) ?: return NO_ALBUM_KEY
         return "name:${title.lowercase()}"
     }
 

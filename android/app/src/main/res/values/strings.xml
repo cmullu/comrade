@@ -547,6 +547,19 @@
         <item quantity="one">%1$d track</item>
         <item quantity="other">%1$d tracks</item>
     </plurals>
+    <!-- While the library read hit its 2,000-row cap. The cut falls in *track
+         title* order across the whole library, not at an album boundary, so a
+         twelve-track record whose last five titles sort past the cut is showing
+         seven — and "7 tracks" would be a claim about the record made out of a
+         fact about the page. -->
+    <plurals name="together_album_tracks_partial">
+        <item quantity="one">at least %1$d track</item>
+        <item quantity="other">at least %1$d tracks</item>
+    </plurals>
+    <!-- Inside an open record, where the search field deliberately is not drawn,
+         so together_library_truncated's "search to find the rest" would name an
+         action this screen does not have. -->
+    <string name="together_album_partial">Your library was read up to 2,000 tracks, so this album may be missing some. Search from the library screen to find them.</string>
     <!-- Tapping a song in your own library plays it, which is what a music
          player does (docs/TOGETHER.md §18, §22). This is how you say you want
          somebody else on it — and the note is there because a toggle whose only

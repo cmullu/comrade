@@ -8,6 +8,7 @@ import android.os.Build
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -33,6 +34,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -935,6 +937,13 @@ private fun LibraryBrowser(
     // library is re-read when a permission is granted, and a held `Album` would
     // go on drawing the tracks of a list that no longer exists.
     var openAlbum by remember { mutableStateOf<String?>(null) }
+    // Hoisted out of the grid, which is the whole point. Opening a record removes
+    // the grid from the composition, so a state remembered *inside* it is
+    // discarded — and coming back out of a record would land at the top of a
+    // library the person had scrolled halfway down, which makes the drill-in
+    // useless past the first screenful. Same value the repo already ships for
+    // chat threads: come back where you left off.
+    val gridState = rememberLazyGridState()
 
     LaunchedEffect(libraryGranted) {
         page = if (libraryGranted) {
@@ -955,22 +964,36 @@ private fun LibraryBrowser(
     // that stopped existing between two reads closes itself instead of showing
     // an empty screen with a back button.
     //
-    // Deliberately *not* wrapped in `remember`: the keys would have to include
-    // `view`, and comparing that means a structural equals over every track in
-    // the library on each recomposition — more expensive than the scan it would
-    // be caching, which is one pass over a few hundred albums.
+    // Deliberately *not* wrapped in `remember`, and the reason is that there is
+    // nothing worth caching: the scan is one pass over a few hundred albums
+    // comparing strings. (It is **not** that the keys would be expensive —
+    // `remember(view, openAlbum)` would compare `view` by reference first, since
+    // a data class's `equals` opens with `this === other` and `view` is the same
+    // instance until `loaded` or `query` changes. The `remember` two lines up
+    // relies on exactly that short-circuit over a `Page` holding 2,000 tracks.)
     val open = (view as? TogetherDecisions.Browse.Albums)
         ?.albums
         ?.firstOrNull { it.key == openAlbum }
     val noAlbum = stringResource(R.string.together_album_none)
 
+    // Only for the level this file added. Enabled only while a record is open, so
+    // back out of the browser itself keeps whatever behaviour the activity has —
+    // this is not the place to start owning the tab's whole back stack.
+    BackHandler(enabled = open != null) { openAlbum = null }
+
     Column(Modifier.fillMaxSize()) {
         BrowserHeader(
             title = open?.let { it.title ?: noAlbum }
                 ?: stringResource(R.string.together_source_phone),
-            // One step up, not out: inside a record, back closes the record. A
-            // back arrow that left the whole browser from two levels down is the
+            // One step up, not out: inside a record, the arrow closes the record.
+            // An arrow that left the whole browser from two levels down is the
             // navigation bug every drill-in gets wrong once.
+            //
+            // The system back button and the predictive-back gesture are handled
+            // separately, below — `MainActivity`'s single `BackHandler` does not
+            // cover the Together tab at all, so this level has to bring its own
+            // or the gesture people actually reach for inside a drill-in would
+            // leave the screen entirely.
             onBack = { if (open != null) openAlbum = null else onBack() },
             choosingPerson = choosingPerson,
             onChoosePerson = onChoosePerson,
@@ -1047,7 +1070,22 @@ private fun LibraryBrowser(
                 items(open.tracks, key = { it.uri }) { track ->
                     TrackRow(track, onClick = { onPlay(track, open.tracks) })
                 }
-                if (loaded.truncated) item(key = "truncated") { TruncatedNote() }
+                // A different sentence from the other two views, because "search
+                // to find the rest" names an action this screen does not have —
+                // the field is deliberately not drawn inside a record. What is
+                // true here is that this record may be missing rows, since the
+                // 2,000-row cut falls in *track title* order and lands inside
+                // whichever albums sort late.
+                if (loaded.truncated) {
+                    item(key = "truncated") {
+                        Text(
+                            stringResource(R.string.together_album_partial),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TogetherMuted,
+                            modifier = Modifier.padding(16.dp),
+                        )
+                    }
+                }
             }
 
             // The two "nothing" sentences, which are different sentences: with
@@ -1073,6 +1111,7 @@ private fun LibraryBrowser(
                 // landscape — the alternative is a screen-width breakpoint this
                 // file would have to guess.
                 columns = GridCells.Adaptive(minSize = GRID_TILE_DP.dp),
+                state = gridState,
                 modifier = Modifier.fillMaxSize(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -1082,7 +1121,14 @@ private fun LibraryBrowser(
                 // one, tile state reattaches to the wrong item as the library is
                 // re-read.
                 items(view.albums, key = { it.key }) { album ->
-                    AlbumTile(album, noAlbum = noAlbum, onClick = { openAlbum = album.key })
+                    AlbumTile(
+                        album,
+                        noAlbum = noAlbum,
+                        // Not a fact about the record while the page was cut —
+                        // see `albumSubtitle`.
+                        partial = loaded.truncated,
+                        onClick = { openAlbum = album.key },
+                    )
                 }
                 if (loaded.truncated) {
                     item(key = "truncated", span = { GridItemSpan(maxLineSpan) }) { TruncatedNote() }
@@ -1170,11 +1216,14 @@ private fun BrowserHeader(
  * @param noAlbum what to call the group whose files name no album. Passed in
  *   rather than read here so the header and the tile cannot call it two
  *   different things.
+ * @param partial the library read was cut at its row cap, so no album's track
+ *   count is a fact about the record — see [albumSubtitle].
  */
 @Composable
 private fun AlbumTile(
     album: TogetherDecisions.Album,
     noAlbum: String,
+    partial: Boolean,
     onClick: () -> Unit,
 ) {
     Column(
@@ -1204,7 +1253,7 @@ private fun AlbumTile(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            albumSubtitle(album),
+            albumSubtitle(album, partial),
             style = MaterialTheme.typography.bodySmall,
             color = TogetherMuted,
             maxLines = 1,
@@ -1222,9 +1271,14 @@ private fun AlbumTile(
  * fact the files withheld, which is why `Unknown` is not folded into `Various`.
  */
 @Composable
-private fun albumSubtitle(album: TogetherDecisions.Album): String {
+private fun albumSubtitle(album: TogetherDecisions.Album, partial: Boolean): String {
     val count = pluralStringResource(
-        R.plurals.together_album_tracks,
+        // "at least" while the page was cut, because the cut falls in *track
+        // title* order across the whole library rather than at an album
+        // boundary: a twelve-track record whose last five titles sort past row
+        // 2,000 is here with seven of them, and "7 tracks" would be a claim
+        // about the record made out of a fact about the page.
+        if (partial) R.plurals.together_album_tracks_partial else R.plurals.together_album_tracks,
         album.tracks.size,
         album.tracks.size,
     )
@@ -2544,11 +2598,14 @@ private const val GRID_TILE_DP = 152
 /**
  * What the provider is asked for, per tile.
  *
- * Deliberately smaller than [GRID_TILE_DP] would suggest at 3× density: these
- * are decoded a screenful at a time and cached, and asking for the full pixel
- * width of every tile is how a grid turns into several megabytes of bitmaps.
- * `loadThumbnail` scales for us and a cover is a photograph, so the difference
- * is not visible at this size.
+ * Roughly a tile's width and not more. `GridCells.Adaptive` gives a 360 dp phone
+ * two columns of about 154 dp, so this asks for a little under what it draws —
+ * a ~10% saving rather than a dramatic one, and the honest reason to keep it a
+ * separate constant is that the tile's width is decided at layout while the
+ * decode has to be asked for before it. Requesting *more* than the tile is what
+ * would matter: these are decoded a screenful at a time into a bounded cache
+ * (`MusicLibrary.CACHE_BYTES`), and a cover is a photograph, so there is nothing
+ * to gain above the size it is drawn at.
  */
 private const val GRID_COVER_DP = 144
 

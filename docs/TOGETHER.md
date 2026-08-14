@@ -2621,19 +2621,26 @@ two conditions read off one list and fall out of which view came back.
 
 **The grouping is the part worth arguing with**, and it is all in the pure file:
 
-- **The album id is the key; the title is only the fallback — but the name is
-  asked about first.** Two records can share a name and `MediaStore` is the only
-  thing that knows they are different, so where there is a name the id decides
-  identity. Where there is an id and *no* name, the row is a leftover rather than
-  an album: an id is a number in a column, not evidence that anything was tagged,
-  and keying by it would produce a second untitled group drawn under the same
-  "not in an album" heading as the first. That ordering is what lets
-  `Album.title` promise to be `null` for exactly one group, which is a test
-  rather than a comment. Where there is a name and no id the lowercased title is
-  the *whole* key, so two untagged records called *Greatest Hits* merge —
-  accepted rather than fixed by adding the artist, because the id-less path is
-  the untagged remainder and splitting *that* by artist would scatter a
-  compilation nobody tagged into one tile per guest.
+- **The album id is the key; the title is only the fallback.** Two records can
+  share a name and `MediaStore` is the only thing that knows they are different.
+  Where there is no id, the lowercased title is the *whole* key — so two untagged
+  records called *Greatest Hits* merge. Accepted rather than fixed by adding the
+  artist: the id-less path is the untagged remainder, and splitting *that* by
+  artist would scatter a compilation nobody tagged into one tile per guest.
+- **Leftovers are decided per *group*, not per row**, and getting that backwards
+  costs a whole record. One file in a rip losing its `ALBUM` tag is ordinary — a
+  re-encode, an edit by another app — and treating that row as unalbumed takes it
+  out of its own record: a tile reading "11 tracks", a queue that can never reach
+  the twelfth, and the twelfth alone at the bottom of the library.
+  `MediaStore` still groups it by `ALBUM_ID`, so it stays there and the group is
+  asked for the name. Only a group where *nobody* named a record is leftovers,
+  and folding all of those into one is what lets `Album.title` promise `null` for
+  exactly one group — an id is a number in a column, not evidence that anything
+  was tagged, and two untitled tiles would be two rows headed the same thing.
+  Both halves are tests. (Whether `MediaStore` on a current device really returns
+  a null `ALBUM` for such a file, or substitutes the folder name, is not
+  something this sandbox can answer; if it substitutes, this is a no-op rather
+  than a fix.)
 - **Alphabetical by album, not the order the tracks arrived in.** The opposite of
   `filterTracks`' rule, for the same underlying reason — this list is not
   recomputed under a finger, so ordering helps here where it would jump there.
@@ -2653,6 +2660,20 @@ two conditions read off one list and fall out of which view came back.
   `AlbumArtist.One` / `Various` / `Unknown`, three arms rather than two. A tile
   reading *Various artists* over four untagged rips invents the one fact the files
   withheld, so `Unknown` says nothing at all instead.
+
+### Grouping a page that was cut needs different sentences
+
+`MusicLibrary.page` stops at 2,000 rows, and the flat list made that legible:
+2,000 titles and one note at the bottom. Grouping does not, because **the cut
+falls in track-title order across the whole library rather than at an album
+boundary** — a twelve-track record whose last five titles sort past row 2,000 is
+present with seven of them. So while `Page.truncated` is set, a tile says *"at
+least 7 tracks"*: the count is a fact about the page and stating it as a fact
+about the record is the kind of small confident lie this feature is written to
+avoid. And inside an open record the note is a different sentence again, because
+the ordinary one ends "search to find the rest" and the search field is
+deliberately not drawn there — it names the library screen instead of an action
+that is not on this one.
 
 ### The cover cache was size-blind, and the grid is what made it visible
 
@@ -2712,10 +2733,18 @@ the tap *after* the one that asked does not ask again.
 ### What is checked here, and what is not
 
 The grouping, the ordering, the three artist answers, the leftovers, the
-every-track-lands-somewhere property and all six rows of the table above are
-`TogetherDecisionsTest`: **118 tests, green in this sandbox** in about a minute,
+every-track-lands-somewhere property and all five rows of the table above are
+`TogetherDecisionsTest`: **119 tests, green in this sandbox** in about a minute,
 up from 105. Each new behaviour was checked by removing it and watching the test
 go red, because a test that cannot fail is not a test.
+
+Two things the grid needed that only a reviewer catches: the grid's
+`LazyGridState` is hoisted out of the `when`, because opening a record removes the
+grid from the composition and a state remembered inside it is discarded — coming
+back out would land at the top of a library somebody had scrolled halfway down.
+And the record level carries its own `BackHandler`: `MainActivity`'s single one
+does not cover the Together tab at all, so the gesture people actually reach for
+inside a drill-in would otherwise leave the screen entirely.
 
 `TogetherScreen.kt` and `MusicLibrary.kt` **type-check** here — the Compose lane
 resolves all 128 sources against real Compose 1.6.1 and Material3 1.2.0, and `R`

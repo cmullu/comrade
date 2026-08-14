@@ -1308,7 +1308,7 @@ is small; the content problem is the real constraint:
 > (`android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt`), with
 > the id-over-title keying, the alphabetical album order, the kept-and-last
 > leftovers group and the three artist answers all pinned by tests.
-> `TogetherDecisions` is **118** JVM tests, up from 105.
+> `TogetherDecisions` is **119** JVM tests, up from 105.
 >
 > And tapping a song in your own library now plays it instead of asking who with
 > — `startStepInLibrary` / `mayChoosePerson`, §18's argument applied one screen
@@ -1323,6 +1323,21 @@ is small; the content problem is the real constraint:
 > screenful of grid covers with room to flick back
 > (`MusicLibrary.kt`, `artwork` and `CACHE_BYTES`). No regression test: it needs a
 > `ContentResolver`, and there is no Robolectric lane in this repo.
+>
+> A `comrade-reviewer` pass over the above found seven things, six of which are
+> fixed in the same branch and are worth naming because none of them is the kind a
+> type-checker or a JVM test can see: the grid's scroll position was discarded on
+> the way back out of a record (`LazyGridState` remembered inside the `when`
+> branch that the drill-in removes); an album's track count was stated as a fact
+> about the record while the 2,000-row page cut had fallen inside it; the
+> truncation note inside an open album told the reader to use a search field that
+> view deliberately does not draw; the cache-budget comment's arithmetic
+> contradicted itself; a comment justified skipping a `remember` with a claim
+> about `equals` that is not true; and the system back gesture did not close an
+> open record, because `MainActivity`'s single `BackHandler` does not cover the
+> Together tab. The seventh — that `MediaStore` may substitute a folder name for a
+> missing `ALBUM` tag, which would make the group-versus-row fix above a no-op —
+> is not answerable in this sandbox and is recorded rather than resolved.
 >
 > Three gaps this leaves:
 >

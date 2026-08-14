@@ -867,7 +867,7 @@ class TogetherDecisionsTest {
     }
 
     @Test
-    fun theAlbumIdWinsOverTheNameButOnlyOnceThereIsAName() {
+    fun theAlbumIdWinsOverTheName() {
         assertEquals("id:7", TogetherDecisions.albumKeyOf(track("x", album = "Rockstar", albumId = 7L)))
         assertEquals(
             "name:rockstar",
@@ -877,13 +877,27 @@ class TogetherDecisionsTest {
             TogetherDecisions.NO_ALBUM_KEY,
             TogetherDecisions.albumKeyOf(track("x", album = null, albumId = null)),
         )
-        // An id is a number in a column, not evidence that anything was tagged.
-        // Keyed by it, this would be a second untitled group drawn under the same
-        // "not in an album" heading as the first.
-        assertEquals(
-            TogetherDecisions.NO_ALBUM_KEY,
-            TogetherDecisions.albumKeyOf(track("x", album = null, albumId = 7L)),
+        // Grouped with its siblings, because whether that group turns out to be
+        // an album is `albumsOf`'s question and not this one's.
+        assertEquals("id:7", TogetherDecisions.albumKeyOf(track("x", album = null, albumId = 7L)))
+    }
+
+    @Test
+    fun aRecordSurvivesOneFileLosingItsAlbumTag() {
+        // Ordinary: a re-encode, an edit by another app. Deciding leftovers per
+        // *row* would take this track out of its own record — a tile reading
+        // "2 tracks", a queue that never reaches the third, and the third alone
+        // at the bottom of the library.
+        val albums = TogetherDecisions.albumsOf(
+            listOf(
+                track("Kun Faya Kun", "A. R. Rahman", "Rockstar", albumId = 10L),
+                track("Nadaan Parindey", "A. R. Rahman", album = null, albumId = 10L),
+                track("Sadda Haq", "Mohit Chauhan", "Rockstar", albumId = 10L),
+            ),
         )
+        assertEquals(1, albums.size)
+        assertEquals("Rockstar", albums.single().title)
+        assertEquals(3, albums.single().tracks.size)
     }
 
     @Test
@@ -1112,6 +1126,19 @@ class TogetherDecisionsTest {
             TogetherDecisions.startStepInLibrary(
                 pairing = TogetherDecisions.ALONE,
                 choosingPerson = true,
+                sessionLive = true,
+                weLead = true,
+            ),
+        )
+        // And the row that fires on every tap *after* the first one in a solo
+        // session: not armed, so it plays. Asserted through the library's own
+        // function rather than inferred from `startStep` above, since that is
+        // what the screen calls.
+        assertEquals(
+            TogetherDecisions.StartStep.PlayNow(TogetherDecisions.ALONE),
+            TogetherDecisions.startStepInLibrary(
+                pairing = TogetherDecisions.ALONE,
+                choosingPerson = false,
                 sessionLive = true,
                 weLead = true,
             ),
