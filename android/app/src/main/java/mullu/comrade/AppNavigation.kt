@@ -34,11 +34,22 @@ object AppNavigation {
     const val SCREEN_SETTINGS = "settings"
     const val SCREEN_REQUESTS = "requests"
 
+    /**
+     * Text handed to us by the system share sheet (`ACTION_SEND`), waiting to
+     * be offered to the reading library. Parked here for the same reason the
+     * tab requests are: the share can arrive while the vault is still locked,
+     * and the offer should survive until the reader can actually show it.
+     */
+    data class SharedText(val title: String, val text: String)
+
     private val _requestedTab = MutableStateFlow<String?>(null)
     val requestedTab: StateFlow<String?> = _requestedTab
 
     private val _requestedPeer = MutableStateFlow<String?>(null)
     val requestedPeer: StateFlow<String?> = _requestedPeer
+
+    private val _sharedText = MutableStateFlow<SharedText?>(null)
+    val sharedText: StateFlow<SharedText?> = _sharedText
 
     /** Record a navigation request; blank/absent keys are ignored. */
     fun request(tab: String?) {
@@ -58,5 +69,17 @@ object AppNavigation {
     /** Called once the conversation request has been honoured. */
     fun consumePeer() {
         _requestedPeer.value = null
+    }
+
+    /** Record text arriving from the share sheet; blank text is ignored. */
+    fun requestSharedText(title: String?, text: String?) {
+        val body = text?.trim().orEmpty()
+        if (body.isEmpty()) return
+        _sharedText.value = SharedText(title = title?.trim().orEmpty(), text = body)
+    }
+
+    /** Called once the shared text has been offered to the reader. */
+    fun consumeSharedText() {
+        _sharedText.value = null
     }
 }

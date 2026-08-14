@@ -72,7 +72,12 @@ const ATTENTION_DAYS_TREE: &str = "attention_days";
 /// Focus-session history (attention pillar — strictly local).
 const FOCUS_SESSIONS_TREE: &str = "focus_sessions";
 /// The single saved long-read (title, full text, reading position).
+/// Superseded by [`READING_LIBRARY_TREE`]; kept so a vault written before the
+/// library existed can migrate its one read instead of losing it
+/// (`comrade_ui::ComradeRuntime::saved_reads` does the move).
 const READING_TREE: &str = "reading_state";
+/// The reading library: every saved long-read, keyed by id.
+const READING_LIBRARY_TREE: &str = "reading_library";
 /// Attention preferences: the user's own doom-app package list.
 const ATTENTION_META_TREE: &str = "attention_meta";
 /// Voice/video call log, keyed by call id.
@@ -334,6 +339,31 @@ pub struct ReadingState {
     /// text — see `comrade_core::attention::chunk_reading` — so the position
     /// is the only state worth storing).
     pub position: u32,
+    pub updated_at: u64,
+}
+
+/// One saved long-read in the reading library — an article shared or pasted
+/// into Comrade, held whole (sealed like everything else) with its own
+/// reading position. What someone chose to keep and how far they got is
+/// sensitive in exactly the way a journal is, which is why the library lives
+/// in the vault and not in a preference file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRead {
+    /// Store key. Zero-padded-timestamp-prefixed so ids sort chronologically,
+    /// like [`FocusSession::id`].
+    pub id: String,
+    pub title: String,
+    /// Where it came from — the host of the first link in the text
+    /// (`comrade_core::attention::reading_source`), or empty for plain pasted
+    /// text. A label, never something to fetch.
+    #[serde(default)]
+    pub source: String,
+    pub text: String,
+    /// Index of the chunk the reader is on (chunking is recomputed from the
+    /// text — see `comrade_core::attention::chunk_reading` — so the position
+    /// is the only progress worth storing).
+    pub position: u32,
+    pub added_at: u64,
     pub updated_at: u64,
 }
 
@@ -911,6 +941,30 @@ impl EncryptedStore {
     /// Delete the saved long-read. Returns `true` if one existed.
     pub fn clear_reading_state(&self) -> Result<bool, StorageError> {
         self.delete(READING_TREE, READING_KEY)
+    }
+
+    /// Persist one saved read, keyed by its id (insert or update-in-place —
+    /// moving the reading position is the same call as saving the text).
+    pub fn save_saved_read(&self, read: &SavedRead) -> Result<(), StorageError> {
+        self.put(READING_LIBRARY_TREE, &read.id, read)
+    }
+
+    /// The whole reading library, newest first — the order a list wants, the
+    /// same ordering rule [`Self::focus_sessions`] uses.
+    pub fn saved_reads(&self) -> Result<Vec<SavedRead>, StorageError> {
+        let mut reads: Vec<SavedRead> = self.values(READING_LIBRARY_TREE)?;
+        reads.sort_by(|a, b| b.added_at.cmp(&a.added_at).then_with(|| b.id.cmp(&a.id)));
+        Ok(reads)
+    }
+
+    /// One saved read by id.
+    pub fn saved_read(&self, id: &str) -> Result<Option<SavedRead>, StorageError> {
+        self.get(READING_LIBRARY_TREE, id)
+    }
+
+    /// Forget one saved read. `true` if there was one.
+    pub fn delete_saved_read(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete(READING_LIBRARY_TREE, id)
     }
 
     /// Persist the attention preferences (doom-app list).
@@ -1655,6 +1709,50 @@ mod tests {
     }
 
     #[test]
+    fn saved_reads_crud_ordering_and_position_update_in_place() {
+        let (_d, s) = store();
+        assert!(s.saved_reads().unwrap().is_empty());
+        assert!(s.saved_read("missing").unwrap().is_none());
+        for (id, at) in [
+            ("00000000000000000020-bbbb", 20u64),
+            ("00000000000000000010-aaaa", 10),
+        ] {
+            s.save_saved_read(&SavedRead {
+                id: id.into(),
+                title: "Essay".into(),
+                source: "example.org".into(),
+                text: "para one\n\npara two".into(),
+                position: 0,
+                added_at: at,
+                updated_at: at,
+            })
+            .unwrap();
+        }
+        let reads = s.saved_reads().unwrap();
+        assert_eq!(reads[0].added_at, 20, "newest first");
+
+        // Turning a page updates the same row rather than duplicating it.
+        let mut open = reads[1].clone();
+        open.position = 1;
+        open.updated_at = 30;
+        s.save_saved_read(&open).unwrap();
+        let reads = s.saved_reads().unwrap();
+        assert_eq!(reads.len(), 2);
+        assert_eq!(reads[1].position, 1);
+
+        assert!(s.delete_saved_read("00000000000000000010-aaaa").unwrap());
+        assert!(!s.delete_saved_read("00000000000000000010-aaaa").unwrap());
+        assert_eq!(s.saved_reads().unwrap().len(), 1);
+
+        // A row written before `source` existed still loads.
+        let legacy: SavedRead = serde_json::from_str(
+            r#"{"id":"x","title":"t","text":"b","position":0,"added_at":1,"updated_at":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.source, "");
+    }
+
+    #[test]
     fn attention_prefs_default_empty_and_roundtrip() {
         let (_d, s) = store();
         assert!(s.load_attention_prefs().unwrap().doom_packages.is_empty());
@@ -1676,6 +1774,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let secret_intent = "my-very-private-focus-intent-0123456789";
         let secret_text = "my-very-private-reading-text-0123456789";
+        let secret_saved = "my-very-private-saved-article-0123456789";
         {
             let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
             s.save_focus_session(&FocusSession {
@@ -1694,6 +1793,16 @@ mod tests {
                 updated_at: 1,
             })
             .unwrap();
+            s.save_saved_read(&SavedRead {
+                id: "00000000000000000002-test".into(),
+                title: "t".into(),
+                source: String::new(),
+                text: secret_saved.into(),
+                position: 0,
+                added_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
             s.flush().unwrap();
         }
         let mut leaked = false;
@@ -1701,7 +1810,7 @@ mod tests {
             let path = entry.unwrap().path();
             if path.is_file() {
                 if let Ok(bytes) = std::fs::read(&path) {
-                    for secret in [secret_intent, secret_text] {
+                    for secret in [secret_intent, secret_text, secret_saved] {
                         if bytes.windows(secret.len()).any(|w| w == secret.as_bytes()) {
                             leaked = true;
                         }
@@ -1717,6 +1826,7 @@ mod tests {
         let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
         assert_eq!(s.focus_sessions().unwrap()[0].intent, secret_intent);
         assert_eq!(s.load_reading_state().unwrap().unwrap().text, secret_text);
+        assert_eq!(s.saved_reads().unwrap()[0].text, secret_saved);
     }
 
     #[test]
@@ -1753,6 +1863,16 @@ mod tests {
             doom_packages: vec!["com.example".into()],
         })
         .unwrap();
+        s.save_saved_read(&SavedRead {
+            id: "00000000000000000002-test".into(),
+            title: "t".into(),
+            source: String::new(),
+            text: "body".into(),
+            position: 0,
+            added_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
 
         s.panic_wipe().unwrap();
 
@@ -1760,6 +1880,7 @@ mod tests {
         assert!(s.focus_sessions().unwrap().is_empty());
         assert!(s.load_reading_state().unwrap().is_none());
         assert!(s.load_attention_prefs().unwrap().doom_packages.is_empty());
+        assert!(s.saved_reads().unwrap().is_empty());
     }
 
     #[test]

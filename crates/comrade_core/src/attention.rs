@@ -230,6 +230,118 @@ pub fn focus_reflection(outcome: FocusOutcome, prior_sessions: u64) -> String {
     }
 }
 
+// ── Stretch breaks ────────────────────────────────────────────────────────────
+
+/// One step of the guided stretch break — a gentle desk stretch a screen can
+/// name and an animation can demonstrate.
+///
+/// The routine is a constant of the design, not the user's data (like
+/// [`FOCUS_PRESETS`]), so both frontends read it from here and neither keeps a
+/// list that could drift. Frontends key their animation off [`key`] and pace
+/// themselves from [`seconds`]/[`mirrored`]; the strings are shown as-is.
+///
+/// [`key`]: StretchStep::key
+/// [`seconds`]: StretchStep::seconds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StretchStep {
+    /// Stable identifier for the frontends' animations. An FFI contract like
+    /// [`FocusOutcome::as_str`], never user-facing text.
+    pub key: &'static str,
+    pub name: &'static str,
+    /// How to do it — one sentence, an invitation, never a drill. Like the
+    /// breathing lines, it may not promise an outcome the app cannot know.
+    pub cue: &'static str,
+    /// Seconds to stay with it — per side, when `mirrored`.
+    pub seconds: u32,
+    /// Done once per side (left, then right) when `true`.
+    pub mirrored: bool,
+}
+
+/// The stretch-break routine, in order. Slow, seated-friendly, nothing that
+/// needs floor space or a warm-up; under three minutes end to end so it fits
+/// the gap between focus sessions it is offered in.
+pub const STRETCH_ROUTINE: &[StretchStep] = &[
+    StretchStep {
+        key: "neck-tilt",
+        name: "Neck tilt",
+        cue: "Let one ear sink toward that shoulder. The weight of your head is enough — nothing to pull.",
+        seconds: 20,
+        mirrored: true,
+    },
+    StretchStep {
+        key: "neck-turn",
+        name: "Slow look-around",
+        cue: "Turn your chin toward the shoulder and let your eyes travel with it.",
+        seconds: 15,
+        mirrored: true,
+    },
+    StretchStep {
+        key: "chin-tuck",
+        name: "Chin tuck",
+        cue: "Draw your chin gently back, making the back of your neck long.",
+        seconds: 15,
+        mirrored: false,
+    },
+    StretchStep {
+        key: "shoulder-roll",
+        name: "Shoulder rolls",
+        cue: "Roll both shoulders up, back and down, in slow full circles.",
+        seconds: 20,
+        mirrored: false,
+    },
+    StretchStep {
+        key: "side-bend",
+        name: "Side bend",
+        cue: "Reach one arm overhead and lean away from it, opening the whole side of your body.",
+        seconds: 15,
+        mirrored: true,
+    },
+    StretchStep {
+        key: "seated-twist",
+        name: "Seated twist",
+        cue: "Turn from your waist to look behind you, and let the breath out as you do.",
+        seconds: 15,
+        mirrored: true,
+    },
+];
+
+/// The whole routine's length in seconds, sides included.
+pub fn stretch_total_secs() -> u32 {
+    STRETCH_ROUTINE
+        .iter()
+        .map(|s| s.seconds * if s.mirrored { 2 } else { 1 })
+        .sum()
+}
+
+// ── Reading sources ───────────────────────────────────────────────────────────
+
+/// A human label for where a saved read came from, derived **offline** from
+/// the text itself: the host of the first `http(s)` link in it
+/// (`instagram.com`, `x.com`, a blog's domain), or `None` for pasted text
+/// with no link.
+///
+/// This exists so the reading library can say which corner of the internet an
+/// article was carried in from without Comrade ever fetching anything — the
+/// URL is read for its host and nothing else, which keeps the reader's
+/// zero-network-by-construction promise intact.
+pub fn reading_source(text: &str) -> Option<String> {
+    let start = match (text.find("https://"), text.find("http://")) {
+        (Some(a), Some(b)) => a.min(b),
+        (a, b) => a.or(b)?,
+    };
+    let rest = &text[start..];
+    let host_start = rest.find("//")? + 2;
+    let host_and_on = &rest[host_start..];
+    let host_end = host_and_on
+        .find(|c: char| c == '/' || c == '?' || c == '#' || c == ':' || c.is_whitespace())
+        .unwrap_or(host_and_on.len());
+    let host = host_and_on[..host_end]
+        .trim_start_matches("www.")
+        .to_ascii_lowercase();
+    // A label needs at least a dot to be a host; "https:// nothing" is not one.
+    (host.contains('.') && !host.starts_with('.') && !host.ends_with('.')).then_some(host)
+}
+
 // ── Long-read chunking ────────────────────────────────────────────────────────
 
 /// Soft target for one reading chunk, in characters — roughly a few minutes
@@ -486,6 +598,70 @@ mod tests {
             assert_eq!(FocusOutcome::from_key(o.as_str()), Some(o));
         }
         assert_eq!(FocusOutcome::from_key("great"), None);
+    }
+
+    // ── stretch breaks ────────────────────────────────────────────────────
+
+    #[test]
+    fn stretch_routine_is_short_gentle_and_keyed_uniquely() {
+        assert!(!STRETCH_ROUTINE.is_empty());
+        for step in STRETCH_ROUTINE {
+            // Long enough to matter, short enough to stay gentle.
+            assert!(
+                (10..=30).contains(&step.seconds),
+                "{} holds for {}s",
+                step.key,
+                step.seconds
+            );
+            assert!(!step.name.trim().is_empty());
+            assert!(!step.cue.trim().is_empty());
+            // Keys are an FFI contract for the frontends' animations: stable,
+            // lowercase, no spaces to escape.
+            assert!(
+                step.key.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "key {:?}",
+                step.key
+            );
+        }
+        let mut keys: Vec<&str> = STRETCH_ROUTINE.iter().map(|s| s.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), STRETCH_ROUTINE.len(), "duplicate step key");
+        // Fits the gap it is offered in: between sessions, not instead of one.
+        let total = stretch_total_secs();
+        assert!(
+            (120..=300).contains(&total),
+            "routine runs {total}s — no longer a short break"
+        );
+    }
+
+    // ── reading sources ───────────────────────────────────────────────────
+
+    #[test]
+    fn reading_source_labels_the_first_link_host_and_nothing_else() {
+        assert_eq!(
+            reading_source("look at this https://www.instagram.com/p/xyz/ thing"),
+            Some("instagram.com".to_string())
+        );
+        assert_eq!(
+            reading_source("https://x.com/someone/status/1?s=20"),
+            Some("x.com".to_string())
+        );
+        assert_eq!(
+            reading_source("mixed case HTTP is not matched, https://Example.ORG:8080/a"),
+            Some("example.org".to_string())
+        );
+        assert_eq!(
+            reading_source("earlier http://old.blog.example/post then https://second.example"),
+            Some("old.blog.example".to_string()),
+            "the first link names the source"
+        );
+        // Pasted prose with no link stays unlabelled rather than guessed.
+        assert_eq!(reading_source("just an essay, no links"), None);
+        assert_eq!(reading_source(""), None);
+        // A scheme with no host is not a source.
+        assert_eq!(reading_source("https:// and nothing"), None);
+        assert_eq!(reading_source("https://localhost/x"), None);
     }
 
     // ── chunking ──────────────────────────────────────────────────────────

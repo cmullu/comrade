@@ -5,6 +5,7 @@ import {
   chosenPreset,
   formatCountdown,
   historyLine,
+  libraryLine,
   outcomeLabel,
   readerNav,
   stepReader,
@@ -77,6 +78,32 @@ test("no presets means no chips, not an invented row", () => {
   assert.equal(chosenPreset([], 25), null);
   assert.equal(chosenPreset(undefined, 25), null);
   assert.equal(chosenPreset(null, 25, 25), null);
+});
+
+test("a library row says where an article came from and how far it got", () => {
+  assert.deepEqual(
+    libraryLine({ title: "On Walking", source: "example.org", chunk_count: 12, position: 2 }),
+    { title: "On Walking", meta: "example.org · 3 of 12" },
+  );
+  // Pasted prose: no source label to show.
+  assert.deepEqual(libraryLine({ title: "Notes", source: "", chunk_count: 3, position: 0 }), {
+    title: "Notes",
+    meta: "1 of 3",
+  });
+});
+
+test("an untitled share leans on its source without repeating it", () => {
+  // Shared in from a feed with no title of its own: the source stands in as
+  // the title, and the meta line must not say it a second time.
+  assert.deepEqual(
+    libraryLine({ title: "", source: "instagram.com", chunk_count: 4, position: 0 }),
+    { title: "instagram.com", meta: "1 of 4" },
+  );
+  // Nothing at all still renders a row.
+  assert.deepEqual(libraryLine({ title: "  ", source: "", chunk_count: 0, position: 0 }), {
+    title: "Long read",
+    meta: "",
+  });
 });
 
 test("reader controls know where they are", () => {
