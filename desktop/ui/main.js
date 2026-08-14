@@ -4988,7 +4988,10 @@
     // URL is an https URL too, and only `parse_music_link` knows the difference.
     const streamLink = await streamLinkReady;
     const asStream = streamLink.planStream(plan.query, target);
-    if (asStream.kind === streamLink.NOT_HTTPS) {
+    // Two refusals, one shape: a scheme we must not carry further, and a page
+    // link a player could never open. Both end here with the sentence naming
+    // the problem — before a session opens and invites somebody to it.
+    if (asStream.kind === streamLink.NOT_HTTPS || asStream.kind === streamLink.NOT_MEDIA) {
       showToast(asStream.message, "warn");
       return;
     }
