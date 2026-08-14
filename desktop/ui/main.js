@@ -123,6 +123,17 @@
   const quoteScrollTargetId = (msgs, replyToId) =>
     chatThread ? chatThread.quoteScrollTargetId(msgs, replyToId) : null;
 
+  // Same degradation, and the safe direction: with no handle yet the thread
+  // sticks to the newest message, which is what it did before this existed.
+  const logIsNearBottom = (log) =>
+    chatThread
+      ? chatThread.isNearBottom({
+          scrollTop: log.scrollTop,
+          scrollHeight: log.scrollHeight,
+          clientHeight: log.clientHeight,
+        })
+      : true;
+
   // ── Focus view decisions (desktop/ui/focus_view.mjs) ───────────────────────
   // Countdown formatting, which duration chip is selected, and where the
   // reader is. Loaded the same way as the modules above. Every call site here
@@ -1778,13 +1789,26 @@
     }
   }
 
+  // Which peer the last render drew. `#chat-log` is one element reused by every
+  // conversation, so its scroll offset outlives the thread that produced it —
+  // without this, switching to a new peer would restore the *previous* thread's
+  // position instead of opening at the newest message.
+  let renderedPeer = null;
+
   function renderConversation() {
     const log = $("#chat-log");
     const head = $("#chat-header");
+    // Measured before the rebuild wipes it. This runs for a delivery tick or a
+    // peer rename as well as for new mail, so a reader scrolled up in history
+    // must not be dragged to the newest line by an event that added nothing to
+    // read. Opening a different conversation always lands at the bottom.
+    const stick = state.activeContact !== renderedPeer || logIsNearBottom(log);
+    const prevScrollTop = log.scrollTop;
     log.innerHTML = "";
     head.innerHTML = "";
     if (!state.activeContact) {
       head.append(el("span", { class: "muted", text: "Select a conversation" }));
+      renderedPeer = null;
       return;
     }
     const peer = state.activeContact;
@@ -1847,7 +1871,10 @@
           );
       }
     }
-    log.scrollTop = log.scrollHeight;
+    // Messages are appended below, never inserted above, so the old offset
+    // still shows the same lines it did before the rebuild.
+    log.scrollTop = stick ? log.scrollHeight : prevScrollTop;
+    renderedPeer = state.activeContact;
   }
 
   function textBubble(m) {
@@ -1934,7 +1961,10 @@
    * the highlight the jump reads as the thread having lost your place.
    */
   function goToQuoted(targetId) {
-    const log = $("#dm-log");
+    // `#chat-log` is the thread; the `dm-` prefix belongs to the composer
+    // controls below it. Looking up an id that does not exist made this return
+    // silently, so the quote button rendered and did nothing at all.
+    const log = $("#chat-log");
     if (!log) return;
     const target = log.querySelector(`[data-msg-id="${CSS.escape(targetId)}"]`);
     if (!target) return;

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { QUOTE_HIGHLIGHT_MS, quoteScrollTargetId } from "./chat_thread.mjs";
+import { QUOTE_HIGHLIGHT_MS, isNearBottom, quoteScrollTargetId } from "./chat_thread.mjs";
 
 // Mirrored in `app/test/chat_thread_test.dart` and
 // `android/.../ui/ChatThreadTest.kt` — same cases, same answers.
@@ -42,4 +42,49 @@ test("a message with no id is never a destination", () => {
 
 test("the flash length matches the other frontends", () => {
   assert.equal(QUOTE_HIGHLIGHT_MS, 1400);
+});
+
+// Auto-scroll. The pixel cases mirror `isNearBottomByOffset` in
+// `app/test/chat_thread_test.dart`, with a scrollable's travel spelled the way
+// the DOM spells it: scrollHeight - clientHeight.
+
+test("at the very bottom counts as near", () => {
+  assert.equal(
+    isNearBottom({ scrollTop: 1000, scrollHeight: 1400, clientHeight: 400 }),
+    true,
+  );
+});
+
+test("within the slack window counts as near", () => {
+  assert.equal(
+    isNearBottom({ scrollTop: 900, scrollHeight: 1400, clientHeight: 400 }),
+    true,
+  );
+});
+
+// The case that decides the feature: reading history, a tick or a rename
+// rebuilds the thread, and the reader must stay where they were.
+test("scrolled up beyond the slack window does not", () => {
+  assert.equal(
+    isNearBottom({ scrollTop: 400, scrollHeight: 1400, clientHeight: 400 }),
+    false,
+  );
+  assert.equal(
+    isNearBottom({ scrollTop: 0, scrollHeight: 10000, clientHeight: 400 }),
+    false,
+  );
+});
+
+test("a log with nothing to scroll counts as bottom", () => {
+  assert.equal(
+    isNearBottom({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 }),
+    true,
+  );
+  // Shorter than its box, and the not-yet-laid-out read the DOM gives before
+  // the first paint — both are "at the bottom", never "scrolled up".
+  assert.equal(
+    isNearBottom({ scrollTop: 0, scrollHeight: 120, clientHeight: 400 }),
+    true,
+  );
+  assert.equal(isNearBottom({}), true);
 });
