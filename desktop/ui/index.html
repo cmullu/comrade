@@ -79,7 +79,7 @@
           </button>
           <button class="tab" data-tab="focus" role="tab" aria-selected="false">
             <span class="tab-icon" aria-hidden="true">⏳</span>
-            <span class="tab-text">Focus <span class="tab-sub">Sessions · Long read</span></span>
+            <span class="tab-text">Focus <span class="tab-sub">Sessions · Reads · Stretch</span></span>
           </button>
           <button class="tab" data-tab="tasks" role="tab" aria-selected="false">
             <span class="tab-icon" aria-hidden="true">🗒</span>
@@ -387,6 +387,10 @@
         </section>
 
         <section id="view-focus" class="view view-focus" role="tabpanel" hidden>
+          <!-- Ambient backdrop: two slow-drifting colour fields behind the
+               glass cards. Decorative only, and stilled entirely under
+               prefers-reduced-motion (styles.css). -->
+          <div class="focus-ambient" aria-hidden="true"></div>
           <div class="focus-col">
             <div class="composer focus-card">
               <div class="focus-head">
@@ -429,6 +433,56 @@
               <p id="focus-reflection" class="focus-reflection" hidden></p>
             </div>
 
+            <!-- Stretch break — the body's half of the pause the breathing
+                 screen gives the head. Guided by the engine's routine
+                 (`stretch_routine`, comrade_core::attention::STRETCH_ROUTINE);
+                 nothing about taking one is recorded anywhere. -->
+            <div class="composer focus-card">
+              <div class="focus-head">
+                <h3>Stretch break</h3>
+                <span class="muted">Neck, shoulders and back — under three minutes.</span>
+              </div>
+
+              <div id="stretch-idle">
+                <p class="hint sm">
+                  Gentle, seated-friendly stretches with nothing to get right.
+                  Nothing about the break is recorded.
+                </p>
+                <button id="stretch-start" class="btn btn-primary">Start stretching</button>
+                <p id="stretch-done" class="focus-reflection" hidden>
+                  That was the whole routine. However much of it you did was enough.
+                </p>
+              </div>
+
+              <div id="stretch-run" hidden>
+                <div class="stretch-stage">
+                  <svg id="stretch-figure" class="stretch-figure" viewBox="0 0 120 120" aria-hidden="true">
+                    <g class="fig-upper">
+                      <path class="fig-arm fig-arm-left" d="M42 62 C 37 74, 35 82, 36 94" />
+                      <path class="fig-arm fig-arm-right" d="M78 62 C 83 74, 85 82, 84 94" />
+                      <path class="fig-shoulders" d="M40 62 C 48 55, 72 55, 80 62" />
+                      <path class="fig-torso" d="M46 64 C 48 84, 48 96, 47 106 L 73 106 C 72 96, 72 84, 74 64 Z" />
+                      <g class="fig-head">
+                        <line class="fig-neck" x1="60" y1="46" x2="60" y2="57" />
+                        <circle cx="60" cy="34" r="13" />
+                      </g>
+                    </g>
+                  </svg>
+                </div>
+                <p id="stretch-name" class="stretch-name"></p>
+                <p id="stretch-side" class="stretch-side"></p>
+                <p id="stretch-cue" class="stretch-cue"></p>
+                <!-- No digits on the bar, same reason the breathing screen has
+                     none: a stretch with a countdown on it becomes a race. -->
+                <div class="stretch-progress" aria-hidden="true">
+                  <div id="stretch-bar" class="stretch-bar"></div>
+                </div>
+                <div class="focus-actions">
+                  <button id="stretch-stop" class="btn btn-ghost">End the break</button>
+                </div>
+              </div>
+            </div>
+
             <div class="composer focus-card">
               <div class="focus-head">
                 <h3>Recent sessions</h3>
@@ -439,13 +493,27 @@
               </div>
             </div>
 
+            <!-- Long reads — the library. One place for every article carried
+                 in from anywhere (shared on Android, pasted here), each with
+                 its own place kept. The user brings the text: Comrade never
+                 fetches a URL, and the source label is derived offline from
+                 the first link in the text (comrade_core::attention::
+                 reading_source). -->
             <div class="composer focus-card">
               <div class="focus-head">
-                <h3>Long read</h3>
+                <h3>Long reads</h3>
+                <span class="muted">Everything you saved to read, in one place.</span>
               </div>
 
-              <!-- Nothing loaded: paste something -->
-              <div id="reader-compose">
+              <!-- The library: saved reads, then the paste box for a new one -->
+              <div id="reader-library">
+                <ul id="reader-list" class="reader-list"></ul>
+                <div id="reader-library-empty" class="empty sm">
+                  <p>
+                    Nothing saved yet. Paste an article below — or share one
+                    into Comrade on your phone — and it will wait here.
+                  </p>
+                </div>
                 <input id="reader-title" class="input" maxlength="200" placeholder="Title (optional)" />
                 <textarea
                   id="reader-text"
@@ -455,16 +523,18 @@
                 ></textarea>
                 <div class="composer-foot">
                   <span class="muted">
-                    Stored encrypted, like your journal. Comrade never fetches it
-                    from the web for you.
+                    Stored encrypted, like your journal. Comrade never fetches
+                    it from the web for you.
                   </span>
-                  <button id="reader-save" class="btn btn-primary">Start reading</button>
+                  <button id="reader-save" class="btn btn-primary">Save to your reads</button>
                 </div>
               </div>
 
-              <!-- Loaded: one chunk at a time -->
+              <!-- One read open: one chunk at a time -->
               <div id="reader-open" hidden>
+                <button id="reader-back" class="btn btn-ghost">← All reads</button>
                 <h4 id="reader-open-title" class="reader-open-title"></h4>
+                <p id="reader-open-source" class="reader-open-source muted" hidden></p>
                 <p id="reader-chunk" class="reader-chunk"></p>
                 <p id="reader-finished" class="hint sm" hidden>
                   That's the end. Worth a line about it?
@@ -474,7 +544,7 @@
                   <span id="reader-progress" class="muted"></span>
                   <button id="reader-next" class="btn btn-primary">Next</button>
                 </div>
-                <button id="reader-clear" class="btn btn-ghost btn-block">Close this read</button>
+                <button id="reader-remove" class="btn btn-ghost btn-block">Remove from your reads</button>
               </div>
             </div>
           </div>

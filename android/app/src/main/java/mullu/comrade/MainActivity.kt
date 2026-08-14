@@ -115,6 +115,7 @@ import mullu.comrade.ui.ReaderScreen
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
+import mullu.comrade.ui.StretchScreen
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
 import mullu.comrade.ui.TaskListScreen
@@ -153,6 +154,7 @@ class MainActivity : ComponentActivity() {
         // first).
         AppNavigation.request(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
         AppNavigation.requestPeer(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
+        intent?.let { offerSharedText(it) }
         // Picture-in-picture for a live video call — see [PipController]. The
         // Activity is the only thing that receives the PiP lifecycle callbacks.
         PipController.attachActivity(this)
@@ -201,6 +203,24 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         AppNavigation.request(intent.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
         AppNavigation.requestPeer(intent.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
+        offerSharedText(intent)
+    }
+
+    /**
+     * Text arriving from the system share sheet — the way into the reading
+     * library from every other app. Parked in [AppNavigation] like the tab
+     * requests, because the share may arrive with the vault still locked; the
+     * shell then lands the user on the reader with the text *offered*, never
+     * silently saved.
+     */
+    private fun offerSharedText(intent: Intent) {
+        if (intent.action != Intent.ACTION_SEND) return
+        if (intent.type?.startsWith("text/") != true) return
+        AppNavigation.requestSharedText(
+            title = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+                ?: intent.getStringExtra(Intent.EXTRA_TITLE),
+            text = intent.getStringExtra(Intent.EXTRA_TEXT),
+        )
     }
 
     /**
@@ -451,6 +471,7 @@ private sealed interface FocusNav {
     data object Sessions : FocusNav
     data object Reader : FocusNav
     data object Breathing : FocusNav
+    data object Stretch : FocusNav
 }
 
 /** Sub-navigation inside the Chats tab. */
@@ -547,6 +568,20 @@ private fun MainShell(
         chatNav = ChatNav.Open(peer = peer, alias = label.ifBlank { null }, username = null)
         settingsOpen = false
         AppNavigation.consumePeer()
+    }
+
+    // Text shared into Comrade from another app lands on the reader with the
+    // compose box prefilled — offered, never silently saved. The flow is
+    // consumed by the ReaderScreen once it has taken the text, so a
+    // configuration change doesn't re-fill a box the user already edited.
+    val sharedText by AppNavigation.sharedText.collectAsState()
+    LaunchedEffect(sharedText) {
+        if (sharedText != null) {
+            tab = MainTab.Focus
+            focusNav = FocusNav.Reader
+            settingsOpen = false
+            feedOpen = false
+        }
     }
 
     // Notification channels + runtime permission (Android 13+). Notifications
@@ -1018,10 +1053,10 @@ private fun MainShell(
                                 title = {
                                     Text(
                                         stringResource(
-                                            if (focusNav == FocusNav.Reader) {
-                                                R.string.reader_title
-                                            } else {
-                                                R.string.breathe_title
+                                            when (focusNav) {
+                                                FocusNav.Reader -> R.string.reader_title
+                                                FocusNav.Stretch -> R.string.stretch_title
+                                                else -> R.string.breathe_title
                                             },
                                         ),
                                     )
@@ -1136,17 +1171,22 @@ private fun MainShell(
                             FocusNav.Sessions -> FocusScreen(
                                 onOpenReader = { focusNav = FocusNav.Reader },
                                 onOpenBreathing = { focusNav = FocusNav.Breathing },
+                                onOpenStretch = { focusNav = FocusNav.Stretch },
                                 onJournalNote = { seedJournalNote(scope, it) },
                                 modifier = content,
                             )
                             FocusNav.Reader -> ReaderScreen(
                                 onJournalNote = { seedJournalNote(scope, it) },
+                                sharedTitle = sharedText?.title,
+                                sharedText = sharedText?.text,
+                                onSharedConsumed = { AppNavigation.consumeSharedText() },
                                 modifier = content,
                             )
                             FocusNav.Breathing -> BreathingScreen(
                                 onDone = { focusNav = FocusNav.Sessions },
                                 modifier = content,
                             )
+                            FocusNav.Stretch -> StretchScreen(modifier = content)
                         }
                         // The session's own surface, rather than an overlay over
                         // the whole app. A film or an album runs for hours, and

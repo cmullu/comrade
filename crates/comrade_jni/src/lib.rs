@@ -89,9 +89,10 @@ use comrade_ui::{
     IceServerDto, IdentityDto, JournalEntryDto, LibraryCandidateDto, MediaBytesDto,
     MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto, MessageRequestDto,
     MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto,
-    PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto,
-    TaraChatDto, TaraMessageDto, TaskDto, TaskState, ThreadDto, ThreadSummaryDto,
-    TogetherSessionDto, TopicDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, SavedReadDto,
+    SavedReadSummaryDto, ShareVerdictDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto,
+    TaskState, ThreadDto, ThreadSummaryDto, TogetherSessionDto, TopicDto, TurnServerStatusDto,
+    UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1383,20 +1384,37 @@ impl Comrade {
         self.inner.blocking_read().focus_reflection(&outcome)
     }
 
-    pub fn save_reading(&self, title: String, text: String) -> Result<ReadingDto, UiError> {
-        self.inner.blocking_read().save_reading(&title, &text)
+    /// The guided stretch break, in order. Infallible and vault-free — see
+    /// `ComradeRuntime::stretch_routine`.
+    pub fn stretch_routine(&self) -> Vec<StretchStepDto> {
+        self.inner.blocking_read().stretch_routine()
     }
 
-    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
-        self.inner.blocking_read().reading()
+    pub fn save_read(&self, title: String, text: String) -> Result<SavedReadDto, UiError> {
+        self.inner.blocking_read().save_read(&title, &text)
     }
 
-    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
-        self.inner.blocking_read().set_reading_position(position)
+    /// The reading library, newest first — rows only, not the texts.
+    pub fn saved_reads(&self) -> Result<Vec<SavedReadSummaryDto>, UiError> {
+        self.inner.blocking_read().saved_reads()
     }
 
-    pub fn clear_reading(&self) -> Result<bool, UiError> {
-        self.inner.blocking_read().clear_reading()
+    pub fn open_saved_read(&self, id: String) -> Result<Option<SavedReadDto>, UiError> {
+        self.inner.blocking_read().open_saved_read(&id)
+    }
+
+    pub fn set_saved_read_position(
+        &self,
+        id: String,
+        position: u32,
+    ) -> Result<Option<SavedReadDto>, UiError> {
+        self.inner
+            .blocking_read()
+            .set_saved_read_position(&id, position)
+    }
+
+    pub fn delete_saved_read(&self, id: String) -> Result<bool, UiError> {
+        self.inner.blocking_read().delete_saved_read(&id)
     }
 
     // ── Calls (voice/video signaling) ───────────────────────────────────────
@@ -1984,10 +2002,11 @@ mod tests {
             c.suggested_focus_minutes(),
             Err(UiError::VaultLocked)
         ));
-        assert!(matches!(c.reading(), Err(UiError::VaultLocked)));
-        // …except the preset list, which a locked frontend still needs in
-        // order to draw its own duration chips.
+        assert!(matches!(c.saved_reads(), Err(UiError::VaultLocked)));
+        // …except the preset list and the stretch routine, which a locked
+        // frontend still needs in order to draw its own break surface.
         assert!(!c.focus_presets().is_empty());
+        assert!(!c.stretch_routine().is_empty());
     }
 
     #[test]
@@ -2043,12 +2062,19 @@ mod tests {
         ));
 
         let saved = c
-            .save_reading("Essay".to_string(), "A line worth reading.".to_string())
+            .save_read("Essay".to_string(), "A line worth reading.".to_string())
             .unwrap();
         assert_eq!(saved.chunks.concat(), "A line worth reading.");
-        assert_eq!(c.set_reading_position(0).unwrap().unwrap().position, 0);
-        assert!(c.clear_reading().unwrap());
-        assert!(c.reading().unwrap().is_none());
+        assert_eq!(c.saved_reads().unwrap().len(), 1);
+        assert_eq!(
+            c.set_saved_read_position(saved.id.clone(), 0)
+                .unwrap()
+                .unwrap()
+                .position,
+            0
+        );
+        assert!(c.delete_saved_read(saved.id.clone()).unwrap());
+        assert!(c.open_saved_read(saved.id).unwrap().is_none());
     }
 
     #[tokio::test]
