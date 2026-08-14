@@ -30,6 +30,18 @@
  *    narrower than core's check on purpose: narrower is safe, and the value is a
  *    sentence that names the actual problem instead of a round trip that comes
  *    back "that link isn't something Comrade will play".
+ *  - And, since 2026-08-14, the **media-suffix line** core draws in
+ *    `direct_media_url` — "is there any point", the different question from "is
+ *    this safe". Android runs core's own copy through `together_stream_content`
+ *    before a session opens; this window has no such call, so without the rule a
+ *    pasted page link opened a session, *invited the other person to it*, and
+ *    failed out of the media element seconds later as `COULD_NOT_PLAY`. The rule
+ *    is mirrored rather than re-imagined: [`MEDIA_SUFFIXES`] and [`namesMedia`]
+ *    are pinned against `STREAM_MEDIA_SUFFIXES` and core's own accept/refuse
+ *    vectors in `together.rs` by `stream_link.test.mjs`, so a drift is a red
+ *    test rather than the loose copy the bullet above warns about. Safety is
+ *    still core's alone — a suffixed URL this file passes is a *candidate*, and
+ *    `together_start` still refuses a hostile one.
  *
  * It sits between the two halves of the existing `/play`: after `play_query`,
  * whose answer it needs, and before `play_flow.mjs`'s `planPlay`, which decides
@@ -50,6 +62,11 @@
 export const STREAM = "stream";
 /** A URL, but not one we could ever play. Refused here, with the reason. */
 export const NOT_HTTPS = "not_https";
+/**
+ * Safe, and there is no media at the end of it — a page *about* the thing.
+ * Refused here, with the reason, before anyone is invited to it.
+ */
+export const NOT_MEDIA = "not_media";
 /** Not a URL at all — words for `play_query` to resolve. */
 export const WORDS = "words";
 
@@ -101,6 +118,19 @@ export function planStream(query, target) {
   const scheme = schemeOf(text);
   if (!scheme) return { kind: WORDS };
   if (scheme === "https") {
+    if (!namesMedia(text)) {
+      return {
+        kind: NOT_MEDIA,
+        // Refusing is the useful half (core's `direct_media_url` says the same):
+        // a player pointed at an HTML page hangs and fails seconds later, after
+        // the other person has already been invited to it. The sentence names
+        // the fix, because the direct link usually exists one click away.
+        message:
+          "That link looks like a page about the thing, not the audio or video " +
+          "itself, so a player couldn't open it. Paste the direct link to the " +
+          "file — it usually ends in .mp3 or .mp4 — or /play the name of something.",
+      };
+    }
     // Byte-identical to what was typed. A frontend that "tidied" a URL —
     // stripping a control character, encoding a space — would hand core a
     // different string from the one the person read, and core's injection rules
@@ -180,6 +210,51 @@ export function streamUrlOf(content) {
   if (!content || content.kind !== "stream") return null;
   const url = typeof content.url === "string" ? content.url.trim() : "";
   return url || null;
+}
+
+/**
+ * Core's `STREAM_MEDIA_SUFFIXES`, byte for byte — the extensions that mean the
+ * URL names media rather than a page that talks about it.
+ *
+ * A mirror, not a second opinion: `stream_link.test.mjs` reads the constant out
+ * of `together.rs` and fails if the two lists differ, so an extension added in
+ * core without landing here is a red test rather than a desktop that quietly
+ * sends real episodes down the refusal path.
+ */
+export const MEDIA_SUFFIXES = Object.freeze([
+  ".mp3",
+  ".m4a",
+  ".aac",
+  ".ogg",
+  ".oga",
+  ".opus",
+  ".flac",
+  ".wav",
+  ".mp4",
+  ".m4v",
+  ".webm",
+  ".mkv",
+]);
+
+/**
+ * Whether an https URL names media a player can open — core's
+ * `direct_media_url`, minus the safety half that stays core's alone.
+ *
+ * The shape mirrors the Rust deliberately: query string and fragment belong to
+ * the server and are cut first; the suffix has to be in the *path*, not the
+ * host, so `https://example.mp3` (a typo, not a file) is refused; and the
+ * lowering is ASCII-only, because that is what `to_ascii_lowercase` does and a
+ * looser lowering here would be the drift the mirror exists to avoid.
+ *
+ * @param {string} url a trimmed `https://…` string — the caller has already
+ *   established the scheme, exactly as `valid_stream_url` has on core's side
+ */
+export function namesMedia(url) {
+  const rest = url.split(/[?#]/)[0] ?? "";
+  const slash = rest.slice(8).indexOf("/");
+  if (slash === -1) return false;
+  const path = rest.slice(8 + slash).replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return MEDIA_SUFFIXES.some((s) => path.endsWith(s));
 }
 
 /**
