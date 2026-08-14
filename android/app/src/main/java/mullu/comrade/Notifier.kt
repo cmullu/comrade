@@ -1,12 +1,14 @@
 package mullu.comrade
 
 import android.annotation.SuppressLint
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
@@ -193,8 +195,33 @@ object Notifier {
         )
     }
 
+    private const val TAG = "Notifier"
+
     private fun canPost(context: Context): Boolean =
         NotificationManagerCompat.from(context).areNotificationsEnabled()
+
+    /**
+     * Post [notification] under [id], absorbing a platform refusal.
+     *
+     * Every post in this file goes through here, and the reason is the caller
+     * rather than the post: these run on [EventPump]'s drain loop, the
+     * process's only consumer of the native event queue. `notify` throws under
+     * conditions that are ordinary rather than exotic — `POST_NOTIFICATIONS`
+     * revoked *between* the [canPost] check and the post (`call/CallService.kt`
+     * has guarded its own post for this reason for some time), or a `CallStyle`
+     * the platform declines — and an escaping throw used to end that loop, so
+     * failing to show one notification silently cost every later message and
+     * call too.
+     *
+     * `drainLoop` now catches this class of failure as well. This is the inner
+     * of the two guards and the one that keeps the loop from ever having to:
+     * losing a single notification is a small, local failure, and it should
+     * read as one in the log rather than as a dropped event.
+     */
+    private fun post(context: Context, id: Int, notification: Notification) {
+        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+            .onFailure { Log.w(TAG, "notification $id was refused by the platform", it) }
+    }
 
     /**
      * The id of the message group's summary. Posted alongside per-peer message
@@ -298,9 +325,8 @@ object Notifier {
             .setSilent(silent)
             .setContentIntent(openAppIntent(context, peer = peer))
             .build()
-        val mgr = NotificationManagerCompat.from(context)
         // Stable per-peer id so repeated messages from one peer collapse.
-        mgr.notify(peer.hashCode(), n)
+        post(context, peer.hashCode(), n)
         postMessageSummary(context)
     }
 
@@ -327,7 +353,7 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(openAppIntent(context))
             .build()
-        NotificationManagerCompat.from(context).notify(MESSAGE_SUMMARY_ID, n)
+        post(context, MESSAGE_SUMMARY_ID, n)
     }
 
     /**
@@ -363,7 +389,7 @@ object Notifier {
             .setSilent(silent)
             .setContentIntent(openAppIntent(context, screen = AppNavigation.SCREEN_REQUESTS))
             .build()
-        NotificationManagerCompat.from(context).notify("req:$peer".hashCode(), n)
+        post(context, "req:$peer".hashCode(), n)
     }
 
     /**
@@ -388,7 +414,7 @@ object Notifier {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(openAppIntent(context, screen = AppNavigation.SCREEN_SETTINGS))
             .build()
-        NotificationManagerCompat.from(context).notify(UPDATE_ID, n)
+        post(context, UPDATE_ID, n)
     }
 
     /** Drop the update notice — it was skipped, or the update has been installed. */
@@ -436,7 +462,7 @@ object Notifier {
             .setFullScreenIntent(openApp, true)
             .setContentIntent(openApp)
             .build()
-        NotificationManagerCompat.from(context).notify("call:$peer".hashCode(), n)
+        post(context, "call:$peer".hashCode(), n)
     }
 
     /**
@@ -457,7 +483,7 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setContentIntent(openAppIntent(context))
             .build()
-        NotificationManagerCompat.from(context).notify("missed:$peer".hashCode(), n)
+        post(context, "missed:$peer".hashCode(), n)
     }
 
     /**
@@ -486,7 +512,7 @@ object Notifier {
             .setTimeoutAfter(ONLINE_TIMEOUT_MS)
             .setContentIntent(openAppIntent(context))
             .build()
-        NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+        post(context, "online:$peer".hashCode(), n)
     }
 
     /**
@@ -523,7 +549,7 @@ object Notifier {
             // about (WP11, the same rule message notifications follow).
             .setContentIntent(openAppIntent(context, peer = peer))
             .build()
-        NotificationManagerCompat.from(context).notify("online:$peer".hashCode(), n)
+        post(context, "online:$peer".hashCode(), n)
     }
 
     /**
@@ -555,7 +581,7 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
             .setContentIntent(openAppIntent(context, screen = TOGETHER_SCREEN))
             .build()
-        NotificationManagerCompat.from(context).notify(TOGETHER_INVITE_ID, n)
+        post(context, TOGETHER_INVITE_ID, n)
     }
 
     /**

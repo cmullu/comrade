@@ -11,8 +11,10 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -75,6 +77,9 @@ class RelayConnectionService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** The liveness re-check; replaced rather than duplicated per start. */
+    private var pumpWatchJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         Notifier.ensureChannels(this)
@@ -86,7 +91,34 @@ class RelayConnectionService : Service() {
         EventPump.acquire(applicationContext, PumpHolder.SERVICE)
         // Only ever started after an unlock, so the store is readable now.
         scope.launch { ChatEventRouter.seedFromStore() }
+        // onStartCommand runs again on a repeat start() and on a START_STICKY
+        // restart, so replace the watch rather than stacking a second one.
+        pumpWatchJob?.cancel()
+        pumpWatchJob = scope.launch { watchPump() }
         return START_STICKY
+    }
+
+    /**
+     * Keep checking that the drain loop is alive for as long as this service
+     * runs.
+     *
+     * [EventPump.acquire] revives a dead loop, but nothing acquires while the
+     * app stays closed — which is the exact stretch this service exists to
+     * cover, so "it will be fixed next time the user opens the app" is the one
+     * answer that does not help here. [drainLoop] is written so a bad event can
+     * no longer kill the loop; this is the insurance that if it dies some other
+     * way, the outage lasts one interval instead of until someone notices no
+     * messages have arrived all day.
+     *
+     * Cheap by construction: one wakeup a minute against a loop that already
+     * polls five times a second, and [EventPump.ensureRunning] is a lock and two
+     * boolean reads when nothing is wrong.
+     */
+    private suspend fun watchPump() {
+        while (true) {
+            delay(PUMP_CHECK_INTERVAL_MS)
+            EventPump.ensureRunning(applicationContext)
+        }
     }
 
     override fun onDestroy() {
@@ -128,6 +160,13 @@ class RelayConnectionService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 0xC0A1EC7
+
+        /**
+         * How often to re-check that the drain loop is alive. A minute is well
+         * inside "a message should not wait noticeably longer than usual" while
+         * being far too rare to matter for battery.
+         */
+        private const val PUMP_CHECK_INTERVAL_MS = 60_000L
 
         /** Start the service — a no-op if the user has disabled the feature. */
         fun start(context: Context) {
