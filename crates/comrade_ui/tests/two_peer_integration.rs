@@ -1489,3 +1489,73 @@ async fn an_offer_that_arrives_twice_raises_one_bubble() {
 
     relay.stop().await;
 }
+
+#[tokio::test]
+async fn a_ride_signal_crosses_to_the_other_seat_with_its_urgency_decided() {
+    let relay = TestRelay::start().await;
+    let alice_dir = TempDir::new().unwrap();
+    let bob_dir = TempDir::new().unwrap();
+    let alice = unlocked_runtime(&relay.url, &alice_dir).await;
+    let bob = unlocked_runtime(&relay.url, &bob_dir).await;
+    let alice_npub = alice.profile().unwrap().npub;
+    let bob_npub = bob.profile().unwrap().npub;
+    let mut bob_events = bob.subscribe_events();
+    tokio::time::sleep(SETTLE).await;
+    become_accepted_contacts(&alice, &alice_npub, &bob, &bob_npub, &mut bob_events).await;
+
+    // The pillion asks for a stop: a catalog phrase, urgent by core's verdict,
+    // not by either frontend's opinion.
+    alice.ride_send_quick(&bob_npub, "pull_over").await.unwrap();
+    let quick = wait_for(&mut bob_events, RECV_TIMEOUT, |e| {
+        matches!(e, BridgeEvent::RideSignal(_))
+    })
+    .await
+    .expect("the phrase must reach the driver's runtime");
+    let BridgeEvent::RideSignal(dto) = quick else {
+        unreachable!()
+    };
+    assert_eq!(dto.kind, "quick");
+    assert_eq!(dto.phrase.as_deref(), Some("pull_over"));
+    assert_eq!(dto.urgency, "urgent");
+    assert_eq!(dto.peer, alice_npub);
+
+    // And a route suggestion, with the landmark it was said about. Neither
+    // signal may double as a chat bubble: the envelope is a control message,
+    // not a message.
+    alice
+        .ride_send_route(
+            &bob_npub,
+            "left",
+            Some(400),
+            Some("  after the petrol pump ".into()),
+        )
+        .await
+        .unwrap();
+    let route = wait_for(
+        &mut bob_events,
+        RECV_TIMEOUT,
+        |e| matches!(e, BridgeEvent::RideSignal(d) if d.kind == "route"),
+    )
+    .await
+    .expect("the route suggestion must reach the driver's runtime");
+    let BridgeEvent::RideSignal(dto) = route else {
+        unreachable!()
+    };
+    assert_eq!(dto.maneuver.as_deref(), Some("left"));
+    assert_eq!(dto.distance_m, Some(400));
+    assert_eq!(
+        dto.note.as_deref(),
+        Some("after the petrol pump"),
+        "the note travels trimmed"
+    );
+    assert_eq!(dto.urgency, "notice");
+
+    // A phrase core does not know is refused at the sender, not shipped to be
+    // dropped at the receiver.
+    assert!(alice
+        .ride_send_quick(&bob_npub, "warp_speed")
+        .await
+        .is_err());
+
+    relay.stop().await;
+}

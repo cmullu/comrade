@@ -14,6 +14,7 @@
  *   nudge   — "they nearly wrote to you": one signal for an abandoned draft
  *   note    — hand one journal entry to one person: the wire form of a shared note
  *   together— sync-play control channel (watch/listen together; no media moves)
+ *   topic   — threads inside a conversation, and the topics they are filed under
  *   share   — chunked, resumable, playable-early P2P file transfer (no server)
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
  *   sakha   — Yrs CRDT shared ledger + DH-encrypted Nostr sync
@@ -66,6 +67,7 @@ pub mod nudge;
 pub mod pad;
 pub mod presence;
 pub mod relay;
+pub mod ride;
 pub mod saathi;
 pub mod sabha;
 pub mod sakha;
@@ -73,6 +75,7 @@ pub mod seen;
 pub mod share;
 pub mod tara;
 pub mod together;
+pub mod topic;
 pub mod vault;
 
 pub use error::CoreError;

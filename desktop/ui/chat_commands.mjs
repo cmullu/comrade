@@ -24,6 +24,17 @@
  * cases where the honest answer is "not here yet".
  */
 
+// The one thing this module imports. `/assign`'s three-way answer is genuinely
+// shared with Android (`TopicDecisions.planAssign`) rather than being this
+// window's own call, so it lives beside the rest of the thread decisions and is
+// pinned by the same vectors — reimplementing it here would be a second copy of
+// the exact rule that keeps a filing from landing on the wrong thread.
+import {
+  ASSIGN_NEEDS_TARGET,
+  ASSIGN_OPEN_PICKER,
+  planAssign,
+} from "./topics.mjs";
+
 /** Nothing to do; send the text as typed. */
 export const SEND = "send";
 /** Route to `tara_aside`, never to `send_dm`. `/tara`. */
@@ -38,6 +49,15 @@ export const ASIDE = "aside";
 export const TARA_HERE = "tara_here";
 /** Route to `assign_task`. */
 export const TASK = "task";
+/**
+ * Route to `assign_thread` — `/assign #topic`.
+ *
+ * Carries `slug` and `messageId`, or a null `slug` meaning "open the picker".
+ * The three-way decision behind that is `topics.mjs`'s {@link planAssign}, which
+ * `TopicDecisions.planAssign` mirrors on Android; this constant only names where
+ * the composer sends the answer.
+ */
+export const ASSIGN_TOPIC = "assign_topic";
 /** Route to `offer_action`. */
 export const OFFER = "offer";
 /** Route to a `/play` flow. */
@@ -99,7 +119,7 @@ export const DESKTOP_CAN_PLAY = true;
  * silently delivered as `/frobnicate the thing` is a message the other person
  * gets confused by; a message silently *swallowed* is worse. So it is reported.
  */
-export function planFor(command, { mentions = [] } = {}) {
+export function planFor(command, { mentions = [], replyTarget = null } = {}) {
   if (!command || typeof command.kind !== "string") return { action: SEND };
   switch (command.kind) {
     case "plain":
@@ -146,6 +166,20 @@ export function planFor(command, { mentions = [] } = {}) {
       // No target is a note to self, which is the common case and needs no
       // resolution at all.
       return { action: TASK, text, peer: targets.npubs[0] ?? null };
+    }
+
+    // The three-way answer is `topics.mjs`'s `planAssign`, shared with Android
+    // and pinned by mirrored vectors — this only turns it into the shape the
+    // composer switches over.
+    case "assign_topic": {
+      const plan = planAssign(command.topics, replyTarget);
+      if (plan.action === ASSIGN_OPEN_PICKER) {
+        return { action: ASSIGN_TOPIC, slug: null, messageId: null };
+      }
+      if (plan.action === ASSIGN_NEEDS_TARGET) {
+        return { action: INCOMPLETE, message: plan.message };
+      }
+      return { action: ASSIGN_TOPIC, slug: plan.slug, messageId: plan.messageId };
     }
 
     case "offer_to": {

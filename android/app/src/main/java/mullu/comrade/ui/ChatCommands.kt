@@ -66,6 +66,25 @@ sealed interface ComposerPlan {
     /** Route to [ComradeCore.assignTaskTyped]. [peer] null is a note to self. */
     data class Task(val text: String, val peer: String?) : ComposerPlan
 
+    /**
+     * File the thread containing [messageId] under [slug] —
+     * [ComradeCore.assignThreadTyped].
+     *
+     * [messageId] is whatever the composer had selected, not the thread root:
+     * core walks up the reply chain, so a frontend cannot file the wrong thread
+     * by picking the wrong end of one.
+     */
+    data class AssignTopic(val slug: String, val messageId: String) : ComposerPlan
+
+    /**
+     * Open the topic sheet — a bare `/assign`, which is the discoverable way in
+     * rather than a refusal.
+     *
+     * Not an [Explain]: "name a topic" with no way to see which topics exist is
+     * the same dead end [Choose] was created to fix.
+     */
+    data object OpenTopics : ComposerPlan
+
     /** Route to [ComradeCore.offerActionTyped]. */
     data class Offer(val action: AppAction, val peers: List<String>) : ComposerPlan
 
@@ -119,6 +138,7 @@ object ChatCommands {
     fun planFor(
         command: ChatCommand,
         mentions: List<ComradeCore.MentionMatchInfo> = emptyList(),
+        replyTarget: String? = null,
     ): ComposerPlan = when (command) {
         is ChatCommand.Plain -> ComposerPlan.Send
 
@@ -181,6 +201,26 @@ object ChatCommands {
                 ComposerPlan.Explain("Name a song, or paste a link.")
             } else {
                 ComposerPlan.Play(command.query.trim(), command.service)
+            }
+
+        // The three-way answer is `TopicDecisions.planAssign`'s, shared with the
+        // desktop and pinned by mirrored vectors — this only turns it into the
+        // sentence Android says.
+        is ChatCommand.AssignTopic ->
+            when (
+                val plan = mullu.comrade.topic.TopicDecisions.planAssign(
+                    command.topics.map { it.slug },
+                    replyTarget,
+                )
+            ) {
+                is mullu.comrade.topic.TopicDecisions.AssignPlan.OpenPicker ->
+                    ComposerPlan.OpenTopics
+                is mullu.comrade.topic.TopicDecisions.AssignPlan.NeedsTarget ->
+                    ComposerPlan.Explain(
+                        "Reply to a message first — then /assign #${plan.slug} files that thread.",
+                    )
+                is mullu.comrade.topic.TopicDecisions.AssignPlan.File ->
+                    ComposerPlan.AssignTopic(plan.slug, plan.messageId)
             }
 
         is ChatCommand.Unknown ->

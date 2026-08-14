@@ -842,6 +842,110 @@ object ComradeCore {
     fun serviceAccess(): uniffi.comrade_core.ServiceAccess =
         uniffi.comrade_core.ServiceAccess(spotify = false, appleMusic = false)
 
+    // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+    //
+    // The `Row` shapes these return are `mullu.comrade.topic`'s, not new ones:
+    // that package has no Android imports so the JVM lane can run its
+    // decisions, and mapping at this boundary is what keeps it that way.
+
+    /**
+     * Every topic in this conversation, oldest first, with live counts.
+     * Closed ones are included — the archive has to be reachable, and
+     * [mullu.comrade.topic.TopicDecisions.visibleTopics] is where the picker
+     * filters.
+     */
+    fun topics(peer: String): List<mullu.comrade.topic.TopicRow> =
+        rethrowing("Topics") { ffi.topics(peer).map { it.toRow() } }
+
+    /**
+     * Every thread in this conversation, most recently active first.
+     * [topicSlug] of null is *all* threads, not the unfiled ones.
+     */
+    fun threads(peer: String, topicSlug: String? = null): List<mullu.comrade.topic.ThreadRow> =
+        rethrowing("Threads") { ffi.threads(peer, topicSlug).map { it.toRow() } }
+
+    /** One thread in full. [rootId] may name any message in it. */
+    fun thread(peer: String, rootId: String): ThreadInfo =
+        rethrowing("Thread") { ffi.thread(peer, rootId).toInfo() }
+
+    /**
+     * Name a topic and tell the peer. Idempotent — the slug is the id, so
+     * naming one that already exists returns it rather than failing.
+     */
+    fun createTopicTyped(peer: String, name: String): mullu.comrade.topic.TopicRow =
+        rethrowing("Topic") { runBlocking { ffi.createTopic(peer, name) }.toRow() }
+
+    /**
+     * File the thread containing [messageId] under [topicName], creating the
+     * topic if it is new — or, with null, take it out of wherever it was.
+     *
+     * Takes the message rather than the thread root because resolving the root
+     * is core's job: filing from a reply must land on the thread it belongs to,
+     * not create a second one.
+     */
+    fun assignThreadTyped(
+        peer: String,
+        messageId: String,
+        topicName: String?,
+    ): mullu.comrade.topic.ThreadRow =
+        rethrowing("Assign") {
+            runBlocking { ffi.assignThread(peer, messageId, topicName) }.toRow()
+        }
+
+    /** Archive a topic, or bring it back. */
+    fun setTopicClosedTyped(
+        peer: String,
+        slug: String,
+        closed: Boolean,
+    ): mullu.comrade.topic.TopicRow =
+        rethrowing("Topic") { runBlocking { ffi.setTopicClosed(peer, slug, closed) }.toRow() }
+
+    /**
+     * Reply inside a thread — addressed to the thread's *root*, whichever
+     * message in it is named. That flatness is what makes a thread a thread
+     * rather than a chain of quotes.
+     */
+    fun sendThreadReplyTyped(peer: String, rootId: String, content: String): MessageInfo =
+        rethrowing("Send") { runBlocking { ffi.sendThreadReply(peer, rootId, content) }.toInfo() }
+
+    /** One thread as the sheet renders it: text and attachments, merged by time. */
+    data class ThreadInfo(
+        val rootId: String,
+        val peer: String,
+        val topicSlug: String?,
+        val messages: List<MessageInfo>,
+        val media: List<MediaMessageInfo>,
+    )
+
+    private fun uniffi.comrade_ui.TopicDto.toRow() = mullu.comrade.topic.TopicRow(
+        slug = slug,
+        name = name,
+        closed = closed,
+        threadCount = threadCount.toInt(),
+        messageCount = messageCount.toInt(),
+        lastActivityAt = lastActivityAt.toLong(),
+        mine = mine,
+    )
+
+    private fun uniffi.comrade_ui.ThreadSummaryDto.toRow() = mullu.comrade.topic.ThreadRow(
+        rootId = rootId,
+        topicSlug = topicSlug,
+        preview = preview,
+        rootIsMedia = rootIsMedia,
+        rootMissing = rootMissing,
+        replyCount = replyCount.toInt(),
+        lastAt = lastAt.toLong(),
+        unread = unread,
+    )
+
+    private fun uniffi.comrade_ui.ThreadDto.toInfo() = ThreadInfo(
+        rootId = rootId,
+        peer = peer,
+        topicSlug = topicSlug,
+        messages = messages.map { it.toInfo() },
+        media = media.map { it.toInfo() },
+    )
+
     /** Name a piece of work. [peer] of null is a note to self — no relay. */
     fun assignTaskTyped(peer: String?, text: String): TaskInfo =
         rethrowing("Task") { runBlocking { ffi.assignTask(peer, text) }.toInfo() }
@@ -962,7 +1066,37 @@ object ComradeCore {
         val remainingSecs: Long,
     )
 
-    data class ReadingInfo(val title: String, val chunks: List<String>, val position: Int)
+    /** One saved read, opened: the full text chunked, plus where the reader is. */
+    data class SavedReadInfo(
+        val id: String,
+        val title: String,
+        /** Host of the first link in the text ("instagram.com"), or empty. */
+        val source: String,
+        val chunks: List<String>,
+        val position: Int,
+        val addedAt: Long,
+    )
+
+    /** A reading-library row — everything the list needs without the text. */
+    data class SavedReadSummaryInfo(
+        val id: String,
+        val title: String,
+        val source: String,
+        val chunkCount: Int,
+        val position: Int,
+        val addedAt: Long,
+    )
+
+    /** One step of the guided stretch break (`attention::STRETCH_ROUTINE`). */
+    data class StretchStepInfo(
+        val key: String,
+        val name: String,
+        val cue: String,
+        /** Seconds to stay with it — per side, when [mirrored]. */
+        val seconds: Int,
+        /** Done once per side (left, then right) when true. */
+        val mirrored: Boolean,
+    )
 
     private fun uniffi.comrade_ui.AttentionDayDto.toInfo() = AttentionDayInfo(
         date = date,
@@ -981,8 +1115,23 @@ object ComradeCore {
         remainingSecs = remainingSecs.toLong(),
     )
 
-    private fun uniffi.comrade_ui.ReadingDto.toInfo() =
-        ReadingInfo(title = title, chunks = chunks, position = position.toInt())
+    private fun uniffi.comrade_ui.SavedReadDto.toInfo() = SavedReadInfo(
+        id = id,
+        title = title,
+        source = source,
+        chunks = chunks,
+        position = position.toInt(),
+        addedAt = addedAt.toLong(),
+    )
+
+    private fun uniffi.comrade_ui.SavedReadSummaryDto.toInfo() = SavedReadSummaryInfo(
+        id = id,
+        title = title,
+        source = source,
+        chunkCount = chunkCount.toInt(),
+        position = position.toInt(),
+        addedAt = addedAt.toLong(),
+    )
 
     fun recordAttentionDayTyped(
         date: String,
@@ -1054,15 +1203,38 @@ object ComradeCore {
     fun focusReflectionTyped(outcome: String): String =
         rethrowing("Focus reflection") { ffi.focusReflection(outcome) }
 
-    fun saveReadingTyped(title: String, text: String): ReadingInfo =
-        rethrowing("Reading") { ffi.saveReading(title, text).toInfo() }
+    /**
+     * The guided stretch break, in order. Vault-free like [focusPresets]:
+     * the routine is a constant of the design, and a stretch must not need
+     * a passphrase.
+     */
+    fun stretchRoutine(): List<StretchStepInfo> = rethrowing("Stretch routine") {
+        ffi.stretchRoutine().map {
+            StretchStepInfo(
+                key = it.key,
+                name = it.name,
+                cue = it.cue,
+                seconds = it.seconds.toInt(),
+                mirrored = it.mirrored,
+            )
+        }
+    }
 
-    fun reading(): ReadingInfo? = rethrowing("Reading") { ffi.reading()?.toInfo() }
+    fun saveReadTyped(title: String, text: String): SavedReadInfo =
+        rethrowing("Reading") { ffi.saveRead(title, text).toInfo() }
 
-    fun setReadingPositionTyped(position: Int): ReadingInfo? =
-        rethrowing("Reading") { ffi.setReadingPosition(position.toUInt())?.toInfo() }
+    /** The reading library, newest first — rows only, not the texts. */
+    fun savedReads(): List<SavedReadSummaryInfo> =
+        rethrowing("Reading") { ffi.savedReads().map { it.toInfo() } }
 
-    fun clearReadingTyped(): Boolean = rethrowing("Reading") { ffi.clearReading() }
+    fun openSavedReadTyped(id: String): SavedReadInfo? =
+        rethrowing("Reading") { ffi.openSavedRead(id)?.toInfo() }
+
+    fun setSavedReadPositionTyped(id: String, position: Int): SavedReadInfo? =
+        rethrowing("Reading") { ffi.setSavedReadPosition(id, position.toUInt())?.toInfo() }
+
+    fun deleteSavedReadTyped(id: String): Boolean =
+        rethrowing("Reading") { ffi.deleteSavedRead(id) }
 
     // ── Encrypted media (NIP-94/96 · Blossom) ─────────────────────────────────
 
@@ -1321,6 +1493,31 @@ object ComradeCore {
     /** The live session, if there is one. */
     fun togetherSessionTyped(): uniffi.comrade_ui.TogetherSessionDto? =
         runCatching { ffi.togetherSession() }.getOrNull()
+
+    // ── Ride mode (driver + pillion — see docs/RIDE.md) ──────────────────────
+
+    /**
+     * Say one catalog phrase to the other seat. [phrase] is a wire name from
+     * [mullu.comrade.ride.RideDecisions.PHRASES]; core refuses one it does not
+     * know rather than sending it, because the far side would drop it whole.
+     */
+    fun rideSendQuick(peer: String, phrase: String) {
+        rethrowing("Send") { runBlocking { ffi.rideSendQuick(peer, phrase) } }
+    }
+
+    /**
+     * Suggest the next maneuver to the person steering. [maneuver] is a wire
+     * name from [mullu.comrade.ride.RideDecisions.MANEUVERS]; an over-long note
+     * is refused by core rather than truncated, so what arrives is what was
+     * typed or nothing at all.
+     */
+    fun rideSendRoute(peer: String, maneuver: String, distanceM: Long?, note: String?) {
+        rethrowing("Send") {
+            runBlocking {
+                ffi.rideSendRoute(peer, maneuver, distanceM?.toUInt(), note)
+            }
+        }
+    }
 
     // ── Handing the file over, when only one side has it ─────────────────────
 

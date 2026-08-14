@@ -383,6 +383,8 @@ class MessageActionSheet extends StatelessWidget {
     required this.onMoreEmoji,
     required this.onReply,
     required this.onCopy,
+    required this.onOpenThread,
+    required this.onFile,
     this.myReaction,
     super.key,
   });
@@ -392,6 +394,15 @@ class MessageActionSheet extends StatelessWidget {
   final VoidCallback onMoreEmoji;
   final VoidCallback onReply;
   final VoidCallback onCopy;
+
+  /// Read this message's thread — see `screens/chats/thread_sheet.dart`. Both
+  /// this and [onFile] act on the *tapped* message's event id, not a thread
+  /// root: core walks up the reply chain, so long-pressing a reply reaches the
+  /// thread it belongs to rather than starting a second one.
+  final VoidCallback onOpenThread;
+
+  /// File this message's thread under a topic.
+  final VoidCallback onFile;
 
   @override
   Widget build(BuildContext context) {
@@ -442,6 +453,18 @@ class MessageActionSheet extends StatelessWidget {
             leading: const Icon(Icons.reply),
             title: const Text('Reply'),
             onTap: onReply,
+          ),
+          ListTile(
+            key: const Key('action-open-thread'),
+            leading: const Icon(Icons.forum_outlined),
+            title: const Text('Open thread'),
+            onTap: onOpenThread,
+          ),
+          ListTile(
+            key: const Key('action-assign-topic'),
+            leading: const Icon(Icons.tag),
+            title: const Text('File under a topic…'),
+            onTap: onFile,
           ),
           ListTile(
             key: const Key('action-copy'),

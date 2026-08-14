@@ -512,6 +512,13 @@ fun ConversationScreen(
     peer: String,
     chatTick: Int,
     /**
+     * Bumped when the *peer* reorganised the conversation — see
+     * `ChatEventRouter.topicTick`. Separate from [chatTick] because rebuilding
+     * the topic counts is a full history scan and a chat tick fires on every
+     * message and receipt.
+     */
+    topicTick: Int = 0,
+    /**
      * Open the file picker for a `/play` that knows what it wants and could not
      * find it on this phone.
      *
@@ -590,6 +597,25 @@ fun ConversationScreen(
     // the quick six. Held separately from `actingOn` because the action sheet
     // closes when it opens, and the target has to outlive that.
     var pickingFor by remember { mutableStateOf<ChatItem?>(null) }
+    // ── Threads and topics (see docs/CHAT_THREADS.md) ────────────────────────
+    //
+    // Three pieces of state, and they are separate because they are three
+    // questions: which thread is open, whether the topic list is open, and
+    // whether the topic list is currently a *destination* for a filing rather
+    // than a place to read. Folding the third into the second would make the
+    // sheet's every row mean two things at once.
+    var threadOpenFor by remember(peer) { mutableStateOf<String?>(null) }
+    var topicsOpen by remember(peer) { mutableStateOf(false) }
+    var filingMessage by remember(peer) { mutableStateOf<String?>(null) }
+    // Bumped by this device's own filings, which raise no BridgeEvent — that
+    // variant reports the peer's changes. Added to `topicTick` so both sources
+    // reload the same sheets.
+    var localTopicTick by remember(peer) { mutableStateOf(0) }
+    // Just enough to decide whether the conversation has any threads worth
+    // offering a way into. Deliberately not the full list: the sheets read
+    // their own, and a bar that held one would keep a second copy in step.
+    var hasThreads by remember(peer) { mutableStateOf(false) }
+    var unreadThreads by remember(peer) { mutableStateOf(0) }
     var attaching by remember { mutableStateOf(false) }
     // Voice notes: tap the action icon to record, tap again to send.
     var recording by remember { mutableStateOf(false) }
@@ -718,6 +744,21 @@ fun ConversationScreen(
     // not yank a reader who scrolled up in history back to the bottom:
     // auto-scroll only on first load or when they were already near it,
     // otherwise light up the jump-to-latest button instead.
+    // Whether there is anything to open a thread sheet *for*, and how much of it
+    // is unread. Rides `chatTick` as well as the topic ticks, because a reply
+    // arriving turns a message into a thread and that is a chat event.
+    LaunchedEffect(peer, chatTick, topicTick, localTopicTick) {
+        val rows = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.threads(peer) }.getOrDefault(emptyList())
+        }
+        val visible = mullu.comrade.topic.TopicDecisions.threadsFor(rows)
+        hasThreads = visible.isNotEmpty() ||
+            withContext(Dispatchers.IO) {
+                runCatching { ComradeCore.topics(peer).isNotEmpty() }.getOrDefault(false)
+            }
+        unreadThreads = mullu.comrade.topic.TopicDecisions.unreadThreadCount(visible)
+    }
+
     LaunchedEffect(peer, chatTick) {
         val loaded = withContext(Dispatchers.IO) {
             Triple(
@@ -830,7 +871,11 @@ fun ConversationScreen(
             runCatching { ComradeCore.resolveMentions(text) }.getOrDefault(emptyList()),
             mentionChoices,
         )
-        val plan = ChatCommands.planFor(command, mentions)
+        // The reply target is what `/assign` files. Any message in the thread
+        // will do — core walks up to the root — so "whatever you are replying
+        // to" is the honest answer to "which thread did you mean", and it is
+        // the only one the composer actually has.
+        val plan = ChatCommands.planFor(command, mentions, replyingTo?.eventId)
 
         // Empties the composer. Deliberately does **not** touch [commandNote]:
         // it used to, and every `/task` confirmation was erased on the line
@@ -946,6 +991,43 @@ fun ConversationScreen(
                         }
                         .onFailure {
                             commandNote = it.message ?: "Tara could not answer."
+                            sending = false
+                        }
+                }
+            }
+
+            is ComposerPlan.OpenTopics -> {
+                topicsOpen = true
+                filingMessage = null
+                clearDraft()
+            }
+
+            is ComposerPlan.AssignTopic -> {
+                sending = true
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            ComradeCore.assignThreadTyped(peer, plan.messageId, plan.slug)
+                        }
+                    }
+                        .onSuccess { filed ->
+                            // Filing produces no bubble on either side, so this
+                            // note is the only evidence the command did
+                            // anything — see `comrade_core::topic`.
+                            commandNote = filed.topicSlug
+                                ?.let { context.getString(R.string.topics_filed, it) }
+                                ?: context.getString(R.string.topics_unfiled_note)
+                            localTopicTick += 1
+                            // The reply chip goes with it: the message was
+                            // selected in order to file it, and leaving it armed
+                            // would make the next thing typed a reply nobody
+                            // asked for.
+                            replyingTo = null
+                            clearDraft()
+                            sending = false
+                        }
+                        .onFailure {
+                            commandNote = it.message ?: "Could not file that."
                             sending = false
                         }
                 }
@@ -1559,6 +1641,57 @@ fun ConversationScreen(
     val nowSecs = remember(chatItems) { System.currentTimeMillis() / 1000 }
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
+        // The way in, and it only appears once there is something to go in to.
+        //
+        // The app bar belongs to `MainActivity` and is shared by every tab, so a
+        // per-conversation action would have to be threaded up through it and
+        // back down. A strip that is *absent* until the conversation has a
+        // thread or a topic costs a chat that has neither exactly nothing — and
+        // is more discoverable than a menu item, which is what this feature
+        // most needs.
+        if (hasThreads) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        filingMessage = null
+                        topicsOpen = true
+                    }
+                    .testTag("threads-bar"),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        TagIcon,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        stringResource(R.string.threads_open),
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (unreadThreads > 0) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primary,
+                        ) {
+                            Text(
+                                unreadThreads.toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
         Box(
             Modifier
                 .weight(1f)
@@ -2104,7 +2237,60 @@ fun ConversationScreen(
                 clipboard.setText(AnnotatedString(item.preview))
                 actingOn = null
             },
+            // Both take the *tapped* message's event id, not a thread root:
+            // core walks up the reply chain, so long-pressing a reply opens and
+            // files the thread it belongs to rather than starting a second one.
+            onOpenThread = {
+                threadOpenFor = item.eventId
+                actingOn = null
+            },
+            onFile = {
+                filingMessage = item.eventId
+                topicsOpen = true
+                actingOn = null
+            },
             onDismiss = { actingOn = null },
+        )
+    }
+
+    threadOpenFor?.let { root ->
+        ThreadSheet(
+            peer = peer,
+            rootId = root,
+            tick = chatTick + topicTick + localTopicTick,
+            onDismiss = { threadOpenFor = null },
+            onFile = {
+                filingMessage = root
+                topicsOpen = true
+                threadOpenFor = null
+            },
+        )
+    }
+
+    if (topicsOpen) {
+        TopicSheet(
+            peer = peer,
+            tick = topicTick + localTopicTick,
+            pendingFile = filingMessage,
+            onDismiss = {
+                topicsOpen = false
+                filingMessage = null
+            },
+            onOpenThread = {
+                topicsOpen = false
+                threadOpenFor = it
+            },
+            onFiled = { slug ->
+                // Said out loud, because filing produces no bubble on either
+                // side (`comrade_core::topic`'s module header says why) — so
+                // without this the one deliberate action in the sheet would
+                // leave no trace at all.
+                commandNote = slug?.let { context.getString(R.string.topics_filed, it) }
+                    ?: context.getString(R.string.topics_unfiled_note)
+                localTopicTick += 1
+                topicsOpen = false
+                filingMessage = null
+            },
         )
     }
 
@@ -2433,6 +2619,8 @@ private fun MessageActionSheet(
     onMoreEmoji: () -> Unit,
     onReply: () -> Unit,
     onCopy: () -> Unit,
+    onOpenThread: () -> Unit,
+    onFile: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -2482,6 +2670,18 @@ private fun MessageActionSheet(
                 label = stringResource(R.string.message_action_reply),
                 onClick = onReply,
                 testTag = "action-reply",
+            )
+            SheetAction(
+                icon = ChatBubbleIcon,
+                label = stringResource(R.string.message_action_open_thread),
+                onClick = onOpenThread,
+                testTag = "action-open-thread",
+            )
+            SheetAction(
+                icon = TagIcon,
+                label = stringResource(R.string.message_action_assign_topic),
+                onClick = onFile,
+                testTag = "action-assign-topic",
             )
             SheetAction(
                 icon = CopyIcon,

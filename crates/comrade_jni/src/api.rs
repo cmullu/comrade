@@ -82,9 +82,10 @@ pub use comrade_ui::{
     ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
     IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
     MessageAuthor, MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto,
-    ProfileDto, ReactionDto, ShareVerdictDto, SharedNoteDto, TaraMessageDto, TogetherCommandDto,
-    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
-    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    ProfileDto, ReactionDto, RideSignalDto, ShareVerdictDto, SharedNoteDto, TaraMessageDto,
+    ThreadDto, ThreadSummaryDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    TogetherSessionDto, TogetherShareDto, TopicDto, TurnServerStatusDto, UiError, UpiIntentDto,
+    WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -189,6 +190,43 @@ pub struct _MessageDto {
 pub struct _SharedNoteDto {
     pub text: String,
     pub mood: Option<String>,
+}
+
+#[frb(mirror(TopicDto))]
+pub struct _TopicDto {
+    pub slug: String,
+    pub name: String,
+    pub peer: String,
+    pub created_by: String,
+    pub mine: bool,
+    pub created_at: u64,
+    pub closed: bool,
+    pub thread_count: u32,
+    pub message_count: u32,
+    pub last_activity_at: u64,
+}
+
+#[frb(mirror(ThreadSummaryDto))]
+pub struct _ThreadSummaryDto {
+    pub root_id: String,
+    pub peer: String,
+    pub topic_slug: Option<String>,
+    pub preview: String,
+    pub root_is_media: bool,
+    pub root_missing: bool,
+    pub started_at: u64,
+    pub reply_count: u32,
+    pub last_at: u64,
+    pub unread: bool,
+}
+
+#[frb(mirror(ThreadDto))]
+pub struct _ThreadDto {
+    pub root_id: String,
+    pub peer: String,
+    pub topic_slug: Option<String>,
+    pub messages: Vec<MessageDto>,
+    pub media: Vec<MediaMessageDto>,
 }
 
 #[frb(mirror(ConversationDto))]
@@ -639,6 +677,19 @@ pub struct _ShareVerdictDto {
     pub relayed_bytes: Option<u64>,
 }
 
+#[frb(mirror(RideSignalDto))]
+pub struct _RideSignalDto {
+    pub peer: String,
+    pub name: Option<String>,
+    pub kind: String,
+    pub phrase: Option<String>,
+    pub maneuver: Option<String>,
+    pub distance_m: Option<u32>,
+    pub note: Option<String>,
+    pub urgency: String,
+    pub created_at: u64,
+}
+
 #[frb(mirror(BridgeEvent))]
 pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
@@ -666,6 +717,7 @@ pub enum _BridgeEvent {
         peer: String,
         name: Option<String>,
     },
+    RideSignal(RideSignalDto),
     TogetherInvited(TogetherInviteDto),
     TogetherJoined {
         session_id: String,
@@ -687,6 +739,9 @@ pub enum _BridgeEvent {
     MeshStatusChanged(MeshStatusDto),
     LedgerUpdated {
         ledger: String,
+    },
+    TopicsChanged {
+        peer: String,
     },
 }
 
@@ -957,6 +1012,79 @@ pub fn messages_with(peer: String) -> Result<Vec<MessageDto>, UiError> {
 /// counterpart of [`messages_with`].
 pub fn media_with(peer: String) -> Result<Vec<MediaMessageDto>, UiError> {
     runtime().blocking_read().media_with(&peer)
+}
+
+// ── Threads and topics (see `comrade_core::topic`) ───────────────────────────
+
+/// Every topic in `peer`'s conversation, oldest first, with live counts.
+/// Closed ones are included — the archive has to be reachable.
+pub fn topics(peer: String) -> Result<Vec<TopicDto>, UiError> {
+    runtime().blocking_read().topics(&peer)
+}
+
+/// Every thread in `peer`'s conversation, most recently active first.
+/// `topic_slug` of `None` is *all* threads, not the unfiled ones.
+pub fn threads(peer: String, topic_slug: Option<String>) -> Result<Vec<ThreadSummaryDto>, UiError> {
+    runtime().blocking_read().threads(&peer, topic_slug)
+}
+
+/// One thread in full. `root_id` may name any message in it — the walk up the
+/// reply chain happens on the Rust side so the frontends cannot disagree about
+/// which thread a bubble belongs to.
+pub fn thread(peer: String, root_id: String) -> Result<ThreadDto, UiError> {
+    runtime().blocking_read().thread(&peer, &root_id)
+}
+
+/// The id of the thread a message belongs to.
+pub fn thread_root(peer: String, message_id: String) -> Result<String, UiError> {
+    runtime().blocking_read().thread_root(&peer, &message_id)
+}
+
+/// Name a topic and tell the peer. Idempotent: naming one that exists returns
+/// it, because the slug is the id.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn create_topic(peer: String, name: String) -> Result<TopicDto, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.create_topic(&peer, &name).await
+}
+
+/// File the thread containing `message_id` under `topic_name`, creating the
+/// topic if it is new — or, with `None`, take it out of wherever it was.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn assign_thread(
+    peer: String,
+    message_id: String,
+    topic_name: Option<String>,
+) -> Result<ThreadSummaryDto, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.assign_thread(&peer, &message_id, topic_name).await
+}
+
+/// Archive a topic, or bring it back.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn set_topic_closed(
+    peer: String,
+    slug: String,
+    closed: bool,
+) -> Result<TopicDto, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.set_topic_closed(&peer, &slug, closed).await
+}
+
+/// Reply inside a thread — addressed to the thread's root, whichever message in
+/// it the caller happens to name.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn send_thread_reply(
+    peer: String,
+    root_id: String,
+    content: String,
+) -> Result<MessageDto, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.send_thread_reply(&peer, &root_id, &content).await
 }
 
 // ── Message requests (stranger gating) + receipts ────────────────────────────

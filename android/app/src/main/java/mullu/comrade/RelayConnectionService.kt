@@ -11,8 +11,10 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -75,6 +77,9 @@ class RelayConnectionService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** The liveness re-check; replaced rather than duplicated per start. */
+    private var pumpWatchJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         Notifier.ensureChannels(this)
@@ -86,7 +91,34 @@ class RelayConnectionService : Service() {
         EventPump.acquire(applicationContext, PumpHolder.SERVICE)
         // Only ever started after an unlock, so the store is readable now.
         scope.launch { ChatEventRouter.seedFromStore() }
+        // onStartCommand runs again on a repeat start() and on a START_STICKY
+        // restart, so replace the watch rather than stacking a second one.
+        pumpWatchJob?.cancel()
+        pumpWatchJob = scope.launch { watchPump() }
         return START_STICKY
+    }
+
+    /**
+     * Keep checking that the drain loop is alive for as long as this service
+     * runs.
+     *
+     * [EventPump.acquire] revives a dead loop, but nothing acquires while the
+     * app stays closed — which is the exact stretch this service exists to
+     * cover, so "it will be fixed next time the user opens the app" is the one
+     * answer that does not help here. [drainLoop] is written so a bad event can
+     * no longer kill the loop; this is the insurance that if it dies some other
+     * way, the outage lasts one interval instead of until someone notices no
+     * messages have arrived all day.
+     *
+     * Cheap by construction: one wakeup a minute against a loop that already
+     * polls five times a second, and [EventPump.ensureRunning] is a lock and two
+     * boolean reads when nothing is wrong.
+     */
+    private suspend fun watchPump() {
+        while (true) {
+            delay(PUMP_CHECK_INTERVAL_MS)
+            EventPump.ensureRunning(applicationContext)
+        }
     }
 
     override fun onDestroy() {
@@ -128,6 +160,13 @@ class RelayConnectionService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 0xC0A1EC7
+
+        /**
+         * How often to re-check that the drain loop is alive. A minute is well
+         * inside "a message should not wait noticeably longer than usual" while
+         * being far too rare to matter for battery.
+         */
+        private const val PUMP_CHECK_INTERVAL_MS = 60_000L
 
         /** Start the service — a no-op if the user has disabled the feature. */
         fun start(context: Context) {
@@ -194,6 +233,28 @@ object ChatEventRouter {
      */
     fun bumpChatTick() {
         _chatTick.update { it + 1 }
+    }
+
+    /**
+     * Bumped when a peer named a topic, filed a thread, or archived one — the
+     * open sheets reload on it.
+     *
+     * Separate from [chatTick] even though both mean "something in this
+     * conversation moved", because they move at very different rates: a chat
+     * tick fires on every message and receipt, and rebuilding the topic sheet's
+     * counts on each of those would be a full history scan per tick
+     * (`comrade_ui`'s `ThreadIndex` is computed on read, deliberately).
+     */
+    private val _topicTick = MutableStateFlow(0)
+    val topicTick: StateFlow<Int> = _topicTick.asStateFlow()
+
+    /**
+     * Force a topic reload from outside the event-routing path — what this
+     * device's own `assignThread` calls, since a local filing raises no
+     * `BridgeEvent` (that variant reports the *peer's* changes).
+     */
+    fun bumpTopicTick() {
+        _topicTick.update { it + 1 }
     }
 
     /** Bumped when a new message request arrives; the requests list reloads on it. */
@@ -481,6 +542,32 @@ object ChatEventRouter {
                     Notifier.notifyComradeNudge(context, event.peer, title)
                 }
             }
+            is BridgeEvent.RideSignal -> {
+                // Ride mode — see docs/RIDE.md. Routed to the board object
+                // rather than to a screen, the TogetherManager division: the
+                // signal arrives whether or not anyone is looking, and speech
+                // and haptics must fire on arrival, not on recomposition.
+                // Core already refused anything stale, replayed, or from an
+                // unaccepted peer.
+                val sig = event.v1
+                mullu.comrade.ride.RideSignals.onSignal(
+                    context,
+                    mullu.comrade.ride.RideDecisions.Sig(
+                        kind = sig.kind,
+                        phrase = sig.phrase,
+                        maneuver = sig.maneuver,
+                        distanceM = sig.distanceM?.toLong(),
+                        note = sig.note,
+                        urgency = sig.urgency,
+                        peerLabel = sig.name?.takeIf { it.isNotBlank() } ?: peerLabel(sig.peer),
+                        // Arrival time on *this* clock, not the sender's
+                        // `created_at`: core already enforced wire freshness,
+                        // and the screen's age-out must not inherit the peer's
+                        // clock skew on top of it.
+                        atMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
             is BridgeEvent.MeshStatusChanged -> MeshStatusMonitor.update(
                 ComradeCore.MeshStatus(active = event.v1.active, peerCount = event.v1.peerCount.toInt()),
             )
@@ -509,6 +596,12 @@ object ChatEventRouter {
             // Sakha/ledger sync isn't wired into the Android UI yet
             // (desktop-only via Tauri commands) — drop, like before.
             is BridgeEvent.LedgerUpdated -> Unit
+            // The peer reorganised the conversation: named a topic, filed a
+            // thread, archived one. Structure, not a message — so no
+            // notification and no chat-list change, only the sheets reload.
+            // Core already refuses to emit this for a replay, so a tick here is
+            // always real news.
+            is BridgeEvent.TopicsChanged -> _topicTick.update { it + 1 }
             // Watch/listen together — see docs/TOGETHER.md. Routed straight to
             // TogetherManager rather than to a screen, so a session survives the
             // UI being disposed; the manager owns the player and the foreground

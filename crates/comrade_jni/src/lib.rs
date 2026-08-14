@@ -89,8 +89,9 @@ use comrade_ui::{
     IceServerDto, IdentityDto, JournalEntryDto, LibraryCandidateDto, MediaBytesDto,
     MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto, MessageRequestDto,
     MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto,
-    PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto,
-    TaraChatDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto,
+    PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, SavedReadDto,
+    SavedReadSummaryDto, ShareVerdictDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto,
+    TaskState, ThreadDto, ThreadSummaryDto, TogetherSessionDto, TopicDto, TurnServerStatusDto,
     UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
@@ -1214,6 +1215,77 @@ impl Comrade {
         handles.set_task_state(&id, state).await
     }
 
+    // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+
+    /// Every topic in this conversation, oldest first, with live counts.
+    /// Closed ones are included — the archive has to be reachable.
+    pub fn topics(&self, peer: String) -> Result<Vec<TopicDto>, UiError> {
+        self.inner.blocking_read().topics(&peer)
+    }
+
+    /// Every thread in this conversation, most recently active first.
+    /// `topic_slug` of `None` is *all* threads, not the unfiled ones.
+    pub fn threads(
+        &self,
+        peer: String,
+        topic_slug: Option<String>,
+    ) -> Result<Vec<ThreadSummaryDto>, UiError> {
+        self.inner.blocking_read().threads(&peer, topic_slug)
+    }
+
+    /// One thread in full. `root_id` may name any message in it.
+    pub fn thread(&self, peer: String, root_id: String) -> Result<ThreadDto, UiError> {
+        self.inner.blocking_read().thread(&peer, &root_id)
+    }
+
+    /// The id of the thread a message belongs to — what a frontend calls before
+    /// opening a sheet from a tapped bubble.
+    pub fn thread_root(&self, peer: String, message_id: String) -> Result<String, UiError> {
+        self.inner.blocking_read().thread_root(&peer, &message_id)
+    }
+
+    /// Name a topic and tell the peer. Idempotent: naming one that exists
+    /// returns it, because the slug is the id.
+    pub async fn create_topic(&self, peer: String, name: String) -> Result<TopicDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.create_topic(&peer, &name).await
+    }
+
+    /// File the thread containing `message_id` under `topic_name`, creating the
+    /// topic if it is new — or, with `None`, take it out of wherever it was.
+    pub async fn assign_thread(
+        &self,
+        peer: String,
+        message_id: String,
+        topic_name: Option<String>,
+    ) -> Result<ThreadSummaryDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.assign_thread(&peer, &message_id, topic_name).await
+    }
+
+    /// Archive a topic, or bring it back.
+    pub async fn set_topic_closed(
+        &self,
+        peer: String,
+        slug: String,
+        closed: bool,
+    ) -> Result<TopicDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.set_topic_closed(&peer, &slug, closed).await
+    }
+
+    /// Reply inside a thread — addressed to the thread's root, whichever
+    /// message in it the caller happens to name.
+    pub async fn send_thread_reply(
+        &self,
+        peer: String,
+        root_id: String,
+        content: String,
+    ) -> Result<MessageDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.send_thread_reply(&peer, &root_id, &content).await
+    }
+
     /// Offer an in-app action to comrades. The outcome names who was told and
     /// why the others were not — a bare count could not tell "the cooldown is
     /// running" from "that person is not your comrade".
@@ -1326,20 +1398,37 @@ impl Comrade {
         self.inner.blocking_read().focus_reflection(&outcome)
     }
 
-    pub fn save_reading(&self, title: String, text: String) -> Result<ReadingDto, UiError> {
-        self.inner.blocking_read().save_reading(&title, &text)
+    /// The guided stretch break, in order. Infallible and vault-free — see
+    /// `ComradeRuntime::stretch_routine`.
+    pub fn stretch_routine(&self) -> Vec<StretchStepDto> {
+        self.inner.blocking_read().stretch_routine()
     }
 
-    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
-        self.inner.blocking_read().reading()
+    pub fn save_read(&self, title: String, text: String) -> Result<SavedReadDto, UiError> {
+        self.inner.blocking_read().save_read(&title, &text)
     }
 
-    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
-        self.inner.blocking_read().set_reading_position(position)
+    /// The reading library, newest first — rows only, not the texts.
+    pub fn saved_reads(&self) -> Result<Vec<SavedReadSummaryDto>, UiError> {
+        self.inner.blocking_read().saved_reads()
     }
 
-    pub fn clear_reading(&self) -> Result<bool, UiError> {
-        self.inner.blocking_read().clear_reading()
+    pub fn open_saved_read(&self, id: String) -> Result<Option<SavedReadDto>, UiError> {
+        self.inner.blocking_read().open_saved_read(&id)
+    }
+
+    pub fn set_saved_read_position(
+        &self,
+        id: String,
+        position: u32,
+    ) -> Result<Option<SavedReadDto>, UiError> {
+        self.inner
+            .blocking_read()
+            .set_saved_read_position(&id, position)
+    }
+
+    pub fn delete_saved_read(&self, id: String) -> Result<bool, UiError> {
+        self.inner.blocking_read().delete_saved_read(&id)
     }
 
     // ── Calls (voice/video signaling) ───────────────────────────────────────
@@ -1524,6 +1613,34 @@ impl Comrade {
     pub async fn together_share(&self, signal: ShareSignal) -> Result<(), UiError> {
         let handles = self.inner.read().await.handles();
         handles.together_share(signal).await
+    }
+
+    /// Say one catalog phrase to the other seat of the motorcycle — see
+    /// [`comrade_core::ride`]. `phrase` is the wire name (`slow_down`,
+    /// `pull_over`, `fuel_soon`, `break_please`, `all_good`); an unknown one is
+    /// refused rather than sent, because the receiver drops it whole anyway.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn ride_send_quick(&self, peer: String, phrase: String) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.ride_send_quick(&peer, &phrase).await
+    }
+
+    /// Suggest the next maneuver to the person steering — `left`, `right`,
+    /// `straight`, `u_turn`, `stop` or `hazard` — optionally with metres to it
+    /// and a short landmark note (capped in core; an over-long note is refused,
+    /// not truncated).
+    pub async fn ride_send_route(
+        &self,
+        peer: String,
+        maneuver: String,
+        distance_m: Option<u32>,
+        note: Option<String>,
+    ) -> Result<(), UiError> {
+        let handles = self.inner.read().await.handles();
+        handles
+            .ride_send_route(&peer, &maneuver, distance_m, note)
+            .await
     }
 
     /// Send one step of handing a **large attachment** over — the road a file
@@ -1927,10 +2044,11 @@ mod tests {
             c.suggested_focus_minutes(),
             Err(UiError::VaultLocked)
         ));
-        assert!(matches!(c.reading(), Err(UiError::VaultLocked)));
-        // …except the preset list, which a locked frontend still needs in
-        // order to draw its own duration chips.
+        assert!(matches!(c.saved_reads(), Err(UiError::VaultLocked)));
+        // …except the preset list and the stretch routine, which a locked
+        // frontend still needs in order to draw its own break surface.
         assert!(!c.focus_presets().is_empty());
+        assert!(!c.stretch_routine().is_empty());
     }
 
     #[test]
@@ -1986,12 +2104,19 @@ mod tests {
         ));
 
         let saved = c
-            .save_reading("Essay".to_string(), "A line worth reading.".to_string())
+            .save_read("Essay".to_string(), "A line worth reading.".to_string())
             .unwrap();
         assert_eq!(saved.chunks.concat(), "A line worth reading.");
-        assert_eq!(c.set_reading_position(0).unwrap().unwrap().position, 0);
-        assert!(c.clear_reading().unwrap());
-        assert!(c.reading().unwrap().is_none());
+        assert_eq!(c.saved_reads().unwrap().len(), 1);
+        assert_eq!(
+            c.set_saved_read_position(saved.id.clone(), 0)
+                .unwrap()
+                .unwrap()
+                .position,
+            0
+        );
+        assert!(c.delete_saved_read(saved.id.clone()).unwrap());
+        assert!(c.open_saved_read(saved.id).unwrap().is_none());
     }
 
     #[tokio::test]

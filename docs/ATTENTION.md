@@ -561,3 +561,85 @@ mock.
   tests and (in CI) emulator smoke tests; `UsageStatsManager` behaviour varies
   across OEM builds, and the pickup count in particular deserves a real-handset
   sanity check before anyone quotes it as precise.
+
+---
+
+## 8. 2026-08-14 — the reading library, the stretch break, and the calm coat
+
+Three owner-requested changes to phase 2, in one pass. The plan above is
+preserved as written; this is the as-built record of where the implementation
+moved past it and why.
+
+### The long read became a library (and the share sheet became the way in)
+
+The single paste slot assumed articles arrive by copy-paste, and from a
+handset they don't: they arrive in Instagram, X, Facebook, a browser — apps
+with a **Share** button. So the reader's storage grew from one
+`reading_state` slot into a `reading_library` tree (`SavedRead`: id, title,
+source, text, position), and `MainActivity` now accepts `ACTION_SEND`
+`text/plain`: share an article's text out of any app and Comrade offers it —
+prefilled, visible, **never silently saved** — to *Long reads*. Each read
+keeps its own place; a vault from before the library migrates its one read on
+first list (`ComradeRuntime::saved_reads`, the same reads-may-write trade
+`active_focus_session` makes).
+
+What was deliberately **not** built is the other reading of the request: a
+supermemory-style aggregator that logs into social accounts and pulls saved
+posts. Every version of that needs either credentials to other people's
+platforms or a fetch path to arbitrary URLs, and both are ruled out by gate 2
+and by the reader's own zero-network-by-construction promise (§3 phase 2).
+The one concession to "where did this come from" is offline:
+`attention::reading_source` reads the **host of the first link** out of the
+shared text ("instagram.com", "x.com") and stores it as a label. The URL is
+never fetched; a paste with no link carries no label.
+
+The old four commands (`save_reading`/`reading`/`set_reading_position`/
+`clear_reading`) are replaced by five (`save_read`, `saved_reads`,
+`open_saved_read`, `set_saved_read_position`, `delete_saved_read`) on both
+bridges; nothing on the flutter_rust_bridge surface changed (`app/` never
+bound the reader).
+
+### The stretch break (the body's half of the pause)
+
+Opera Air's break exercises are the reference: a slow demonstrating figure
+sets the pace, and the screen asks nothing else of you. The routine — six
+gentle seated stretches, neck/shoulders/back, ~2¾ minutes, mirrored steps
+done left then right — is `attention::STRETCH_ROUTINE` in the **engine**,
+served vault-free (`stretch_routine`, the same reasoning as
+`focus_presets`), so Android and desktop can never drift on what a break is.
+Pacing arithmetic is duplicated per frontend on purpose (pure
+`StretchPacing.kt`, JVM-tested; pure `stretch_view.mjs`, node-tested; same
+semantics pinned by twin test suites) because unlike the focus countdown
+there is no engine state to keep honest: nothing persists, nothing lapses,
+**nothing about having taken a break is recorded** — gate 3 applied to the
+body. The animation is the metronome (CSS keyframes on desktop, a Compose
+`Canvas` figure on Android); the progress bar carries no digits; ending
+early shows no closing line, because leaving is not an outcome.
+
+### The desktop Focus tab got its calm coat
+
+The tab now looks like what it is for — ambient colour fields drifting on a
+minutes-long loop behind frosted-glass cards, the Opera-Air register — with
+two hard edges kept: every decorative motion stops under
+`prefers-reduced-motion`, and no honesty string changed. Android keeps its
+Material3 idiom rather than imitating the desktop's glass; the shared parts
+(routine, copy register, no-digits rules) travel through the engine.
+
+Verified in this pass: `cargo fmt --check`, `clippy --workspace --all-targets
+-D warnings` and `cargo test --workspace` (987 tests) — clippy on a
+freshly-`rustup update`d stable, because the container's snapshot was three
+releases behind CI's and that gap has turned a branch red before; `node --test
+desktop/ui` (436 cases, incl. the new `stretch_view` suite and main's
+`dom_bindings` check, which is what proves the new markup ids are all
+declared) plus a scripted browser-preview walkthrough of the tab, re-run after
+merging main since both sides had touched `main.js`; the pinned-kotlinc JUnit
+run of `StretchPacingTest` alongside `TogetherDecisionsTest` (124 tests); and
+`android-typecheck-compose.sh`, whose frontend came back clean over all 130
+sources — so `StretchScreen`, the rewritten `ReaderScreen`, `FocusScreen` and
+the `MainActivity` wiring resolve against the real Compose/Material3 AARs.
+
+**Not verified**, and only CI or a handset can: `./gradlew test` and `res/`
+correctness; the Tauri shell's clippy lane (no GTK headers here, as ever); and
+the share-sheet flow end to end — the intent filter and the
+offered-never-silently-saved path are reasoned from code and type-checked, but
+nobody has yet shared an Instagram post into a running build.

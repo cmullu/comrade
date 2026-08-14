@@ -203,6 +203,45 @@
     <string name="message_action_copy">Copy text</string>
     <string name="react_more">More emoji</string>
     <string name="message_goto_quoted">Go to the quoted message</string>
+    <!-- Threads and topics (see docs/CHAT_THREADS.md). The wording rule these
+         all follow: a topic is a place messages are *filed*, never a claim about
+         the person or the conversation, so nothing here says "organised",
+         "important" or "unresolved". -->
+    <string name="message_action_open_thread">Open thread</string>
+    <string name="message_action_assign_topic">File under a topic…</string>
+    <string name="threads_title">Threads</string>
+    <string name="threads_open">Threads and topics</string>
+    <string name="threads_all">All threads</string>
+    <string name="threads_unfiled">Not filed</string>
+    <string name="threads_empty">No threads yet. Reply to a message and it becomes one.</string>
+    <string name="threads_empty_topic">Nothing filed here yet.</string>
+    <!-- %1$d is the number of replies below the first message. -->
+    <plurals name="thread_replies">
+        <item quantity="one">%1$d reply</item>
+        <item quantity="other">%1$d replies</item>
+    </plurals>
+    <string name="thread_root_missing">The first message isn\'t on this device</string>
+    <string name="thread_preview_attachment">📎 Attachment</string>
+    <string name="thread_preview_empty">(no text)</string>
+    <string name="thread_reply_hint">Reply in this thread</string>
+    <string name="thread_send">Send</string>
+    <string name="thread_close">Close</string>
+    <string name="topics_title">Topics</string>
+    <string name="topics_new">New topic</string>
+    <string name="topics_name_hint">Name it, like Flat deposit</string>
+    <string name="topics_create">Create</string>
+    <string name="topics_cancel">Cancel</string>
+    <string name="topics_none">No topics yet. Name one, then file a thread under it.</string>
+    <string name="topics_archive">Archive</string>
+    <string name="topics_unarchive">Bring back</string>
+    <string name="topics_archived">Archived</string>
+    <string name="topics_show_archived">Show archived</string>
+    <string name="topics_remove_from">Take out of this topic</string>
+    <!-- %1$d threads, %2$d messages under one topic. -->
+    <string name="topics_counts">%1$d · %2$d messages</string>
+    <!-- Confirmation after `/assign #x` or the sheet's file action. %1$s is the topic name. -->
+    <string name="topics_filed">Filed under #%1$s.</string>
+    <string name="topics_unfiled_note">Taken out of that topic.</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->
@@ -347,17 +386,34 @@
     <string name="focus_outcome_lapsed">Lapsed</string>
     <string name="focus_save_note">Save as a journal note</string>
 
-    <!-- Attention: the long-form reader (phase 2) -->
-    <string name="reader_title">Long read</string>
+    <!-- Attention: the long-form reader, now a library of saved reads
+         (phase 2, extended 2026-08-14). Articles arrive by paste or by the
+         system share sheet — sharing from any feed app lands here. -->
+    <string name="reader_title">Long reads</string>
     <string name="reader_paste_label">Paste something worth your attention</string>
-    <string name="reader_paste_hint">An article, a chapter, a letter — whatever you\'ve been meaning to read properly. It stays on this phone, encrypted like your journal. Comrade never fetches it from the web for you.</string>
-    <string name="reader_save">Start reading</string>
+    <string name="reader_paste_hint">An article, a chapter, a letter — share one into Comrade from any app, or paste it here. It stays on this phone, encrypted like your journal. Comrade never fetches it from the web for you.</string>
+    <string name="reader_save">Save to your reads</string>
     <string name="reader_next">Next</string>
     <string name="reader_previous">Back</string>
     <string name="reader_progress">%1$d of %2$d</string>
     <string name="reader_finished">That\'s the end. Worth a line about it?</string>
-    <string name="reader_clear">Close this read</string>
+    <string name="reader_remove">Remove from your reads</string>
     <string name="reader_title_label">Title (optional)</string>
+    <string name="reader_back_to_list">All reads</string>
+    <string name="reader_empty">Nothing saved yet. Share an article into Comrade — or paste one below — and it will wait here.</string>
+    <string name="reader_shared_in">Shared in — give it a look before you keep it.</string>
+    <string name="reader_add">Add something to read</string>
+
+    <!-- Attention: the stretch break (phase 2, extended 2026-08-14). Step
+         names and cues come from the engine (comrade_core::attention::
+         STRETCH_ROUTINE), like the focus prompts do; only the frame is here. -->
+    <string name="stretch_title">Stretch break</string>
+    <string name="stretch_intro">Gentle, seated-friendly stretches for your neck, shoulders and back — under three minutes, with nothing to get right. Nothing about the break is recorded.</string>
+    <string name="stretch_start">Start stretching</string>
+    <string name="stretch_stop">End the break</string>
+    <string name="stretch_done">That was the whole routine. However much of it you did was enough.</string>
+    <string name="stretch_side_left">Left side</string>
+    <string name="stretch_side_right">Right side</string>
 
     <!-- Tasks: what `/task` produces. The empty-state and row copy lives in
          `ui/TaskList.kt` beside the decisions it belongs to and is covered by
@@ -761,4 +817,36 @@
          renegotiating that connection \u2014 which would take the picture away. -->
     <string name="together_mic_unavailable">Your microphone can\u2019t join while you\u2019re watching their stream. It\u2019ll work on the next thing you play.</string>
     <string name="together_follow_note">Comrade is following another app on this phone. It can play, pause and place the playhead \u2014 it can\u2019t show you the picture.</string>
+
+    <!--
+      Ride mode (docs/RIDE.md). The wording avoids the word "navigation"
+      everywhere, deliberately: there is no routing engine behind any of this,
+      and a screen that borrowed a satnav's vocabulary would be borrowing a
+      confidence nobody measured. What the pillion sends is a suggestion.
+    -->
+    <string name="ride_title">Riding together</string>
+    <string name="ride_subtitle">For the two of you on one bike. Say the few things the engine drowns out.</string>
+    <string name="ride_note">No location is shared \u2014 only the words you tap. Anything you send stops being shown after a minute, because by then it isn\u2019t true any more.</string>
+    <string name="ride_who_with">Riding with</string>
+    <string name="ride_seat">Your seat</string>
+    <string name="ride_seat_driver">Driving</string>
+    <string name="ride_seat_pillion">Riding pillion</string>
+    <string name="ride_seat_driver_note">Big buttons, spoken alerts, no keyboard.</string>
+    <string name="ride_seat_pillion_note">You get the map, the music and the words.</string>
+    <string name="ride_change_seat">Change seat</string>
+    <string name="ride_say">Say</string>
+    <string name="ride_suggest">Suggest a turn</string>
+    <string name="ride_distance">How far</string>
+    <string name="ride_landmark">Landmark (optional)</string>
+    <string name="ride_send">Send</string>
+    <string name="ride_nothing_yet">Nothing said yet.</string>
+    <string name="ride_music">Music</string>
+    <string name="ride_music_none">Nothing playing. Start something on the Together tab and it\u2019ll show up here.</string>
+    <string name="ride_play">Play</string>
+    <string name="ride_pause">Pause</string>
+    <string name="ride_next">Next</string>
+    <string name="ride_previous">Previous</string>
+    <!-- Said once, where it matters: the mode is only honest if the driver is
+         not reading. -->
+    <string name="ride_driver_note">Keep your eyes up. Anything urgent is spoken and buzzed \u2014 you don\u2019t need to look at this.</string>
 </resources>

@@ -159,6 +159,17 @@
     })
     .catch(() => {});
 
+  // ── Stretch-break decisions (desktop/ui/stretch_view.mjs) ──────────────────
+  // Flattens the engine's routine into left/right segments and answers "which
+  // stretch is the clock in?" — the routine itself comes from the
+  // `stretch_routine` command, never from here.
+  let stretchView = null;
+  import("./stretch_view.mjs")
+    .then((m) => {
+      stretchView = m;
+    })
+    .catch(() => {});
+
   // ── In-chat command decisions (desktop/ui/chat_commands.mjs) ───────────────
   // What the composer does with a parsed command, the `/` picker's rows, and
   // the sentences for the cases desktop cannot serve. The *grammar* is
@@ -181,6 +192,18 @@
   import("./task_list.mjs")
     .then((m) => {
       taskList = m;
+    })
+    .catch(() => {});
+
+  // ── Thread and topic decisions (desktop/ui/topics.mjs) ─────────────────────
+  // Ordering, filtering, which rows are hidden, the preview branch, and what
+  // `/assign` does. Mirrored by `mullu.comrade.topic.TopicDecisions` and pinned
+  // by the same test vectors. Loaded like the modules above; every call site
+  // guards on null, because the drawer must not half-render if the import fails.
+  let topicsMod = null;
+  import("./topics.mjs")
+    .then((m) => {
+      topicsMod = m;
     })
     .catch(() => {});
 
@@ -321,6 +344,19 @@
     // whether they chose back) — see docs/PRESENCE.md.
     presence: new Map(),
     replyTo: null, // { id, content, outgoing } while composing a reply
+    // Threads and topics (docs/CHAT_THREADS.md). `filing` is the message id a
+    // `/assign` or a bubble menu is about to file — held separately from
+    // `openThread` because "the drawer is a destination" and "the drawer is a
+    // reading surface" are two states and a row must not mean both at once.
+    threads: {
+      open: false,
+      topics: [],
+      rows: [],
+      filter: null, // null = all, UNFILED symbol, or a slug
+      showArchived: false,
+      openThread: null, // { rootId, messages, media, topicSlug }
+      filing: null,
+    },
     // Which contact the user picked for an ambiguous `@handle`, by handle. Two
     // people can answer to one name, and picking for them is how a private
     // message reaches the wrong person — so the choice is theirs and it is
@@ -355,8 +391,14 @@
       active: null,
       history: [],
       reflection: null,
-      reading: null,
+      // The reading library: summaries for the list, and the one read open.
+      reads: [],
+      read: null,
       tick: null,
+      // The stretch break. `routine` is the engine's; `startedAt` is a local
+      // wall-clock epoch because the break is purely presentational — nothing
+      // persists, nothing lapses, nothing is scored.
+      stretch: { routine: [], startedAt: null, tick: null, done: false },
     },
   };
 
@@ -750,9 +792,11 @@
       // one's session, history and half-read text rather than leaving them on
       // screen under the new npub.
       stopFocusTick();
+      stopStretch();
       state.focus.active = null;
       state.focus.history = [];
-      state.focus.reading = null;
+      state.focus.reads = [];
+      state.focus.read = null;
       state.focus.reflection = null;
       state.focus.chosen = null;
       showToast(`Vault unlocked · ${shortNpub(id.npub)}`, "success");
@@ -1487,6 +1531,13 @@
     }
     state.activeContact = key;
     clearReply();
+    // Threads are per conversation, so nothing about the last one survives the
+    // switch — including an open drawer, whose rows would otherwise be the
+    // previous conversation's until the reload landed.
+    state.threads.openThread = null;
+    state.threads.filing = null;
+    state.threads.filter = null;
+    if (state.threads.open) void refreshThreads();
     $("#dm-input").disabled = false;
     $("#dm-attach").disabled = false;
     $("#dm-send").disabled = false;
@@ -1498,11 +1549,22 @@
     renderHandoffCard();
     // Opening a conversation clears its unread state and sends read receipts.
     safeInvoke("mark_conversation_read", { peer: key }, { silent: true }).catch(() => {});
-    // Pull the full persisted thread — text history plus persisted media
-    // history — and merge in any live media bubbles from this session ahead
-    // of their persisted duplicate (a live one may already hold a decrypted
-    // objectUrl, which a freshly-fetched persisted row never does).
-    Promise.all([
+    reloadConversation(key);
+  }
+
+  /**
+   * Pull the full persisted thread — text history plus persisted media history
+   * — and merge in any live media bubbles from this session ahead of their
+   * persisted duplicate (a live one may already hold a decrypted objectUrl,
+   * which a freshly-fetched persisted row never does).
+   *
+   * Named and separate from `selectContact` because the thread drawer's
+   * composer needs it too: a thread reply is an ordinary DM and belongs in the
+   * conversation log, and going back through `selectContact` would file a
+   * spurious draft report and clear the reply chip.
+   */
+  function reloadConversation(key) {
+    return Promise.all([
       safeInvoke("messages_with", { peer: key }, { silent: true }).catch(() => []),
       safeInvoke("media_with", { peer: key }, { silent: true }).catch(() => []),
     ]).then(([msgs, mediaHistory]) => {
@@ -1572,7 +1634,13 @@
       (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [],
       state.mentionChoices,
     );
-    const plan = chatCommands.planFor(command, { mentions });
+    // The reply target is what `/assign` files. Any message in the thread will
+    // do — core walks up to the root — so "whatever you are replying to" is the
+    // honest answer to "which thread", and the only one the composer has.
+    const plan = chatCommands.planFor(command, {
+      mentions,
+      replyTarget: state.replyTo?.id || null,
+    });
     const input = $("#dm-input");
 
     switch (plan.action) {
@@ -1663,6 +1731,21 @@
         // used to be — the old plan said "pick which one" and offered nothing to
         // pick, so the command could never be completed at all.
         renderMentionChooser(plan, text);
+        return true;
+      }
+
+      case chatCommands.ASSIGN_TOPIC: {
+        if (plan.slug) {
+          await fileThread(plan.messageId, plan.slug);
+          // The reply chip goes with it: the message was selected in order to
+          // file it, and leaving it armed makes the next thing typed a reply
+          // nobody asked for.
+          clearReply();
+        } else {
+          openThreadsDrawer(plan.messageId || null);
+        }
+        input.value = "";
+        clearComposerCommandUi();
         return true;
       }
 
@@ -1861,6 +1944,17 @@
           onClick: () => toggleComrade(peer),
         }),
         el("button", {
+          class: "icon-btn" + (state.threads.open ? " is-on" : ""),
+          title: "Threads and topics",
+          "aria-label": "Threads and topics",
+          text: "#",
+          onClick: () => {
+            if (state.threads.open) closeThreadsDrawer();
+            else openThreadsDrawer(null);
+            renderConversation();
+          },
+        }),
+        el("button", {
           class: "icon-btn",
           title: "Voice call",
           "aria-label": "Start voice call",
@@ -1927,8 +2021,12 @@
         mine && m.status ? statusTick(m.status) : null,
       ),
     );
-    // A reply is only addressable if we know the target message's event id.
-    if (m.id) wrap.append(replyButton(m));
+    // A reply is only addressable if we know the target message's event id, and
+    // so is a thread: both are the `e` tag naming an event.
+    if (m.id) {
+      wrap.append(replyButton(m));
+      wrap.append(threadButton(m));
+    }
     return wrap;
   }
 
@@ -1986,6 +2084,31 @@
       box.append(toggle);
     }
     return box;
+  }
+
+  /**
+   * Open the thread this bubble is in — the drawer's other way in, beside the
+   * "Threads" button in the header.
+   *
+   * Passes the *tapped* message's id rather than a thread root: core walks up
+   * the reply chain (`ComradeRuntime::thread`), so clicking a reply opens the
+   * thread it belongs to rather than starting a second one.
+   */
+  function threadButton(m) {
+    return el("button", {
+      class: "bubble-reply",
+      title: "Open thread",
+      "aria-label": "Open this message's thread",
+      text: "⤳",
+      onClick: (e) => {
+        e.stopPropagation();
+        state.threads.open = true;
+        state.threads.filing = null;
+        $("#threads-drawer").hidden = false;
+        void refreshThreads();
+        void openThread(m.id);
+      },
+    });
   }
 
   // ── Milestone 6: replies, receipts, requests, calls ───────────────────────
@@ -2079,6 +2202,216 @@
         setReply(m);
       },
     });
+  }
+
+  // ── Threads and topics (docs/CHAT_THREADS.md) ─────────────────────────────
+  //
+  // The decisions are `topics.mjs`; the reply graph and the slug rules are
+  // `comrade_core::topic` over the bridge. What is here is DOM.
+
+  /** Open the drawer, optionally as a *destination* for filing `messageId`. */
+  function openThreadsDrawer(messageId = null) {
+    state.threads.open = true;
+    state.threads.filing = messageId;
+    state.threads.openThread = null;
+    $("#threads-drawer").hidden = false;
+    void refreshThreads();
+  }
+
+  function closeThreadsDrawer() {
+    state.threads.open = false;
+    state.threads.filing = null;
+    state.threads.openThread = null;
+    $("#threads-drawer").hidden = true;
+  }
+
+  /** Re-read this conversation's topics and threads, then redraw the drawer. */
+  async function refreshThreads() {
+    if (!state.threads.open || !state.activeContact) return;
+    const peer = state.activeContact;
+    const [topics, rows] = await Promise.all([
+      safeInvoke("topics", { peer }, { silent: true }),
+      safeInvoke("threads", { peer, topicSlug: null }, { silent: true }),
+    ]);
+    // A conversation switched under an in-flight read must not repaint the new
+    // one with the old one's rows.
+    if (state.activeContact !== peer) return;
+    state.threads.topics = topics || [];
+    state.threads.rows = rows || [];
+    renderThreadsDrawer();
+  }
+
+  function renderThreadsDrawer() {
+    if (!topicsMod) return;
+    const filing = state.threads.filing;
+    $("#threads-filing").hidden = !filing;
+    if (filing) {
+      $("#threads-filing").textContent =
+        "Pick a topic for that thread, or take it out of the one it is in.";
+    }
+    $("#thread-open").hidden = !state.threads.openThread;
+    $("#threads-list").hidden = Boolean(state.threads.openThread);
+
+    const topicsHost = $("#threads-topics");
+    topicsHost.replaceChildren();
+    const visible = topicsMod.visibleTopics(state.threads.topics, {
+      includeClosed: state.threads.showArchived,
+    });
+    for (const t of visible) {
+      const unread = topicsMod.unreadThreadCount(state.threads.rows, t.slug);
+      topicsHost.append(
+        el("button", {
+          class: "topic-chip" + (t.closed ? " archived" : ""),
+          "aria-pressed": String(state.threads.filter === t.slug),
+          text: `#${t.name}${unread ? ` (${unread})` : ""}`,
+          onClick: () => {
+            if (state.threads.filing) {
+              void fileThread(state.threads.filing, t.name);
+            } else {
+              state.threads.filter = state.threads.filter === t.slug ? null : t.slug;
+              renderThreadsDrawer();
+            }
+          },
+        }),
+      );
+    }
+    if (!state.threads.filing) {
+      topicsHost.append(
+        el("button", {
+          class: "topic-chip",
+          "aria-pressed": String(state.threads.filter === topicsMod.UNFILED),
+          text: "Not filed",
+          onClick: () => {
+            state.threads.filter =
+              state.threads.filter === topicsMod.UNFILED ? null : topicsMod.UNFILED;
+            renderThreadsDrawer();
+          },
+        }),
+      );
+      if (state.threads.topics.some((t) => t.closed)) {
+        topicsHost.append(
+          el("button", {
+            class: "topic-chip",
+            "aria-pressed": String(state.threads.showArchived),
+            text: "Archived",
+            onClick: () => {
+              state.threads.showArchived = !state.threads.showArchived;
+              renderThreadsDrawer();
+            },
+          }),
+        );
+      }
+    } else {
+      // "Out of every topic" is a destination too, and only exists while
+      // something is being filed.
+      topicsHost.append(
+        el("button", {
+          class: "topic-chip",
+          text: "Take it out",
+          onClick: () => void fileThread(state.threads.filing, null),
+        }),
+      );
+    }
+
+    const host = $("#threads-list");
+    host.replaceChildren();
+    const rows = topicsMod.threadsFor(state.threads.rows, {
+      topicSlug: state.threads.filter,
+      // Under a named topic a thread of one is there because somebody filed it,
+      // and hiding it would lose the filing.
+      includeSingletons: typeof state.threads.filter === "string",
+    });
+    if (!rows.length) {
+      host.append(
+        el("p", {
+          class: "muted sm",
+          text: state.threads.filter
+            ? "Nothing filed here yet."
+            : "No threads yet. Reply to a message and it becomes one.",
+        }),
+      );
+      return;
+    }
+    for (const row of rows) {
+      const replies = row.reply_count === 1 ? "1 reply" : `${row.reply_count} replies`;
+      host.append(
+        el(
+          "button",
+          {
+            class: "thread-row" + (row.unread ? " unread" : ""),
+            onClick: () => void openThread(row.root_id),
+          },
+          el("span", { text: topicsMod.threadPreview(row) }),
+          el("span", {
+            class: "thread-row-meta",
+            text: row.topic_slug ? `${replies} · #${row.topic_slug}` : replies,
+          }),
+        ),
+      );
+    }
+  }
+
+  /** Read one thread in the drawer. `rootId` may name any message in it. */
+  async function openThread(rootId) {
+    const peer = state.activeContact;
+    const thread = await safeInvoke("thread", { peer, rootId }, { silent: true });
+    if (!thread || state.activeContact !== peer) return;
+    state.threads.openThread = thread;
+    renderThreadsDrawer();
+    renderOpenThread();
+  }
+
+  function renderOpenThread() {
+    const thread = state.threads.openThread;
+    if (!thread) return;
+    $("#thread-open-title").textContent = thread.topic_slug
+      ? `Thread · #${thread.topic_slug}`
+      : "Thread";
+    const host = $("#thread-log");
+    host.replaceChildren();
+    // Two lists merged by time — core hands them up separately on purpose (see
+    // `comrade_ui::ThreadDto`) rather than inventing a third ordering, and the
+    // conversation log already does this interleave.
+    const entries = [
+      ...(thread.messages || []).map((m) => ({
+        at: m.created_at,
+        outgoing: m.outgoing,
+        text: m.content,
+      })),
+      ...(thread.media || []).map((m) => ({
+        at: m.created_at,
+        outgoing: m.outgoing,
+        text: mediaQuoteLabel(m.mime_type, m.caption),
+      })),
+    ].sort((a, b) => a.at - b.at);
+    for (const entry of entries) {
+      host.append(
+        el("div", {
+          class: "thread-bubble" + (entry.outgoing ? " mine" : ""),
+          text: entry.text,
+        }),
+      );
+    }
+    host.scrollTop = host.scrollHeight;
+  }
+
+  /**
+   * File the thread containing `messageId` under `topicName` — or unfile it.
+   *
+   * Says so out loud, because filing produces no chat bubble on either side
+   * (`comrade_core::topic`'s module header has the reason): without the toast
+   * the one deliberate action in this drawer would leave no trace.
+   */
+  async function fileThread(messageId, topicName) {
+    const peer = state.activeContact;
+    const filed = await safeInvoke("assign_thread", { peer, messageId, topicName });
+    if (!filed) return;
+    showToast(
+      filed.topic_slug ? `Filed under #${filed.topic_slug}.` : "Taken out of that topic.",
+      "info",
+    );
+    state.threads.filing = null;
+    await refreshThreads();
   }
 
   function setReply(m) {
@@ -4009,7 +4342,13 @@
       (await safeInvoke("resolve_mentions", { text }, { silent: true })) || [],
       state.mentionChoices,
     );
-    const plan = chatCommands.planFor(command, { mentions });
+    // The reply target is what `/assign` files. Any message in the thread will
+    // do — core walks up to the root — so "whatever you are replying to" is the
+    // honest answer to "which thread", and the only one the composer has.
+    const plan = chatCommands.planFor(command, {
+      mentions,
+      replyTarget: state.replyTo?.id || null,
+    });
     if (plan.message) {
       hint.textContent = plan.message;
       hint.hidden = false;
@@ -4337,13 +4676,14 @@
     if (!state.identity) return; // vault still locked; the tab paints on unlock
     if (!focusView) await focusReady.catch(() => {});
     try {
-      const [presets, suggested, prompt, active, history, reading] = await Promise.all([
+      const [presets, suggested, prompt, active, history, reads, routine] = await Promise.all([
         safeInvoke("focus_presets", undefined, { silent: true }).catch(() => []),
         safeInvoke("suggested_focus_minutes"),
         safeInvoke("focus_prompt"),
         safeInvoke("active_focus_session"),
         safeInvoke("focus_sessions"),
-        safeInvoke("reading"),
+        safeInvoke("saved_reads"),
+        safeInvoke("stretch_routine", undefined, { silent: true }).catch(() => []),
       ]);
       state.focus.presets = Array.isArray(presets) ? presets : [];
       state.focus.suggested = suggested;
@@ -4351,9 +4691,11 @@
       state.focus.active = active || null;
       // Only finished sessions are history; the running one has its own card.
       state.focus.history = (Array.isArray(history) ? history : []).filter((s) => s.outcome);
-      state.focus.reading = reading || null;
+      state.focus.reads = Array.isArray(reads) ? reads : [];
+      state.focus.stretch.routine = Array.isArray(routine) ? routine : [];
       renderFocus();
       renderReader();
+      renderStretch();
     } catch {
       /* toasted */
     }
@@ -4504,22 +4846,66 @@
     }
   }
 
-  // ── Long read ─────────────────────────────────────────────────────────────
+  // ── Long reads (the library) ──────────────────────────────────────────────
 
   function renderReader() {
     if (!focusView) return;
-    const r = state.focus.reading;
-    $("#reader-compose").hidden = !!r;
+    const r = state.focus.read;
+    $("#reader-library").hidden = !!r;
     $("#reader-open").hidden = !r;
+
+    // The library list — one row per saved read, newest first. Rows are
+    // buttons (textContent only, audit S6); opening fetches the full text.
+    const list = $("#reader-list");
+    list.replaceChildren(
+      ...state.focus.reads.map((s) => {
+        const line = focusView.libraryLine(s);
+        return el("li", { class: "reader-item" }, [
+          el(
+            "button",
+            {
+              class: "reader-item-open",
+              type: "button",
+              onClick: () => handleReaderOpen(s.id),
+            },
+            [
+              el("span", { class: "reader-item-title", text: line.title }),
+              el("span", { class: "reader-item-meta", text: line.meta }),
+            ],
+          ),
+        ]);
+      }),
+    );
+    $("#reader-library-empty").hidden = state.focus.reads.length > 0;
     if (!r) return;
 
     const nav = focusView.readerNav(r.position, r.chunks.length);
-    $("#reader-open-title").textContent = r.title || "Long read";
+    $("#reader-open-title").textContent = r.title || r.source || "Long read";
+    const sourceLine = $("#reader-open-source");
+    // The source under the title, unless it is already standing in as the
+    // title — a header must not say the same thing twice.
+    sourceLine.textContent = r.title && r.source ? r.source : "";
+    sourceLine.hidden = !(r.title && r.source);
     $("#reader-chunk").textContent = r.chunks[nav.position] || "";
     $("#reader-progress").textContent = nav.label;
     $("#reader-prev").disabled = !nav.canPrev;
     $("#reader-next").disabled = !nav.canNext;
     $("#reader-finished").hidden = !nav.atEnd;
+  }
+
+  async function handleReaderOpen(id) {
+    try {
+      const read = await safeInvoke("open_saved_read", { id });
+      if (!read) {
+        // Deleted on another surface since the list painted — refresh it.
+        await loadFocus();
+        return;
+      }
+      state.focus.read = read;
+      renderReader();
+    } catch {
+      /* toasted */
+    }
   }
 
   async function handleReaderSave() {
@@ -4531,12 +4917,16 @@
     const btn = $("#reader-save");
     setBusy(btn, true);
     try {
-      state.focus.reading = await safeInvoke("save_reading", {
+      // Saving opens the read: the person who just pasted an article is the
+      // person who wants to start it.
+      state.focus.read = await safeInvoke("save_read", {
         title: $("#reader-title").value.trim(),
         text,
       });
       $("#reader-title").value = "";
       $("#reader-text").value = "";
+      const reads = await safeInvoke("saved_reads", undefined, { silent: true }).catch(() => null);
+      if (Array.isArray(reads)) state.focus.reads = reads;
       renderReader();
     } catch {
       /* toasted */
@@ -4547,7 +4937,7 @@
 
   async function handleReaderStep(delta) {
     if (!focusView) return;
-    const r = state.focus.reading;
+    const r = state.focus.read;
     if (!r) return;
     const to = focusView.stepReader(r.position, r.chunks.length, delta);
     // null means the position did not change — every step is a write into the
@@ -4555,12 +4945,12 @@
     if (to == null) return;
     // Paint immediately and let the engine's clamped answer overwrite it; the
     // reader should not wait on a disk write to turn the page.
-    state.focus.reading = { ...r, position: to };
+    state.focus.read = { ...r, position: to };
     renderReader();
     try {
-      const updated = await safeInvoke("set_reading_position", { position: to });
+      const updated = await safeInvoke("set_saved_read_position", { id: r.id, position: to });
       if (updated) {
-        state.focus.reading = updated;
+        state.focus.read = updated;
         renderReader();
       }
     } catch {
@@ -4568,13 +4958,93 @@
     }
   }
 
-  async function handleReaderClear() {
+  /** Back to the library, leaving the read (and its place) saved. */
+  async function handleReaderBack() {
+    state.focus.read = null;
+    // Re-list so the row shows the place the reader just got to.
+    const reads = await safeInvoke("saved_reads", undefined, { silent: true }).catch(() => null);
+    if (Array.isArray(reads)) state.focus.reads = reads;
+    renderReader();
+  }
+
+  async function handleReaderRemove() {
+    const r = state.focus.read;
+    if (!r) return;
     try {
-      await safeInvoke("clear_reading");
-      state.focus.reading = null;
+      await safeInvoke("delete_saved_read", { id: r.id });
+      state.focus.read = null;
+      state.focus.reads = state.focus.reads.filter((s) => s.id !== r.id);
       renderReader();
     } catch {
       /* toasted */
+    }
+  }
+
+  // ── Stretch break ─────────────────────────────────────────────────────────
+  //
+  // Paced locally, unlike the focus countdown: a break is purely
+  // presentational — nothing persists, nothing lapses, nothing is scored — so
+  // there is no engine state a per-second re-read would keep honest. The
+  // engine's contribution is the routine itself (`stretch_routine`).
+
+  function renderStretch() {
+    if (!stretchView) return;
+    const st = state.focus.stretch;
+    const segments = stretchView.stretchSegments(st.routine);
+    const running = st.startedAt != null;
+    $("#stretch-idle").hidden = running;
+    $("#stretch-run").hidden = !running;
+    $("#stretch-done").hidden = !st.done;
+    // The bridge failed or answered empty: no player rather than an empty one.
+    $("#stretch-start").disabled = segments.length === 0;
+    if (!running) return;
+
+    const elapsed = (Date.now() - st.startedAt) / 1000;
+    const at = stretchView.stretchAt(segments, elapsed);
+    if (!at) {
+      stopStretch();
+      return;
+    }
+    const figure = $("#stretch-figure");
+    figure.dataset.stretch = at.segment.key;
+    figure.dataset.side = at.segment.side || "";
+    $("#stretch-name").textContent = at.segment.name;
+    $("#stretch-side").textContent = stretchView.sideLabel(at.segment.side);
+    $("#stretch-cue").textContent = at.segment.cue;
+    $("#stretch-bar").style.width = `${stretchView.stretchProgress(segments, elapsed) * 100}%`;
+    if (at.done) {
+      // The routine ran its course: back to rest, with a closing line. Ending
+      // early (the button) shows no line — leaving is not an outcome here.
+      stopStretch();
+      state.focus.stretch.done = true;
+      renderStretch();
+    }
+  }
+
+  function startStretch() {
+    if (!stretchView) return;
+    if (stretchView.stretchSegments(state.focus.stretch.routine).length === 0) return;
+    state.focus.stretch.startedAt = Date.now();
+    state.focus.stretch.done = false;
+    if (!state.focus.stretch.tick) {
+      // 4 fps is plenty for a progress bar; the figure's motion is CSS.
+      state.focus.stretch.tick = setInterval(renderStretch, 250);
+    }
+    renderStretch();
+  }
+
+  function stopStretch() {
+    const st = state.focus.stretch;
+    if (st.tick) clearInterval(st.tick);
+    st.tick = null;
+    st.startedAt = null;
+    st.done = false;
+    // Repaint only when the tab is built (this also runs from the unlock
+    // reset, before the Focus tab has ever painted).
+    if (stretchView && $("#stretch-run")) {
+      $("#stretch-idle").hidden = false;
+      $("#stretch-run").hidden = true;
+      $("#stretch-done").hidden = true;
     }
   }
 
@@ -4747,7 +5217,10 @@
     // URL is an https URL too, and only `parse_music_link` knows the difference.
     const streamLink = await streamLinkReady;
     const asStream = streamLink.planStream(plan.query, target);
-    if (asStream.kind === streamLink.NOT_HTTPS) {
+    // Two refusals, one shape: a scheme we must not carry further, and a page
+    // link a player could never open. Both end here with the sentence naming
+    // the problem — before a session opens and invites somebody to it.
+    if (asStream.kind === streamLink.NOT_HTTPS || asStream.kind === streamLink.NOT_MEDIA) {
       showToast(asStream.message, "warn");
       return;
     }
@@ -6328,7 +6801,10 @@
     $("#reader-save").addEventListener("click", handleReaderSave);
     $("#reader-next").addEventListener("click", () => handleReaderStep(1));
     $("#reader-prev").addEventListener("click", () => handleReaderStep(-1));
-    $("#reader-clear").addEventListener("click", handleReaderClear);
+    $("#reader-back").addEventListener("click", handleReaderBack);
+    $("#reader-remove").addEventListener("click", handleReaderRemove);
+    $("#stretch-start").addEventListener("click", startStretch);
+    $("#stretch-stop").addEventListener("click", stopStretch);
     $("#dm-input").addEventListener("input", (e) => {
       reportDraftEdit();
       // Withdrawn here rather than inside the debounced handler below: a question
@@ -6451,6 +6927,58 @@
 
     // Reply chip + message requests + call settings (Milestone 6)
     $("#dm-reply-cancel").addEventListener("click", clearReply);
+
+    // Threads and topics (docs/CHAT_THREADS.md)
+    $("#threads-close").addEventListener("click", () => {
+      closeThreadsDrawer();
+      renderConversation();
+    });
+    $("#threads-new-topic").addEventListener("click", () => {
+      const namer = $("#threads-namer");
+      namer.hidden = !namer.hidden;
+      if (!namer.hidden) $("#threads-name").focus();
+    });
+    $("#threads-create").addEventListener("click", async () => {
+      const name = $("#threads-name").value.trim();
+      if (!name) return;
+      // Naming and filing in one gesture when there is something to file:
+      // somebody who typed a name while a thread was selected meant both, and
+      // making them click the chip they just created is a step that exists only
+      // because the code has two calls.
+      if (state.threads.filing) {
+        await fileThread(state.threads.filing, name);
+      } else if (await safeInvoke("create_topic", { peer: state.activeContact, name })) {
+        await refreshThreads();
+      }
+      $("#threads-name").value = "";
+      $("#threads-namer").hidden = true;
+    });
+    $("#thread-back").addEventListener("click", () => {
+      state.threads.openThread = null;
+      renderThreadsDrawer();
+    });
+    $("#thread-input").addEventListener("input", () => {
+      $("#thread-send").disabled = !$("#thread-input").value.trim();
+    });
+    $("#thread-send").addEventListener("click", async () => {
+      const open = state.threads.openThread;
+      const content = $("#thread-input").value.trim();
+      if (!open || !content) return;
+      // Addressed to the thread's *root*, whichever message in it is on screen
+      // — the flatness is what makes a thread a thread rather than a chain of
+      // quotes. Core resolves the root again on its side.
+      const sent = await safeInvoke("send_thread_reply", {
+        peer: state.activeContact,
+        rootId: open.root_id,
+        content,
+      });
+      if (!sent) return;
+      $("#thread-input").value = "";
+      $("#thread-send").disabled = true;
+      await openThread(open.root_id);
+      // The reply is an ordinary DM, so the conversation has it too.
+      await reloadConversation(state.activeContact);
+    });
     $("#call-settings-btn").addEventListener("click", openTurnModal);
     $("#turn-cancel").addEventListener("click", closeTurnModal);
     $("#turn-save").addEventListener("click", handleSaveTurn);
@@ -6540,6 +7068,50 @@
     let ws = wsOf("Base");
     const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     const re = /\/pay\s+(\d+(?:\.\d{1,2})?)\s+to\s+([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)/gi;
+    // One filed topic and one unfiled thread, so the threads drawer draws both
+    // branches of its filter without a backend. Mutated in place by the
+    // `create_topic` / `assign_thread` / `set_topic_closed` arms below, the way
+    // `mockTasks` is by `set_task_state`.
+    const mockTopics = [
+      {
+        slug: "flat-deposit",
+        name: "Flat deposit",
+        peer: "npub1mockcontact000000000000000000000000000000000000",
+        created_by: "npub1mockdev0identity00000000000000000000000000000000",
+        mine: true,
+        created_at: Math.floor(Date.now() / 1000) - 90_000,
+        closed: false,
+        thread_count: 1,
+        message_count: 2,
+        last_activity_at: Math.floor(Date.now() / 1000) - 600,
+      },
+    ];
+    const mockThreads = [
+      {
+        root_id: "mock-thread-1",
+        peer: "npub1mockcontact000000000000000000000000000000000000",
+        topic_slug: "flat-deposit",
+        preview: "the deposit still hasn't come back (mock)",
+        root_is_media: false,
+        root_missing: false,
+        started_at: Math.floor(Date.now() / 1000) - 90_000,
+        reply_count: 1,
+        last_at: Math.floor(Date.now() / 1000) - 600,
+        unread: true,
+      },
+      {
+        root_id: "mock-thread-2",
+        peer: "npub1mockcontact000000000000000000000000000000000000",
+        topic_slug: null,
+        preview: "are we still on for saturday? (mock)",
+        root_is_media: false,
+        root_missing: false,
+        started_at: Math.floor(Date.now() / 1000) - 40_000,
+        reply_count: 2,
+        last_at: Math.floor(Date.now() / 1000) - 300,
+        unread: false,
+      },
+    ];
     // Two rows so the Tasks panel is previewable without a backend: one asked of
     // you (Done/Decline) and one note to self (all three).
     const mockTasks = [
@@ -6586,7 +7158,7 @@
     // Couple Sandbox behave believably in browser preview.
     let mockSakha = { paired: false, partnerNpub: null, role: null, ledger: "" };
     // Focus practice state for browser preview (see the `focus_*` cases below).
-    const mockFocus = { active: null, sessions: [], reading: null };
+    const mockFocus = { active: null, sessions: [], reads: [] };
 
     const invoke = async (cmd, args = {}) => {
       await delay(120);
@@ -6708,6 +7280,16 @@
             end: (m.index || 0) + m[1].length + 1,
           }));
           if (head === "task") return { kind: "task", text: body.replace(/(?:^|\s)@[a-z0-9_]{3,24}/gi, "").trim(), assignees: at };
+          if (head === "assign" || head === "topic" || head === "file") {
+            return {
+              kind: "assign_topic",
+              topics: [...body.matchAll(/(?:^|\s)#([a-zA-Z0-9_-]{2,32})/g)].map((m) => ({
+                slug: m[1].toLowerCase(),
+                start: m.index || 0,
+                end: (m.index || 0) + m[1].length + 1,
+              })),
+            };
+          }
           if (head === "tara") return { kind: "ask_tara", text: body };
           if (head === "breathe" || head === "breath") return { kind: "open", action: "breathe" };
           if (head === "comrade-breathe") return { kind: "offer_to", action: "breathe", targets: at };
@@ -6739,6 +7321,100 @@
           if (t) t.state = args.taskState;
           return t || null;
         }
+        // Threads and topics. One filed topic and one unfiled thread, so the
+        // drawer is previewable without a backend and both branches of the
+        // filter draw something. The parse mock above returns `assign_topic`
+        // for `/assign`, so the composer path is previewable too.
+        case "topics":
+          return mockTopics;
+        case "threads":
+          return args.topicSlug
+            ? mockThreads.filter((t) => t.topic_slug === args.topicSlug)
+            : mockThreads;
+        case "thread": {
+          const row =
+            mockThreads.find((t) => t.root_id === args.rootId) || mockThreads[0];
+          return {
+            root_id: row.root_id,
+            peer: args.peer,
+            topic_slug: row.topic_slug,
+            messages: [
+              {
+                id: row.root_id,
+                peer: args.peer,
+                content: row.preview,
+                created_at: row.started_at,
+                outgoing: false,
+                author: "human",
+                status: null,
+                reply_to: null,
+              },
+              {
+                id: `${row.root_id}-r1`,
+                peer: args.peer,
+                content: "(mock) i'll chase them monday",
+                created_at: row.last_at,
+                outgoing: true,
+                author: "human",
+                status: "sent",
+                reply_to: row.root_id,
+              },
+            ],
+            media: [],
+          };
+        }
+        case "thread_root":
+          return args.messageId;
+        case "create_topic": {
+          // Slugified the way `comrade_core::topic::slugify` does for the
+          // shapes this mock can produce — deliberately not a second
+          // implementation of the rule, just enough to key a mock row.
+          const slug = String(args.name || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, "-")
+            .replace(/^-+|-+$/g, "");
+          const existing = mockTopics.find((t) => t.slug === slug);
+          if (existing) return existing;
+          const fresh = {
+            slug,
+            name: args.name,
+            peer: args.peer,
+            created_by: "npub1mockdev0identity00000000000000000000000000000000",
+            mine: true,
+            created_at: Math.floor(Date.now() / 1000),
+            closed: false,
+            thread_count: 0,
+            message_count: 0,
+            last_activity_at: Math.floor(Date.now() / 1000),
+          };
+          mockTopics.push(fresh);
+          return fresh;
+        }
+        case "assign_thread": {
+          const row =
+            mockThreads.find((t) => t.root_id === args.messageId) || mockThreads[0];
+          row.topic_slug = args.topicName
+            ? String(args.topicName).trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-")
+            : null;
+          return row;
+        }
+        case "set_topic_closed": {
+          const t = mockTopics.find((x) => x.slug === args.slug);
+          if (t) t.closed = args.closed;
+          return t || null;
+        }
+        case "send_thread_reply":
+          return {
+            id: `mock-thread-reply-${Math.floor(Math.random() * 1e6)}`,
+            peer: args.peer,
+            content: args.content,
+            created_at: Math.floor(Date.now() / 1000),
+            outgoing: true,
+            author: "human",
+            status: "sent",
+            reply_to: args.rootId,
+          };
         case "assign_task":
           return {
             id: "mock-task",
@@ -6935,29 +7611,52 @@
         }
         case "focus_sessions":
           return mockFocus.sessions.slice();
-        case "save_reading":
-          mockFocus.reading = {
+        // The stretch routine is the engine's; this copy exists so the break
+        // player runs in browser preview, and one drifted step here can only
+        // mislead a preview, never a user.
+        case "stretch_routine":
+          return [
+            { key: "neck-tilt", name: "Neck tilt", cue: "Let one ear sink toward that shoulder. (mock)", seconds: 6, mirrored: true },
+            { key: "shoulder-roll", name: "Shoulder rolls", cue: "Slow full circles. (mock)", seconds: 6, mirrored: false },
+            { key: "side-bend", name: "Side bend", cue: "Reach up and lean away. (mock)", seconds: 6, mirrored: true },
+          ];
+        case "save_read": {
+          const read = {
+            id: "mockread_" + Date.now(),
             title: args.title || "",
-            // A stand-in for `attention::chunk_reading`, which splits on
-            // paragraph boundaries. Same shape, not the same algorithm.
+            // A stand-in for `attention::reading_source` (first link's host)…
+            source: (String(args.text).match(/https?:\/\/(?:www\.)?([^/\s:?#]+)/) || [])[1] || "",
+            // …and for `attention::chunk_reading`, which splits on paragraph
+            // boundaries. Same shape, not the same algorithm.
             chunks: String(args.text)
               .split(/\n{2,}/)
               .filter((c) => c.trim()),
             position: 0,
+            added_at: nowSecs(),
           };
-          return mockFocus.reading;
-        case "reading":
-          return mockFocus.reading;
-        case "set_reading_position":
-          if (!mockFocus.reading) return null;
-          mockFocus.reading.position = Math.min(
-            Math.max(0, args.position),
-            mockFocus.reading.chunks.length - 1,
-          );
-          return mockFocus.reading;
-        case "clear_reading": {
-          const had = !!mockFocus.reading;
-          mockFocus.reading = null;
+          mockFocus.reads.unshift(read);
+          return read;
+        }
+        case "saved_reads":
+          return mockFocus.reads.map((r) => ({
+            id: r.id,
+            title: r.title,
+            source: r.source,
+            chunk_count: r.chunks.length,
+            position: r.position,
+            added_at: r.added_at,
+          }));
+        case "open_saved_read":
+          return mockFocus.reads.find((r) => r.id === args.id) || null;
+        case "set_saved_read_position": {
+          const read = mockFocus.reads.find((r) => r.id === args.id);
+          if (!read) return null;
+          read.position = Math.min(Math.max(0, args.position), read.chunks.length - 1);
+          return read;
+        }
+        case "delete_saved_read": {
+          const had = mockFocus.reads.some((r) => r.id === args.id);
+          mockFocus.reads = mockFocus.reads.filter((r) => r.id !== args.id);
           return had;
         }
         // Large attachments. The 10 MB here is a stand-in for

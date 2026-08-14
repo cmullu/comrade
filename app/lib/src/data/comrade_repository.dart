@@ -171,6 +171,57 @@ abstract interface class ComradeRepository {
     required String emoji,
   });
 
+  // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+  //
+  // Nothing here re-derives a slug or walks a reply chain: both are core's, so
+  // the four frontends cannot disagree about which thread a message is in.
+
+  /// Every topic in [peer]'s conversation, oldest first, with live counts.
+  /// Closed ones are included — the archive has to be reachable, and the picker
+  /// is where the filtering belongs.
+  Future<List<TopicInfo>> topics(String peer);
+
+  /// Every thread in [peer]'s conversation, most recently active first.
+  /// [topicSlug] of null is *all* threads, not the unfiled ones.
+  Future<List<ThreadInfo>> threads(String peer, {String? topicSlug});
+
+  /// One thread in full. [rootId] may name any message in it — core walks up to
+  /// the root, so a sheet opened from a reply shows the same thread as one
+  /// opened from the top.
+  Future<ThreadDetail> thread({required String peer, required String rootId});
+
+  /// Name a topic and tell the peer. Idempotent: the slug is the id, so naming
+  /// one that exists returns it rather than failing.
+  Future<TopicInfo> createTopic({required String peer, required String name});
+
+  /// File the thread containing [messageId] under [topicName], creating the
+  /// topic if it is new — or, with null, take it out of wherever it was.
+  ///
+  /// Takes the message rather than the thread root: resolving the root is
+  /// core's job, and a frontend that had to do it could file the wrong thread
+  /// from a reply.
+  Future<ThreadInfo> assignThread({
+    required String peer,
+    required String messageId,
+    String? topicName,
+  });
+
+  /// Archive a topic, or bring it back.
+  Future<TopicInfo> setTopicClosed({
+    required String peer,
+    required String slug,
+    required bool closed,
+  });
+
+  /// Reply inside a thread — addressed to the thread's *root*, whichever
+  /// message in it is named. That flatness is what makes a thread a thread
+  /// rather than a chain of quotes.
+  Future<MessageInfo> sendThreadReply({
+    required String peer,
+    required String rootId,
+    required String content,
+  });
+
   Future<List<MessageRequestInfo>> messageRequests();
 
   Future<void> acceptRequest(String peer);

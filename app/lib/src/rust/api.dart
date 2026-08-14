@@ -187,6 +187,62 @@ Future<List<MessageDto>> messagesWith({required String peer}) =>
 Future<List<MediaMessageDto>> mediaWith({required String peer}) =>
     RustLib.instance.api.crateApiMediaWith(peer: peer);
 
+/// Every topic in `peer`'s conversation, oldest first, with live counts.
+/// Closed ones are included — the archive has to be reachable.
+Future<List<TopicDto>> topics({required String peer}) =>
+    RustLib.instance.api.crateApiTopics(peer: peer);
+
+/// Every thread in `peer`'s conversation, most recently active first.
+/// `topic_slug` of `None` is *all* threads, not the unfiled ones.
+Future<List<ThreadSummaryDto>> threads(
+        {required String peer, String? topicSlug}) =>
+    RustLib.instance.api.crateApiThreads(peer: peer, topicSlug: topicSlug);
+
+/// One thread in full. `root_id` may name any message in it — the walk up the
+/// reply chain happens on the Rust side so the frontends cannot disagree about
+/// which thread a bubble belongs to.
+Future<ThreadDto> thread({required String peer, required String rootId}) =>
+    RustLib.instance.api.crateApiThread(peer: peer, rootId: rootId);
+
+/// The id of the thread a message belongs to.
+Future<String> threadRoot({required String peer, required String messageId}) =>
+    RustLib.instance.api.crateApiThreadRoot(peer: peer, messageId: messageId);
+
+/// Name a topic and tell the peer. Idempotent: naming one that exists returns
+/// it, because the slug is the id.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<TopicDto> createTopic({required String peer, required String name}) =>
+    RustLib.instance.api.crateApiCreateTopic(peer: peer, name: name);
+
+/// File the thread containing `message_id` under `topic_name`, creating the
+/// topic if it is new — or, with `None`, take it out of wherever it was.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<ThreadSummaryDto> assignThread(
+        {required String peer, required String messageId, String? topicName}) =>
+    RustLib.instance.api.crateApiAssignThread(
+        peer: peer, messageId: messageId, topicName: topicName);
+
+/// Archive a topic, or bring it back.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<TopicDto> setTopicClosed(
+        {required String peer, required String slug, required bool closed}) =>
+    RustLib.instance.api
+        .crateApiSetTopicClosed(peer: peer, slug: slug, closed: closed);
+
+/// Reply inside a thread — addressed to the thread's root, whichever message in
+/// it the caller happens to name.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<MessageDto> sendThreadReply(
+        {required String peer,
+        required String rootId,
+        required String content}) =>
+    RustLib.instance.api
+        .crateApiSendThreadReply(peer: peer, rootId: rootId, content: content);
+
 Future<List<MessageRequestDto>> messageRequests() =>
     RustLib.instance.api.crateApiMessageRequests();
 
@@ -649,6 +705,9 @@ sealed class BridgeEvent with _$BridgeEvent {
     required String peer,
     String? name,
   }) = BridgeEvent_ComradeNudge;
+  const factory BridgeEvent.rideSignal(
+    RideSignalDto field0,
+  ) = BridgeEvent_RideSignal;
   const factory BridgeEvent.togetherInvited(
     TogetherInviteDto field0,
   ) = BridgeEvent_TogetherInvited;
@@ -683,6 +742,9 @@ sealed class BridgeEvent with _$BridgeEvent {
   const factory BridgeEvent.ledgerUpdated({
     required String ledger,
   }) = BridgeEvent_LedgerUpdated;
+  const factory BridgeEvent.topicsChanged({
+    required String peer,
+  }) = BridgeEvent_TopicsChanged;
 }
 
 enum CallMediaKind {
@@ -1624,6 +1686,57 @@ sealed class RelayPolicy with _$RelayPolicy {
   const factory RelayPolicy.always() = RelayPolicy_Always;
 }
 
+class RideSignalDto {
+  final String peer;
+  final String? name;
+  final String kind;
+  final String? phrase;
+  final String? maneuver;
+  final int? distanceM;
+  final String? note;
+  final String urgency;
+  final BigInt createdAt;
+
+  const RideSignalDto({
+    required this.peer,
+    this.name,
+    required this.kind,
+    this.phrase,
+    this.maneuver,
+    this.distanceM,
+    this.note,
+    required this.urgency,
+    required this.createdAt,
+  });
+
+  @override
+  int get hashCode =>
+      peer.hashCode ^
+      name.hashCode ^
+      kind.hashCode ^
+      phrase.hashCode ^
+      maneuver.hashCode ^
+      distanceM.hashCode ^
+      note.hashCode ^
+      urgency.hashCode ^
+      createdAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RideSignalDto &&
+          runtimeType == other.runtimeType &&
+          peer == other.peer &&
+          name == other.name &&
+          kind == other.kind &&
+          phrase == other.phrase &&
+          maneuver == other.maneuver &&
+          distanceM == other.distanceM &&
+          note == other.note &&
+          urgency == other.urgency &&
+          createdAt == other.createdAt;
+}
+
 class ShareOffer {
   final BigInt totalBytes;
   final int chunkBytes;
@@ -1753,6 +1866,96 @@ class TaraMessageDto {
           fromTara == other.fromTara &&
           crisis == other.crisis &&
           createdAt == other.createdAt;
+}
+
+class ThreadDto {
+  final String rootId;
+  final String peer;
+  final String? topicSlug;
+  final List<MessageDto> messages;
+  final List<MediaMessageDto> media;
+
+  const ThreadDto({
+    required this.rootId,
+    required this.peer,
+    this.topicSlug,
+    required this.messages,
+    required this.media,
+  });
+
+  @override
+  int get hashCode =>
+      rootId.hashCode ^
+      peer.hashCode ^
+      topicSlug.hashCode ^
+      messages.hashCode ^
+      media.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThreadDto &&
+          runtimeType == other.runtimeType &&
+          rootId == other.rootId &&
+          peer == other.peer &&
+          topicSlug == other.topicSlug &&
+          messages == other.messages &&
+          media == other.media;
+}
+
+class ThreadSummaryDto {
+  final String rootId;
+  final String peer;
+  final String? topicSlug;
+  final String preview;
+  final bool rootIsMedia;
+  final bool rootMissing;
+  final BigInt startedAt;
+  final int replyCount;
+  final BigInt lastAt;
+  final bool unread;
+
+  const ThreadSummaryDto({
+    required this.rootId,
+    required this.peer,
+    this.topicSlug,
+    required this.preview,
+    required this.rootIsMedia,
+    required this.rootMissing,
+    required this.startedAt,
+    required this.replyCount,
+    required this.lastAt,
+    required this.unread,
+  });
+
+  @override
+  int get hashCode =>
+      rootId.hashCode ^
+      peer.hashCode ^
+      topicSlug.hashCode ^
+      preview.hashCode ^
+      rootIsMedia.hashCode ^
+      rootMissing.hashCode ^
+      startedAt.hashCode ^
+      replyCount.hashCode ^
+      lastAt.hashCode ^
+      unread.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ThreadSummaryDto &&
+          runtimeType == other.runtimeType &&
+          rootId == other.rootId &&
+          peer == other.peer &&
+          topicSlug == other.topicSlug &&
+          preview == other.preview &&
+          rootIsMedia == other.rootIsMedia &&
+          rootMissing == other.rootMissing &&
+          startedAt == other.startedAt &&
+          replyCount == other.replyCount &&
+          lastAt == other.lastAt &&
+          unread == other.unread;
 }
 
 class TogetherCommandDto {
@@ -1947,6 +2150,61 @@ class TogetherShareDto {
           sessionId == other.sessionId &&
           peer == other.peer &&
           signal == other.signal;
+}
+
+class TopicDto {
+  final String slug;
+  final String name;
+  final String peer;
+  final String createdBy;
+  final bool mine;
+  final BigInt createdAt;
+  final bool closed;
+  final int threadCount;
+  final int messageCount;
+  final BigInt lastActivityAt;
+
+  const TopicDto({
+    required this.slug,
+    required this.name,
+    required this.peer,
+    required this.createdBy,
+    required this.mine,
+    required this.createdAt,
+    required this.closed,
+    required this.threadCount,
+    required this.messageCount,
+    required this.lastActivityAt,
+  });
+
+  @override
+  int get hashCode =>
+      slug.hashCode ^
+      name.hashCode ^
+      peer.hashCode ^
+      createdBy.hashCode ^
+      mine.hashCode ^
+      createdAt.hashCode ^
+      closed.hashCode ^
+      threadCount.hashCode ^
+      messageCount.hashCode ^
+      lastActivityAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TopicDto &&
+          runtimeType == other.runtimeType &&
+          slug == other.slug &&
+          name == other.name &&
+          peer == other.peer &&
+          createdBy == other.createdBy &&
+          mine == other.mine &&
+          createdAt == other.createdAt &&
+          closed == other.closed &&
+          threadCount == other.threadCount &&
+          messageCount == other.messageCount &&
+          lastActivityAt == other.lastActivityAt;
 }
 
 @freezed

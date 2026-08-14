@@ -67,6 +67,9 @@ use comrade_core::presence::{
     is_online_at, parse_presence_beacon, presence_expires_at, PresenceBeacon,
     PRESENCE_HEARTBEAT_SECS, PRESENCE_SWEEP_SECS,
 };
+use comrade_core::ride::{
+    parse_ride_envelope, ride_expires_at, RideEnvelope, RideManeuver, RidePhrase, RideSignal,
+};
 use comrade_core::saathi::SaathiEngine;
 use comrade_core::sabha::{
     display_name_of, ChitthiCallback, FeedFilterSpec, FeedScope, SabhaEngine, DEFAULT_RELAYS,
@@ -79,6 +82,7 @@ use comrade_core::share::transport::{
 use comrade_core::share::{
     read_verdict as share_read_verdict, ReadSample, ReadVerdict, ShareSignal,
 };
+use comrade_core::topic::{parse_topic_envelope, TopicSignal};
 
 /// Read a stored [`SharePrefs`] back into a policy.
 ///
@@ -554,6 +558,38 @@ pub struct TogetherShareDto {
     pub session_id: String,
     pub peer: String,
     pub signal: ShareSignal,
+}
+
+/// One ride signal from the other seat of the motorcycle, ready to render —
+/// see [`comrade_core::ride`].
+///
+/// Flattened to strings and options rather than mirroring the core enums,
+/// for the reason [`TogetherShareDto`]'s doc gives in reverse: the frontends
+/// key decision tables on the wire names (`RidePhrase::as_str`), and a
+/// bridged enum would put a Kotlin `when`, a Dart `switch` and a regenerated
+/// bridge behind every phrase added to the catalog. `kind` says which of the
+/// two field groups is populated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct RideSignalDto {
+    pub peer: String,
+    /// Display name at the time of the event (alias → published handle), so a
+    /// glance card can be drawn without a store round-trip.
+    pub name: Option<String>,
+    /// `"quick"` or `"route"` — [`comrade_core::ride::RideSignal`]'s tag.
+    pub kind: String,
+    /// The catalog phrase's wire name, for `kind == "quick"`.
+    pub phrase: Option<String>,
+    /// The maneuver's wire name, for `kind == "route"`.
+    pub maneuver: Option<String>,
+    pub distance_m: Option<u32>,
+    pub note: Option<String>,
+    /// `"urgent"`, `"notice"` or `"info"` — decided in core
+    /// ([`comrade_core::ride::RideUrgency`]), so two phones cannot disagree
+    /// about whether "pull over" is worth a buzz.
+    pub urgency: String,
+    /// The signal's true send time (unix seconds), like
+    /// [`CallSignalDto::created_at`]: what a frontend ages the card out by.
+    pub created_at: u64,
 }
 
 // ── In-chat commands (see `comrade_core::command`) ───────────────────────────
@@ -1717,16 +1753,48 @@ pub struct FocusSessionDto {
     pub remaining_secs: u64,
 }
 
-/// The saved long-read, already split into chapter-sized chunks, plus where
-/// the reader had got to. Chunking is lossless by test
-/// (`comrade_core::attention::chunk_reading`).
+/// One saved read, opened for reading: the full text already split into
+/// chapter-sized chunks (lossless by test —
+/// `comrade_core::attention::chunk_reading`), plus where the reader had got to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
-pub struct ReadingDto {
+pub struct SavedReadDto {
+    pub id: String,
     pub title: String,
+    /// Where it came from — the host of the first link in the text, or empty
+    /// for pasted prose. A label, never something to fetch.
+    pub source: String,
     pub chunks: Vec<String>,
     /// Index into `chunks`, always in range (a stored position past the end
     /// after an edit is clamped rather than trusted).
     pub position: u32,
+    pub added_at: u64,
+}
+
+/// A reading-library row: everything the list needs without hauling the whole
+/// text across the FFI for every entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct SavedReadSummaryDto {
+    pub id: String,
+    pub title: String,
+    /// See [`SavedReadDto::source`].
+    pub source: String,
+    pub chunk_count: u32,
+    pub position: u32,
+    pub added_at: u64,
+}
+
+/// One step of the guided stretch break
+/// (`comrade_core::attention::STRETCH_ROUTINE`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct StretchStepDto {
+    /// Stable key the frontends hang their animation on.
+    pub key: String,
+    pub name: String,
+    pub cue: String,
+    /// Seconds to stay with it — per side, when `mirrored`.
+    pub seconds: u32,
+    /// Done once per side (left, then right) when `true`.
+    pub mirrored: bool,
 }
 
 /// A crisis helpline surfaced when a Tara message carries distress cues.
@@ -1857,6 +1925,106 @@ fn shared_note_of(content: &str) -> Option<SharedNoteDto> {
     })
 }
 
+// ── Threads and topics (see `comrade_core::topic`) ───────────────────────────
+
+/// One topic in one conversation, with the counts a list row needs.
+///
+/// The counts are computed on read rather than stored, and that is deliberate:
+/// a stored count is a second source of truth that drifts the first time a
+/// backfill inserts an old message, and this history is bounded by one
+/// conversation. See [`ThreadIndex`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct TopicDto {
+    /// Canonical slug — the id. See `comrade_core::topic::slugify`.
+    pub slug: String,
+    /// Display name, as first spelled.
+    pub name: String,
+    /// Peer npub the conversation is keyed by.
+    pub peer: String,
+    /// npub of whoever first named it.
+    pub created_by: String,
+    /// Whether *this device* named it — so a frontend can say "you started
+    /// this" without holding the local npub.
+    pub mine: bool,
+    pub created_at: u64,
+    /// Archived: readable, out of the picker. Nothing deletes a topic.
+    pub closed: bool,
+    /// Threads filed here.
+    pub thread_count: u32,
+    /// Messages across those threads.
+    pub message_count: u32,
+    /// `created_at` of the newest message in any of its threads, or the
+    /// topic's own creation time when it holds nothing yet — so a list can sort
+    /// by liveliness without a second query.
+    pub last_activity_at: u64,
+}
+
+/// One thread as a list row: what it is about, how big it got, and where it is
+/// filed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ThreadSummaryDto {
+    /// Event id of the root message — the thread's id, and what
+    /// [`ComradeRuntime::thread`] takes.
+    pub root_id: String,
+    pub peer: String,
+    /// Slug of the topic it is filed under, or `None` for unfiled.
+    pub topic_slug: Option<String>,
+    /// The root's own text, already stripped of any author marker. Empty when
+    /// the root is an uncaptioned attachment, or when the root is not in the
+    /// loaded history at all — see [`Self::root_is_media`] and
+    /// [`Self::root_missing`], which say which.
+    pub preview: String,
+    /// Whether the root is an attachment rather than a text message, so a
+    /// frontend can render its own "📎 Photo" in its own language rather than
+    /// having English pushed up from here — the same split
+    /// `comrade_core::command`'s offer envelopes make.
+    pub root_is_media: bool,
+    /// Whether the root message is missing from this device's history.
+    ///
+    /// Not an error and not rare: a thread can be filed before its root is
+    /// cached (a reply arrives first, the peer files it, the root turns up on
+    /// the next backfill), and a reply can quote something older than the
+    /// window. The row still renders — its replies are real — and the frontend
+    /// says the root is not here rather than showing a blank quote.
+    pub root_missing: bool,
+    /// `created_at` of the root, or of the oldest message actually held when
+    /// the root is missing.
+    pub started_at: u64,
+    /// Messages *below* the root. A thread of one is a message nobody replied
+    /// to, and both shipping frontends hide those from the thread list.
+    pub reply_count: u32,
+    /// `created_at` of the newest message in the thread.
+    pub last_at: u64,
+    /// Whether anything in this thread came from the peer after the
+    /// conversation's read watermark — the dot on the row. Uses the same
+    /// watermark as the main thread's unread divider
+    /// (`ConversationMeta::last_read_at`), because a sheet with its own idea of
+    /// "unread" would disagree with the screen it opens from.
+    pub unread: bool,
+}
+
+/// One thread, in full, for the sheet that opens over the conversation.
+///
+/// Two lists rather than one merged one, because a merge needs a total order
+/// and the frontends already have theirs: `ChatsScreen`'s `ChatItem` and the
+/// desktop's `msgs` array both interleave text and media by `created_at`
+/// today. Handing up a third ordering would be a fourth answer to a question
+/// three surfaces already answer identically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct ThreadDto {
+    pub root_id: String,
+    pub peer: String,
+    pub topic_slug: Option<String>,
+    /// Every text message in the thread, oldest first, including the root when
+    /// the root is a text message.
+    pub messages: Vec<MessageDto>,
+    /// Every attachment in the thread, oldest first. In practice this is the
+    /// root or nothing: an attachment carries no `reply_to`, so it can start a
+    /// thread but not join one. That is a real limitation rather than a design
+    /// choice — recorded as `AUDIT.md` TOPIC-2.
+    pub media: Vec<MediaMessageDto>,
+}
+
 /// Live connectivity status of the off-grid Saathi mesh (mDNS discovery +
 /// Gossipsub), for a persistent UI indicator — the one signal that still works
 /// with zero cellular or relay reachability.
@@ -1903,6 +2071,23 @@ pub enum BridgeEvent {
         message_ids: Vec<String>,
         status: String,
     },
+    /// A peer named a topic, filed a thread under one, or archived one — the
+    /// structure of `peer`'s conversation moved. See `comrade_core::topic`.
+    ///
+    /// **Carries the conversation and nothing else.** One coarse event rather
+    /// than a payload per signal kind, for two reasons. The sheet re-reads the
+    /// whole conversation's topics anyway (the counts are derived, not stored —
+    /// see [`TopicDto`]), so a fine-grained payload would be read and thrown
+    /// away. And this variant costs a Kotlin `when` arm and a Dart `switch` arm
+    /// in files nobody edits, which is the tax
+    /// [`Self::TogetherShare`] documents; paying it once for "topics changed"
+    /// is the version of that tax worth paying.
+    ///
+    /// Emitted only when the visible state actually moved, so a replay off the
+    /// two-day gift-wrap backfill does not redraw anything — the same rule
+    /// [`Self::IncomingReaction`] follows, enforced by
+    /// `EncryptedStore::set_thread_topic`'s return value.
+    TopicsChanged { peer: String },
     /// A peer shared (or updated) their display handle — e.g. by accepting our
     /// message request. The chat list should re-title their conversation.
     PeerProfileUpdated { peer: String, name: Option<String> },
@@ -1934,6 +2119,14 @@ pub enum BridgeEvent {
         /// so a notification can be raised without a store round-trip.
         name: Option<String>,
     },
+    /// The other seat of the motorcycle said one of the few things worth
+    /// saying at speed — see [`comrade_core::ride`]. Emitted only from an
+    /// accepted conversation and only while the signal is still fresh: a
+    /// backfilled "left in 400 m" from Tuesday raises nothing.
+    ///
+    /// One variant for the whole vocabulary rather than one per phrase — the
+    /// tax [`Self::TogetherShare`] warns about, avoided the same way.
+    RideSignal(RideSignalDto),
     /// Someone asked to watch or listen to something together.
     TogetherInvited(TogetherInviteDto),
     /// They accepted our invitation, so the session is live on both sides.
@@ -2978,6 +3171,163 @@ impl ComradeRuntime {
             .collect();
         msgs.sort_by_key(|m| m.created_at);
         Ok(msgs)
+    }
+
+    // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+
+    /// Every topic in `peer`'s conversation, oldest first, with live counts.
+    ///
+    /// Closed ones are included — the archive has to be reachable, and the
+    /// picker is where the filtering belongs.
+    pub fn topics(&self, peer: &str) -> Result<Vec<TopicDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let peer_npub = to_npub(peer);
+        let peer_hex = parse_pubkey(peer)?.to_hex();
+        let me = self.my_npub().unwrap_or_default();
+        let index = ThreadIndex::build(store, &peer_npub, &peer_hex)?;
+        Ok(store
+            .topics_with(&peer_npub)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|row| topic_dto(row, &me, &index))
+            .collect())
+    }
+
+    /// Every thread in `peer`'s conversation, most recently active first.
+    ///
+    /// `topic_slug` of `None` is "all threads" rather than "unfiled threads" —
+    /// the sheet's default view is everything, and a caller wanting only the
+    /// unfiled ones filters on [`ThreadSummaryDto::topic_slug`], which it can
+    /// do without a second round trip.
+    ///
+    /// Threads of one — a message nobody replied to — are included. Whether to
+    /// show them is a frontend's call: the desktop panel lists them so a thread
+    /// can be *started* from the sheet, and Android's sheet hides them.
+    pub fn threads(
+        &self,
+        peer: &str,
+        topic_slug: Option<String>,
+    ) -> Result<Vec<ThreadSummaryDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let peer_npub = to_npub(peer);
+        let peer_hex = parse_pubkey(peer)?.to_hex();
+        let index = ThreadIndex::build(store, &peer_npub, &peer_hex)?;
+        let wanted = topic_slug.and_then(|s| comrade_core::topic::slugify(&s));
+        Ok(index
+            .summaries(&peer_npub)
+            .into_iter()
+            .filter(|t| match &wanted {
+                Some(slug) => t.topic_slug.as_deref() == Some(slug.as_str()),
+                None => true,
+            })
+            .collect())
+    }
+
+    /// One thread in full: the root and everything that replied into it.
+    ///
+    /// `root_id` may name any message in the thread rather than only its root —
+    /// this resolves upwards first, so a frontend that has a tapped bubble's id
+    /// and not its ancestry gets the right sheet. Returns an empty thread (not
+    /// an error) for an id we hold nothing for; see
+    /// [`ThreadSummaryDto::root_missing`] for why that is a normal state.
+    pub fn thread(&self, peer: &str, root_id: &str) -> Result<ThreadDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let peer_npub = to_npub(peer);
+        let peer_hex = parse_pubkey(peer)?.to_hex();
+        let root = resolve_thread_root(store, &peer_npub, root_id)?;
+        let index = ThreadIndex::build(store, &peer_npub, &peer_hex)?;
+        let members: std::collections::HashSet<&str> = index
+            .threads
+            .get(&root)
+            .map(|m| m.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let messages = self
+            .messages_with(&peer_npub)?
+            .into_iter()
+            .filter(|m| members.contains(m.id.as_str()))
+            .collect();
+        let media = self
+            .media_with(&peer_npub)?
+            .into_iter()
+            .filter(|m| members.contains(m.event_id.as_str()))
+            .collect();
+        Ok(ThreadDto {
+            topic_slug: index.filed.get(&root).cloned(),
+            root_id: root,
+            peer: peer_npub,
+            messages,
+            media,
+        })
+    }
+
+    /// The id of the thread `message_id` belongs to.
+    ///
+    /// What a frontend calls before opening a sheet from a tapped bubble, so
+    /// the four surfaces do not each re-implement the walk up the reply chain —
+    /// which is the drift `/pay` already demonstrated.
+    pub fn thread_root(&self, peer: &str, message_id: &str) -> Result<String, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        resolve_thread_root(store, &to_npub(peer), message_id)
+    }
+
+    /// Name a topic in `peer`'s conversation, and tell them.
+    ///
+    /// Idempotent: the slug is the id, so naming an existing topic returns it
+    /// rather than failing. Delegates to [`RuntimeHandles::create_topic`] — see
+    /// [`Self::send_dm`] for why the network half never runs under the lock.
+    pub async fn create_topic(&self, peer: &str, name: &str) -> Result<TopicDto, UiError> {
+        self.handles().create_topic(peer, name).await
+    }
+
+    /// File the thread containing `message_id` under `topic_name`, creating the
+    /// topic if it is new — or, with `topic_name` of `None`, take it out of
+    /// wherever it was.
+    ///
+    /// Takes the *message* rather than the thread root on purpose: resolving
+    /// the root is this side's job (see [`Self::thread_root`]), and a frontend
+    /// that had to do it could file the wrong thread from a reply.
+    ///
+    /// Delegates to [`RuntimeHandles::assign_thread`].
+    pub async fn assign_thread(
+        &self,
+        peer: &str,
+        message_id: &str,
+        topic_name: Option<String>,
+    ) -> Result<ThreadSummaryDto, UiError> {
+        self.handles()
+            .assign_thread(peer, message_id, topic_name)
+            .await
+    }
+
+    /// Archive a topic, or bring it back. Delegates to
+    /// [`RuntimeHandles::set_topic_closed`].
+    pub async fn set_topic_closed(
+        &self,
+        peer: &str,
+        slug: &str,
+        closed: bool,
+    ) -> Result<TopicDto, UiError> {
+        self.handles().set_topic_closed(peer, slug, closed).await
+    }
+
+    /// Reply inside a thread.
+    ///
+    /// [`Self::send_dm_reply`] with the thread's root as the target, and the
+    /// root resolved here rather than by the caller — so a reply typed into the
+    /// sheet lands in the thread the sheet is showing even when the last thing
+    /// read in it was itself a reply. That is the difference between Slack's
+    /// thread composer and quoting a message: the flat shape is the feature.
+    ///
+    /// Delegates to [`RuntimeHandles::send_thread_reply`].
+    pub async fn send_thread_reply(
+        &self,
+        peer: &str,
+        root_id: &str,
+        content: &str,
+    ) -> Result<MessageDto, UiError> {
+        self.handles()
+            .send_thread_reply(peer, root_id, content)
+            .await
     }
 
     // ── Message requests (gate strangers; accept/block; profile on accept) ────
@@ -4173,6 +4523,28 @@ impl ComradeRuntime {
         self.handles().nudge_comrades().await
     }
 
+    // ── Ride signals (driver + pillion — see `comrade_core::ride`) ───────────
+
+    /// Say one catalog phrase to the other seat of the motorcycle. Delegates
+    /// to [`RuntimeHandles::ride_send_quick`].
+    pub async fn ride_send_quick(&self, target: &str, phrase: &str) -> Result<(), UiError> {
+        self.handles().ride_send_quick(target, phrase).await
+    }
+
+    /// Suggest the next maneuver to the person steering. Delegates to
+    /// [`RuntimeHandles::ride_send_route`].
+    pub async fn ride_send_route(
+        &self,
+        target: &str,
+        maneuver: &str,
+        distance_m: Option<u32>,
+        note: Option<String>,
+    ) -> Result<(), UiError> {
+        self.handles()
+            .ride_send_route(target, maneuver, distance_m, note)
+            .await
+    }
+
     // ── Journal (wellbeing pillar #1 — strictly local) ───────────────────────
     //
     // Nothing in this section is synchronised, published or uploaded, and no
@@ -4852,63 +5224,128 @@ impl ComradeRuntime {
         Ok(attention::focus_reflection(parsed, prior))
     }
 
-    /// Save text for the distraction-free reader, replacing whatever was
-    /// there, and return it chunked. The user brings the text (paste, share);
-    /// nothing here fetches a URL — a reader that went to the network would
-    /// put an arbitrary-fetch path into the one app that promises not to.
-    pub fn save_reading(&self, title: &str, text: &str) -> Result<ReadingDto, UiError> {
+    /// The guided stretch-break routine, in order.
+    ///
+    /// Vault-free for the same reason [`Self::focus_presets`] is: the routine
+    /// is a constant of the design, not the user's data, and it lives in the
+    /// engine so no frontend keeps a list that could drift from the others'.
+    pub fn stretch_routine(&self) -> Vec<StretchStepDto> {
+        attention::STRETCH_ROUTINE
+            .iter()
+            .map(|s| StretchStepDto {
+                key: s.key.to_string(),
+                name: s.name.to_string(),
+                cue: s.cue.to_string(),
+                seconds: s.seconds,
+                mirrored: s.mirrored,
+            })
+            .collect()
+    }
+
+    /// Add text to the reading library and return it chunked, ready to read.
+    ///
+    /// The user brings the text (paste, or the share sheet); nothing here
+    /// fetches a URL — a reader that went to the network would put an
+    /// arbitrary-fetch path into the one app that promises not to. The source
+    /// label is derived offline from the first link in the text
+    /// ([`attention::reading_source`]) so a library of articles carried in
+    /// from different apps can say where each came from.
+    pub fn save_read(&self, title: &str, text: &str) -> Result<SavedReadDto, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let text = text.trim();
         if text.is_empty() {
             return Err(UiError::Engine("nothing to read".into()));
         }
-        let state = comrade_storage::ReadingState {
+        let now = now_secs();
+        let read = comrade_storage::SavedRead {
+            id: timestamped_store_id(now),
             title: title.trim().to_string(),
+            source: attention::reading_source(text).unwrap_or_default(),
             text: text.to_string(),
             position: 0,
-            updated_at: now_secs(),
+            added_at: now,
+            updated_at: now,
         };
         store
-            .save_reading_state(&state)
+            .save_saved_read(&read)
             .and_then(|()| store.flush())
             .map_err(|e| UiError::Storage(e.to_string()))?;
-        Ok(reading_dto(state))
+        Ok(saved_read_dto(read))
     }
 
-    /// The saved long-read, chunked, or `None` if nothing is saved.
-    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
+    /// The reading library, newest first — rows only, not the texts.
+    ///
+    /// This read may write once: a vault written before the library existed
+    /// holds one read in the old single-slot tree, and the first list moves it
+    /// into the library (position included) rather than losing it. The same
+    /// "reads may write" trade [`Self::active_focus_session`] already makes.
+    pub fn saved_reads(&self) -> Result<Vec<SavedReadSummaryDto>, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        Ok(store
+        if let Some(legacy) = store
             .load_reading_state()
             .map_err(|e| UiError::Storage(e.to_string()))?
-            .map(reading_dto))
+        {
+            let migrated = comrade_storage::SavedRead {
+                id: timestamped_store_id(legacy.updated_at),
+                title: legacy.title,
+                source: attention::reading_source(&legacy.text).unwrap_or_default(),
+                text: legacy.text,
+                position: legacy.position,
+                added_at: legacy.updated_at,
+                updated_at: legacy.updated_at,
+            };
+            store
+                .save_saved_read(&migrated)
+                .and_then(|()| store.clear_reading_state().map(|_| ()))
+                .and_then(|()| store.flush())
+                .map_err(|e| UiError::Storage(e.to_string()))?;
+        }
+        Ok(store
+            .saved_reads()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(saved_read_summary_dto)
+            .collect())
+    }
+
+    /// One saved read, chunked and ready to pick up where it was left off.
+    pub fn open_saved_read(&self, id: &str) -> Result<Option<SavedReadDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .saved_read(id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .map(saved_read_dto))
     }
 
     /// Remember which chunk the reader is on. Clamped to the real chunk count,
     /// so a stored position can never point past the end of the text.
-    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
+    pub fn set_saved_read_position(
+        &self,
+        id: &str,
+        position: u32,
+    ) -> Result<Option<SavedReadDto>, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        let Some(mut state) = store
-            .load_reading_state()
+        let Some(mut read) = store
+            .saved_read(id)
             .map_err(|e| UiError::Storage(e.to_string()))?
         else {
             return Ok(None);
         };
-        let chunks = attention::chunk_reading(&state.text).len() as u32;
-        state.position = position.min(chunks.saturating_sub(1));
-        state.updated_at = now_secs();
+        let chunks = attention::chunk_reading(&read.text).len() as u32;
+        read.position = position.min(chunks.saturating_sub(1));
+        read.updated_at = now_secs();
         store
-            .save_reading_state(&state)
+            .save_saved_read(&read)
             .and_then(|()| store.flush())
             .map_err(|e| UiError::Storage(e.to_string()))?;
-        Ok(Some(reading_dto(state)))
+        Ok(Some(saved_read_dto(read)))
     }
 
-    /// Forget the saved long-read. Returns whether one existed.
-    pub fn clear_reading(&self) -> Result<bool, UiError> {
+    /// Forget one saved read. Returns whether it existed.
+    pub fn delete_saved_read(&self, id: &str) -> Result<bool, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let removed = store
-            .clear_reading_state()
+            .delete_saved_read(id)
             .map_err(|e| UiError::Storage(e.to_string()))?;
         store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
         Ok(removed)
@@ -6232,6 +6669,62 @@ impl RuntimeHandles {
         deliver_nudges(&vault, recipients).await
     }
 
+    // ── Ride signals (driver + pillion — see `comrade_core::ride`) ───────────
+
+    /// Say one catalog phrase to the other seat. `phrase` is the wire name
+    /// ([`RidePhrase::as_str`]); an unknown one is refused here rather than
+    /// sent, because the receiver would drop it whole anyway and "it sent"
+    /// would be a lie.
+    pub async fn ride_send_quick(&self, target: &str, phrase: &str) -> Result<(), UiError> {
+        let phrase = RidePhrase::parse(phrase)
+            .ok_or_else(|| UiError::Engine(format!("not a ride phrase: {phrase}")))?;
+        self.ride_send(target, RideSignal::Quick { phrase }).await
+    }
+
+    /// Suggest the next maneuver to the person steering. `maneuver` is the
+    /// wire name ([`RideManeuver::as_str`]); the note is trimmed and an empty
+    /// one becomes no note, so a cleared composer field does not travel as
+    /// `""`.
+    pub async fn ride_send_route(
+        &self,
+        target: &str,
+        maneuver: &str,
+        distance_m: Option<u32>,
+        note: Option<String>,
+    ) -> Result<(), UiError> {
+        let maneuver = RideManeuver::parse(maneuver)
+            .ok_or_else(|| UiError::Engine(format!("not a ride maneuver: {maneuver}")))?;
+        let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        self.ride_send(
+            target,
+            RideSignal::Route {
+                maneuver,
+                distance_m,
+                note,
+            },
+        )
+        .await
+    }
+
+    /// The shared tail of both ride sends: the send-side half of the
+    /// admissibility check ([`RideSignal::admissible`] — the receive-side half
+    /// is inside [`parse_ride_envelope`]), then straight to the vault via
+    /// [`Self::send_control_envelope`]. No outbox retry, deliberately: a ride
+    /// signal is a claim about now, and "left in 400 m" delivered by a retry
+    /// ten minutes later is not late, it is wrong. A send that fails is the
+    /// sender's to repeat, and they are holding the phone that failed.
+    async fn ride_send(&self, target: &str, signal: RideSignal) -> Result<(), UiError> {
+        if !signal.admissible() {
+            return Err(UiError::Engine(
+                "ride note too long, or distance beyond the next maneuver".into(),
+            ));
+        }
+        let json = RideEnvelope::new(signal)
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        self.send_control_envelope(target, &json).await
+    }
+
     // ── Tasks and offers (see `comrade_core::karya`, `comrade_core::command`) ─
 
     /// Send a control envelope to `target` without it becoming a chat message.
@@ -6356,6 +6849,198 @@ impl RuntimeHandles {
             }
         }
         task_dto(stored_task(&task), &me).ok_or_else(|| UiError::Engine("bad task row".into()))
+    }
+
+    // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+
+    /// Name a topic in `peer`'s conversation, or return the one that already
+    /// answers to that word.
+    ///
+    /// Stores first and then tells the peer, exactly as [`Self::assign_task`]
+    /// does and for the same reason: a relay that refuses must not lose the
+    /// topic the user typed. The envelope goes through
+    /// [`Self::send_control_envelope`], so there is no outbox retry — a topic
+    /// the peer never hears about is one they will hear about the next time
+    /// something is filed under it, because [`Self::assign_thread`] re-announces
+    /// the name with every filing.
+    async fn upsert_topic(
+        &self,
+        peer_npub: &str,
+        name: &str,
+        announce: bool,
+    ) -> Result<comrade_storage::StoredTopic, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .ok_or(UiError::NoIdentity)?;
+        let fresh = comrade_core::topic::Topic::new(name, peer_npub, &me, now_secs())
+            .ok_or_else(|| UiError::Engine(TOPIC_NAME_REFUSED.into()))?;
+
+        let existing = store
+            .get_topic(peer_npub, &fresh.slug)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let row = match existing {
+            Some(row) => row,
+            None => {
+                let row = stored_topic(&fresh);
+                store
+                    .save_topic(&row)
+                    .and_then(|()| store.flush())
+                    .map_err(|e| UiError::Storage(e.to_string()))?;
+                row
+            }
+        };
+
+        if announce {
+            let json =
+                comrade_core::topic::TopicEnvelope::new(comrade_core::topic::TopicSignal::Create {
+                    slug: row.slug.clone(),
+                    name: row.name.clone(),
+                })
+                .to_json()
+                .map_err(|e| UiError::Engine(e.to_string()))?;
+            if let Err(e) = self.send_control_envelope(peer_npub, &json).await {
+                // The row is stored and this device can file against it. The
+                // peer learns the name from the next filing, which carries it.
+                tracing::debug!("topic not announced: {e}");
+            }
+        }
+        Ok(row)
+    }
+
+    /// Name a topic and tell the peer. See [`ComradeRuntime::create_topic`].
+    pub async fn create_topic(&self, peer: &str, name: &str) -> Result<TopicDto, UiError> {
+        let peer_npub = to_npub(peer);
+        let peer_hex = parse_pubkey(peer)?.to_hex();
+        let row = self.upsert_topic(&peer_npub, name, true).await?;
+        let store = self.store.as_ref().ok_or(UiError::VaultLocked)?;
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .unwrap_or_default();
+        let index = ThreadIndex::build(store, &peer_npub, &peer_hex)?;
+        Ok(topic_dto(row, &me, &index))
+    }
+
+    /// File the thread containing `message_id` under `topic_name`, or unfile it.
+    /// See [`ComradeRuntime::assign_thread`].
+    ///
+    /// Two envelopes, not one, when the topic is new: `Create` then `Assign`.
+    /// Folding the name into the filing signal would mean a peer who receives a
+    /// filing for a topic they have never heard of has to invent one from a
+    /// slug, losing the spelling — and the two signals are separately useful
+    /// (naming a topic before anything goes in it is how the picker gets
+    /// populated).
+    pub async fn assign_thread(
+        &self,
+        peer: &str,
+        message_id: &str,
+        topic_name: Option<String>,
+    ) -> Result<ThreadSummaryDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let peer_npub = to_npub(peer);
+        let peer_hex = parse_pubkey(peer)?.to_hex();
+        let root_id = resolve_thread_root(&store, &peer_npub, message_id)?;
+
+        let slug = match topic_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            Some(name) => Some(self.upsert_topic(&peer_npub, name, true).await?.slug),
+            None => None,
+        };
+
+        let filing = comrade_storage::ThreadTopic {
+            root_id: root_id.clone(),
+            peer_npub: peer_npub.clone(),
+            slug: slug.clone(),
+            updated_at: now_secs(),
+        };
+        // The local row is the copy this device trusts, and the store's own
+        // replay guard is what decides whether this is news — so a filing the
+        // guard refuses is still not an error to the caller, it is a filing
+        // that was already true.
+        store
+            .set_thread_topic(&filing)
+            .and_then(|c| store.flush().map(|()| c))
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        let json =
+            comrade_core::topic::TopicEnvelope::new(comrade_core::topic::TopicSignal::Assign {
+                root_id: root_id.clone(),
+                slug,
+            })
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        if let Err(e) = self.send_control_envelope(&peer_npub, &json).await {
+            tracing::debug!("thread filing not sent: {e}");
+        }
+
+        let index = ThreadIndex::build(&store, &peer_npub, &peer_hex)?;
+        index
+            .summary(&peer_npub, &root_id)
+            .ok_or_else(|| UiError::Engine("that thread is not in this conversation".into()))
+    }
+
+    /// Archive a topic, or bring it back.
+    /// See [`ComradeRuntime::set_topic_closed`].
+    pub async fn set_topic_closed(
+        &self,
+        peer: &str,
+        slug: &str,
+        closed: bool,
+    ) -> Result<TopicDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let peer_npub = to_npub(peer);
+        let peer_hex = parse_pubkey(peer)?.to_hex();
+        let slug = comrade_core::topic::slugify(slug)
+            .ok_or_else(|| UiError::Engine(TOPIC_NAME_REFUSED.into()))?;
+        let row = store
+            .get_topic(&peer_npub, &slug)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .ok_or_else(|| UiError::Engine("no such topic".into()))?;
+        let mut topic = topic_from_stored(&row);
+        topic.set_closed(closed, now_secs());
+        let row = stored_topic(&topic);
+        store
+            .save_topic(&row)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+
+        let json =
+            comrade_core::topic::TopicEnvelope::new(comrade_core::topic::TopicSignal::Close {
+                slug: topic.slug.clone(),
+                closed,
+            })
+            .to_json()
+            .map_err(|e| UiError::Engine(e.to_string()))?;
+        if let Err(e) = self.send_control_envelope(&peer_npub, &json).await {
+            tracing::debug!("topic close not sent: {e}");
+        }
+
+        let me = self
+            .identity
+            .as_ref()
+            .map(|i| i.npub.clone())
+            .unwrap_or_default();
+        let index = ThreadIndex::build(&store, &peer_npub, &peer_hex)?;
+        Ok(topic_dto(row, &me, &index))
+    }
+
+    /// Reply inside a thread. See [`ComradeRuntime::send_thread_reply`].
+    pub async fn send_thread_reply(
+        &self,
+        peer: &str,
+        root_id: &str,
+        content: &str,
+    ) -> Result<MessageDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let root = resolve_thread_root(&store, &to_npub(peer), root_id)?;
+        self.send_dm_reply(peer, content, Some(&root)).await
     }
 
     /// Ask Tara **in front of the other person** — the `@tara …` spelling.
@@ -7494,15 +8179,34 @@ fn focus_dto(session: comrade_storage::FocusSession, now: u64) -> FocusSessionDt
     }
 }
 
-/// The saved long-read, chunked, with its position clamped into range — a
-/// stored position must never be able to point past the end of the text.
-fn reading_dto(state: comrade_storage::ReadingState) -> ReadingDto {
-    let chunks = attention::chunk_reading(&state.text);
+/// A saved read opened for reading: chunked, with its position clamped into
+/// range — a stored position must never point past the end of the text.
+fn saved_read_dto(read: comrade_storage::SavedRead) -> SavedReadDto {
+    let chunks = attention::chunk_reading(&read.text);
     let last = chunks.len().saturating_sub(1) as u32;
-    ReadingDto {
-        title: state.title,
+    SavedReadDto {
+        id: read.id,
+        title: read.title,
+        source: read.source,
         chunks,
-        position: state.position.min(last),
+        position: read.position.min(last),
+        added_at: read.added_at,
+    }
+}
+
+/// A library row. The chunk count is recomputed (chunking is cheap and the
+/// text is the truth), and the position is clamped the same way
+/// [`saved_read_dto`] clamps it so the two views can never disagree on
+/// progress.
+fn saved_read_summary_dto(read: comrade_storage::SavedRead) -> SavedReadSummaryDto {
+    let chunks = attention::chunk_reading(&read.text).len() as u32;
+    SavedReadSummaryDto {
+        id: read.id,
+        title: read.title,
+        source: read.source,
+        chunk_count: chunks,
+        position: read.position.min(chunks.saturating_sub(1)),
+        added_at: read.added_at,
     }
 }
 
@@ -8002,6 +8706,110 @@ fn apply_karya_signal(
     }
 }
 
+/// Apply an incoming topic signal to the local store, returning whether the
+/// *visible* structure moved — which is what decides whether an event is sent.
+///
+/// `false` covers every case where the signal changed nothing: a redelivered
+/// creation (relays deliver at-least-once and the inbox backfills two days on
+/// every launch, so this *will* happen), a filing older than the one we hold,
+/// and a close for a topic we have never heard of.
+///
+/// **There is no standing check here, and that is deliberate.** Unlike
+/// [`apply_karya_signal`], which refuses a state change from a peer who is not
+/// party to the task, a topic is shared filing rather than a request made of
+/// one person: both people can name topics and file threads, so the only
+/// authorisation that matters is the one the caller already applied — that the
+/// sender is in an accepted conversation. What a peer *cannot* do is reach
+/// another conversation, because `peer_npub` is the authenticated sender of a
+/// gift-wrapped DM and every row written here is keyed by it.
+fn apply_topic_signal(
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    peer_npub: &str,
+    created_at: u64,
+    signal: &TopicSignal,
+) -> bool {
+    let Some(store) = store else {
+        return false;
+    };
+    match signal {
+        TopicSignal::Create { slug, name } => {
+            let Some(fresh) =
+                comrade_core::topic::Topic::new(name, peer_npub, peer_npub, created_at)
+            else {
+                return false;
+            };
+            // The slug travels on the wire *and* is re-derived from the name
+            // here, and the two must agree. A mismatch means the sender's rules
+            // are not ours — a newer build, or a forged envelope — and taking
+            // their slug would file threads under a key this device can never
+            // produce from any name a user types.
+            if &fresh.slug != slug {
+                tracing::debug!(peer = %peer_npub, "topic slug does not match its name");
+                return false;
+            }
+            match store.get_topic(peer_npub, slug) {
+                Ok(Some(row)) => {
+                    let mut topic = topic_from_stored(&row);
+                    if !topic.merge_name(name, created_at) {
+                        return false;
+                    }
+                    store
+                        .save_topic(&stored_topic(&topic))
+                        .and_then(|()| store.flush())
+                        .map_err(|e| warn!("failed to persist a topic rename: {e}"))
+                        .is_ok()
+                }
+                Ok(None) => store
+                    .save_topic(&stored_topic(&fresh))
+                    .and_then(|()| store.flush())
+                    .map_err(|e| warn!("failed to persist an incoming topic: {e}"))
+                    .is_ok(),
+                Err(e) => {
+                    warn!("failed to read a topic: {e}");
+                    false
+                }
+            }
+        }
+        TopicSignal::Assign { root_id, slug } => {
+            // A filing whose topic we do not hold is stored anyway. The two
+            // envelopes can be reordered by the relay, and refusing here would
+            // silently drop the filing that the `Create` behind it was for.
+            // `ThreadIndex` treats an unknown slug as unfiled until the name
+            // arrives, which is the recoverable version of the same state.
+            let filing = comrade_storage::ThreadTopic {
+                root_id: root_id.clone(),
+                peer_npub: peer_npub.to_string(),
+                slug: slug.clone(),
+                updated_at: created_at,
+            };
+            match store
+                .set_thread_topic(&filing)
+                .and_then(|c| store.flush().map(|()| c))
+            {
+                Ok(changed) => changed,
+                Err(e) => {
+                    warn!("failed to persist an incoming thread filing: {e}");
+                    false
+                }
+            }
+        }
+        TopicSignal::Close { slug, closed } => {
+            let Ok(Some(row)) = store.get_topic(peer_npub, slug) else {
+                return false;
+            };
+            let mut topic = topic_from_stored(&row);
+            if !topic.set_closed(*closed, created_at) {
+                return false;
+            }
+            store
+                .save_topic(&stored_topic(&topic))
+                .and_then(|()| store.flush())
+                .map_err(|e| warn!("failed to persist a topic archive: {e}"))
+                .is_ok()
+        }
+    }
+}
+
 /// Persist and surface a chat line this device generated from a control
 /// envelope, so a task or an offer reads as the message it is.
 ///
@@ -8051,6 +8859,261 @@ fn deliver_synthetic_line(
         upi_intents: Vec::new(),
         reply_to: None,
     }));
+}
+
+// ── Thread and topic reads (see `comrade_core::topic`) ───────────────────────
+
+/// What to say when a name cannot be a slug.
+///
+/// One sentence, and it names the rule rather than the failure, because the
+/// commonest way to hit it is by typing a topic in a script the slug rules do
+/// not yet accept (`AUDIT.md` TOPIC-1) — and "that's not a valid slug" tells
+/// somebody nothing they can act on.
+const TOPIC_NAME_REFUSED: &str =
+    "A topic name needs two or more letters or digits, and for now Latin ones";
+
+/// One conversation's history reduced to the shape every thread and topic
+/// question is asked against, computed once per call.
+///
+/// Built rather than stored, and the counts are derived from it rather than
+/// kept beside the rows, because a stored count is a second source of truth
+/// that drifts the first time a backfill inserts an old message into the
+/// middle of a thread — and this history is bounded by one conversation, so
+/// there is nothing here that scales badly enough to justify the drift.
+struct ThreadIndex {
+    /// Root id → the ids in that thread, oldest first.
+    threads: std::collections::HashMap<String, Vec<String>>,
+    /// Every item, by event id. Roots that are not in this map are threads
+    /// filed before their root arrived; see [`ThreadSummaryDto::root_missing`].
+    items: std::collections::HashMap<String, ThreadItem>,
+    /// Root id → the topic it is filed under. Unfiled roots are absent, which
+    /// is what an unfiling tombstone reads as.
+    filed: std::collections::HashMap<String, String>,
+    /// `ConversationMeta::last_read_at` — the same watermark the main thread's
+    /// unread divider uses, so a sheet cannot disagree with the screen that
+    /// opened it.
+    last_read_at: u64,
+}
+
+/// One item in a thread, reduced to what a summary row needs.
+struct ThreadItem {
+    created_at: u64,
+    outgoing: bool,
+    /// The text to preview. Empty for an uncaptioned attachment — the frontend
+    /// supplies its own word, see [`ThreadSummaryDto::root_is_media`].
+    preview: String,
+    is_media: bool,
+}
+
+impl ThreadIndex {
+    /// Read one conversation and group it into threads.
+    ///
+    /// Attachments are included as items but contribute no `reply_to` edges,
+    /// because a `MediaRef` carries none: an attachment can *start* a thread
+    /// and cannot join one. `AUDIT.md` TOPIC-2.
+    fn build(
+        store: &comrade_storage::EncryptedStore,
+        peer_npub: &str,
+        peer_hex: &str,
+    ) -> Result<Self, UiError> {
+        let rows = store
+            .messages_with(peer_npub)
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        let media: Vec<MediaRef> = store
+            .values::<MediaRef>(MEDIA_REFS_TREE)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .filter(|r| r.peer_pubkey == peer_hex)
+            .collect();
+
+        let mut items = std::collections::HashMap::new();
+        let mut parents = std::collections::HashMap::new();
+        for row in &rows {
+            if let Some(parent) = row.reply_to.clone().filter(|p| !p.is_empty()) {
+                parents.insert(row.id.clone(), parent);
+            }
+            let (_, preview) = split_author(row.content.clone());
+            items.insert(
+                row.id.clone(),
+                ThreadItem {
+                    created_at: row.created_at,
+                    outgoing: row.outgoing,
+                    preview,
+                    is_media: false,
+                },
+            );
+        }
+        for r in &media {
+            items.insert(
+                r.event_id.clone(),
+                ThreadItem {
+                    created_at: r.created_at,
+                    outgoing: r.outgoing,
+                    preview: r.caption.clone(),
+                    is_media: true,
+                },
+            );
+        }
+
+        // Time-ordered so every thread's member list is time-ordered too, which
+        // is what lets a summary read its first and last entry rather than
+        // scanning for a minimum and a maximum.
+        let mut ids: Vec<String> = items.keys().cloned().collect();
+        ids.sort_by(|a, b| {
+            let (ta, tb) = (items[a].created_at, items[b].created_at);
+            ta.cmp(&tb).then_with(|| a.cmp(b))
+        });
+
+        let filed = store
+            .thread_topics_with(peer_npub)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .filter_map(|f| f.slug.map(|s| (f.root_id, s)))
+            .collect();
+
+        let last_read_at = store
+            .get_conversation_meta(peer_npub)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .map(|m| m.last_read_at)
+            .unwrap_or_default();
+
+        Ok(Self {
+            threads: comrade_core::topic::group_threads(&ids, &parents),
+            items,
+            filed,
+            last_read_at,
+        })
+    }
+
+    /// The summary row for one thread, or `None` if the root names no thread we
+    /// hold — which happens when a filing arrived for a root whose whole thread
+    /// is still outside the loaded window, and is a row with nothing to say.
+    fn summary(&self, peer_npub: &str, root_id: &str) -> Option<ThreadSummaryDto> {
+        let members = self.threads.get(root_id)?;
+        let root = self.items.get(root_id);
+        let first = members.first().and_then(|id| self.items.get(id));
+        let last = members.last().and_then(|id| self.items.get(id))?;
+        Some(ThreadSummaryDto {
+            root_id: root_id.to_string(),
+            peer: peer_npub.to_string(),
+            topic_slug: self.filed.get(root_id).cloned(),
+            preview: root.map(|r| r.preview.clone()).unwrap_or_default(),
+            root_is_media: root.is_some_and(|r| r.is_media),
+            root_missing: root.is_none(),
+            started_at: root.or(first).map(|r| r.created_at).unwrap_or_default(),
+            // The root is a member of its own thread, so "replies" is one less
+            // — and saturating, because a thread whose root is missing has a
+            // member list that does not contain it.
+            reply_count: (members.len() as u32).saturating_sub(if root.is_some() { 1 } else { 0 }),
+            last_at: last.created_at,
+            unread: members.iter().any(|id| {
+                self.items
+                    .get(id)
+                    .is_some_and(|i| !i.outgoing && i.created_at > self.last_read_at)
+            }),
+        })
+    }
+
+    /// Every thread in the conversation, newest activity first.
+    fn summaries(&self, peer_npub: &str) -> Vec<ThreadSummaryDto> {
+        let mut out: Vec<ThreadSummaryDto> = self
+            .threads
+            .keys()
+            .filter_map(|root| self.summary(peer_npub, root))
+            .collect();
+        out.sort_by(|a, b| {
+            b.last_at
+                .cmp(&a.last_at)
+                .then_with(|| a.root_id.cmp(&b.root_id))
+        });
+        out
+    }
+}
+
+/// The thread `message_id` belongs to, resolved against `peer`'s history.
+///
+/// A message we have never seen is its own root rather than an error: filing
+/// something that arrived on another device before this one backfilled it is a
+/// reasonable thing to ask for, and refusing would make the sheet's one
+/// destructive-looking action fail for a reason the user cannot act on.
+fn resolve_thread_root(
+    store: &comrade_storage::EncryptedStore,
+    peer_npub: &str,
+    message_id: &str,
+) -> Result<String, UiError> {
+    let parents: std::collections::HashMap<String, String> = store
+        .messages_with(peer_npub)
+        .map_err(|e| UiError::Storage(e.to_string()))?
+        .into_iter()
+        .filter_map(|m| {
+            m.reply_to
+                .filter(|p| !p.is_empty())
+                .map(|parent| (m.id, parent))
+        })
+        .collect();
+    Ok(comrade_core::topic::root_of(message_id, &parents))
+}
+
+/// A stored topic as a list row, with counts read off `index`.
+fn topic_dto(row: comrade_storage::StoredTopic, me: &str, index: &ThreadIndex) -> TopicDto {
+    // Only threads this device actually holds are counted. A filing whose
+    // whole thread is still outside the loaded window contributes nothing
+    // rather than a phantom row, which keeps the count and the list the sheet
+    // renders the same number.
+    let members: Vec<&Vec<String>> = index
+        .filed
+        .iter()
+        .filter(|(_, slug)| **slug == row.slug)
+        .filter_map(|(root, _)| index.threads.get(root))
+        .collect();
+    let message_count: usize = members.iter().map(|m| m.len()).sum();
+    let last_activity_at = members
+        .iter()
+        .filter_map(|m| m.last())
+        .filter_map(|id| index.items.get(id))
+        .map(|i| i.created_at)
+        .max()
+        .unwrap_or(row.created_at);
+    TopicDto {
+        mine: row.created_by == me,
+        thread_count: members.len() as u32,
+        message_count: message_count as u32,
+        last_activity_at,
+        slug: row.slug,
+        name: row.name,
+        peer: row.peer_npub,
+        created_by: row.created_by,
+        created_at: row.created_at,
+        closed: row.closed,
+    }
+}
+
+/// A `topic::Topic` as the store holds it, and back — the same two-shape split
+/// [`stored_task`] / [`task_from_stored`] make, and for the same reason:
+/// `comrade_storage` cannot depend on `comrade_core`.
+fn stored_topic(topic: &comrade_core::topic::Topic) -> comrade_storage::StoredTopic {
+    comrade_storage::StoredTopic {
+        peer_npub: topic.peer_npub.clone(),
+        slug: topic.slug.clone(),
+        name: topic.name.clone(),
+        created_by: topic.created_by.clone(),
+        created_at: topic.created_at,
+        closed: topic.closed,
+        updated_at: topic.updated_at,
+    }
+}
+
+/// A stored row back as a `topic::Topic`.
+fn topic_from_stored(row: &comrade_storage::StoredTopic) -> comrade_core::topic::Topic {
+    comrade_core::topic::Topic {
+        slug: row.slug.clone(),
+        name: row.name.clone(),
+        peer_npub: row.peer_npub.clone(),
+        created_by: row.created_by.clone(),
+        created_at: row.created_at,
+        closed: row.closed,
+        updated_at: row.updated_at,
+    }
 }
 
 // ── Task conversions ─────────────────────────────────────────────────────────
@@ -8326,6 +9389,63 @@ fn handle_nudge(
         name: presence_display_name(store, peer_npub),
         peer: peer_npub.to_string(),
     });
+}
+
+/// Surface one incoming ride signal, if it is still worth acting on.
+///
+/// The replay story is the nudge's, not the together session's, because there
+/// is no session: the **freshness gate** is what keeps a two-day-old
+/// backfilled "left in 400 m" off a moving driver's screen (measured from send
+/// time, peer TTL clamped — [`comrade_core::ride::ride_expires_at`]), and the
+/// **event-id set** is what keeps a relay's at-least-once redelivery from
+/// buzzing twice for one tap. Everything about *what* may travel — the
+/// catalog, the note cap, the distance cap — was already enforced by
+/// [`parse_ride_envelope`] before this is called.
+fn handle_ride(
+    store: Option<&Arc<comrade_storage::EncryptedStore>>,
+    tx: &broadcast::Sender<BridgeEvent>,
+    dedup: &SeenSet,
+    peer_npub: &str,
+    event_id: &str,
+    created_at: u64,
+    env: RideEnvelope,
+) {
+    if !is_fresh_at(ride_expires_at(created_at, env.ttl_secs), now_secs()) {
+        tracing::debug!(peer = %peer_npub, created_at, "dropping stale ride signal");
+        return;
+    }
+    if dedup.already_seen(event_id) {
+        tracing::debug!(%event_id, "dropping duplicate ride signal");
+        return;
+    }
+    let urgency = env.signal.urgency().as_str().to_string();
+    let (kind, phrase, maneuver, distance_m, note) = match env.signal {
+        RideSignal::Quick { phrase } => {
+            ("quick", Some(phrase.as_str().to_string()), None, None, None)
+        }
+        RideSignal::Route {
+            maneuver,
+            distance_m,
+            note,
+        } => (
+            "route",
+            None,
+            Some(maneuver.as_str().to_string()),
+            distance_m,
+            note,
+        ),
+    };
+    let _ = tx.send(BridgeEvent::RideSignal(RideSignalDto {
+        peer: peer_npub.to_string(),
+        name: store.and_then(|s| presence_display_name(s, peer_npub)),
+        kind: kind.to_string(),
+        phrase,
+        maneuver,
+        distance_m,
+        note,
+        urgency,
+        created_at,
+    }));
 }
 
 /// Apply one incoming together envelope to the live session.
@@ -9441,6 +10561,26 @@ fn dispatch_incoming_dm(
         return;
     }
 
+    // 4a) Ride signal — one seat of a motorcycle to the other. Gated exactly
+    //     like a nudge: a stranger must not be able to put "pull over" on a
+    //     moving driver's screen, and returning either way keeps an ungated
+    //     one from surfacing as a message request full of JSON. Freshness and
+    //     dedup live in `handle_ride`.
+    if let Some(env) = parse_ride_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted) {
+            handle_ride(
+                store,
+                tx,
+                dedup,
+                &peer_npub,
+                &msg.event_id,
+                msg.created_at,
+                env,
+            );
+        }
+        return;
+    }
+
     // 5) Call signaling — only from an established conversation, so a stranger
     //    cannot ring you before their message request is accepted. Stale or
     //    already-dispatched signals are dropped: offers older than the ring
@@ -9586,6 +10726,29 @@ fn dispatch_incoming_dm(
             {
                 deliver_synthetic_line(vault, store, tx, route, &msg, &peer_npub, line);
             }
+        }
+        return;
+    }
+
+    // 8b) A topic signal: a name, a filing, or an archive. Gated exactly like a
+    //     task — a stranger who can reorganise your conversation has been
+    //     handed a way to hide messages from you, which is worse than the
+    //     feature is good. Returns either way, so an ungated one is dropped
+    //     rather than surfacing as a message request full of JSON.
+    //
+    //     No `deliver_synthetic_line` here, unlike a task or an offer: filing a
+    //     thread emits no bubble on either side. `comrade_core::topic`'s module
+    //     header has the argument — a conversation that grew a line every time
+    //     somebody tidied would punish tidying. The cross-transport duplicate
+    //     check a bubble needs is therefore not needed either: the store's own
+    //     replay guards make a second copy a no-op.
+    if let Some(env) = parse_topic_envelope(&msg.content) {
+        if matches!(gate, IncomingGate::Accepted)
+            && apply_topic_signal(store, &peer_npub, msg.created_at, &env.signal)
+        {
+            let _ = tx.send(BridgeEvent::TopicsChanged {
+                peer: peer_npub.clone(),
+            });
         }
         return;
     }
@@ -10975,16 +12138,20 @@ mod tests {
             rt.focus_reflection("completed"),
             Err(UiError::VaultLocked)
         ));
+        assert!(matches!(rt.save_read("t", "x"), Err(UiError::VaultLocked)));
+        assert!(matches!(rt.saved_reads(), Err(UiError::VaultLocked)));
         assert!(matches!(
-            rt.save_reading("t", "x"),
+            rt.open_saved_read("id"),
             Err(UiError::VaultLocked)
         ));
-        assert!(matches!(rt.reading(), Err(UiError::VaultLocked)));
         assert!(matches!(
-            rt.set_reading_position(0),
+            rt.set_saved_read_position("id", 0),
             Err(UiError::VaultLocked)
         ));
-        assert!(matches!(rt.clear_reading(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.delete_saved_read("id"),
+            Err(UiError::VaultLocked)
+        ));
     }
 
     #[test]
@@ -10997,6 +12164,22 @@ mod tests {
         assert_eq!(presets, attention::FOCUS_PRESETS.to_vec());
         assert!(!presets.is_empty());
         assert!(presets.windows(2).all(|w| w[0] < w[1]), "ascending");
+    }
+
+    #[test]
+    fn the_stretch_routine_is_drawable_before_the_vault_is_open() {
+        // Same reasoning as the duration chips: the routine is a constant of
+        // the design, and a stretch break must not need a passphrase.
+        let rt = ComradeRuntime::new();
+        let routine = rt.stretch_routine();
+        assert_eq!(routine.len(), attention::STRETCH_ROUTINE.len());
+        for (dto, step) in routine.iter().zip(attention::STRETCH_ROUTINE) {
+            assert_eq!(dto.key, step.key);
+            assert_eq!(dto.seconds, step.seconds);
+            assert_eq!(dto.mirrored, step.mirrored);
+            assert!(!dto.name.is_empty());
+            assert!(!dto.cue.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -11181,38 +12364,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reading_roundtrips_chunked_with_a_clamped_position() {
+    async fn the_reading_library_roundtrips_chunked_with_clamped_positions() {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
 
-        assert!(rt.reading().unwrap().is_none());
-        assert!(matches!(
-            rt.save_reading("t", "   "),
-            Err(UiError::Engine(_))
-        ));
+        assert!(rt.saved_reads().unwrap().is_empty());
+        assert!(matches!(rt.save_read("t", "   "), Err(UiError::Engine(_))));
 
         let text = "A paragraph worth a couple of minutes of attention.\n\n".repeat(80);
-        let saved = rt.save_reading("  Walden  ", &text).unwrap();
+        let saved = rt.save_read("  Walden  ", &text).unwrap();
         assert_eq!(saved.title, "Walden");
         assert!(saved.chunks.len() > 1);
         assert_eq!(saved.position, 0);
+        assert_eq!(saved.source, "", "pasted prose carries no source label");
         // Losslessness carries through the DTO: the reader shows exactly what
         // was saved (the trailing trim is the only edit, and it is announced).
         assert_eq!(saved.chunks.concat(), text.trim());
 
-        let moved = rt.set_reading_position(2).unwrap().unwrap();
+        // A second article, this one carried in with a link: the library keys
+        // its source off the first URL's host, offline.
+        let shared = rt
+            .save_read("", "worth a read https://www.instagram.com/p/abc/ tonight")
+            .unwrap();
+        assert_eq!(shared.source, "instagram.com");
+
+        // Both saves can land in the same second, which makes their relative
+        // order a coin toss on the random id tail — newest-first ordering is
+        // pinned in the storage tests with distinct timestamps instead.
+        let rows = rt.saved_reads().unwrap();
+        assert_eq!(rows.len(), 2);
+        let saved_row = rows.iter().find(|r| r.id == saved.id).unwrap();
+        assert_eq!(saved_row.chunk_count as usize, saved.chunks.len());
+
+        let moved = rt.set_saved_read_position(&saved.id, 2).unwrap().unwrap();
         assert_eq!(moved.position, 2);
-        assert_eq!(rt.reading().unwrap().unwrap().position, 2);
+        assert_eq!(
+            rt.open_saved_read(&saved.id).unwrap().unwrap().position,
+            2,
+            "each read keeps its own place"
+        );
+        assert_eq!(rt.open_saved_read(&shared.id).unwrap().unwrap().position, 0);
         // A position past the end is clamped, never trusted.
-        let clamped = rt.set_reading_position(9_999).unwrap().unwrap();
+        let clamped = rt
+            .set_saved_read_position(&saved.id, 9_999)
+            .unwrap()
+            .unwrap();
         assert_eq!(clamped.position as usize, clamped.chunks.len() - 1);
 
-        assert!(rt.clear_reading().unwrap());
-        assert!(!rt.clear_reading().unwrap());
-        assert!(rt.reading().unwrap().is_none());
-        // With nothing saved, moving the position is a clean None.
-        assert!(rt.set_reading_position(0).unwrap().is_none());
+        assert!(rt.delete_saved_read(&saved.id).unwrap());
+        assert!(!rt.delete_saved_read(&saved.id).unwrap());
+        assert_eq!(rt.saved_reads().unwrap().len(), 1);
+        // With the row gone, opening and moving are clean Nones.
+        assert!(rt.open_saved_read(&saved.id).unwrap().is_none());
+        assert!(rt.set_saved_read_position(&saved.id, 0).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pre_library_vaults_single_read_migrates_into_the_library() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        // A vault written before the library existed: one read, mid-progress,
+        // in the old single-slot tree.
+        store
+            .save_reading_state(&comrade_storage::ReadingState {
+                title: "Walden".into(),
+                // Long enough to chunk more than once, so the position below
+                // is real progress and not something the clamp pulls back.
+                text: "A paragraph worth a couple of minutes of attention.\n\n".repeat(80),
+                position: 1,
+                updated_at: 1_700_000_000,
+            })
+            .unwrap();
+
+        let rows = rt.saved_reads().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Walden");
+        assert_eq!(rows[0].position, 1, "progress survives the move");
+
+        // The move happened once: the slot is empty and a second list does not
+        // mint a duplicate.
+        assert!(store.load_reading_state().unwrap().is_none());
+        assert_eq!(rt.saved_reads().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -15166,6 +16402,114 @@ mod tests {
         );
     }
 
+    // ── Ride signals (see `comrade_core::ride`) ───────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_drops_a_stale_ride_signal_and_dedups_a_fresh_one() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                last_read_at: 0,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let envelope = RideEnvelope::new(RideSignal::Route {
+            maneuver: RideManeuver::Left,
+            distance_m: Some(400),
+            note: Some("after the petrol pump".into()),
+        })
+        .to_json()
+        .unwrap();
+
+        // The worst bug this feature could have: a two-day-old backfilled
+        // "left in 400 m" rendered huge on a moving driver's screen.
+        let mut stale = incoming(&hex, "r1", &envelope);
+        stale.created_at = now_secs().saturating_sub(7200);
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, stale);
+        assert!(
+            rx.try_recv().is_err(),
+            "a ride signal older than its TTL must not reach the bus"
+        );
+
+        // A fresh signal reaches the bus once, fully decomposed and carrying
+        // core's urgency verdict; the same wrapper event id redelivered
+        // (at-least-once relay delivery) must not buzz twice for one tap.
+        let mut fresh = incoming(&hex, "r2", &envelope);
+        fresh.created_at = now_secs();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &route,
+            fresh.clone(),
+        );
+        let BridgeEvent::RideSignal(dto) = rx.try_recv().unwrap() else {
+            panic!("a fresh ride signal must surface as BridgeEvent::RideSignal");
+        };
+        assert_eq!(dto.peer, peer);
+        assert_eq!(dto.kind, "route");
+        assert_eq!(dto.maneuver.as_deref(), Some("left"));
+        assert_eq!(dto.distance_m, Some(400));
+        assert_eq!(dto.note.as_deref(), Some("after the petrol pump"));
+        assert_eq!(dto.phrase, None);
+        assert_eq!(dto.urgency, "notice");
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, fresh);
+        assert!(
+            rx.try_recv().is_err(),
+            "the same wrapper event id must only ever dispatch one RideSignal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_strangers_ride_signal_is_dropped_not_surfaced() {
+        // The gate that matters most: an unaccepted peer must not be able to
+        // put "pull over" on a moving driver's screen — and the attempt must
+        // not fall through to the message-request path either, which would
+        // surface a request preview full of JSON.
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let route = relay_route(&transport_dedup);
+        let (hex, _peer) = stranger();
+
+        let envelope = RideEnvelope::new(RideSignal::Quick {
+            phrase: RidePhrase::PullOver,
+        })
+        .to_json()
+        .unwrap();
+        let mut msg = incoming(&hex, "r3", &envelope);
+        msg.created_at = now_secs();
+        dispatch_incoming_dm(&vault, Some(&store), &tx, &dedup, &outbox, &route, msg);
+        assert!(
+            rx.try_recv().is_err(),
+            "an unaccepted peer's ride signal must not surface at all"
+        );
+    }
+
     // ── T2: DM dedup + durable receive watermark ─────────────────────────────
 
     #[tokio::test]
@@ -16954,5 +18298,323 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+
+    /// A conversation of `root` plus two replies into it, and one unrelated
+    /// message — the smallest history in which "thread" means anything.
+    async fn threaded_chat(rt: &ComradeRuntime, peer: &str) -> (String, String) {
+        let root = rt
+            .send_dm(peer, "the deposit still hasn't come back")
+            .await
+            .unwrap();
+        let reply = rt
+            .send_dm_reply(peer, "i'll chase them monday", Some(&root.id))
+            .await
+            .unwrap();
+        // A reply to the *reply*, so the walk up the chain has something to do.
+        rt.send_dm_reply(peer, "thanks", Some(&reply.id))
+            .await
+            .unwrap();
+        rt.send_dm(peer, "unrelated: dinner?").await.unwrap();
+        (root.id, reply.id)
+    }
+
+    #[tokio::test]
+    async fn a_thread_is_the_root_and_everything_that_replied_into_it() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, reply) = threaded_chat(&rt, &peer).await;
+
+        let thread = rt.thread(&peer, &root).unwrap();
+        assert_eq!(thread.messages.len(), 3, "root plus both replies");
+        assert_eq!(thread.messages[0].id, root, "oldest first");
+        assert!(thread.media.is_empty());
+
+        // Flat, Slack-style: a reply to a reply is in the same thread, and
+        // opening from *any* member reaches the same sheet.
+        assert_eq!(rt.thread(&peer, &reply).unwrap().root_id, root);
+        assert_eq!(rt.thread_root(&peer, &reply).unwrap(), root);
+    }
+
+    #[tokio::test]
+    async fn a_message_nobody_replied_to_is_a_thread_of_one() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, _) = threaded_chat(&rt, &peer).await;
+
+        let threads = rt.threads(&peer, None).unwrap();
+        assert_eq!(
+            threads.len(),
+            2,
+            "the deposit thread and the dinner message"
+        );
+        let deposit = threads.iter().find(|t| t.root_id == root).unwrap();
+        assert_eq!(deposit.reply_count, 2);
+        assert_eq!(deposit.preview, "the deposit still hasn't come back");
+        assert!(!deposit.root_missing);
+        assert!(!deposit.root_is_media);
+        let dinner = threads.iter().find(|t| t.root_id != root).unwrap();
+        assert_eq!(
+            dinner.reply_count, 0,
+            "nobody replied, so it has no replies"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_thread_is_filed_from_any_message_in_it_and_reaches_the_root() {
+        // The reason `assign_thread` takes a message and not a root: filing
+        // from a reply must land on the thread, not create a second one.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, reply) = threaded_chat(&rt, &peer).await;
+
+        let filed = rt
+            .assign_thread(&peer, &reply, Some("#Flat Deposit".into()))
+            .await
+            .unwrap();
+        assert_eq!(filed.root_id, root);
+        assert_eq!(filed.topic_slug.as_deref(), Some("flat-deposit"));
+
+        // And the topic exists, once, spelled the way it was typed.
+        let topics = rt.topics(&peer).unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].slug, "flat-deposit");
+        assert_eq!(topics[0].name, "Flat Deposit");
+        assert!(topics[0].mine);
+        assert_eq!(topics[0].thread_count, 1);
+        assert_eq!(topics[0].message_count, 3);
+
+        // Filtering by the topic finds it; the unrelated message stays out.
+        let in_topic = rt.threads(&peer, Some("flat-deposit".into())).unwrap();
+        assert_eq!(in_topic.len(), 1);
+        assert_eq!(in_topic[0].root_id, root);
+    }
+
+    #[tokio::test]
+    async fn filing_the_same_word_twice_is_one_topic() {
+        // Both people typing `/assign #deposit` before either envelope lands is
+        // the case the slug-as-id keying exists for.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, _) = threaded_chat(&rt, &peer).await;
+
+        rt.create_topic(&peer, "Deposit").await.unwrap();
+        rt.assign_thread(&peer, &root, Some("deposit".into()))
+            .await
+            .unwrap();
+        let topics = rt.topics(&peer).unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].name, "Deposit", "the first spelling is kept");
+    }
+
+    #[tokio::test]
+    async fn a_thread_can_be_moved_and_taken_out_again() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, _) = threaded_chat(&rt, &peer).await;
+
+        rt.assign_thread(&peer, &root, Some("deposit".into()))
+            .await
+            .unwrap();
+        rt.assign_thread(&peer, &root, Some("repairs".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            rt.threads(&peer, Some("deposit".into())).unwrap().len(),
+            0,
+            "a thread is in one topic at a time"
+        );
+        assert_eq!(rt.threads(&peer, Some("repairs".into())).unwrap().len(), 1);
+
+        let unfiled = rt.assign_thread(&peer, &root, None).await.unwrap();
+        assert_eq!(unfiled.topic_slug, None);
+        // Both topics survive the unfiling — nothing here deletes one.
+        assert_eq!(rt.topics(&peer).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_topic_name_that_cannot_be_a_key_is_refused_rather_than_mangled() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, _) = threaded_chat(&rt, &peer).await;
+
+        // AUDIT TOPIC-1: a Devanagari topic name is a thing users will type, and it
+        // must fail loudly rather than become `#--`.
+        let err = rt
+            .assign_thread(&peer, &root, Some("जमा".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UiError::Engine(_)));
+        assert!(rt.topics(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn archiving_a_topic_keeps_its_threads_readable() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, _) = threaded_chat(&rt, &peer).await;
+        rt.assign_thread(&peer, &root, Some("deposit".into()))
+            .await
+            .unwrap();
+
+        let closed = rt.set_topic_closed(&peer, "deposit", true).await.unwrap();
+        assert!(closed.closed);
+        assert_eq!(
+            closed.thread_count, 1,
+            "the archive still holds its threads"
+        );
+        assert_eq!(
+            rt.threads(&peer, Some("deposit".into())).unwrap().len(),
+            1,
+            "closing hides it from the picker, not from the reader"
+        );
+        assert!(
+            !rt.set_topic_closed(&peer, "deposit", false)
+                .await
+                .unwrap()
+                .closed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_thread_reply_lands_in_the_thread_however_it_was_addressed() {
+        // The sheet's composer replies to the *root*, not to whatever was last
+        // read — that flatness is what makes a thread a thread rather than a
+        // chain of quotes.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let (root, reply) = threaded_chat(&rt, &peer).await;
+
+        let sent = rt
+            .send_thread_reply(&peer, &reply, "any news?")
+            .await
+            .unwrap();
+        assert_eq!(sent.reply_to.as_deref(), Some(root.as_str()));
+        assert_eq!(rt.thread(&peer, &root).unwrap().messages.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_filing_for_a_thread_we_do_not_hold_is_not_an_error_but_says_so() {
+        // A peer can file a thread whose root is outside our window; the row
+        // has to survive until the backfill catches up.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        threaded_chat(&rt, &peer).await;
+        let handles = rt.handles();
+        let store = handles.store.as_ref().unwrap();
+
+        assert!(apply_topic_signal(
+            Some(store),
+            &peer,
+            10,
+            &TopicSignal::Create {
+                slug: "deposit".into(),
+                name: "deposit".into(),
+            },
+        ));
+        assert!(apply_topic_signal(
+            Some(store),
+            &peer,
+            11,
+            &TopicSignal::Assign {
+                root_id: "not-here-yet".into(),
+                slug: Some("deposit".into()),
+            },
+        ));
+        // The topic exists and counts nothing, because the thread is not here.
+        let topics = rt.topics(&peer).unwrap();
+        assert_eq!(topics[0].thread_count, 0);
+        assert_eq!(topics[0].message_count, 0);
+        assert!(!topics[0].mine, "the peer named it");
+        // And the filing survived for when it arrives.
+        assert_eq!(
+            store.thread_topic("not-here-yet").unwrap().as_deref(),
+            Some("deposit")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_incoming_topic_signal_that_changes_nothing_raises_no_event() {
+        // The two-day gift-wrap re-scan on every launch makes a replay the
+        // normal case; redrawing on one is what `IncomingReaction` already
+        // refuses to do.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let handles = rt.handles();
+        let store = handles.store.as_ref().unwrap();
+        let create = TopicSignal::Create {
+            slug: "deposit".into(),
+            name: "Deposit".into(),
+        };
+
+        assert!(apply_topic_signal(Some(store), &peer, 10, &create));
+        assert!(
+            !apply_topic_signal(Some(store), &peer, 10, &create),
+            "a redelivered creation is not news"
+        );
+        let filing = TopicSignal::Assign {
+            root_id: "r".into(),
+            slug: Some("deposit".into()),
+        };
+        assert!(apply_topic_signal(Some(store), &peer, 20, &filing));
+        assert!(!apply_topic_signal(Some(store), &peer, 15, &filing));
+    }
+
+    #[tokio::test]
+    async fn a_topic_whose_slug_does_not_match_its_name_is_refused() {
+        // The forgery shape this catches: an envelope naming `#deposit` but
+        // carrying a slug nothing on this device could ever derive, which would
+        // file threads under a key no user could type back.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+        let handles = rt.handles();
+        let store = handles.store.as_ref().unwrap();
+
+        assert!(!apply_topic_signal(
+            Some(store),
+            &peer,
+            10,
+            &TopicSignal::Create {
+                slug: "something-else".into(),
+                name: "Deposit".into(),
+            },
+        ));
+        assert!(rt.topics(&peer).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn topics_do_not_leak_between_conversations() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex_a, peer_a) = stranger();
+        let (_hex_b, peer_b) = stranger();
+        let (root_a, _) = threaded_chat(&rt, &peer_a).await;
+        threaded_chat(&rt, &peer_b).await;
+
+        rt.assign_thread(&peer_a, &root_a, Some("deposit".into()))
+            .await
+            .unwrap();
+        assert_eq!(rt.topics(&peer_a).unwrap().len(), 1);
+        assert!(
+            rt.topics(&peer_b).unwrap().is_empty(),
+            "`#deposit` with two people is two subjects"
+        );
+        assert_eq!(
+            rt.threads(&peer_b, Some("deposit".into())).unwrap().len(),
+            0
+        );
     }
 }

@@ -72,7 +72,12 @@ const ATTENTION_DAYS_TREE: &str = "attention_days";
 /// Focus-session history (attention pillar — strictly local).
 const FOCUS_SESSIONS_TREE: &str = "focus_sessions";
 /// The single saved long-read (title, full text, reading position).
+/// Superseded by [`READING_LIBRARY_TREE`]; kept so a vault written before the
+/// library existed can migrate its one read instead of losing it
+/// (`comrade_ui::ComradeRuntime::saved_reads` does the move).
 const READING_TREE: &str = "reading_state";
+/// The reading library: every saved long-read, keyed by id.
+const READING_LIBRARY_TREE: &str = "reading_library";
 /// Attention preferences: the user's own doom-app package list.
 const ATTENTION_META_TREE: &str = "attention_meta";
 /// Voice/video call log, keyed by call id.
@@ -85,6 +90,13 @@ const SHARE_META_TREE: &str = "share_meta";
 /// — one row per person per message, so reacting again replaces rather than
 /// stacks. See [`MessageReaction`].
 const REACTIONS_TREE: &str = "message_reactions";
+/// Topics named inside a conversation, keyed `<peer npub>:<slug>` — one row per
+/// name per conversation. See [`StoredTopic`], and `comrade_core::topic` for why
+/// the slug is the id.
+const TOPICS_TREE: &str = "conversation_topics";
+/// Which topic a thread is filed under, keyed by the thread root's event id.
+/// See [`ThreadTopic`].
+const THREAD_TOPICS_TREE: &str = "thread_topics";
 
 const IDENTITY_KEY: &str = "self";
 const LEDGER_SNAPSHOT_KEY: &str = "hisab_kitab";
@@ -331,6 +343,61 @@ pub struct StoredTask {
     pub updated_at: u64,
 }
 
+/// One topic named inside one conversation — a heading threads are filed under.
+///
+/// Keyed `(peer_npub, slug)`, which is why there is no separate id field: the
+/// slug *is* the id, so both devices reach the same row from the same word with
+/// no merge. `comrade_core::topic`'s module header has the full argument and
+/// what it costs (a topic cannot be renamed into a different word).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTopic {
+    /// The conversation, as the peer's npub. Topics are per-conversation:
+    /// `#deposit` with two different people are two different subjects.
+    pub peer_npub: String,
+    /// Canonical slug — half the store key. See `comrade_core::topic::slugify`.
+    pub slug: String,
+    /// Display name, bounded and stripped before it gets here; see
+    /// `comrade_core::topic::bound_name`.
+    pub name: String,
+    /// npub of whoever first named it.
+    pub created_by: String,
+    pub created_at: u64,
+    /// Archived: still readable, out of the picker. Nothing deletes a topic —
+    /// see `comrade_core::topic::Topic`.
+    #[serde(default)]
+    pub closed: bool,
+    /// When `closed` last moved; equals `created_at` until it does.
+    pub updated_at: u64,
+}
+
+/// One thread filed under one topic, keyed by the thread root's event id.
+///
+/// A separate tree rather than a column on [`StoredMessage`], for two reasons
+/// that are both about arrival order. A thread can be filed **before its root
+/// message is cached** — a reply arrives, the peer files the thread, and the
+/// root turns up on the next backfill — and a row hanging off a message we do
+/// not have would have nowhere to live. And filing must not rewrite a message
+/// row, because `set_message_status`'s monotonic receipt guard is the only
+/// writer that may touch one; a second writer racing it is how a `read` tick
+/// gets rolled back to `sent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadTopic {
+    /// Event id of the thread's root message — the store key.
+    pub root_id: String,
+    /// The conversation this thread belongs to, denormalised so a conversation's
+    /// filings can be read without walking every message. Same reasoning as
+    /// [`MessageReaction::peer_npub`], and the same reason: the root may be an
+    /// event we have not cached yet.
+    pub peer_npub: String,
+    /// Slug of the topic it is filed under, or `None` for "taken out of
+    /// wherever it was". Kept as a row rather than deleted so the timestamp
+    /// survives to refuse a replay — exactly the reaction-tombstone argument in
+    /// [`EncryptedStore::set_reaction`].
+    pub slug: Option<String>,
+    /// When the filing last moved. Refuses anything not newer.
+    pub updated_at: u64,
+}
+
 /// The one saved long-read for the distraction-free reader: user-supplied
 /// text, held whole (sealed like everything else) with the reading position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,6 +408,31 @@ pub struct ReadingState {
     /// text — see `comrade_core::attention::chunk_reading` — so the position
     /// is the only state worth storing).
     pub position: u32,
+    pub updated_at: u64,
+}
+
+/// One saved long-read in the reading library — an article shared or pasted
+/// into Comrade, held whole (sealed like everything else) with its own
+/// reading position. What someone chose to keep and how far they got is
+/// sensitive in exactly the way a journal is, which is why the library lives
+/// in the vault and not in a preference file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRead {
+    /// Store key. Zero-padded-timestamp-prefixed so ids sort chronologically,
+    /// like [`FocusSession::id`].
+    pub id: String,
+    pub title: String,
+    /// Where it came from — the host of the first link in the text
+    /// (`comrade_core::attention::reading_source`), or empty for plain pasted
+    /// text. A label, never something to fetch.
+    #[serde(default)]
+    pub source: String,
+    pub text: String,
+    /// Index of the chunk the reader is on (chunking is recomputed from the
+    /// text — see `comrade_core::attention::chunk_reading` — so the position
+    /// is the only progress worth storing).
+    pub position: u32,
+    pub added_at: u64,
     pub updated_at: u64,
 }
 
@@ -689,6 +781,103 @@ impl EncryptedStore {
         Ok(row.filter(|r| !r.emoji.is_empty()))
     }
 
+    // Topics and threads ------------------------------------------------------
+
+    /// Store key for a topic: the conversation and the slug, in that order so a
+    /// prefix scan over one conversation stays possible if this ever needs one.
+    fn topic_key(peer_npub: &str, slug: &str) -> String {
+        format!("{peer_npub}:{slug}")
+    }
+
+    /// Insert or update a topic.
+    ///
+    /// A plain upsert with no clock check, unlike [`Self::set_reaction`] and
+    /// [`Self::set_thread_topic`], because the caller has already merged: the
+    /// slug is the id, so a second creation of the same word is the *same*
+    /// topic, and which display spelling and which `closed` flag survive is
+    /// `comrade_core::topic::Topic::merge_name` / `set_closed`'s decision. A
+    /// second timestamp rule here would be a second answer to that question.
+    pub fn save_topic(&self, topic: &StoredTopic) -> Result<(), StorageError> {
+        self.put(
+            TOPICS_TREE,
+            &Self::topic_key(&topic.peer_npub, &topic.slug),
+            topic,
+        )
+    }
+
+    /// One topic, or `None`.
+    pub fn get_topic(
+        &self,
+        peer_npub: &str,
+        slug: &str,
+    ) -> Result<Option<StoredTopic>, StorageError> {
+        self.get(TOPICS_TREE, &Self::topic_key(peer_npub, slug))
+    }
+
+    /// Every topic in one conversation, oldest first.
+    ///
+    /// Closed ones are included: the archive has to be reachable, and hiding it
+    /// here would mean every caller that wants it re-reads the whole tree. The
+    /// picker filters; the sheet does not.
+    pub fn topics_with(&self, peer_npub: &str) -> Result<Vec<StoredTopic>, StorageError> {
+        let mut rows: Vec<StoredTopic> = self
+            .values::<StoredTopic>(TOPICS_TREE)?
+            .into_iter()
+            .filter(|t| t.peer_npub == peer_npub)
+            .collect();
+        rows.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.slug.cmp(&b.slug))
+        });
+        Ok(rows)
+    }
+
+    /// File a thread under a topic (or, with `slug` of `None`, take it out of
+    /// wherever it was). Returns whether the *visible* filing actually changed,
+    /// so a caller only pushes a UI event when there is news.
+    ///
+    /// **Older filings are refused**, for the reason [`Self::set_reaction`]
+    /// spells out: relays redeliver and this app re-scans a two-day gift-wrap
+    /// window on every launch, so replaying a stale filing is expected on a
+    /// normal cold start rather than exotic. Equal timestamps are refused too —
+    /// within one second the store cannot order two filings, and keeping what is
+    /// already there is at least stable.
+    pub fn set_thread_topic(&self, filing: &ThreadTopic) -> Result<bool, StorageError> {
+        let existing: Option<ThreadTopic> = self.get(THREAD_TOPICS_TREE, &filing.root_id)?;
+        if let Some(prev) = &existing {
+            if prev.updated_at >= filing.updated_at {
+                return Ok(false);
+            }
+        }
+        let was = existing.and_then(|p| p.slug);
+        self.put(THREAD_TOPICS_TREE, &filing.root_id, filing)?;
+        Ok(was != filing.slug)
+    }
+
+    /// Where one thread is filed, or `None` if it never was — which reads the
+    /// same as an unfiling, and means the same thing.
+    pub fn thread_topic(&self, root_id: &str) -> Result<Option<String>, StorageError> {
+        let row: Option<ThreadTopic> = self.get(THREAD_TOPICS_TREE, root_id)?;
+        Ok(row.and_then(|r| r.slug))
+    }
+
+    /// Every filing in one conversation, including the unfiled tombstones — the
+    /// caller is building a map and a `None` there is an answer, not an absence.
+    pub fn thread_topics_with(&self, peer_npub: &str) -> Result<Vec<ThreadTopic>, StorageError> {
+        let mut rows: Vec<ThreadTopic> = self
+            .values::<ThreadTopic>(THREAD_TOPICS_TREE)?
+            .into_iter()
+            .filter(|t| t.peer_npub == peer_npub)
+            .collect();
+        rows.sort_by(|a, b| {
+            a.updated_at
+                .cmp(&b.updated_at)
+                .then_with(|| a.root_id.cmp(&b.root_id))
+        });
+        Ok(rows)
+    }
+
     // Conversation gate (message requests) ------------------------------------
 
     /// Insert or update the conversation gate for a peer.
@@ -925,6 +1114,30 @@ impl EncryptedStore {
         self.delete(READING_TREE, READING_KEY)
     }
 
+    /// Persist one saved read, keyed by its id (insert or update-in-place —
+    /// moving the reading position is the same call as saving the text).
+    pub fn save_saved_read(&self, read: &SavedRead) -> Result<(), StorageError> {
+        self.put(READING_LIBRARY_TREE, &read.id, read)
+    }
+
+    /// The whole reading library, newest first — the order a list wants, the
+    /// same ordering rule [`Self::focus_sessions`] uses.
+    pub fn saved_reads(&self) -> Result<Vec<SavedRead>, StorageError> {
+        let mut reads: Vec<SavedRead> = self.values(READING_LIBRARY_TREE)?;
+        reads.sort_by(|a, b| b.added_at.cmp(&a.added_at).then_with(|| b.id.cmp(&a.id)));
+        Ok(reads)
+    }
+
+    /// One saved read by id.
+    pub fn saved_read(&self, id: &str) -> Result<Option<SavedRead>, StorageError> {
+        self.get(READING_LIBRARY_TREE, id)
+    }
+
+    /// Forget one saved read. `true` if there was one.
+    pub fn delete_saved_read(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete(READING_LIBRARY_TREE, id)
+    }
+
     /// Persist the attention preferences (doom-app list).
     pub fn save_attention_prefs(&self, prefs: &AttentionPrefs) -> Result<(), StorageError> {
         self.put(ATTENTION_META_TREE, ATTENTION_PREFS_KEY, prefs)
@@ -985,6 +1198,122 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = EncryptedStore::open(dir.path(), "pin").unwrap();
         (dir, store)
+    }
+
+    fn topic(peer: &str, slug: &str, at: u64) -> StoredTopic {
+        StoredTopic {
+            peer_npub: peer.into(),
+            slug: slug.into(),
+            name: slug.into(),
+            created_by: "npub_me".into(),
+            created_at: at,
+            closed: false,
+            updated_at: at,
+        }
+    }
+
+    fn filing(root: &str, peer: &str, slug: Option<&str>, at: u64) -> ThreadTopic {
+        ThreadTopic {
+            root_id: root.into(),
+            peer_npub: peer.into(),
+            slug: slug.map(str::to_string),
+            updated_at: at,
+        }
+    }
+
+    #[test]
+    fn topics_are_per_conversation() {
+        // `#deposit` with two people is two subjects; merging them would leak
+        // one conversation's structure into the other.
+        let (_d, s) = store();
+        s.save_topic(&topic("npub_a", "deposit", 10)).unwrap();
+        s.save_topic(&topic("npub_b", "deposit", 20)).unwrap();
+        assert_eq!(s.topics_with("npub_a").unwrap().len(), 1);
+        assert_eq!(s.topics_with("npub_a").unwrap()[0].created_at, 10);
+        assert_eq!(s.topics_with("npub_b").unwrap()[0].created_at, 20);
+        assert!(s.get_topic("npub_a", "repairs").unwrap().is_none());
+    }
+
+    #[test]
+    fn saving_a_topic_twice_is_one_row() {
+        // The slug is the id, so both people typing `/assign #deposit` before
+        // either envelope lands must not end up filing into two topics.
+        let (_d, s) = store();
+        s.save_topic(&topic("npub_a", "deposit", 10)).unwrap();
+        s.save_topic(&topic("npub_a", "deposit", 99)).unwrap();
+        assert_eq!(s.topics_with("npub_a").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_thread_moves_between_topics_and_can_be_unfiled() {
+        let (_d, s) = store();
+        assert!(s
+            .set_thread_topic(&filing("root", "npub_a", Some("deposit"), 10))
+            .unwrap());
+        assert_eq!(s.thread_topic("root").unwrap().as_deref(), Some("deposit"));
+        assert!(s
+            .set_thread_topic(&filing("root", "npub_a", Some("repairs"), 20))
+            .unwrap());
+        assert_eq!(s.thread_topic("root").unwrap().as_deref(), Some("repairs"));
+        // Unfiling is a row, not a delete — see `ThreadTopic::slug`.
+        assert!(s
+            .set_thread_topic(&filing("root", "npub_a", None, 30))
+            .unwrap());
+        assert_eq!(s.thread_topic("root").unwrap(), None);
+        assert_eq!(s.thread_topics_with("npub_a").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_replayed_filing_cannot_undo_a_newer_one() {
+        // The two-day gift-wrap re-scan on every launch makes this the normal
+        // case, not an exotic one.
+        let (_d, s) = store();
+        s.set_thread_topic(&filing("root", "npub_a", Some("deposit"), 10))
+            .unwrap();
+        s.set_thread_topic(&filing("root", "npub_a", Some("repairs"), 20))
+            .unwrap();
+        assert!(
+            !s.set_thread_topic(&filing("root", "npub_a", Some("deposit"), 10))
+                .unwrap(),
+            "a redelivered older filing changes nothing"
+        );
+        assert_eq!(s.thread_topic("root").unwrap().as_deref(), Some("repairs"));
+        // Equal timestamps too: the store cannot order two filings inside one
+        // second, and stable beats arbitrary.
+        assert!(!s
+            .set_thread_topic(&filing("root", "npub_a", Some("deposit"), 20))
+            .unwrap());
+        assert_eq!(s.thread_topic("root").unwrap().as_deref(), Some("repairs"));
+    }
+
+    #[test]
+    fn refiling_to_the_same_topic_is_not_news() {
+        // Advancing the clock is worth writing; redrawing is not.
+        let (_d, s) = store();
+        s.set_thread_topic(&filing("root", "npub_a", Some("deposit"), 10))
+            .unwrap();
+        assert!(!s
+            .set_thread_topic(&filing("root", "npub_a", Some("deposit"), 20))
+            .unwrap());
+        assert_eq!(
+            s.thread_topics_with("npub_a").unwrap()[0].updated_at,
+            20,
+            "the clock still moved, so the next replay is refused"
+        );
+    }
+
+    #[test]
+    fn a_thread_can_be_filed_before_its_root_message_is_cached() {
+        // The arrival order that put filings in their own tree: the peer files
+        // a thread whose root turns up on the next backfill.
+        let (_d, s) = store();
+        s.set_thread_topic(&filing("not_yet_here", "npub_a", Some("deposit"), 10))
+            .unwrap();
+        assert!(s.get_message("not_yet_here").unwrap().is_none());
+        assert_eq!(
+            s.thread_topic("not_yet_here").unwrap().as_deref(),
+            Some("deposit")
+        );
     }
 
     #[test]
@@ -1667,6 +1996,50 @@ mod tests {
     }
 
     #[test]
+    fn saved_reads_crud_ordering_and_position_update_in_place() {
+        let (_d, s) = store();
+        assert!(s.saved_reads().unwrap().is_empty());
+        assert!(s.saved_read("missing").unwrap().is_none());
+        for (id, at) in [
+            ("00000000000000000020-bbbb", 20u64),
+            ("00000000000000000010-aaaa", 10),
+        ] {
+            s.save_saved_read(&SavedRead {
+                id: id.into(),
+                title: "Essay".into(),
+                source: "example.org".into(),
+                text: "para one\n\npara two".into(),
+                position: 0,
+                added_at: at,
+                updated_at: at,
+            })
+            .unwrap();
+        }
+        let reads = s.saved_reads().unwrap();
+        assert_eq!(reads[0].added_at, 20, "newest first");
+
+        // Turning a page updates the same row rather than duplicating it.
+        let mut open = reads[1].clone();
+        open.position = 1;
+        open.updated_at = 30;
+        s.save_saved_read(&open).unwrap();
+        let reads = s.saved_reads().unwrap();
+        assert_eq!(reads.len(), 2);
+        assert_eq!(reads[1].position, 1);
+
+        assert!(s.delete_saved_read("00000000000000000010-aaaa").unwrap());
+        assert!(!s.delete_saved_read("00000000000000000010-aaaa").unwrap());
+        assert_eq!(s.saved_reads().unwrap().len(), 1);
+
+        // A row written before `source` existed still loads.
+        let legacy: SavedRead = serde_json::from_str(
+            r#"{"id":"x","title":"t","text":"b","position":0,"added_at":1,"updated_at":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.source, "");
+    }
+
+    #[test]
     fn attention_prefs_default_empty_and_roundtrip() {
         let (_d, s) = store();
         assert!(s.load_attention_prefs().unwrap().doom_packages.is_empty());
@@ -1688,6 +2061,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let secret_intent = "my-very-private-focus-intent-0123456789";
         let secret_text = "my-very-private-reading-text-0123456789";
+        let secret_saved = "my-very-private-saved-article-0123456789";
         {
             let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
             s.save_focus_session(&FocusSession {
@@ -1706,6 +2080,16 @@ mod tests {
                 updated_at: 1,
             })
             .unwrap();
+            s.save_saved_read(&SavedRead {
+                id: "00000000000000000002-test".into(),
+                title: "t".into(),
+                source: String::new(),
+                text: secret_saved.into(),
+                position: 0,
+                added_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
             s.flush().unwrap();
         }
         let mut leaked = false;
@@ -1713,7 +2097,7 @@ mod tests {
             let path = entry.unwrap().path();
             if path.is_file() {
                 if let Ok(bytes) = std::fs::read(&path) {
-                    for secret in [secret_intent, secret_text] {
+                    for secret in [secret_intent, secret_text, secret_saved] {
                         if bytes.windows(secret.len()).any(|w| w == secret.as_bytes()) {
                             leaked = true;
                         }
@@ -1729,6 +2113,7 @@ mod tests {
         let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
         assert_eq!(s.focus_sessions().unwrap()[0].intent, secret_intent);
         assert_eq!(s.load_reading_state().unwrap().unwrap().text, secret_text);
+        assert_eq!(s.saved_reads().unwrap()[0].text, secret_saved);
     }
 
     #[test]
@@ -1765,6 +2150,16 @@ mod tests {
             doom_packages: vec!["com.example".into()],
         })
         .unwrap();
+        s.save_saved_read(&SavedRead {
+            id: "00000000000000000002-test".into(),
+            title: "t".into(),
+            source: String::new(),
+            text: "body".into(),
+            position: 0,
+            added_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
 
         s.panic_wipe().unwrap();
 
@@ -1772,6 +2167,7 @@ mod tests {
         assert!(s.focus_sessions().unwrap().is_empty());
         assert!(s.load_reading_state().unwrap().is_none());
         assert!(s.load_attention_prefs().unwrap().doom_packages.is_empty());
+        assert!(s.saved_reads().unwrap().is_empty());
     }
 
     #[test]

@@ -23,10 +23,17 @@ This brings four of those into the composer.
 | `/task <what> [@who]` | Name a piece of work; no `@who` is a note to self |
 | `/breathe`, `/focus`, `/journal`, `/read` | Open it here |
 | `/comrade-breathe @who` (and `-focus`, `-journal`, `-read`, `-tara`) | Offer it to a comrade |
+| `/assign #topic`, `/topic`, `/file` | File the thread you replied to under a topic — `docs/CHAT_THREADS.md` |
 | `/pay <amount> to <vpa>` | Unchanged — recognised so it is never called a typo |
 | `/help` | The list |
 
-**`/assign` was relabelled.** You cannot assign somebody a breath. The breathing
+**`/assign` was relabelled — and then it came back, for something else
+(2026-08-14).** It now files a thread under a topic (`docs/CHAT_THREADS.md`), and
+that is not a reversal of the reasoning below: a topic is a filing cabinet, not a
+person, so assigning a thread to one claims nothing about anybody's state. The
+original argument, which still holds for *actions*:
+
+You cannot assign somebody a breath. The breathing
 screen's own copy says *"you don't have to feel better yet"* and its
 `strings.xml` carries a comment forbidding claims the app cannot support, so an
 imperative verb was the wrong register. The verb was dropped entirely instead:

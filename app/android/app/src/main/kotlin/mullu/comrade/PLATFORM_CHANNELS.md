@@ -92,7 +92,8 @@ than message payloads, precisely so there is one source of truth. Putting DM con
 channel would create a second copy of the store in a second language.
 
 The corollary the services depend on: **`ComradeCore.pollEvent()` is drained by
-`RelayConnectionService` and by nothing else, ever.** Dart has no method that reaches it.
+`EventPump` — one loop, held by `RelayConnectionService` and/or a visible Activity — and
+by nothing else, ever.** Dart has no method that reaches it.
 `EventBus`'s three-tier priority discipline (critical never-dropped / coalesced
 latest-per-key / feed bounded-lossy — `ComradeCore.kt:627-739`, AUDIT COMMS-04) is only
 correct with a single consumer; a second drainer in Dart would silently steal call
@@ -311,7 +312,7 @@ partial ones):
 
 `peerLabel` is resolved natively (`CallManager.upgradePeerLabel`) so the ringing screen and
 the notification cannot disagree — the same reason `ChatEventRouter` reads it back off
-`CallUiState.Ringing` instead of re-deriving it (`RelayConnectionService.kt:352-358`).
+`CallUiState.Ringing` instead of re-deriving it (`RelayConnectionService.kt:538`).
 
 `videoSuspended` and `cameraOn` are deliberately two facts, not one: `cameraOn` is the
 user's own choice and survives backgrounding; `videoSuspended` is the app saying "no
@@ -374,9 +375,9 @@ Not because (a) is impossible. Because (a) breaks the architecture this phase is
 
 **The decisive argument is not risk, it is the event path.** Incoming call signals arrive
 as `BridgeEvent.IncomingCallSignal` on `ComradeCore.pollEvent()`, drained by
-`RelayConnectionService` — a foreground `dataSync` service that runs specifically when no
-UI is alive — and handed to `CallManager.onIncomingSignal`, whose `true` return raises the
-ringing notification (`RelayConnectionService.kt:342-363`). Under option (a) the
+`EventPump` — held by `RelayConnectionService`, a foreground `dataSync` service that runs
+specifically when no UI is alive — and handed to `CallManager.onIncomingSignal`, whose
+`true` return raises the ringing notification (`ChatEventRouter.route`). Under option (a) the
 `PeerConnection` lives in the Dart isolate. An offer arriving with the engine detached
 would then have nowhere to go: the service would have to spin up a headless Dart isolate,
 keep it warm for the life of the vault unlock, and route every ICE candidate through two

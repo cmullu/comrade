@@ -115,6 +115,7 @@ import mullu.comrade.ui.ReaderScreen
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
+import mullu.comrade.ui.StretchScreen
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
 import mullu.comrade.ui.TaskListScreen
@@ -153,6 +154,7 @@ class MainActivity : ComponentActivity() {
         // first).
         AppNavigation.request(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
         AppNavigation.requestPeer(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
+        intent?.let { offerSharedText(it) }
         // Picture-in-picture for a live video call — see [PipController]. The
         // Activity is the only thing that receives the PiP lifecycle callbacks.
         PipController.attachActivity(this)
@@ -201,6 +203,24 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         AppNavigation.request(intent.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
         AppNavigation.requestPeer(intent.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
+        offerSharedText(intent)
+    }
+
+    /**
+     * Text arriving from the system share sheet — the way into the reading
+     * library from every other app. Parked in [AppNavigation] like the tab
+     * requests, because the share may arrive with the vault still locked; the
+     * shell then lands the user on the reader with the text *offered*, never
+     * silently saved.
+     */
+    private fun offerSharedText(intent: Intent) {
+        if (intent.action != Intent.ACTION_SEND) return
+        if (intent.type?.startsWith("text/") != true) return
+        AppNavigation.requestSharedText(
+            title = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+                ?: intent.getStringExtra(Intent.EXTRA_TITLE),
+            text = intent.getStringExtra(Intent.EXTRA_TEXT),
+        )
     }
 
     /**
@@ -451,6 +471,7 @@ private sealed interface FocusNav {
     data object Sessions : FocusNav
     data object Reader : FocusNav
     data object Breathing : FocusNav
+    data object Stretch : FocusNav
 }
 
 /** Sub-navigation inside the Chats tab. */
@@ -487,6 +508,7 @@ private fun MainShell(
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     /// Feed is a pushed screen now, reached from the drawer — see [MainTab].
     var feedOpen by rememberSaveable { mutableStateOf(false) }
+    var rideOpen by rememberSaveable { mutableStateOf(false) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     // Owned by RelayConnectionService/ChatEventRouter now — the single
@@ -495,6 +517,8 @@ private fun MainShell(
     // loop, so a backgrounded Activity (or one recreated mid-session) never
     // duplicates, or simply stops, event handling.
     val chatTick by ChatEventRouter.chatTick.collectAsState()
+    // Separate from `chatTick` on purpose — see `ChatEventRouter.topicTick`.
+    val topicTick by ChatEventRouter.topicTick.collectAsState()
     val requestTick by ChatEventRouter.requestTick.collectAsState()
     val feedItems by ChatEventRouter.feedItems.collectAsState()
 
@@ -545,6 +569,20 @@ private fun MainShell(
         chatNav = ChatNav.Open(peer = peer, alias = label.ifBlank { null }, username = null)
         settingsOpen = false
         AppNavigation.consumePeer()
+    }
+
+    // Text shared into Comrade from another app lands on the reader with the
+    // compose box prefilled — offered, never silently saved. The flow is
+    // consumed by the ReaderScreen once it has taken the text, so a
+    // configuration change doesn't re-fill a box the user already edited.
+    val sharedText by AppNavigation.sharedText.collectAsState()
+    LaunchedEffect(sharedText) {
+        if (sharedText != null) {
+            tab = MainTab.Focus
+            focusNav = FocusNav.Reader
+            settingsOpen = false
+            feedOpen = false
+        }
     }
 
     // Notification channels + runtime permission (Android 13+). Notifications
@@ -701,7 +739,7 @@ private fun MainShell(
     // Settings screen closes, then a Chats sub-screen returns to the list.
     BackHandler(
         enabled = drawerState.isOpen ||
-            settingsOpen || feedOpen ||
+            settingsOpen || feedOpen || rideOpen ||
             (tab == MainTab.Chats && chatNav != ChatNav.List) ||
             (tab == MainTab.Focus && focusNav != FocusNav.Sessions),
     ) {
@@ -709,6 +747,7 @@ private fun MainShell(
             drawerState.isOpen -> scope.launch { drawerState.close() }
             settingsOpen -> settingsOpen = false
             feedOpen -> feedOpen = false
+            rideOpen -> rideOpen = false
             tab == MainTab.Focus -> focusNav = FocusNav.Sessions
             else -> chatNav = ChatNav.List
         }
@@ -732,6 +771,9 @@ private fun MainShell(
                     focusNav = FocusNav.Breathing
                 },
             )
+        } else if (rideOpen) {
+            // Pushed, with its own back arrow, like Feed — see the drawer item.
+            RidePushedScreen(onBack = { rideOpen = false })
         } else if (settingsOpen) {
             SettingsPushedScreen(
                 profile = profile,
@@ -767,6 +809,10 @@ private fun MainShell(
                         onOpenFeed = {
                             scope.launch { drawerState.close() }
                             feedOpen = true
+                        },
+                        onOpenRide = {
+                            scope.launch { drawerState.close() }
+                            rideOpen = true
                         },
                     )
                 },
@@ -1016,10 +1062,10 @@ private fun MainShell(
                                 title = {
                                     Text(
                                         stringResource(
-                                            if (focusNav == FocusNav.Reader) {
-                                                R.string.reader_title
-                                            } else {
-                                                R.string.breathe_title
+                                            when (focusNav) {
+                                                FocusNav.Reader -> R.string.reader_title
+                                                FocusNav.Stretch -> R.string.stretch_title
+                                                else -> R.string.breathe_title
                                             },
                                         ),
                                     )
@@ -1114,6 +1160,7 @@ private fun MainShell(
                             is ChatNav.Open -> ConversationScreen(
                                 peer = nav.peer,
                                 chatTick = chatTick,
+                                topicTick = topicTick,
                                 // Same launcher the Together button in the chat
                                 // header uses, so a file arriving from `/play`
                                 // and one picked by hand start a session by the
@@ -1133,17 +1180,22 @@ private fun MainShell(
                             FocusNav.Sessions -> FocusScreen(
                                 onOpenReader = { focusNav = FocusNav.Reader },
                                 onOpenBreathing = { focusNav = FocusNav.Breathing },
+                                onOpenStretch = { focusNav = FocusNav.Stretch },
                                 onJournalNote = { seedJournalNote(scope, it) },
                                 modifier = content,
                             )
                             FocusNav.Reader -> ReaderScreen(
                                 onJournalNote = { seedJournalNote(scope, it) },
+                                sharedTitle = sharedText?.title,
+                                sharedText = sharedText?.text,
+                                onSharedConsumed = { AppNavigation.consumeSharedText() },
                                 modifier = content,
                             )
                             FocusNav.Breathing -> BreathingScreen(
                                 onDone = { focusNav = FocusNav.Sessions },
                                 modifier = content,
                             )
+                            FocusNav.Stretch -> StretchScreen(modifier = content)
                         }
                         // The session's own surface, rather than an overlay over
                         // the whole app. A film or an album runs for hours, and
@@ -1420,6 +1472,7 @@ private fun ComradeDrawerSheet(
     onOpenComrades: () -> Unit,
     onOpenTasks: () -> Unit,
     onOpenFeed: () -> Unit,
+    onOpenRide: () -> Unit,
 ) {
     ModalDrawerSheet {
         Row(
@@ -1470,6 +1523,18 @@ private fun ComradeDrawerSheet(
             onClick = onOpenFeed,
             modifier = Modifier.testTag("drawer-feed"),
         )
+        // Ride mode is a place you *go* — you are about to get on a
+        // motorcycle — which is the same argument that put Feed in the drawer
+        // rather than on the bottom nav. It is deliberately not a tab: five
+        // tabs is the nav, and a sixth for something used on a ride and never
+        // otherwise would cost the four daily ones room.
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.ride_title)) },
+            icon = { Icon(PeopleHugIcon, contentDescription = null) },
+            selected = false,
+            onClick = onOpenRide,
+            modifier = Modifier.testTag("drawer-ride"),
+        )
         NavigationDrawerItem(
             label = { Text(stringResource(R.string.call_history_title)) },
             icon = { Icon(CallIcon, contentDescription = null) },
@@ -1482,6 +1547,44 @@ private fun ComradeDrawerSheet(
             selected = false,
             onClick = onOpenSettings,
             modifier = Modifier.testTag("drawer-settings"),
+        )
+    }
+}
+
+/**
+ * Ride mode, as a pushed screen (`docs/RIDE.md`).
+ *
+ * Loads its own comrade list rather than taking one from the caller: this is
+ * reached from the drawer, not from a tab that already had one in hand, and
+ * the list is small and read once when the screen opens.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RidePushedScreen(onBack: () -> Unit) {
+    var comrades by remember { mutableStateOf<List<ComradeCore.ComradeInfo>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        comrades = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.comrades() }.getOrDefault(emptyList())
+        }
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                        )
+                    }
+                },
+                title = { Text(stringResource(R.string.ride_title)) },
+            )
+        },
+    ) { padding ->
+        mullu.comrade.ui.RideScreen(
+            peers = comrades,
+            modifier = Modifier.padding(padding),
         )
     }
 }

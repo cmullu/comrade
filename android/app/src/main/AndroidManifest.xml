@@ -207,6 +207,16 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- The way into the reading library from every other app: share
+                 an article's text (or its link plus text) out of any feed and
+                 it is offered — never silently saved — to Long reads. Text
+                 only, deliberately: files and images are the attachment
+                 pipeline's business, not the reader's. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
 
         <!-- Handles the Decline/Hang Up actions on the call notifications'
