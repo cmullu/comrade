@@ -4,16 +4,22 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +40,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -64,8 +73,9 @@ import mullu.comrade.R
  */
 @Composable
 fun FocusScreen(
-    onOpenReader: () -> Unit,
+    onOpenShelf: () -> Unit,
     onOpenBreathing: () -> Unit,
+    onOpenStretch: (String?) -> Unit,
     onJournalNote: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -88,6 +98,13 @@ fun FocusScreen(
     // Drives the countdown text; the authoritative remaining time comes from
     // the engine, this only re-reads it.
     var tick by remember { mutableLongStateOf(0L) }
+    // A stretch break, offered on the half hour of a long session. `offeredMark`
+    // is what stops the same offer reappearing every second — the engine decides
+    // *whether* one is due (`stretch_break_due`), including that the last minutes
+    // of a session are left alone, and this remembers what it has already said.
+    var stretchOffer by remember { mutableStateOf<Int?>(null) }
+    var offeredMark by remember { mutableStateOf<Int?>(null) }
+    var offeredRoutine by remember { mutableStateOf<String?>(null) }
 
     suspend fun reload() {
         withContext(Dispatchers.IO) {
@@ -119,6 +136,28 @@ fun FocusScreen(
                 break
             }
             active = current
+            // Whether a break is due is the engine's answer, not this screen's.
+            // Nothing starts on its own: a routine that began by itself would be
+            // an interruption rather than an offer, and the session keeps running
+            // either way.
+            val elapsedMinutes =
+                ((current.plannedMinutes * 60 - current.remainingSecs).coerceAtLeast(0) / 60).toInt()
+            val due = withContext(Dispatchers.IO) {
+                runCatching {
+                    ComradeCore.stretchBreakDueTyped(
+                        current.plannedMinutes,
+                        elapsedMinutes,
+                        offeredMark,
+                    )
+                }.getOrNull()
+            }
+            if (due != null) {
+                offeredMark = due
+                stretchOffer = due
+                offeredRoutine = withContext(Dispatchers.IO) {
+                    runCatching { ComradeCore.suggestedStretchRoutineTyped() }.getOrNull()
+                }
+            }
         }
     }
 
@@ -132,6 +171,10 @@ fun FocusScreen(
             }.onSuccess {
                 active = it
                 intent = ""
+                // A new session has its own marks; carrying the last one's over
+                // would silence this session's first offer.
+                offeredMark = null
+                stretchOffer = null
                 if (silenceWhileRunning) requestSilence(context)
             }.onFailure { error = it.message ?: "Could not start." }
         }
@@ -161,7 +204,16 @@ fun FocusScreen(
     ) {
         item {
             val running = active
-            ElevatedCard(Modifier.fillMaxWidth()) {
+            ElevatedCard(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.elevatedCardColors(
+                    // Translucent, so the ambient layer behind it shows through —
+                    // see `FocusAmbient`. Not fully transparent: text over a
+                    // moving gradient with no surface under it is the version of
+                    // this that is pretty and unreadable.
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.74f),
+                ),
+            ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         stringResource(R.string.focus_title),
@@ -226,9 +278,30 @@ fun FocusScreen(
                     } else {
                         // `tick` is read so the countdown recomposes each second.
                         @Suppress("UNUSED_EXPRESSION") tick
+                        // The ring *empties* as the session runs. One that filled
+                        // up would invite "how much have I earned", which is the
+                        // scoring gate 3 refuses; a ring draining is only where
+                        // the time went. Desktop draws the same thing from
+                        // `focus_view.mjs`'s `ringGeometry`.
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CountdownRing(
+                                remainingSecs = running.remainingSecs,
+                                plannedMinutes = running.plannedMinutes,
+                            )
+                            Text(
+                                formatCountdown(running.remainingSecs),
+                                style = MaterialTheme.typography.headlineMedium,
+                            )
+                        }
                         Text(
                             stringResource(R.string.focus_running, formatCountdown(running.remainingSecs)),
-                            style = MaterialTheme.typography.headlineMedium,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         if (running.intent.isNotBlank()) {
                             Text(running.intent, style = MaterialTheme.typography.bodyLarge)
@@ -262,13 +335,48 @@ fun FocusScreen(
             }
         }
 
+        stretchOffer?.let { mark ->
+            item {
+                OutlinedCard(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            stringResource(R.string.stretch_offer, mark),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    stretchOffer = null
+                                    onOpenStretch(offeredRoutine)
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) { Text(stringResource(R.string.stretch_offer_accept)) }
+                            OutlinedButton(
+                                onClick = { stretchOffer = null },
+                                modifier = Modifier.weight(1f),
+                            ) { Text(stringResource(R.string.stretch_offer_later)) }
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(onClick = onOpenReader, modifier = Modifier.weight(1f)) {
-                    Text(stringResource(R.string.reader_title))
+                OutlinedButton(onClick = onOpenShelf, modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.library_title))
                 }
                 OutlinedButton(onClick = onOpenBreathing, modifier = Modifier.weight(1f)) {
                     Text(stringResource(R.string.breathe_title))
+                }
+                OutlinedButton(
+                    onClick = { onOpenStretch(offeredRoutine) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(stringResource(R.string.stretch_title))
                 }
             }
         }
@@ -343,6 +451,63 @@ fun FocusScreen(
         )
     }
 }
+
+/**
+ * The session clock as a ring that empties.
+ *
+ * Fed the engine's own remaining seconds — the ring is a second *rendering* of
+ * that number, never a second source for it. The total comes from the plan rather
+ * than from the largest remaining value this screen has seen, so a session the
+ * screen joined halfway through (app reopened, phone woken) draws a ring that is
+ * already part-empty instead of one that starts full and lies about it.
+ *
+ * `animateFloatAsState` rather than a redraw per tick: the value arrives once a
+ * second and the sweep has to cross the gap smoothly, which is the same reason
+ * the desktop ring has a 700ms linear transition. Under "Remove animations" the
+ * platform collapses the duration itself, so there is nothing extra to check
+ * here — unlike the ambient background, whose motion is a loop the platform
+ * cannot shorten (see `FocusAmbient.reduceMotion`).
+ */
+@Composable
+private fun CountdownRing(remainingSecs: Long, plannedMinutes: Int) {
+    val total = (plannedMinutes.coerceAtLeast(0) * 60).toFloat()
+    val fraction = if (total <= 0f) 1f else (remainingSecs.toFloat() / total).coerceIn(0f, 1f)
+    val swept by animateFloatAsState(
+        targetValue = fraction,
+        animationSpec = tween(durationMillis = RING_MS),
+        label = "focus-ring",
+    )
+    val track = MaterialTheme.colorScheme.surfaceVariant
+    val arc = MaterialTheme.colorScheme.primary
+    Canvas(Modifier.size(RING_DP.dp)) {
+        val stroke = Stroke(width = RING_STROKE_DP.dp.toPx(), cap = StrokeCap.Round)
+        val inset = stroke.width / 2f
+        val box = Size(size.width - stroke.width, size.height - stroke.width)
+        drawArc(
+            color = track,
+            startAngle = 0f,
+            sweepAngle = 360f,
+            useCenter = false,
+            topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+            size = box,
+            style = stroke,
+        )
+        drawArc(
+            color = arc,
+            // -90 so it drains from the top, which is where an eye starts.
+            startAngle = -90f,
+            sweepAngle = 360f * swept,
+            useCenter = false,
+            topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+            size = box,
+            style = stroke,
+        )
+    }
+}
+
+private const val RING_DP = 168
+private const val RING_STROKE_DP = 6
+private const val RING_MS = 700
 
 private fun outcomeLabel(outcome: String?): Int = when (outcome) {
     "completed" -> R.string.focus_outcome_completed

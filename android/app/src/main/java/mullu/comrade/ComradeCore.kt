@@ -934,7 +934,76 @@ object ComradeCore {
         val remainingSecs: Long,
     )
 
-    data class ReadingInfo(val title: String, val chunks: List<String>, val position: Int)
+    data class ReadingInfo(
+        /** Which shelf row this is, so the reader can act on it directly. */
+        val itemId: String,
+        val title: String,
+        val chunks: List<String>,
+        val position: Int,
+        val url: String?,
+        val source: String,
+    )
+
+    /**
+     * One row on the reading shelf.
+     *
+     * [hasText] is the load-bearing field: a bookmark imported from Instagram is
+     * a title and a link and **nothing to read**, because nothing in Comrade
+     * fetches a page. A row that offered "Read" for one of those would open an
+     * empty reader, which reads as a bug rather than as a boundary.
+     */
+    data class SavedItemInfo(
+        val id: String,
+        val title: String,
+        val url: String?,
+        /** `instagram` / `twitter` / `facebook` / `reddit` / `youtube` /
+         *  `readlater` / `web` / `pasted`. Mapped to words by the screen. */
+        val source: String,
+        val hasText: Boolean,
+        val estimatedMinutes: Int,
+        val chunkCount: Int,
+        val position: Int,
+        val savedAt: Long,
+        val openedAt: Long?,
+        val finishedAt: Long?,
+        val isOpen: Boolean,
+    )
+
+    /** What an import of an export archive did, in numbers the screen says out loud. */
+    data class ImportReportInfo(
+        val format: String,
+        val added: Int,
+        val duplicates: Int,
+        val skipped: Int,
+        val truncated: Boolean,
+        /** The format did not parse and only the links survived. */
+        val fellBack: Boolean,
+    )
+
+    /** One movement in a stretch routine. [key] is looked up in `strings.xml`. */
+    data class StretchStepInfo(
+        val key: String,
+        val seconds: Int,
+        val part: String,
+        val side: String,
+        val motion: String,
+    )
+
+    data class StretchRoutineInfo(
+        val key: String,
+        val totalSeconds: Int,
+        val steps: List<StretchStepInfo>,
+    )
+
+    /** Where a running routine is. The engine owns this walk, not the screen. */
+    data class StretchCursorInfo(
+        val index: Int,
+        val step: StretchStepInfo,
+        val secsIntoStep: Int,
+        val secsLeftInStep: Int,
+        val secsLeftTotal: Int,
+        val progress: Float,
+    )
 
     private fun uniffi.comrade_ui.AttentionDayDto.toInfo() = AttentionDayInfo(
         date = date,
@@ -953,8 +1022,61 @@ object ComradeCore {
         remainingSecs = remainingSecs.toLong(),
     )
 
-    private fun uniffi.comrade_ui.ReadingDto.toInfo() =
-        ReadingInfo(title = title, chunks = chunks, position = position.toInt())
+    private fun uniffi.comrade_ui.ReadingDto.toInfo() = ReadingInfo(
+        itemId = itemId,
+        title = title,
+        chunks = chunks,
+        position = position.toInt(),
+        url = url,
+        source = source,
+    )
+
+    private fun uniffi.comrade_ui.SavedItemDto.toInfo() = SavedItemInfo(
+        id = id,
+        title = title,
+        url = url,
+        source = source,
+        hasText = hasText,
+        estimatedMinutes = estimatedMinutes.toInt(),
+        chunkCount = chunkCount.toInt(),
+        position = position.toInt(),
+        savedAt = savedAt.toLong(),
+        openedAt = openedAt?.toLong(),
+        finishedAt = finishedAt?.toLong(),
+        isOpen = isOpen,
+    )
+
+    private fun uniffi.comrade_ui.ImportReportDto.toInfo() = ImportReportInfo(
+        format = format,
+        added = added.toInt(),
+        duplicates = duplicates.toInt(),
+        skipped = skipped.toInt(),
+        truncated = truncated,
+        fellBack = fellBack,
+    )
+
+    private fun uniffi.comrade_ui.StretchStepDto.toInfo() = StretchStepInfo(
+        key = key,
+        seconds = seconds.toInt(),
+        part = part,
+        side = side,
+        motion = motion,
+    )
+
+    private fun uniffi.comrade_ui.StretchRoutineDto.toInfo() = StretchRoutineInfo(
+        key = key,
+        totalSeconds = totalSeconds.toInt(),
+        steps = steps.map { it.toInfo() },
+    )
+
+    private fun uniffi.comrade_ui.StretchCursorDto.toInfo() = StretchCursorInfo(
+        index = index.toInt(),
+        step = step.toInfo(),
+        secsIntoStep = secsIntoStep.toInt(),
+        secsLeftInStep = secsLeftInStep.toInt(),
+        secsLeftTotal = secsLeftTotal.toInt(),
+        progress = progress,
+    )
 
     fun recordAttentionDayTyped(
         date: String,
@@ -1026,15 +1148,100 @@ object ComradeCore {
     fun focusReflectionTyped(outcome: String): String =
         rethrowing("Focus reflection") { ffi.focusReflection(outcome) }
 
-    fun saveReadingTyped(title: String, text: String): ReadingInfo =
-        rethrowing("Reading") { ffi.saveReading(title, text).toInfo() }
+    // ── The reading shelf (comrade_core::library) ─────────────────────────────
+    //
+    // What replaced the paste-only reader. Rows arrive from the share sheet, from
+    // a paste, or from an import of the user's own Instagram / X / Facebook /
+    // Reddit / Pocket data export — read on this phone, sent nowhere. Nothing
+    // here fetches a URL.
+
+    fun libraryItems(): List<SavedItemInfo> =
+        rethrowing("Reading shelf") { ffi.libraryItems().map { it.toInfo() } }
+
+    fun saveLinkTyped(url: String, title: String): SavedItemInfo =
+        rethrowing("Saving") { ffi.saveLink(url, title).toInfo() }
+
+    fun saveTextTyped(title: String, text: String, url: String? = null): SavedItemInfo =
+        rethrowing("Saving") { ffi.saveText(title, text, url).toInfo() }
+
+    /**
+     * The share-sheet entry point: `EXTRA_SUBJECT` and `EXTRA_TEXT` in, a shelf
+     * row out — or null when the payload carried nothing worth keeping.
+     *
+     * Whether a payload is a *link* or an *article* is
+     * `comrade_core::library::parse_shared`'s answer, deliberately: desktop takes
+     * the same decision through the same call, and two frontends drawing that
+     * line themselves would draw it differently.
+     */
+    fun saveSharedTyped(subject: String?, body: String): SavedItemInfo? =
+        rethrowing("Saving") { ffi.saveShared(subject, body)?.toInfo() }
+
+    /**
+     * Import an export archive. **The caller reads the file** — only the Android
+     * side has the document picker and the permission — and passes its text.
+     */
+    fun importSavesTyped(payload: String): ImportReportInfo =
+        rethrowing("Import") { ffi.importSaves(payload).toInfo() }
+
+    fun openSavedItemTyped(id: String): ReadingInfo? =
+        rethrowing("Reading") { ffi.openSavedItem(id)?.toInfo() }
+
+    fun deleteSavedItemTyped(id: String): Boolean =
+        rethrowing("Reading shelf") { ffi.deleteSavedItem(id) }
 
     fun reading(): ReadingInfo? = rethrowing("Reading") { ffi.reading()?.toInfo() }
 
     fun setReadingPositionTyped(position: Int): ReadingInfo? =
         rethrowing("Reading") { ffi.setReadingPosition(position.toUInt())?.toInfo() }
 
-    fun clearReadingTyped(): Boolean = rethrowing("Reading") { ffi.clearReading() }
+    /** Close the reader, keeping the article and its position on the shelf. */
+    fun closeReadingTyped(): Boolean = rethrowing("Reading") { ffi.closeReading() }
+
+    // ── Stretch breaks (comrade_core::stretch) ────────────────────────────────
+    //
+    // Needs no vault: the choreography is a constant of the design, like the
+    // focus presets. And nothing about a break is stored — the same call the
+    // breathing screen makes, because a count would turn a break into a task.
+
+    fun stretchRoutines(): List<StretchRoutineInfo> =
+        rethrowing("Stretches") { ffi.stretchRoutines().map { it.toInfo() } }
+
+    /**
+     * Where a running routine is at [elapsedSecs], or null once it is over.
+     *
+     * Asked once a second by the screen. The walk lives in the engine so that
+     * this frontend and the desktop one cannot step different timelines — the
+     * durations both are stepping are the ones the engine's symmetry test
+     * guards.
+     */
+    fun stretchStepAtTyped(routineKey: String, elapsedSecs: Int): StretchCursorInfo? =
+        rethrowing("Stretches") {
+            ffi.stretchStepAt(routineKey, elapsedSecs.toUInt())?.toInfo()
+        }
+
+    fun suggestedStretchRoutineTyped(): String =
+        rethrowing("Stretches") { ffi.suggestedStretchRoutine() }
+
+    fun stretchBreakMarks(plannedMinutes: Int): List<Int> =
+        rethrowing("Stretches") { ffi.stretchBreakMarks(plannedMinutes.toUInt()).map { it.toInt() } }
+
+    /**
+     * Whether a stretch is due now, given the last mark already offered.
+     *
+     * The returned mark is both the answer and the value to remember: an offer
+     * that reappeared every second would be the nag this pillar refuses.
+     */
+    fun stretchBreakDueTyped(
+        plannedMinutes: Int,
+        elapsedMinutes: Int,
+        lastOffered: Int?,
+    ): Int? = rethrowing("Stretches") {
+        ffi.stretchBreakDue(
+            plannedMinutes.toUInt(),
+            elapsedMinutes.toUInt(),
+            lastOffered?.toUInt(),
+        )?.toInt()
+    }
 
     // ── Encrypted media (NIP-94/96 · Blossom) ─────────────────────────────────
 

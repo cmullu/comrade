@@ -101,6 +101,7 @@ import mullu.comrade.ui.CloudIcon
 import mullu.comrade.ui.CopyIcon
 import mullu.comrade.ui.conversationMenu
 import mullu.comrade.ui.FeedScreen
+import mullu.comrade.ui.FocusAmbient
 import mullu.comrade.ui.FocusScreen
 import mullu.comrade.ui.HeartIcon
 import mullu.comrade.ui.JournalScreen
@@ -111,7 +112,9 @@ import mullu.comrade.ui.OnboardingScreen
 import mullu.comrade.ui.PeerAvatar
 import mullu.comrade.ui.PresenceDot
 import mullu.comrade.ui.presenceText
+import mullu.comrade.ui.LibraryScreen
 import mullu.comrade.ui.ReaderScreen
+import mullu.comrade.ui.StretchScreen
 import mullu.comrade.ui.RequestsScreen
 import mullu.comrade.ui.SettingsScreen
 import mullu.comrade.ui.StarIcon
@@ -153,6 +156,10 @@ class MainActivity : ComponentActivity() {
         // first).
         AppNavigation.request(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
         AppNavigation.requestPeer(intent?.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
+        // Something shared in from another app — a page from a browser, a post
+        // from Instagram, a selection from anywhere. Parked rather than saved,
+        // because the shelf is inside the vault and this may arrive locked.
+        acceptShare(intent)
         // Picture-in-picture for a live video call — see [PipController]. The
         // Activity is the only thing that receives the PiP lifecycle callbacks.
         PipController.attachActivity(this)
@@ -201,6 +208,29 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         AppNavigation.request(intent.getStringExtra(AppNavigation.EXTRA_OPEN_TAB))
         AppNavigation.requestPeer(intent.getStringExtra(AppNavigation.EXTRA_OPEN_PEER))
+        acceptShare(intent)
+    }
+
+    /**
+     * Take an `ACTION_SEND` payload off an intent and park it for the shell.
+     *
+     * Only `text/*`: Comrade's share target is for reading material, and
+     * accepting `*/*` would put this app in the share sheet for every photo and
+     * video on the phone — a list it has no business being in and which would
+     * make the entry useless where it is wanted.
+     *
+     * `EXTRA_TEXT` is a `CharSequence`, not a `String`: several apps send a
+     * `Spanned`, and `getStringExtra` returns null for those. That is a silent
+     * "share did nothing" for whichever apps happen to do it, which is the worst
+     * shape of bug this path can have.
+     */
+    private fun acceptShare(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        if (intent.type?.startsWith("text/") != true) return
+        AppNavigation.requestShare(
+            subject = intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT)?.toString(),
+            body = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString(),
+        )
     }
 
     /**
@@ -449,8 +479,16 @@ private enum class MainTab(val label: String, val icon: ImageVector) {
 /** Sub-navigation inside the Focus tab. */
 private sealed interface FocusNav {
     data object Sessions : FocusNav
+
+    /** The reading shelf: everything saved to read (`LibraryScreen`). */
+    data object Shelf : FocusNav
+
+    /** Whatever the shelf has open (`ReaderScreen`). */
     data object Reader : FocusNav
     data object Breathing : FocusNav
+
+    /** A stretch break, optionally pre-selected by a session's break offer. */
+    data class Stretch(val routine: String?) : FocusNav
 }
 
 /** Sub-navigation inside the Chats tab. */
@@ -528,6 +566,28 @@ private fun MainShell(
             }
         }
         AppNavigation.consume()
+    }
+
+    // Something shared in from another app. Saved as soon as the vault is open —
+    // the engine decides whether it is a link or an article
+    // (`library::parse_shared`) — and the shelf is opened so the save is visibly
+    // *somewhere* rather than only a toast. Sharing into an app and seeing no
+    // trace of it is indistinguishable from the share having failed.
+    val sharedPayload by AppNavigation.sharedText.collectAsState()
+    LaunchedEffect(sharedPayload) {
+        val payload = sharedPayload ?: return@LaunchedEffect
+        val saved = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.saveSharedTyped(payload.subject, payload.body) }
+        }
+        // Consumed either way: a payload that could not be saved must not be
+        // retried on every recomposition. A locked vault is the one case worth
+        // keeping it for, and the shell only runs once the vault is open.
+        AppNavigation.consumeShare()
+        if (saved.getOrNull() != null) {
+            tab = MainTab.Focus
+            focusNav = FocusNav.Shelf
+            settingsOpen = false
+        }
     }
 
     // A tapped message notification names a conversation: open it (WP11).
@@ -1003,10 +1063,21 @@ private fun MainShell(
                                 actions = { TransportPrecedenceAction() },
                             )
                             // A Focus sub-screen gets a back arrow to the
-                            // session list, like the Chats sub-screens do.
+                            // session list, like the Chats sub-screens do. The
+                            // reader's arrow goes to the *shelf* rather than all
+                            // the way out: the shelf is where you came from, and
+                            // where the next thing to read is.
                             tab == MainTab.Focus && focusNav != FocusNav.Sessions -> TopAppBar(
                                 navigationIcon = {
-                                    IconButton(onClick = { focusNav = FocusNav.Sessions }) {
+                                    IconButton(
+                                        onClick = {
+                                            focusNav = if (focusNav == FocusNav.Reader) {
+                                                FocusNav.Shelf
+                                            } else {
+                                                FocusNav.Sessions
+                                            }
+                                        },
+                                    ) {
                                         Icon(
                                             Icons.AutoMirrored.Filled.ArrowBack,
                                             contentDescription = "Back",
@@ -1016,10 +1087,11 @@ private fun MainShell(
                                 title = {
                                     Text(
                                         stringResource(
-                                            if (focusNav == FocusNav.Reader) {
-                                                R.string.reader_title
-                                            } else {
-                                                R.string.breathe_title
+                                            when (focusNav) {
+                                                FocusNav.Reader -> R.string.reader_title
+                                                FocusNav.Shelf -> R.string.library_title
+                                                is FocusNav.Stretch -> R.string.stretch_title
+                                                else -> R.string.breathe_title
                                             },
                                         ),
                                     )
@@ -1129,21 +1201,35 @@ private fun MainShell(
                         }
                         MainTab.Journal -> JournalScreen(modifier = content)
                         MainTab.Tara -> TaraScreen(modifier = content)
-                        MainTab.Focus -> when (focusNav) {
-                            FocusNav.Sessions -> FocusScreen(
-                                onOpenReader = { focusNav = FocusNav.Reader },
-                                onOpenBreathing = { focusNav = FocusNav.Breathing },
-                                onJournalNote = { seedJournalNote(scope, it) },
-                                modifier = content,
-                            )
-                            FocusNav.Reader -> ReaderScreen(
-                                onJournalNote = { seedJournalNote(scope, it) },
-                                modifier = content,
-                            )
-                            FocusNav.Breathing -> BreathingScreen(
-                                onDone = { focusNav = FocusNav.Sessions },
-                                modifier = content,
-                            )
+                        // Every Focus surface sits inside the ambient layer —
+                        // the one place in the app with a mood. See `FocusAmbient`
+                        // for why that is not a gate-3 violation and why it is not
+                        // simply Opera Air's white.
+                        MainTab.Focus -> FocusAmbient(modifier = content) {
+                            when (val nav = focusNav) {
+                                FocusNav.Sessions -> FocusScreen(
+                                    onOpenShelf = { focusNav = FocusNav.Shelf },
+                                    onOpenBreathing = { focusNav = FocusNav.Breathing },
+                                    onOpenStretch = { routine ->
+                                        focusNav = FocusNav.Stretch(routine)
+                                    },
+                                    onJournalNote = { seedJournalNote(scope, it) },
+                                )
+                                FocusNav.Shelf -> LibraryScreen(
+                                    onRead = { focusNav = FocusNav.Reader },
+                                )
+                                FocusNav.Reader -> ReaderScreen(
+                                    onJournalNote = { seedJournalNote(scope, it) },
+                                    onBackToShelf = { focusNav = FocusNav.Shelf },
+                                )
+                                FocusNav.Breathing -> BreathingScreen(
+                                    onDone = { focusNav = FocusNav.Sessions },
+                                )
+                                is FocusNav.Stretch -> StretchScreen(
+                                    onDone = { focusNav = FocusNav.Sessions },
+                                    initialRoutine = nav.routine,
+                                )
+                            }
                         }
                         // The session's own surface, rather than an overlay over
                         // the whole app. A film or an album runs for hours, and

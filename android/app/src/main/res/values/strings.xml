@@ -349,15 +349,132 @@
 
     <!-- Attention: the long-form reader (phase 2) -->
     <string name="reader_title">Long read</string>
-    <string name="reader_paste_label">Paste something worth your attention</string>
-    <string name="reader_paste_hint">An article, a chapter, a letter — whatever you\'ve been meaning to read properly. It stays on this phone, encrypted like your journal. Comrade never fetches it from the web for you.</string>
-    <string name="reader_save">Start reading</string>
     <string name="reader_next">Next</string>
     <string name="reader_previous">Back</string>
     <string name="reader_progress">%1$d of %2$d</string>
     <string name="reader_finished">That\'s the end. Worth a line about it?</string>
-    <string name="reader_clear">Close this read</string>
-    <string name="reader_title_label">Title (optional)</string>
+    <!-- "Close", not "delete": the article and the position stay on the shelf.
+         The old wording here said "Close this read" over a call that deleted the
+         only saved text, which was true when there was only one of them. -->
+    <string name="reader_close">Close this read</string>
+    <string name="reader_nothing_open">Nothing open right now. Pick something off your shelf.</string>
+
+    <!-- Attention: the reading shelf.
+
+         What replaced the paste box. The two sentences that must survive any
+         edit of this block are in library_import_hint and library_privacy_note:
+         an import is a *snapshot, not a sync*, and Comrade never fetches a page.
+         Both are boundaries of what the app does, not marketing about it, and a
+         user who does not know them will read the shelf as broken — a bookmark
+         that cannot be read looks like a bug until you know why. -->
+    <string name="library_title">Reading shelf</string>
+    <string name="library_add_label">Paste a link, or something you want to read properly</string>
+    <string name="library_save">Save to shelf</string>
+    <string name="library_import">Import an export file…</string>
+    <string name="library_import_hint">Already saved things elsewhere? Pick the saved-posts file out of your Instagram, X, Facebook, Reddit or Pocket data export — it is read on this phone and nothing is sent anywhere. An import is a snapshot, not a sync: things you save later will not appear until the next export, or until you share them here.</string>
+    <string name="library_import_reading">Reading that file…</string>
+    <string name="library_import_failed">That file could not be read.</string>
+    <string name="library_import_added">Added %1$d.</string>
+    <string name="library_import_duplicates">%1$d were already on your shelf.</string>
+    <string name="library_import_skipped">%1$d we could not read.</string>
+    <string name="library_import_truncated">That file had more in it than one import takes — run it again to continue.</string>
+    <string name="library_import_fell_back">We did not recognise the format, so we took the links out of it; the titles did not survive.</string>
+    <string name="library_privacy_note">Your shelf is encrypted on this phone, like your journal. Comrade never fetches a page for you — a saved link stays a link until you bring the text.</string>
+    <string name="library_empty">Nothing here yet. Share something into Comrade from any app, paste a link above, or import what you have already saved.</string>
+    <string name="library_untitled">Untitled</string>
+    <string name="library_read">Read</string>
+    <string name="library_resume">Resume</string>
+    <string name="library_open_link">Open link</string>
+    <string name="library_add_text">Add the text</string>
+    <string name="library_remove">Remove</string>
+    <string name="library_paste_label">Paste the article here</string>
+    <string name="library_paste_save">Save the text</string>
+    <string name="library_reading_time">~%1$d min</string>
+    <string name="library_link_only">link only</string>
+    <string name="library_open_now">open</string>
+    <string name="library_finished">finished</string>
+    <string name="library_nothing_to_save">There was nothing in that worth saving.</string>
+    <string name="library_link_only_explainer">That one is a link only. Open it, or paste the text in — Comrade will not fetch the page for you.</string>
+    <string name="library_no_browser">No app on this phone can open that link.</string>
+    <string name="library_shared_saved">Saved to your reading shelf.</string>
+    <!-- Where a save came from. Keys are comrade_core::library::SaveSource's;
+         desktop's focus_view.mjs sourceLabel holds the same words, so the same
+         shelf reads the same on a phone and a laptop. -->
+    <string name="library_source_instagram">Instagram</string>
+    <string name="library_source_twitter">X</string>
+    <string name="library_source_facebook">Facebook</string>
+    <string name="library_source_reddit">Reddit</string>
+    <string name="library_source_youtube">YouTube</string>
+    <string name="library_source_readlater">Read later</string>
+    <string name="library_source_pasted">Pasted here</string>
+    <string name="library_source_web">Web</string>
+    <string name="library_source_saved">Saved</string>
+
+    <!-- Attention: stretch breaks.
+
+         The copy limit here is the one BreathingScreen's block records for
+         breathing, and it is the same limit: these lines may say what a movement
+         *is*, and may never say what it treats, prevents or corrects. "Loosens
+         the neck" is a description; "corrects tech neck" is a medical claim, and
+         this is a phone. Nothing here tells anyone to push, to hold their breath,
+         or to go as far as they can — the movements are all self-limiting and the
+         wording has to stay that way.
+
+         Every step key below is comrade_core::stretch's. A step added there needs
+         a line here in the same change, or it renders with the routine's generic
+         note instead of an instruction (StretchScreen.stepInstruction). -->
+    <string name="stretch_title">Stretch break</string>
+    <string name="stretch_start">Start · %1$d seconds</string>
+    <string name="stretch_stop">Stop</string>
+    <string name="stretch_complete">That\'s the set.</string>
+    <string name="stretch_step_of">Step %1$d of %2$d</string>
+    <string name="stretch_note">A minute or two of moving, sitting down or standing up. Nothing about it is recorded. Stop any time — soreness is a reason to stop, not to push through.</string>
+    <string name="stretch_offer">%1$d minutes in. Two minutes of moving, if you want it — the session keeps running.</string>
+    <string name="stretch_offer_accept">Stretch</string>
+    <string name="stretch_offer_later">Not now</string>
+    <string name="stretch_routine_neck">Neck</string>
+    <string name="stretch_routine_shoulders">Shoulders</string>
+    <string name="stretch_routine_wrists">Wrists</string>
+    <string name="stretch_routine_back">Back</string>
+    <string name="stretch_routine_eyes">Eyes</string>
+    <string name="stretch_routine_stand">Stand up</string>
+    <string name="stretch_blurb_neck">Slow tilts and turns, for the part a screen actually pulls on.</string>
+    <string name="stretch_blurb_shoulders">Rolls and a squeeze, for where an hour of sitting collects.</string>
+    <string name="stretch_blurb_wrists">For the end of you that has been typing.</string>
+    <string name="stretch_blurb_back">Seated twists and side reaches. No standing needed.</string>
+    <string name="stretch_blurb_eyes">Look far away for a while. That is most of it.</string>
+    <string name="stretch_blurb_stand">The one worth doing if there is time for one.</string>
+    <string name="stretch_neck_release">Sit tall. Let your shoulders drop away from your ears.</string>
+    <string name="stretch_neck_tilt_left">Tilt your left ear toward your left shoulder. Just to where you feel it.</string>
+    <string name="stretch_neck_tilt_right">And the other side — right ear toward right shoulder.</string>
+    <string name="stretch_neck_turn_left">Turn slowly to look over your left shoulder.</string>
+    <string name="stretch_neck_turn_right">Now over your right shoulder, just as slowly.</string>
+    <string name="stretch_chin_tuck">Draw your chin gently back, like making a double chin. Release. Again.</string>
+    <string name="stretch_shoulder_roll_back">Roll both shoulders backward, slowly, all the way round.</string>
+    <string name="stretch_shoulder_shrug">Lift both shoulders up toward your ears, then let them fall.</string>
+    <string name="stretch_shoulder_blade_squeeze">Draw your shoulder blades toward each other and hold.</string>
+    <string name="stretch_cross_body_left">Bring your left arm across your chest and hold it there with the right.</string>
+    <string name="stretch_cross_body_right">Swap: right arm across, held with the left.</string>
+    <string name="stretch_wrist_circles">Circle both wrists, one way and then the other.</string>
+    <string name="stretch_wrist_extend_left">Straighten your left arm, fingers up, and draw them gently back.</string>
+    <string name="stretch_wrist_extend_right">The right hand now — fingers up, drawn gently back.</string>
+    <string name="stretch_finger_spread">Spread your fingers wide, then make a soft fist. Repeat.</string>
+    <string name="stretch_hands_shake_out">Shake your hands out loosely.</string>
+    <string name="stretch_seated_twist_left">Turn your torso to the left, using the chair for a little leverage.</string>
+    <string name="stretch_seated_twist_right">And to the right.</string>
+    <string name="stretch_cat_curl">Round your back forward, then open your chest. Slowly, either way.</string>
+    <string name="stretch_side_reach_left">Reach your left arm up and lean gently to the right.</string>
+    <string name="stretch_side_reach_right">Right arm up, lean gently to the left.</string>
+    <string name="stretch_eyes_far_focus">Look at the furthest thing you can see. Let your eyes rest there.</string>
+    <string name="stretch_eyes_slow_blink">Blink slowly, all the way closed, a few times.</string>
+    <string name="stretch_eyes_palm_rest">Cup your palms over your closed eyes. No pressure — just dark.</string>
+    <string name="stretch_stand_tall">Stand up. Feet under your hips, weight even.</string>
+    <string name="stretch_calf_raises">Rise onto your toes and lower back down, slowly.</string>
+    <string name="stretch_hamstring_reach_left">Left foot forward, hinge at the hips, reach toward it.</string>
+    <string name="stretch_hamstring_reach_right">Right foot forward this time, and hinge again.</string>
+    <string name="stretch_hip_open_left">Left ankle across the opposite knee, sit back a little.</string>
+    <string name="stretch_hip_open_right">Right ankle across now, and sit back.</string>
+    <string name="stretch_shake_out">Shake it all out. That\'s the set.</string>
 
     <!-- Tasks: what `/task` produces. The empty-state and row copy lives in
          `ui/TaskList.kt` beside the decisions it belongs to and is covered by

@@ -12,7 +12,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,31 +33,30 @@ import mullu.comrade.ComradeCore
 import mullu.comrade.R
 
 /**
- * The long read — the other half of `docs/ATTENTION.md` phase 2.
+ * The long read — one chapter-sized chunk at a time.
  *
- * One chapter-sized chunk at a time, with Back/Next, and the position
- * remembered. The design constraint is what it *lacks*: no infinite scroll,
- * no related-articles tail, no progress percentage to optimise, nothing to
- * swipe to next. Sustained reading is the exercise, so the screen offers
- * exactly one thing to do.
+ * The design constraint is what it *lacks*: no infinite scroll, no
+ * related-articles tail, no progress percentage to optimise, nothing to swipe to
+ * next. Sustained reading is the exercise, so the screen offers exactly one thing
+ * to do.
  *
- * **The text is always the user's own.** Comrade does not fetch a URL for
- * them, deliberately: adding an arbitrary-fetch path to the one app that
- * promises not to phone home would trade the promise for a convenience, and
- * readability extraction would drag a parser in behind it. Paste, or share
- * into the app.
+ * **The text is still always the user's own**, and that has not changed with the
+ * shelf: Comrade does not fetch a URL for anyone. What changed is where the text
+ * comes *from* — it used to be pasted here, one article at a time, and it now
+ * comes off `LibraryScreen`'s shelf, filled by the share sheet or by an import of
+ * the user's own platform export. This screen shows whichever row is open
+ * (`ComradeRuntime::reading`) and nothing else; there is no paste box here any
+ * more, because a reader with a compose field in it is two screens.
  */
 @Composable
 fun ReaderScreen(
     onJournalNote: (String) -> Unit,
+    onBackToShelf: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     var reading by remember { mutableStateOf<ComradeCore.ReadingInfo?>(null) }
     var loaded by remember { mutableStateOf(false) }
-    var title by remember { mutableStateOf("") }
-    var pasted by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
     val scroll = rememberScrollState()
 
     LaunchedEffect(Unit) {
@@ -66,21 +64,6 @@ fun ReaderScreen(
             runCatching { ComradeCore.reading() }.getOrNull()
         }
         loaded = true
-    }
-
-    fun save() {
-        val text = pasted.trim()
-        if (text.isEmpty()) return
-        error = null
-        scope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) { ComradeCore.saveReadingTyped(title.trim(), text) }
-            }.onSuccess {
-                reading = it
-                pasted = ""
-                title = ""
-            }.onFailure { error = it.message ?: "Could not save." }
-        }
     }
 
     fun move(to: Int) {
@@ -100,6 +83,9 @@ fun ReaderScreen(
     val current = reading
     if (!loaded) return
 
+    // Nothing open. This is reachable — the row was removed on the shelf while
+    // the reader was in the back stack — and the honest answer is a way back
+    // rather than an empty page.
     if (current == null) {
         Column(
             modifier = modifier
@@ -113,36 +99,13 @@ fun ReaderScreen(
                 color = MaterialTheme.colorScheme.primary,
             )
             Text(
-                stringResource(R.string.reader_paste_hint),
-                style = MaterialTheme.typography.bodySmall,
+                stringResource(R.string.reader_nothing_open),
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it },
-                label = { Text(stringResource(R.string.reader_title_label)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = pasted,
-                onValueChange = { pasted = it },
-                label = { Text(stringResource(R.string.reader_paste_label)) },
-                minLines = 6,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("reader-paste"),
-            )
-            error?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Button(onClick = onBackToShelf, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.library_title))
             }
-            Button(
-                onClick = { save() },
-                enabled = pasted.isNotBlank(),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("reader-save"),
-            ) { Text(stringResource(R.string.reader_save)) }
         }
         return
     }
@@ -172,6 +135,14 @@ fun ReaderScreen(
                 color = MaterialTheme.colorScheme.outline,
             )
         }
+        // Where it came from, said once and quietly. It matters for a shared
+        // selection whose title is a guess: "from Instagram" is often the only
+        // thing that identifies which save this is.
+        Text(
+            stringResource(sourceLabel(current.source)),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.outline,
+        )
 
         Text(
             current.chunks.getOrElse(position) { "" },
@@ -215,14 +186,19 @@ fun ReaderScreen(
                     .testTag("reader-next"),
             ) { Text(stringResource(R.string.reader_next)) }
         }
+        // Closes the reader, keeping the article and the position on the shelf.
+        // The old wording here was "Close this read" over a call that *deleted*
+        // the only saved text, which was true when there was only one. Deleting
+        // is now a shelf-row action, where the thing being deleted is visible.
         TextButton(
             onClick = {
                 scope.launch {
-                    withContext(Dispatchers.IO) { runCatching { ComradeCore.clearReadingTyped() } }
+                    withContext(Dispatchers.IO) { runCatching { ComradeCore.closeReadingTyped() } }
                     reading = null
+                    onBackToShelf()
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text(stringResource(R.string.reader_clear)) }
+        ) { Text(stringResource(R.string.reader_close)) }
     }
 }

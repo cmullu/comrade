@@ -557,3 +557,156 @@ mock.
   tests and (in CI) emulator smoke tests; `UsageStatsManager` behaviour varies
   across OEM builds, and the pickup count in particular deserves a real-handset
   sanity check before anyone quotes it as precise.
+
+---
+
+## 8. What shipped next: the shelf, and the body (2026-08-14)
+
+Two changes, both to the phase-2 surface, driven by the same complaint from the
+owner: **the long read was not useful, because it was fed by copy-paste.**
+
+That was a fair verdict on a real defect, and the diagnosis is not subtle. The
+reader was built to be handed text one article at a time. The articles people
+mean to read properly are *already saved* — in Instagram's bookmarks, in X's, in
+Facebook's saves, in a browser's reading list — so asking for them again asked
+someone to do the collecting twice, in the app that is supposed to be reducing
+what their phone asks of them.
+
+### 8.1 The reading shelf (`comrade_core::library`)
+
+The reader now reads off a **shelf**, and the shelf fills itself two ways that
+need no account, no API key and no network:
+
+| Route | What it is | Where |
+|---|---|---|
+| **Share sheet** | Share a page — or a text selection — into Comrade from any app. Android's `ACTION_SEND` (`text/plain`), parked by `AppNavigation.requestShare` because the shelf lives inside the vault and a share can arrive locked | `AndroidManifest.xml`, `MainActivity.acceptShare` |
+| **Export archive** | The file Instagram, X, Facebook and Reddit are obliged to hand over. Picked with `ACTION_OPEN_DOCUMENT` on Android or a file input on desktop, read in the frontend, parsed in Rust | `library::import_saves` |
+| **Paste** | Still there, and now one row among many rather than the only way in | `save_shared` |
+
+**Why export archives and not APIs.** Every one of those platforms can be read
+programmatically — with an OAuth app, a client secret, a per-request round trip
+to their servers, and their terms of service. Comrade would then be an app that
+promises not to phone home and ships four API clients, which is not a trade gate
+2 leaves available. A data export is a file, and a file is something a pure
+function can read on a plane. The cost is real and the UI says it in as many
+words: **an import is a snapshot, not a sync.**
+
+**Why the JSON importer walks the shape instead of matching it.** One struct per
+platform with `serde` derives is the obvious implementation and the one that
+breaks silently: these schemas are internal formats that change between export
+versions, and a mismatched `Deserialize` fails as *"0 items imported"* —
+indistinguishable, to the person holding the file, from Comrade being broken. So
+`import_saves` walks arbitrary JSON for the *shape* of a save (a URL-valued
+field, with a title and a timestamp near it, inherited down the tree so
+Instagram's account-name-two-levels-up survives). One tested code path covers
+Instagram's `saved_posts.json`, X's `bookmarks.js` (assignment prefix and all),
+Facebook's `saved_items.json`, Reddit's and Pocket's CSV, Pocket's HTML, and a
+bare list of URLs — and a file it cannot parse at all degrades to "we found the
+links in it" **and says so**, because titles are lost on that path.
+
+**The boundary that had to be said out loud.** Nothing fetches a URL. An
+imported bookmark is a title and a link, so a row with no text cannot be opened
+in the reader — it offers the link and a way to paste the article in. That rule
+is `ShelfDecisions.rowActions` on Android and `shelfRow` on desktop, both tested,
+because the failure mode of getting it wrong is an empty reader, which reads as a
+broken app rather than as a deliberate limit. A library that quietly fetched
+every URL it was given would be a crawler wearing a reading app's clothes.
+
+Storage: one new sealed tree (`library_saves`) plus an `OpenRead` pointer in
+`attention_meta`. The legacy one-slot `reading_state` is **migrated** on first
+read and cleared — onto the shelf, not into the reader, because someone who
+updates the app should not be dropped back into chunk 14 of something without
+asking.
+
+API note: `clear_reading` is now `close_reading` and keeps the article;
+`delete_saved_item` is the one that forgets. Two verbs, because there is more than
+one thing on the shelf to delete now.
+
+### 8.2 Stretch breaks (`comrade_core::stretch`)
+
+The pillar had paced breathing for the nervous system and a timer for the mind,
+and nothing for the part of a long session that actually hurts: an hour still in
+one chair, neck forward, shoulders up. Opera Air's neck exercises are the
+reference, and the reason to take the idea is not fashion — a break someone will
+*take* has to be short, guided and impossible to fail, and "get up for a bit" is
+none of those.
+
+Six routines — neck, shoulders, wrists, back, eyes, stand up — 45 to 130 seconds
+each, offered on the half hour of a session and **never in its last eight
+minutes** (interrupting the final stretch of work is how this feature gets
+switched off). The engine ships step *keys* and durations, never prose, so the
+words stay translatable and live in `strings.xml` / `stretch_view.mjs`; it also
+owns the walk over the steps, asked once a second by both frontends, so neither
+can drift onto its own timeline.
+
+Four gates, two of them enforced by tests rather than by intention:
+
+1. **No claims.** The copy may say what a movement *is*, never what it treats.
+   `stretch_view.test.mjs` greps every line for `cure|treat|corrects|prevents|…`
+   and for "push through", because those are the two ways stretch copy goes wrong
+   and neither is a review anyone remembers to do.
+2. **Symmetry is not optional.** A test asserts both sides of every one-sided
+   movement get equal time and the same motion. It caught the neck routine on its
+   first run — the check had paired a *turn* with a *tilt*'s mirror, which is the
+   bug the test exists for, in the test.
+3. **No breath-holding or end-range forcing.** Every movement is self-limiting.
+4. **Nothing is recorded.** Like breathing: no count of breaks taken, because a
+   number would turn a break into a task.
+
+### 8.3 The Focus surface has a mood now
+
+The tab was deliberately the plainest surface in the app, on the reasoning that
+gate 3 forbids celebrating a completion and a plain screen cannot celebrate
+anything. **The premise is right and the conclusion was too strong.** What gate 3
+forbids is *reward mechanics* — a score, a streak, a red state — and none of
+those is the same thing as the surface being pleasant to sit in front of. Opera
+Air is the reference for the difference: soft light, slow motion, translucency,
+nothing to beat.
+
+Two adaptations rather than a copy:
+
+- **Not white.** That browser is light and airy; this app is dark-mode-first, and
+  flipping one screen to white would strobe someone's eyes on every tab switch at
+  night. So the same idea in this app's own key — three big soft gradients
+  drifting behind translucent panels, bloom instead of glare, at the theme's own
+  accents (`FocusAmbient` on Android, `.focus-ambient` on desktop, with the same
+  three drift periods on both so they breathe at the same rate).
+- **The countdown is a ring that empties.** A ring that filled up would invite
+  "how much have I earned", which is precisely the scoring this pillar refuses. A
+  ring draining is only where the time went.
+
+**Reduced motion stops all of it.** `prefers-reduced-motion` on desktop,
+`ANIMATOR_DURATION_SCALE == 0` on Android — the closest thing the platform has.
+The rule lives in `ambientBlobs()` and `FocusAmbient.reduceMotion` rather than
+only in a stylesheet, and it has a test, because it is the one thing here that
+would otherwise be pretty instead of calm: this is the tab someone opens when
+they are already scattered.
+
+### 8.4 What is verified, and what is not
+
+Ran here: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D
+warnings` **on stable 1.97** (the sandbox image was on 1.94, and 1.97 has a
+`collapsible_match` case the older one does not — the trap in `CLAUDE.md` is
+real), `cargo test --workspace` (34 new tests), `node --test desktop/ui/*.test.mjs`
+(440, 27 new), and the two new Kotlin decision files compiled and run against
+JUnit through the `kotlinc` route in `CLAUDE.md` (17 tests).
+
+Not verified here, and not claimed to be: `desktop/src-tauri` clippy (no
+GTK/webview headers in this sandbox), `./gradlew test`, the APK, and anything
+about how either screen *looks*. In particular **nobody has run an import against
+a real export archive** — the parsers are tested against hand-written fixtures
+shaped like the real files, which is not the same thing as the real files, and the
+first genuine Instagram export is likely to find something. The fallback path
+exists precisely because that is expected.
+
+### 8.5 Still open
+
+- **The reader cannot fill a bookmark by itself, and will not.** The honest
+  consequence is that an imported Instagram shelf is mostly links. Whether that
+  is worth revisiting — with an explicit, per-item, opt-in fetch behind the same
+  kind of feature gate as `media-http` — is an owner decision, not a default.
+- **No dedupe against what was read *before* an import.** A save deleted from the
+  shelf and then re-imported comes back. Deleting a row is not the same as saying
+  "never again", and a tombstone list is a second thing to keep in the vault.
+- **`app/` (Flutter) has none of this.** It has no Focus surface at all, so this
+  is not a regression there; it is a gap that widens.

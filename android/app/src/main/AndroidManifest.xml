@@ -207,6 +207,22 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Comrade as a share target for reading material: a page from a
+                 browser, a post from Instagram, a selection from anywhere. This
+                 is what makes the reading shelf fillable in the moment something
+                 is noticed, instead of only by importing an export archive later
+                 (MainActivity.acceptShare → ComradeCore.saveSharedTyped).
+
+                 text/* only, deliberately. A `*/*` filter would put Comrade in
+                 the share sheet for every photo and video on the phone — a list
+                 it has no business being in, and a crowd that makes the entry
+                 harder to find where it is actually wanted. Images already have
+                 their own path into the app (the composer's picker). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
 
         <!-- Handles the Decline/Hang Up actions on the call notifications'
