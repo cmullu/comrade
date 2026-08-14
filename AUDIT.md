@@ -246,6 +246,8 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each finding is labele
 | T4 | M | **[judgment] No cross-engine integration test and no known-answer crypto tests.** Nothing exercises unlock → engine build → broadcast → event-bus delivery against a mock/local relay; crypto tests are all self-round-trips with no fixed vectors (e.g., NIP-04 reference vectors, HKDF/AES KATs). The Rust↔Kotlin JSON contract is pinned by no test on either side, and the `nip96-http` feature is never compiled in CI (`cargo test --workspace` uses default features), so the real uploader can rot silently. |
 | T5 | M | **[fact, found 2026-08-08 reviewing polius/FileSync; half closed 2026-08-08] Nothing tested that a transferred byte arrives, and three of the four `RelayPolicy` branches still cannot be exercised.** The byte half is now covered: `crates/comrade_core/tests/share_byte_round_trip.rs` chunks a seeded buffer, shuffles every frame, duplicates every fifth, aims the malformed-frame guards at a chunk that has genuinely not arrived, and ends on the SHA-256 the offer carried. **Note what it does not cover:** it re-implements the receiver's ordering rather than calling any shipped receiver, so it cannot catch a regression in `FileTransfer.onChunk` — it is a test in Rust about an invariant enforced in Kotlin. **The open half is the sharper one.** `RelayPolicy::DirectOnly` is provable by construction, but `UnderBytes`, `AskEachTime` and `Always` all describe a transfer *through* a relay and there is no way to make ICE choose one when a direct path exists, so those three branches have almost certainly never carried a byte — and Q19's consent handling now depends on `AskEachTime`. `CallManager.testTurnConnectivity` already builds a RELAY-only `PeerConnection` for calls (COMMS-02); transfers have no equivalent. The fix FileSync points at is a forced-ICE override (`web/js/modules/webrtc/mode.js` — `?ice=turn` sets `iceTransportPolicy: 'relay'`). Deliberately not built here: the knob is small but needs an FFI surface and two frontend wirings to enable a test that still needs two devices on different networks, which is the two-installation harness COMMS-03 deferred. Adding the surface without the harness would look like coverage without being it. |
 
+| T6 | M | **[fact, found 2026-08-14] The `Device test` lane is flaky, nothing says so, and the failure it produces reads exactly like a real regression.** `MainActivityUiTest.onboardingLeadsToChatsShell` times out after 120 s with *"the onboarding form is still showing — the submit tap did not take effect"* and no error line: the app reported nothing, the tap simply did not land. Eight of the last twenty `android-apk.yml` runs failed this lane, **twice on `main`** (`729845f`, `91dd3ae`), and a re-run of the identical commit passes — while the sibling `pixel-9` AVD passes first time on the same APK. So the signal is per-AVD timing, not per-commit. The cost is not the red badge: it is that anyone pushing an Android change sees a failure in the one lane that runs their code on a device and has to disprove authorship before they can trust it, which is a full investigation cycle each time. Not fixed here because the fix is a judgment about the test, not a bug: `performClick` on a Compose node with the IME up and Argon2 about to run is inherently racy, and the honest repairs are to retry the submit when the form is still showing after a bounded wait, or to assert the vault opened through the state machine rather than through the shell's text. Either is a change to a test this branch has no other reason to touch. **Exit condition:** the retry (or a `waitUntil` around the tap) lands and the lane goes twenty runs without this failure. |
+
 **Healthy — and worth saying loudly:** this is a genuinely well-tested prototype where tests exist: `comrade_state` (transition graph, history), `comrade_storage` (13 unit + 6 durability tests incl. reboot cycles, wrong-PIN fail-closed, and adversarial scans proving no plaintext ever hits disk), relay router (10 pure-logic tests), media (full pipeline round-trip), `comrade_ui` (lock-gating, Send/Sync compile guarantees, serde round-trips), Kotlin voice parsing. Tests assert behavior, not execution. Roughly: storage/state/relay/media/ui ≈ well covered; vault/sakha ≈ partial (pure parts only); sabha engine, saathi, JNI, desktop JS ≈ uncovered.
 
 ### 3.6 Dependencies
@@ -1298,6 +1300,62 @@ is small; the content problem is the real constraint:
 >   transport row and the embed-refusal copy are Android's alone; `desktop/ui`
 >   still starts a session per thing played. Recorded rather than implied,
 >   because the shared-decision convention makes silence read as agreement.
+
+> **Together, 2026-08-14 — the library browses as a collection, and a tap plays.**
+> `docs/TOGETHER.md` §22. Two owner-requested changes and one bug found under
+> them.
+>
+> The browser drew `MediaStore`'s track-title order as one flat column, which is
+> the shape of a search result rather than of a collection. It is now a grid of
+> covers with a drill-in per record, and the flat list is what a *query* produces
+> — `TogetherDecisions.browse` / `albumsOf` / `AlbumArtist`
+> (`android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt`), with
+> the id-over-title keying, the alphabetical album order, the kept-and-last
+> leftovers group and the three artist answers all pinned by tests.
+> `TogetherDecisions` is **119** JVM tests, up from 105.
+>
+> And tapping a song in your own library now plays it instead of asking who with
+> — `startStepInLibrary` / `mayChoosePerson`, §18's argument applied one screen
+> earlier. Only the library's rule changed: a pasted link, a picked file and a
+> catalogue search still ask through `startStep`.
+>
+> **Resolved here:** `MusicLibrary.artwork` keyed its cache on the album id alone,
+> so with three request sizes in play (48 dp row, 144 dp tile, 320 dp sleeve)
+> whichever decoded first was served to all three — a sleeve drawn from a 48 px
+> thumbnail after a browse, or a sleeve-sized bitmap per row going the other way.
+> The key carries the size and the budget went 4 MB → 12 MB, which is one
+> screenful of grid covers with room to flick back
+> (`MusicLibrary.kt`, `artwork` and `CACHE_BYTES`). No regression test: it needs a
+> `ContentResolver`, and there is no Robolectric lane in this repo.
+>
+> A `comrade-reviewer` pass over the above found seven things, six of which are
+> fixed in the same branch and are worth naming because none of them is the kind a
+> type-checker or a JVM test can see: the grid's scroll position was discarded on
+> the way back out of a record (`LazyGridState` remembered inside the `when`
+> branch that the drill-in removes); an album's track count was stated as a fact
+> about the record while the 2,000-row page cut had fallen inside it; the
+> truncation note inside an open album told the reader to use a search field that
+> view deliberately does not draw; the cache-budget comment's arithmetic
+> contradicted itself; a comment justified skipping a `remember` with a claim
+> about `equals` that is not true; and the system back gesture did not close an
+> open record, because `MainActivity`'s single `BackHandler` does not cover the
+> Together tab. The seventh — that `MediaStore` may substitute a folder name for a
+> missing `ALBUM` tag, which would make the group-versus-row fix above a no-op —
+> is not answerable in this sandbox and is recorded rather than resolved.
+>
+> Three gaps this leaves:
+>
+> - **An album is in title order, not track order.**
+>   `MediaStore.Audio.Media.TRACK` is not in `MusicLibrary.page`'s projection, so
+>   a record's own sequence — the one thing that would make it read as the album
+>   does — is not available to `albumsOf`. Adding the column is small; deciding
+>   what to do with the disc-number encoding it carries is not.
+> - **Nothing here has been drawn.** Both files type-check via
+>   `.claude/scripts/android-typecheck-compose.sh` and the pure half runs, but no
+>   device has laid out the grid or decoded a cover into it. Tile size and how the
+>   adaptive column count lands on a 360 dp phone are unverified by construction.
+> - **The grid is Android's alone**, like the rest of §16 and §18. `desktop/ui`
+>   has no library to browse and `app/` has no together surface at all.
 
 ---
 
