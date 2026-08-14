@@ -205,13 +205,12 @@ object Notifier {
      *
      * Every post in this file goes through here, and the reason is the caller
      * rather than the post: these run on [EventPump]'s drain loop, the
-     * process's only consumer of the native event queue. `notify` throws under
-     * conditions that are ordinary rather than exotic — `POST_NOTIFICATIONS`
-     * revoked *between* the [canPost] check and the post (`call/CallService.kt`
-     * has guarded its own post for this reason for some time), or a `CallStyle`
-     * the platform declines — and an escaping throw used to end that loop, so
-     * failing to show one notification silently cost every later message and
-     * call too.
+     * process's only consumer of the native event queue. `notify` can throw
+     * under conditions that are ordinary rather than exotic — a `CallStyle`
+     * the platform declines is the known case (`call/CallService.kt` has
+     * guarded its own post for this reason for some time) — and an escaping
+     * throw used to end that loop, so failing to show one notification
+     * silently cost every later message and call too.
      *
      * `drainLoop` now catches this class of failure as well. This is the inner
      * of the two guards and the one that keeps the loop from ever having to:

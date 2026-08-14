@@ -53,9 +53,11 @@ object EventPump {
     private const val POLL_IDLE_MS = 200L
 
     /**
-     * Guarded by this object's monitor, along with [job]. One lock for both:
-     * checking the holder set outside it would race a concurrent [release]
-     * into leaving a loop running that nobody holds.
+     * Every start/stop *decision* over the holder set and [job] runs under
+     * this object's monitor. One lock for both: deciding from a holder set
+     * read outside it would race a concurrent [release] into leaving a loop
+     * running that nobody holds. ([isHeld] reads without the monitor — it is
+     * a diagnostic, never a decision input.)
      */
     private val holders = PumpHolders()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

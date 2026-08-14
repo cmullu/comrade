@@ -103,10 +103,9 @@ private const val SAFE_SHIFT_LIMIT = 20
  * property that once failed in production — a throwing event ending delivery
  * for the life of the process — is pinned by a JVM test rather than asserted
  * by a comment. [EventPump] instantiates it over [ComradeCore.pollEvent] and
- * [ChatEventRouter.route], either of which can throw for ordinary reasons:
- * `NotificationManagerCompat.notify` throws once `POST_NOTIFICATIONS` has been
- * revoked mid-session, and a `CallStyle` notification can be refused outright
- * by the platform.
+ * [ChatEventRouter.route], either of which can throw for ordinary reasons —
+ * a `CallStyle` notification the platform refuses outright, a
+ * SharedPreferences or WebRTC edge inside routing.
  *
  * So one event's failure costs exactly that event: it is reported to [onError]
  * and dropped — not retried, because a poisoned event that fails once will
