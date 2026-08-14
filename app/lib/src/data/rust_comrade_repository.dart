@@ -52,23 +52,27 @@
 ///   disclosure with no UI to explain it is the one thing this feature must
 ///   not be. It is one line here the day that screen exists.
 ///
-/// And a whole family that `api.rs` deliberately does *not* export yet: the
-/// in-chat commands (`/task`, `@tara`, `/comrade-breathe`, `/play` — see
+/// And a family that `api.rs` deliberately does *not* export yet: the in-chat
+/// commands (`/task`, `@tara`, `/comrade-breathe`, `/play` — see
 /// `docs/CHAT_ACTIONS.md`). They are on the uniffi surface for Kotlin and on
-/// the Tauri surface for desktop, and they were kept off the FRB surface on
-/// purpose. Two reasons, and the second is the real one:
+/// the Tauri surface for desktop, and they are kept off the FRB surface for one
+/// reason only:
 ///
 /// * The composer here has no picker, no mention chips and no aside styling,
 ///   and an aside that looks like a message is precisely the failure that
 ///   feature must not have — `@tara` reaching `sendDmReply` would send somebody
 ///   their own private thought.
-/// * Adding them would have meant regenerating `frb_generated.rs`, and the
-///   change that introduced them could not do that (`flutter_rust_bridge_codegen`
-///   was unavailable), so half of it would have been hand-edited. That file is
-///   generated, never edited by hand.
 ///
-/// The Rust side is complete and frontend-agnostic; this is a UI gap and a
-/// codegen step, in that order.
+/// **A second reason used to be given here and it is no longer true.** It said
+/// adding them would mean regenerating `frb_generated.rs` and that the change
+/// introducing them could not, because `flutter_rust_bridge_codegen` was
+/// unavailable. The threads-and-topics work of 2026-08-14 installed the pinned
+/// 2.12.0 codegen and regenerated, so codegen is a step somebody can take, not
+/// a blocker — see `.claude/rules/flutter.md` for the exact command and why
+/// `--no-web` is not optional. What is left is the UI gap above, and that one is
+/// real: it is a composer, not a bridge.
+///
+/// The Rust side is complete and frontend-agnostic.
 ///
 /// Each is a one-line addition to the interface plus a fake implementation
 /// when a screen wants it. Nothing here is half-wired: every method the

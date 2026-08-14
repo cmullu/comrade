@@ -99,7 +99,7 @@ pub const MAX_THREAD_DEPTH: usize = 64;
 /// half silently, which is the failure this module's whole keying scheme
 /// exists to avoid. The exit condition is real work, not a flag: NFKC
 /// normalisation plus a confusables check, at which point `MIN`/`MAX` become
-/// grapheme counts. Recorded in `AUDIT.md` as T-1 so it is not rediscovered as
+/// grapheme counts. Recorded in `AUDIT.md` as TOPIC-1 so it is not rediscovered as
 /// a bug. Until then a non-ASCII name is *rejected*, never silently mangled
 /// into `#--`.
 ///
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn slugify_refuses_non_ascii_rather_than_mangling_it() {
-        // The limitation the module header records as AUDIT T-1. What must not
+        // The limitation the module header records as AUDIT TOPIC-1. What must not
         // happen is `#जमा` quietly becoming `#--` or an empty key.
         assert_eq!(slugify("जमा"), None);
         assert_eq!(slugify("dépôt"), None);

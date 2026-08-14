@@ -1881,7 +1881,7 @@ pub struct ThreadDto {
     /// Every attachment in the thread, oldest first. In practice this is the
     /// root or nothing: an attachment carries no `reply_to`, so it can start a
     /// thread but not join one. That is a real limitation rather than a design
-    /// choice — recorded as `AUDIT.md` T-2.
+    /// choice — recorded as `AUDIT.md` TOPIC-2.
     pub media: Vec<MediaMessageDto>,
 }
 
@@ -8485,7 +8485,7 @@ fn deliver_synthetic_line(
 ///
 /// One sentence, and it names the rule rather than the failure, because the
 /// commonest way to hit it is by typing a topic in a script the slug rules do
-/// not yet accept (`AUDIT.md` T-1) — and "that's not a valid slug" tells
+/// not yet accept (`AUDIT.md` TOPIC-1) — and "that's not a valid slug" tells
 /// somebody nothing they can act on.
 const TOPIC_NAME_REFUSED: &str =
     "A topic name needs two or more letters or digits, and for now Latin ones";
@@ -8528,7 +8528,7 @@ impl ThreadIndex {
     ///
     /// Attachments are included as items but contribute no `reply_to` edges,
     /// because a `MediaRef` carries none: an attachment can *start* a thread
-    /// and cannot join one. `AUDIT.md` T-2.
+    /// and cannot join one. `AUDIT.md` TOPIC-2.
     fn build(
         store: &comrade_storage::EncryptedStore,
         peer_npub: &str,
@@ -17681,7 +17681,7 @@ mod tests {
         let (_hex, peer) = stranger();
         let (root, _) = threaded_chat(&rt, &peer).await;
 
-        // AUDIT T-1: a Devanagari topic name is a thing users will type, and it
+        // AUDIT TOPIC-1: a Devanagari topic name is a thing users will type, and it
         // must fail loudly rather than become `#--`.
         let err = rt
             .assign_thread(&peer, &root, Some("जमा".into()))

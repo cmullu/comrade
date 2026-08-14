@@ -275,7 +275,7 @@ void main() {
 
     testWidgets('a name that cannot be a key is refused, not mangled',
         (WidgetTester tester) async {
-      // AUDIT T-1: a Devanagari topic name is a thing users will type, and it
+      // AUDIT TOPIC-1: a Devanagari topic name is a thing users will type, and it
       // has to fail visibly rather than become `#--`.
       setWindowSize(tester, const Size(420, 900));
       final FakeComradeRepository repo = await unlockedFake(seed: false);

@@ -301,7 +301,7 @@ class ThreadDetail {
   final List<MessageInfo> messages;
 
   /// In practice the root or nothing: an attachment carries no `replyTo`, so it
-  /// can start a thread but not join one (`AUDIT.md` T-2).
+  /// can start a thread but not join one (`AUDIT.md` TOPIC-2).
   final List<MediaMessageInfo> media;
 }
 
