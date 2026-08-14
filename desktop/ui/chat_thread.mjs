@@ -28,6 +28,32 @@ export function quoteScrollTargetId(msgs, replyToId) {
 }
 
 /**
+ * Whether the reader is close enough to the newest message that a rebuild of
+ * the thread should land them at the bottom again.
+ *
+ * Someone scrolled up reading history must NOT be yanked down. On desktop that
+ * is not only about new mail: the thread is rebuilt for a delivery tick or a
+ * peer rename too, so without this rule an event that added nothing to read
+ * still drags the reader to the newest line.
+ *
+ * The pixel equivalent of `isNearBottom` on Android and `isNearBottomByOffset`
+ * in the Flutter app — a scrollable's travel is `scrollHeight - clientHeight`,
+ * which is what Flutter calls `maxScrollExtent`, and [slackPixels] is the same
+ * 220 those carry. A log with nothing to scroll (not yet laid out, or shorter
+ * than its box) counts as at the bottom, matching their `totalCount <= 0`.
+ */
+export function isNearBottom({
+  scrollTop,
+  scrollHeight,
+  clientHeight,
+  slackPixels = 220,
+}) {
+  const travel = (scrollHeight || 0) - (clientHeight || 0);
+  if (travel <= 0) return true;
+  return (scrollTop || 0) >= travel - slackPixels;
+}
+
+/**
  * How long the jumped-to message stays highlighted, in milliseconds.
  *
  * A scroll on its own does not say *which* message it landed on, and a reply
