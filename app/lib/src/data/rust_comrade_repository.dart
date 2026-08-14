@@ -768,6 +768,12 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
         ),
       rust.BridgeEvent_ComradeNudge(:final String peer, :final String? name) =>
         IncomingComradeNudge(peer: peer, name: name),
+      // Ride mode — no Flutter surface yet; see `docs/RIDE.md` §8. Null rather
+      // than a stub for the same reason the Together arms below are: a glance
+      // card nobody can see, spoken by nothing, is worse than silence — and a
+      // phrase that never reaches a screen must not raise a notification
+      // claiming it did. Android is the priority frontend and has it.
+      rust.BridgeEvent_RideSignal() => null,
       rust.BridgeEvent_MeshStatusChanged(:final rust.MeshStatusDto field0) =>
         MeshStatusChanged(_meshStatus(field0)),
       rust.BridgeEvent_LedgerUpdated(:final String ledger) =>

@@ -176,6 +176,18 @@ class RideDecisionsTest {
         assertTrue(pillion.playPause && pillion.next && pillion.previous && pillion.scrubber)
     }
 
+    @Test
+    fun bothSeatsGetThePhrasesAndOnlyThePillionGetsTheRouteComposer() {
+        // Answering a glance with "all good" is half the point, so the phrase
+        // grid is on both screens…
+        assertTrue(RideDecisions.mayComposeQuick(Role.Driver))
+        assertTrue(RideDecisions.mayComposeQuick(Role.Pillion))
+        // …but a keyboard and three chips is not a thing the person steering
+        // should be offered.
+        assertTrue(!RideDecisions.mayComposeRoute(Role.Driver))
+        assertTrue(RideDecisions.mayComposeRoute(Role.Pillion))
+    }
+
     // ── The composer's tables ────────────────────────────────────────────────
 
     @Test

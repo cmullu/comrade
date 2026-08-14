@@ -1294,6 +1294,31 @@ object ComradeCore {
     fun togetherSessionTyped(): uniffi.comrade_ui.TogetherSessionDto? =
         runCatching { ffi.togetherSession() }.getOrNull()
 
+    // ── Ride mode (driver + pillion — see docs/RIDE.md) ──────────────────────
+
+    /**
+     * Say one catalog phrase to the other seat. [phrase] is a wire name from
+     * [mullu.comrade.ride.RideDecisions.PHRASES]; core refuses one it does not
+     * know rather than sending it, because the far side would drop it whole.
+     */
+    fun rideSendQuick(peer: String, phrase: String) {
+        rethrowing("Send") { runBlocking { ffi.rideSendQuick(peer, phrase) } }
+    }
+
+    /**
+     * Suggest the next maneuver to the person steering. [maneuver] is a wire
+     * name from [mullu.comrade.ride.RideDecisions.MANEUVERS]; an over-long note
+     * is refused by core rather than truncated, so what arrives is what was
+     * typed or nothing at all.
+     */
+    fun rideSendRoute(peer: String, maneuver: String, distanceM: Long?, note: String?) {
+        rethrowing("Send") {
+            runBlocking {
+                ffi.rideSendRoute(peer, maneuver, distanceM?.toUInt(), note)
+            }
+        }
+    }
+
     // ── Handing the file over, when only one side has it ─────────────────────
 
     /**

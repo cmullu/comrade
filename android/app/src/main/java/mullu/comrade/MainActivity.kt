@@ -487,6 +487,7 @@ private fun MainShell(
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     /// Feed is a pushed screen now, reached from the drawer — see [MainTab].
     var feedOpen by rememberSaveable { mutableStateOf(false) }
+    var rideOpen by rememberSaveable { mutableStateOf(false) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     // Owned by RelayConnectionService/ChatEventRouter now — the single
@@ -701,7 +702,7 @@ private fun MainShell(
     // Settings screen closes, then a Chats sub-screen returns to the list.
     BackHandler(
         enabled = drawerState.isOpen ||
-            settingsOpen || feedOpen ||
+            settingsOpen || feedOpen || rideOpen ||
             (tab == MainTab.Chats && chatNav != ChatNav.List) ||
             (tab == MainTab.Focus && focusNav != FocusNav.Sessions),
     ) {
@@ -709,6 +710,7 @@ private fun MainShell(
             drawerState.isOpen -> scope.launch { drawerState.close() }
             settingsOpen -> settingsOpen = false
             feedOpen -> feedOpen = false
+            rideOpen -> rideOpen = false
             tab == MainTab.Focus -> focusNav = FocusNav.Sessions
             else -> chatNav = ChatNav.List
         }
@@ -732,6 +734,9 @@ private fun MainShell(
                     focusNav = FocusNav.Breathing
                 },
             )
+        } else if (rideOpen) {
+            // Pushed, with its own back arrow, like Feed — see the drawer item.
+            RidePushedScreen(onBack = { rideOpen = false })
         } else if (settingsOpen) {
             SettingsPushedScreen(
                 profile = profile,
@@ -767,6 +772,10 @@ private fun MainShell(
                         onOpenFeed = {
                             scope.launch { drawerState.close() }
                             feedOpen = true
+                        },
+                        onOpenRide = {
+                            scope.launch { drawerState.close() }
+                            rideOpen = true
                         },
                     )
                 },
@@ -1420,6 +1429,7 @@ private fun ComradeDrawerSheet(
     onOpenComrades: () -> Unit,
     onOpenTasks: () -> Unit,
     onOpenFeed: () -> Unit,
+    onOpenRide: () -> Unit,
 ) {
     ModalDrawerSheet {
         Row(
@@ -1470,6 +1480,18 @@ private fun ComradeDrawerSheet(
             onClick = onOpenFeed,
             modifier = Modifier.testTag("drawer-feed"),
         )
+        // Ride mode is a place you *go* — you are about to get on a
+        // motorcycle — which is the same argument that put Feed in the drawer
+        // rather than on the bottom nav. It is deliberately not a tab: five
+        // tabs is the nav, and a sixth for something used on a ride and never
+        // otherwise would cost the four daily ones room.
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.ride_title)) },
+            icon = { Icon(PeopleHugIcon, contentDescription = null) },
+            selected = false,
+            onClick = onOpenRide,
+            modifier = Modifier.testTag("drawer-ride"),
+        )
         NavigationDrawerItem(
             label = { Text(stringResource(R.string.call_history_title)) },
             icon = { Icon(CallIcon, contentDescription = null) },
@@ -1482,6 +1504,44 @@ private fun ComradeDrawerSheet(
             selected = false,
             onClick = onOpenSettings,
             modifier = Modifier.testTag("drawer-settings"),
+        )
+    }
+}
+
+/**
+ * Ride mode, as a pushed screen (`docs/RIDE.md`).
+ *
+ * Loads its own comrade list rather than taking one from the caller: this is
+ * reached from the drawer, not from a tab that already had one in hand, and
+ * the list is small and read once when the screen opens.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RidePushedScreen(onBack: () -> Unit) {
+    var comrades by remember { mutableStateOf<List<ComradeCore.ComradeInfo>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        comrades = withContext(Dispatchers.IO) {
+            runCatching { ComradeCore.comrades() }.getOrDefault(emptyList())
+        }
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                        )
+                    }
+                },
+                title = { Text(stringResource(R.string.ride_title)) },
+            )
+        },
+    ) { padding ->
+        mullu.comrade.ui.RideScreen(
+            peers = comrades,
+            modifier = Modifier.padding(padding),
         )
     }
 }

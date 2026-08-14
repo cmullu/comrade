@@ -221,6 +221,23 @@ object RideDecisions {
         Role.Pillion -> Controls(playPause = true, next = true, previous = true, scrubber = true)
     }
 
+    /**
+     * Whether this seat's screen offers the phrase grid. **Both do** — the
+     * driver answering a glance with "all good" is half the point, and five
+     * big buttons is the one composer a gloved thumb can hit without looking.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun mayComposeQuick(role: Role): Boolean = true
+
+    /**
+     * Whether this seat's screen offers the route composer. **The pillion's
+     * does; the driver's does not.** Not a wire permission — the protocol is
+     * symmetric and either side may send one — but a maneuver, a distance chip
+     * and a typed landmark is three deliberate taps and a keyboard, and the
+     * person doing that should not be the person steering.
+     */
+    fun mayComposeRoute(role: Role): Boolean = role == Role.Pillion
+
     // ── The composer's own tables (pillion side) ─────────────────────────────
 
     /** Every phrase the composer offers, in the order the grid draws them —
