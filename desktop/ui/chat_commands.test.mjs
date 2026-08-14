@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   ACTION_KEYS,
   ASIDE,
+  ASSIGN_TOPIC,
   BLOCKED,
   CHOOSE,
   DESKTOP_CAN_PLAY,
@@ -353,4 +354,34 @@ test("a shared Tara answer is split the same way core splits it", () => {
   // it: a match is the sender's claim, never proof — AUDIT.md Q17.
   assert.equal(splitAuthor("Tara: I made this up").author, "tara");
   assert.deepEqual(splitAuthor(null), { author: "human", content: "" });
+});
+
+test("/assign with a topic and a reply target files that thread", () => {
+  const command = { kind: "assign_topic", topics: [{ slug: "deposit", start: 8, end: 16 }] };
+  assert.deepEqual(planFor(command, { replyTarget: "msg1" }), {
+    action: ASSIGN_TOPIC,
+    slug: "deposit",
+    messageId: "msg1",
+  });
+});
+
+test("a bare /assign opens the picker rather than refusing", () => {
+  // Empty `topics` is the discoverable way in: a refusal here would make the
+  // one command that shows you the topics the one you cannot type blind.
+  assert.deepEqual(planFor({ kind: "assign_topic", topics: [] }, { replyTarget: "msg1" }), {
+    action: ASSIGN_TOPIC,
+    slug: null,
+    messageId: null,
+  });
+});
+
+test("/assign with nothing selected says what is missing and keeps the text", () => {
+  // INCOMPLETE, not BLOCKED: the window can do this perfectly well, the draft
+  // just has not said which thread — and guessing would file the wrong one.
+  const plan = planFor(
+    { kind: "assign_topic", topics: [{ slug: "deposit", start: 8, end: 16 }] },
+    { replyTarget: null },
+  );
+  assert.equal(plan.action, INCOMPLETE);
+  assert.match(plan.message, /#deposit/);
 });

@@ -248,7 +248,43 @@
             <div id="chat-header" class="chat-header">
               <span class="muted">Select a conversation</span>
             </div>
-            <div id="chat-log" class="chat-log" aria-live="polite"></div>
+            <!-- Threads and topics (docs/CHAT_THREADS.md). A drawer beside the
+                 conversation rather than a route, because a thread is something
+                 you dip into and come back from — the same reason Android uses
+                 a bottom sheet. Rows and ordering come from `topics.mjs`; the
+                 filing itself is `assign_thread` in core, which owns the reply
+                 graph so no frontend re-walks it. -->
+            <div class="chat-body">
+              <div id="chat-log" class="chat-log" aria-live="polite"></div>
+              <aside id="threads-drawer" class="threads-drawer" hidden aria-label="Threads and topics">
+                <div class="threads-head">
+                  <span class="threads-title">Threads</span>
+                  <button id="threads-new-topic" class="btn btn-ghost sm">New topic</button>
+                  <button id="threads-close" class="icon-btn" title="Close" aria-label="Close">✕</button>
+                </div>
+                <div id="threads-namer" class="field-row" hidden>
+                  <input id="threads-name" type="text" placeholder="Name it, like Flat deposit" />
+                  <button id="threads-create" class="btn btn-primary sm">Create</button>
+                </div>
+                <p id="threads-filing" class="hint sm" hidden></p>
+                <div id="threads-topics" class="threads-topics"></div>
+                <div id="threads-list" class="threads-list"></div>
+                <!-- One open thread, read in place. The composer always
+                     addresses the thread's *root*, which is what keeps a thread
+                     flat instead of becoming a chain of quotes. -->
+                <section id="thread-open" class="thread-open" hidden>
+                  <div class="threads-head">
+                    <span id="thread-open-title" class="threads-title"></span>
+                    <button id="thread-back" class="btn btn-ghost sm">Back</button>
+                  </div>
+                  <div id="thread-log" class="thread-log" aria-live="polite"></div>
+                  <div class="field-row">
+                    <input id="thread-input" type="text" placeholder="Reply in this thread" />
+                    <button id="thread-send" class="btn btn-primary sm" disabled>Send</button>
+                  </div>
+                </section>
+              </aside>
+            </div>
 
             <!-- Watch/listen together (docs/TOGETHER.md). Both sides play their
                  own copy and Comrade only keeps the clocks together; when only
