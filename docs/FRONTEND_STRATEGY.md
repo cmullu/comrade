@@ -18,6 +18,13 @@ plan — this document is scoped to the frontend-framework question only._
 > steered around. See §10 for what the implementation actually found, including which
 > of D1–D8 held up and which turned out sharper than written.
 
+> **ADDED — owner decision, 2026-08-08: Android goes first.** `android/` is the
+> **priority frontend**, and the focus is on getting the Android app working first.
+> When a feature cannot land everywhere at once Android ships first; when a design
+> choice suits one frontend and costs another, Android's wins. This orders *new
+> work* and does not overturn §1 or §7 — it is **§11**, with what the rule does not
+> mean and the verification cost it carries.
+
 _**Verification honesty.** Every claim about *this repository* below was measured or read
 directly, and Appendix A gives the exact command for each. Where a claim is reasoned
 rather than measured, it says so._
@@ -549,3 +556,66 @@ replacing the Tauri and Compose build steps — doing that now would leave the a
 users actually install untested, on the strength of a frontend that has never been run on
 a real device. Retirement is the last step of this migration, gated on parity, not the
 first.
+
+---
+
+## 11. Android goes first — the standing priority
+
+_Owner decision, 2026-08-08, restated 2026-08-14. This is the operative rule for
+**sequencing frontend work**, and it sits alongside §1 and §7 rather than
+overturning them: those answer "should the frontends be unified", this answers
+"when they cannot all land at once, which one leads"._
+
+**`android/` is the priority frontend, and the focus is on getting the Android app
+working first.** Not per-feature, not re-decided each time:
+
+- When a feature cannot land everywhere at once, **Android ships first** and the
+  other frontends follow.
+- When a design choice suits one frontend and costs another, **Android's is the
+  one that wins**.
+- A frontend being cheaper to build or easier to verify is **not** a reason to
+  build it first. That argument has already been made and lost on the record:
+  the YouTube embed (`docs/TOGETHER.md` §11b) went to Android before desktop
+  *despite desktop being the only frontend that compiles in the cloud sandbox at
+  all* — which is exactly the trade this rule exists to settle without a fresh
+  debate each time.
+
+### What it does not mean
+
+- **Not "desktop is finished".** §2's finding stands: the real pain measured in
+  this repo was desktop **parity debt**, not UI duplication, and §7's Option A —
+  build the desktop journal, Tara and call-history views — is still the cheap fix
+  for it. Android-first orders new work; it does not retire an existing gap.
+- **Not "desktop and `app/` may be deleted".** Both `android/` and `desktop/` are
+  shipping frontends. §10's *"What has NOT been deleted, deliberately"* is the
+  gate: retirement is the last step of the Flutter migration, conditioned on
+  parity and on the replacement having actually run on a device. Do not remove
+  their code or their CI lanes before that.
+- **Not a licence to leave the others silent.** When something lands on Android
+  alone, say so where the feature is documented — the repo's shared-decision
+  convention makes silence read as agreement. `AUDIT.md`'s Together entries do
+  this explicitly ("None of §16 exists on desktop or in `app/`"), and that is the
+  form to copy.
+
+### The awkward consequence, stated rather than rediscovered
+
+**The priority frontend is the one the cloud sandbox cannot compile.** There is no
+Android SDK there, so `./gradlew` cannot run and no Compose file has ever been
+built before CI. The practical answer is not to deprioritise Android; it is to put
+the *reasoning* where it can be checked:
+
+- Decision logic goes in framework-free Kotlin — no Android imports, no generated
+  bindings — which compiles and **runs** under a plain `kotlinc` plus JUnit in
+  about a minute. `android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt`
+  is the pattern, and `docs/TOGETHER.md` §22 is a worked example: the album
+  grouping, the ordering and the play-versus-ask rule are all tested before a push.
+- Everything short of Compose codegen type-checks locally via
+  `.claude/scripts/android-typecheck.sh`, and Compose itself via
+  `.claude/scripts/android-typecheck-compose.sh`. Neither is a build, a test run,
+  or an opinion about how a screen looks.
+- What remains genuinely CI-first: `./gradlew test`, `res/` and manifest
+  correctness, the APK, and anything about appearance or behaviour on a handset.
+
+So "Android first" costs verification depth, and the compensating discipline is to
+keep the checkable half large. A change that puts new logic in a file the JVM lane
+cannot see has chosen to be checked only in CI, and should say so.
