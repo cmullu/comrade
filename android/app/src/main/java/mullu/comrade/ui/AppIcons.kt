@@ -981,3 +981,55 @@ val ReplyIcon: ImageVector = materialIcon(name = "Filled.Reply") {
         close()
     }
 }
+
+/**
+ * Material "tag" (filled) — a topic.
+ *
+ * A `#`, because that is the sigil `/assign #deposit` uses and the one drawn on
+ * every topic chip; a folder glyph would have said "somewhere else" when the
+ * whole point of a topic is that the messages never leave the conversation.
+ *
+ * Inlined like every other icon here rather than taking
+ * `material-icons-extended` for one glyph — the position this file has held
+ * since the first icon.
+ */
+val TagIcon: ImageVector = materialIcon(name = "Filled.Tag") {
+    materialPath {
+        moveTo(20.0f, 10.0f)
+        verticalLineTo(8.0f)
+        horizontalLineToRelative(-4.0f)
+        verticalLineTo(4.0f)
+        horizontalLineToRelative(-2.0f)
+        verticalLineToRelative(4.0f)
+        horizontalLineToRelative(-4.0f)
+        verticalLineTo(4.0f)
+        horizontalLineTo(8.0f)
+        verticalLineToRelative(4.0f)
+        horizontalLineTo(4.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineToRelative(4.0f)
+        horizontalLineTo(4.0f)
+        verticalLineToRelative(2.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineToRelative(4.0f)
+        horizontalLineToRelative(2.0f)
+        verticalLineToRelative(-4.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineToRelative(4.0f)
+        horizontalLineToRelative(2.0f)
+        verticalLineToRelative(-4.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineToRelative(-2.0f)
+        horizontalLineToRelative(-4.0f)
+        verticalLineToRelative(-4.0f)
+        horizontalLineToRelative(4.0f)
+        close()
+        moveTo(14.0f, 14.0f)
+        horizontalLineToRelative(-4.0f)
+        verticalLineToRelative(-4.0f)
+        horizontalLineToRelative(4.0f)
+        verticalLineToRelative(4.0f)
+        close()
+    }
+}

@@ -17,15 +17,18 @@ import '../../data/comrade_repository.dart';
 import '../../data/models.dart';
 import '../../state/chat_providers.dart';
 import '../../state/providers.dart';
+import '../../state/topic_providers.dart';
 import '../../theme/comrade_theme.dart';
 import '../../util/attachment_caption.dart';
 import '../../util/chat_thread.dart';
+import '../../util/topic_view.dart';
 import '../../widgets/app_chrome.dart';
 import '../../widgets/attachment_preview.dart';
 import '../../widgets/composer.dart';
 import '../../widgets/emoji_picker.dart';
 import '../../widgets/media_attachment.dart';
 import '../../widgets/message_bubble.dart';
+import 'thread_sheet.dart';
 
 class ConversationScreen extends ConsumerStatefulWidget {
   const ConversationScreen({required this.peer, super.key});
@@ -343,6 +346,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         _onItemsChanged(state);
         return Column(
           children: <Widget>[
+            _threadsBar(context),
             Expanded(child: _thread(context, state)),
             if (state.error != null)
               Padding(
@@ -497,6 +501,10 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
             Navigator.of(sheetContext).pop(const _MessageAction.reply()),
         onCopy: () =>
             Navigator.of(sheetContext).pop(const _MessageAction.copy()),
+        onOpenThread: () =>
+            Navigator.of(sheetContext).pop(const _MessageAction.openThread()),
+        onFile: () =>
+            Navigator.of(sheetContext).pop(const _MessageAction.file()),
       ),
     );
     if (!mounted || chosen == null) return;
@@ -518,8 +526,112 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
         _startReply(item);
       case _MessageActionKind.copy:
         await Clipboard.setData(ClipboardData(text: item.preview));
+      case _MessageActionKind.openThread:
+        await _openThread(item.id);
+      case _MessageActionKind.file:
+        await _fileThread(item.id);
     }
   }
+
+  // ── Threads and topics (docs/CHAT_THREADS.md) ───────────────────────────
+
+  /// The way in, and it only appears once there is something to go in to.
+  ///
+  /// The app bar belongs to the shell and is shared by every tab, so a
+  /// per-conversation action would have to be threaded up through it and back
+  /// down. A strip that is *absent* until the conversation has a thread or a
+  /// topic costs a chat that has neither exactly nothing — and is more
+  /// discoverable than a menu item, which is what this feature most needs.
+  /// `ChatsScreen.kt` carries the same affordance for the same reason.
+  Widget _threadsBar(BuildContext context) {
+    final TopicsState? topics = ref.watch(topicsProvider(widget.peer)).value;
+    if (topics == null) return const SizedBox.shrink();
+    final List<ThreadInfo> rows = threadsFor(topics.threads);
+    if (rows.isEmpty && topics.topics.isEmpty) return const SizedBox.shrink();
+    final int unread = unreadThreadCount(rows);
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: InkWell(
+        key: const Key('threads-bar'),
+        onTap: () => fireAndForget(_openTopics()),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: <Widget>[
+              const Icon(Icons.tag, size: 18),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Threads and topics',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              if (unread > 0)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(50),
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  child: Text(
+                    '$unread',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Read one thread over the conversation.
+  ///
+  /// [messageId] is the tapped bubble's event id, not a thread root — core
+  /// walks up the reply chain, so opening from a reply reaches the thread it
+  /// belongs to rather than starting a second one.
+  Future<void> _openThread(String messageId) => showThreadSheet(
+        context,
+        peer: widget.peer,
+        rootId: messageId,
+        // "File this" from inside the thread sheet: the thread sheet closes
+        // itself first, so this opens the picker over the conversation rather
+        // than stacking two sheets.
+        onFile: () => fireAndForget(_fileThread(messageId)),
+      );
+
+  /// Open the topic picker as a destination for [messageId]'s thread.
+  ///
+  /// The outcome is said out loud because filing produces no chat bubble on
+  /// either side (`comrade_core::topic`'s module header has the reason) — the
+  /// snackbar is the only trace the action leaves.
+  Future<void> _fileThread(String messageId) async {
+    final String? slug = await showTopicSheet(
+      context,
+      peer: widget.peer,
+      filingMessageId: messageId,
+      onOpenThread: (String rootId) => fireAndForget(_openThread(rootId)),
+    );
+    if (!mounted || slug == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          slug.isEmpty ? 'Taken out of that topic.' : 'Filed under #$slug.',
+        ),
+      ),
+    );
+  }
+
+  /// The way in that is not a long press.
+  Future<void> _openTopics() => showTopicSheet(
+        context,
+        peer: widget.peer,
+        onOpenThread: (String rootId) => fireAndForget(_openThread(rootId)),
+      );
 
   Future<void> _toggleReaction(ChatItem item, String emoji) => ref
       .read(conversationProvider(widget.peer).notifier)
@@ -581,7 +693,7 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
 /// A returned value rather than callbacks that act directly: the sheet has to be
 /// popped *before* a reply focuses the composer or the emoji picker opens, and
 /// having the sheet close itself and report is the only ordering that cannot race.
-enum _MessageActionKind { react, moreEmoji, reply, copy }
+enum _MessageActionKind { react, moreEmoji, reply, copy, openThread, file }
 
 class _MessageAction {
   const _MessageAction.react(this.emoji) : kind = _MessageActionKind.react;
@@ -593,6 +705,12 @@ class _MessageAction {
         emoji = null;
   const _MessageAction.copy()
       : kind = _MessageActionKind.copy,
+        emoji = null;
+  const _MessageAction.openThread()
+      : kind = _MessageActionKind.openThread,
+        emoji = null;
+  const _MessageAction.file()
+      : kind = _MessageActionKind.file,
         emoji = null;
 
   final _MessageActionKind kind;

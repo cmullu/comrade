@@ -235,6 +235,28 @@ object ChatEventRouter {
         _chatTick.update { it + 1 }
     }
 
+    /**
+     * Bumped when a peer named a topic, filed a thread, or archived one — the
+     * open sheets reload on it.
+     *
+     * Separate from [chatTick] even though both mean "something in this
+     * conversation moved", because they move at very different rates: a chat
+     * tick fires on every message and receipt, and rebuilding the topic sheet's
+     * counts on each of those would be a full history scan per tick
+     * (`comrade_ui`'s `ThreadIndex` is computed on read, deliberately).
+     */
+    private val _topicTick = MutableStateFlow(0)
+    val topicTick: StateFlow<Int> = _topicTick.asStateFlow()
+
+    /**
+     * Force a topic reload from outside the event-routing path — what this
+     * device's own `assignThread` calls, since a local filing raises no
+     * `BridgeEvent` (that variant reports the *peer's* changes).
+     */
+    fun bumpTopicTick() {
+        _topicTick.update { it + 1 }
+    }
+
     /** Bumped when a new message request arrives; the requests list reloads on it. */
     private val _requestTick = MutableStateFlow(0)
     val requestTick: StateFlow<Int> = _requestTick.asStateFlow()
@@ -548,6 +570,12 @@ object ChatEventRouter {
             // Sakha/ledger sync isn't wired into the Android UI yet
             // (desktop-only via Tauri commands) — drop, like before.
             is BridgeEvent.LedgerUpdated -> Unit
+            // The peer reorganised the conversation: named a topic, filed a
+            // thread, archived one. Structure, not a message — so no
+            // notification and no chat-list change, only the sheets reload.
+            // Core already refuses to emit this for a replay, so a tick here is
+            // always real news.
+            is BridgeEvent.TopicsChanged -> _topicTick.update { it + 1 }
             // Watch/listen together — see docs/TOGETHER.md. Routed straight to
             // TogetherManager rather than to a screen, so a session survives the
             // UI being disposed; the manager owns the player and the foreground

@@ -516,6 +516,8 @@ private fun MainShell(
     // loop, so a backgrounded Activity (or one recreated mid-session) never
     // duplicates, or simply stops, event handling.
     val chatTick by ChatEventRouter.chatTick.collectAsState()
+    // Separate from `chatTick` on purpose — see `ChatEventRouter.topicTick`.
+    val topicTick by ChatEventRouter.topicTick.collectAsState()
     val requestTick by ChatEventRouter.requestTick.collectAsState()
     val feedItems by ChatEventRouter.feedItems.collectAsState()
 
@@ -1149,6 +1151,7 @@ private fun MainShell(
                             is ChatNav.Open -> ConversationScreen(
                                 peer = nav.peer,
                                 chatTick = chatTick,
+                                topicTick = topicTick,
                                 // Same launcher the Together button in the chat
                                 // header uses, so a file arriving from `/play`
                                 // and one picked by hand start a session by the

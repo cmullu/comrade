@@ -245,6 +245,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<TaraMessageDto> dco_decode_list_tara_message_dto(dynamic raw);
 
   @protected
+  List<ThreadSummaryDto> dco_decode_list_thread_summary_dto(dynamic raw);
+
+  @protected
+  List<TopicDto> dco_decode_list_topic_dto(dynamic raw);
+
+  @protected
   List<UpiIntentDto> dco_decode_list_upi_intent_dto(dynamic raw);
 
   @protected
@@ -344,6 +350,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TaraMessageDto dco_decode_tara_message_dto(dynamic raw);
 
   @protected
+  ThreadDto dco_decode_thread_dto(dynamic raw);
+
+  @protected
+  ThreadSummaryDto dco_decode_thread_summary_dto(dynamic raw);
+
+  @protected
   TogetherCommandDto dco_decode_together_command_dto(dynamic raw);
 
   @protected
@@ -360,6 +372,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TogetherShareDto dco_decode_together_share_dto(dynamic raw);
+
+  @protected
+  TopicDto dco_decode_topic_dto(dynamic raw);
 
   @protected
   TransferSignal dco_decode_transfer_signal(dynamic raw);
@@ -647,6 +662,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  List<ThreadSummaryDto> sse_decode_list_thread_summary_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  List<TopicDto> sse_decode_list_topic_dto(SseDeserializer deserializer);
+
+  @protected
   List<UpiIntentDto> sse_decode_list_upi_intent_dto(
       SseDeserializer deserializer);
 
@@ -755,6 +777,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TaraMessageDto sse_decode_tara_message_dto(SseDeserializer deserializer);
 
   @protected
+  ThreadDto sse_decode_thread_dto(SseDeserializer deserializer);
+
+  @protected
+  ThreadSummaryDto sse_decode_thread_summary_dto(SseDeserializer deserializer);
+
+  @protected
   TogetherCommandDto sse_decode_together_command_dto(
       SseDeserializer deserializer);
 
@@ -775,6 +803,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TogetherShareDto sse_decode_together_share_dto(SseDeserializer deserializer);
+
+  @protected
+  TopicDto sse_decode_topic_dto(SseDeserializer deserializer);
 
   @protected
   TransferSignal sse_decode_transfer_signal(SseDeserializer deserializer);
@@ -1087,6 +1118,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       List<TaraMessageDto> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_thread_summary_dto(
+      List<ThreadSummaryDto> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_topic_dto(List<TopicDto> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_upi_intent_dto(
       List<UpiIntentDto> self, SseSerializer serializer);
 
@@ -1199,6 +1237,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       TaraMessageDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_thread_dto(ThreadDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_summary_dto(
+      ThreadSummaryDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_together_command_dto(
       TogetherCommandDto self, SseSerializer serializer);
 
@@ -1221,6 +1266,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_together_share_dto(
       TogetherShareDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_topic_dto(TopicDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_transfer_signal(
