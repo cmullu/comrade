@@ -1073,6 +1073,79 @@ mod tests {
         );
     }
 
+    /// A one-request Blossom stub on an ephemeral loopback port. Plain
+    /// `std::net` on its own thread rather than a fixture crate: the tests
+    /// need exactly one canned response each, and hermetic beats featureful.
+    #[cfg(feature = "media-http")]
+    fn spawn_blossom_stub(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Drain the whole request (headers, then Content-Length bytes of
+            // body) before answering — replying mid-upload reads back to the
+            // client as a broken connection, not as the canned status.
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            let mut header_end = None;
+            let mut content_len = 0usize;
+            loop {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        content_len = String::from_utf8_lossy(&buf[..pos])
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().ok())?
+                            })
+                            .unwrap_or(0);
+                    }
+                }
+                if let Some(end) = header_end {
+                    if buf.len() >= end + content_len {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        format!("http://{addr}")
+    }
+
+    #[cfg(feature = "media-http")]
+    #[tokio::test]
+    async fn a_later_hosts_success_is_returned_not_just_reported() {
+        // The failover's only prior test was the all-fail case, so "a later
+        // host's acceptance actually becomes the caller's URL" rested on
+        // reading the loop. This is that missing half: first host refuses,
+        // second accepts, and the caller must get the second host's answer —
+        // with no failure text smuggled into a success.
+        let refusing = spawn_blossom_stub("500 Internal Server Error", "{}");
+        let accepting = spawn_blossom_stub("200 OK", r#"{"url":"https://cdn.example/abc123"}"#);
+        let uploader = BlossomUploader::with_servers([refusing, accepting], Keys::generate());
+
+        let receipt = uploader
+            .upload(b"ciphertext", "application/octet-stream")
+            .await
+            .expect("the second host accepted, so the upload must succeed");
+        assert_eq!(receipt.url, "https://cdn.example/abc123");
+    }
+
     #[test]
     fn parse_rejects_event_without_url() {
         let keys = Keys::generate();
