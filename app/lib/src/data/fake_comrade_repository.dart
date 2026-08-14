@@ -682,7 +682,13 @@ class FakeComradeRepository implements ComradeRepository {
     _requireUnlocked();
     final String slug = _slugify(name);
     if (slug.length < 2) {
-      throw StateError('A topic name needs two or more letters or digits');
+      // The same sentence `comrade_ui`'s `TOPIC_NAME_REFUSED` gives, and the
+      // same exception type every other refusal here uses — a `StateError`
+      // would escape the sheet's `on ComradeException` and crash the widget
+      // instead of showing the reason (AUDIT T-1).
+      throw const ComradeException(
+        'A topic name needs two or more letters or digits, and for now Latin ones',
+      );
     }
     final Map<String, TopicInfo> byslug =
         _topics[peer] ??= <String, TopicInfo>{};
