@@ -1030,6 +1030,20 @@ impl Comrade {
         self.inner.blocking_read().delete_journal_entry(&id)
     }
 
+    /// Hand one journal entry to one peer, as an ordinary DM. The entry is
+    /// copied, never moved: see `RuntimeHandles::share_journal_entry` for what
+    /// this deliberately does not do.
+    ///
+    /// See [`Comrade::broadcast_chitthi`]'s doc comment for the lock discipline.
+    pub async fn share_journal_entry(
+        &self,
+        peer: String,
+        entry_id: String,
+    ) -> Result<MessageDto, UiError> {
+        let handles = self.inner.read().await.handles();
+        handles.share_journal_entry(&peer, &entry_id).await
+    }
+
     // ── Tara (reflective companion — strictly local, not therapy) ───────────
 
     /// Persist the user's message, compute Tara's on-device reply, persist and

@@ -82,7 +82,7 @@ pub use comrade_ui::{
     ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
     IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
     MessageAuthor, MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto,
-    ProfileDto, ReactionDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto,
+    ProfileDto, ReactionDto, ShareVerdictDto, SharedNoteDto, TaraMessageDto, TogetherCommandDto,
     TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
     TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
@@ -163,6 +163,7 @@ pub struct _DirectMessageDto {
     pub created_at: u64,
     pub upi_intents: Vec<UpiIntentDto>,
     pub reply_to: Option<String>,
+    pub shared_note: Option<SharedNoteDto>,
 }
 
 #[frb(mirror(MessageAuthor))]
@@ -181,6 +182,13 @@ pub struct _MessageDto {
     pub author: MessageAuthor,
     pub status: Option<String>,
     pub reply_to: Option<String>,
+    pub shared_note: Option<SharedNoteDto>,
+}
+
+#[frb(mirror(SharedNoteDto))]
+pub struct _SharedNoteDto {
+    pub text: String,
+    pub mood: Option<String>,
 }
 
 #[frb(mirror(ConversationDto))]
@@ -1146,6 +1154,15 @@ pub fn journal_entries() -> Result<Vec<JournalEntryDto>, UiError> {
 
 pub fn delete_journal_entry(id: String) -> Result<bool, UiError> {
     runtime().blocking_read().delete_journal_entry(&id)
+}
+
+/// Hand one journal entry to one peer, as an ordinary DM. A copy: the entry is
+/// not marked, moved or changed — see `RuntimeHandles::share_journal_entry`.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+pub async fn share_journal_entry(peer: String, entry_id: String) -> Result<MessageDto, UiError> {
+    let handles = runtime().read().await.handles();
+    handles.share_journal_entry(&peer, &entry_id).await
 }
 
 // ── Tara (reflective companion — strictly local, not therapy) ────────────────

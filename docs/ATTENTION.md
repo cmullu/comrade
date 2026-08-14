@@ -30,7 +30,7 @@ for this pillar:
 
 | Existing piece | Where | Why it matters here |
 |---|---|---|
-| **Journal** — encrypted entries with self-reported mood emoji, typed or dictated on-device | `comrade_ui::runtime` (`add_journal_entry` / `journal_entries`), `JournalScreen.kt` | The reflection surface every phase below feeds into. Mood markers are already a minimal, structured signal |
+| **Journal** — encrypted entries with self-reported mood emoji, typed or dictated on-device; one entry at a time can be handed to one saved contact as an encrypted DM (`share_journal_entry`, `comrade_core::note`), which leaves the entry untouched | `comrade_ui::runtime` (`add_journal_entry` / `journal_entries` / `share_journal_entry`), `JournalScreen.kt` | The reflection surface every phase below feeds into. Mood markers are already a minimal, structured signal — and sharing is the one door out of it, opened by hand, per note |
 | **Tara** — deterministic on-device reflective companion; `CompanionEngine` trait; opener nudges read journal **mood markers only**, never text | `comrade_core::tara`, `TaraScreen.kt`, [`TARA.md`](TARA.md) | The coaching voice. Its two honesty gates ("not therapy, and it says so"; "on-device or not at all") are the template for this pillar's gates |
 | **Encrypted store** — every value sealed (Argon2id + AES-256-GCM), panic-wipe enumerates all tables | `comrade_storage` | Usage data is sensitive behavioural data; it gets the same at-rest guarantee as journal text, and is destroyed by the same wipe |
 | **Device-local metrics** — counters with no peer, content or timestamp; no exporter, no endpoint | `comrade_core::metrics` | The established pattern for "measure without surveilling". Attention data follows it |
@@ -548,7 +548,11 @@ mock.
 - **OQ14** answered as Android-first, then partly closed: the desktop web UI
   now has a **Focus tab** — sessions and the long read, the two halves that are
   platform-neutral. See "Desktop" below. The journal and Tara are still absent
-  there, and so is the usage mirror.
+  there, and so is the usage mirror. Shared journal notes are the one piece that
+  did land on desktop *asymmetrically* — that window renders a note somebody
+  sent it (`sharedNoteBody` in `main.js`) but has nothing to share *from*, which
+  is the honest split: a note written on a phone still has to be readable on the
+  laptop it is read on.
 - **No on-device trend chart yet.** Phase 4's *storage and API* shipped
   (`attention_days` keeps the full history and `attention_days()` returns it),
   and the monthly self-check-in did not — it is a small addition on top of the

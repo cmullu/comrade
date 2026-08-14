@@ -77,8 +77,8 @@ pub use runtime::{
     LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
     MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
     PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
-    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
+    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, SharedNoteDto, TaraChatDto, TaraMessageDto,
+    TaskDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
     TogetherShareDto, TurnServerStatusDto,
 };
 

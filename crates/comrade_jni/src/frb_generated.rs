@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1471913872;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1724953004;
 
 // Section: executor
 
@@ -2463,6 +2463,44 @@ fn wire__crate__api__share_ice_servers_allowed_impl(
         },
     )
 }
+fn wire__crate__api__share_journal_entry_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "share_journal_entry",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_peer = <String>::sse_decode(&mut deserializer);
+            let api_entry_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::UiError>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::share_journal_entry(api_peer, api_entry_id).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__share_transfer_verdict_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3450,6 +3488,7 @@ const _: fn() = || {
         let _: u64 = DirectMessageDto.created_at;
         let _: Vec<crate::api::UpiIntentDto> = DirectMessageDto.upi_intents;
         let _: Option<String> = DirectMessageDto.reply_to;
+        let _: Option<crate::api::SharedNoteDto> = DirectMessageDto.shared_note;
     }
     {
         let FoundProfileDto = None::<crate::api::FoundProfileDto>.unwrap();
@@ -3522,6 +3561,7 @@ const _: fn() = || {
         let _: crate::api::MessageAuthor = MessageDto.author;
         let _: Option<String> = MessageDto.status;
         let _: Option<String> = MessageDto.reply_to;
+        let _: Option<crate::api::SharedNoteDto> = MessageDto.shared_note;
     }
     {
         let MessageRequestDto = None::<crate::api::MessageRequestDto>.unwrap();
@@ -3632,6 +3672,11 @@ const _: fn() = || {
         crate::api::ShareSignal::Transport { signal } => {
             let _: crate::api::TransferSignal = signal;
         }
+    }
+    {
+        let SharedNoteDto = None::<crate::api::SharedNoteDto>.unwrap();
+        let _: String = SharedNoteDto.text;
+        let _: Option<String> = SharedNoteDto.mood;
     }
     match None::<crate::api::SyncVerdict>.unwrap() {
         crate::api::SyncVerdict::Hold => {}
@@ -4201,6 +4246,7 @@ impl SseDecode for crate::api::DirectMessageDto {
         let mut var_createdAt = <u64>::sse_decode(deserializer);
         let mut var_upiIntents = <Vec<crate::api::UpiIntentDto>>::sse_decode(deserializer);
         let mut var_replyTo = <Option<String>>::sse_decode(deserializer);
+        let mut var_sharedNote = <Option<crate::api::SharedNoteDto>>::sse_decode(deserializer);
         return crate::api::DirectMessageDto {
             id: var_id,
             sender: var_sender,
@@ -4208,6 +4254,7 @@ impl SseDecode for crate::api::DirectMessageDto {
             created_at: var_createdAt,
             upi_intents: var_upiIntents,
             reply_to: var_replyTo,
+            shared_note: var_sharedNote,
         };
     }
 }
@@ -4694,6 +4741,7 @@ impl SseDecode for crate::api::MessageDto {
         let mut var_author = <crate::api::MessageAuthor>::sse_decode(deserializer);
         let mut var_status = <Option<String>>::sse_decode(deserializer);
         let mut var_replyTo = <Option<String>>::sse_decode(deserializer);
+        let mut var_sharedNote = <Option<crate::api::SharedNoteDto>>::sse_decode(deserializer);
         return crate::api::MessageDto {
             id: var_id,
             peer: var_peer,
@@ -4703,6 +4751,7 @@ impl SseDecode for crate::api::MessageDto {
             author: var_author,
             status: var_status,
             reply_to: var_replyTo,
+            shared_note: var_sharedNote,
         };
     }
 }
@@ -4836,6 +4885,17 @@ impl SseDecode for Option<crate::api::Recording> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::Recording>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::SharedNoteDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::SharedNoteDto>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -5073,6 +5133,18 @@ impl SseDecode for crate::api::ShareSignal {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseDecode for crate::api::SharedNoteDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_mood = <Option<String>>::sse_decode(deserializer);
+        return crate::api::SharedNoteDto {
+            text: var_text,
+            mood: var_mood,
+        };
     }
 }
 
@@ -5550,26 +5622,27 @@ fn pde_ffi_dispatcher_primary_impl(
         68 => wire__crate__api__set_username_impl(port, ptr, rust_vec_len, data_len),
         69 => wire__crate__api__share_classify_path_impl(port, ptr, rust_vec_len, data_len),
         70 => wire__crate__api__share_ice_servers_allowed_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__share_transfer_verdict_impl(port, ptr, rust_vec_len, data_len),
-        72 => wire__crate__api__sync_ledger_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__tara_crisis_resources_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__together_direct_ready_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__together_end_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__together_join_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__together_match_score_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__together_receive_direct_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__together_report_position_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__together_set_state_impl(port, ptr, rust_vec_len, data_len),
-        84 => wire__crate__api__together_start_impl(port, ptr, rust_vec_len, data_len),
-        85 => wire__crate__api__toggle_reaction_impl(port, ptr, rust_vec_len, data_len),
-        86 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
-        87 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
-        88 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
-        89 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
-        92 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__share_journal_entry_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__share_transfer_verdict_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__sync_ledger_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__tara_crisis_resources_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__tara_opener_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__tara_send_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__tara_thread_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__together_direct_ready_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__together_end_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__together_join_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__together_match_score_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__together_receive_direct_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__together_report_position_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__together_set_state_impl(port, ptr, rust_vec_len, data_len),
+        85 => wire__crate__api__together_start_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__toggle_reaction_impl(port, ptr, rust_vec_len, data_len),
+        87 => wire__crate__api__toggle_workspace_impl(port, ptr, rust_vec_len, data_len),
+        88 => wire__crate__api__turn_server_status_impl(port, ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__unlock_vault_impl(port, ptr, rust_vec_len, data_len),
+        90 => wire__crate__api__upload_and_send_media_impl(port, ptr, rust_vec_len, data_len),
+        93 => wire__crate__api__workspaces_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5585,8 +5658,8 @@ fn pde_ffi_dispatcher_sync_impl(
         5 => wire__crate__api__all_workspaces_impl(ptr, rust_vec_len, data_len),
         27 => wire__crate__api__generate_keypair_impl(ptr, rust_vec_len, data_len),
         45 => wire__crate__api__npub_from_nsec_impl(ptr, rust_vec_len, data_len),
-        90 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
-        91 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
+        91 => wire__crate__api__version_impl(ptr, rust_vec_len, data_len),
+        92 => wire__crate__api__workspace_label_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -6025,6 +6098,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::DirectMessageDto> 
             self.0.created_at.into_into_dart().into_dart(),
             self.0.upi_intents.into_into_dart().into_dart(),
             self.0.reply_to.into_into_dart().into_dart(),
+            self.0.shared_note.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6351,6 +6425,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::MessageDto> {
             self.0.author.into_into_dart().into_dart(),
             self.0.status.into_into_dart().into_dart(),
             self.0.reply_to.into_into_dart().into_dart(),
+            self.0.shared_note.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6679,6 +6754,27 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::ShareSignal>>
     for crate::api::ShareSignal
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::ShareSignal> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::SharedNoteDto> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.text.into_into_dart().into_dart(),
+            self.0.mood.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::SharedNoteDto>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::SharedNoteDto>>
+    for crate::api::SharedNoteDto
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::SharedNoteDto> {
         self.into()
     }
 }
@@ -7452,6 +7548,7 @@ impl SseEncode for crate::api::DirectMessageDto {
         <u64>::sse_encode(self.created_at, serializer);
         <Vec<crate::api::UpiIntentDto>>::sse_encode(self.upi_intents, serializer);
         <Option<String>>::sse_encode(self.reply_to, serializer);
+        <Option<crate::api::SharedNoteDto>>::sse_encode(self.shared_note, serializer);
     }
 }
 
@@ -7866,6 +7963,7 @@ impl SseEncode for crate::api::MessageDto {
         <crate::api::MessageAuthor>::sse_encode(self.author, serializer);
         <Option<String>>::sse_encode(self.status, serializer);
         <Option<String>>::sse_encode(self.reply_to, serializer);
+        <Option<crate::api::SharedNoteDto>>::sse_encode(self.shared_note, serializer);
     }
 }
 
@@ -7979,6 +8077,16 @@ impl SseEncode for Option<crate::api::Recording> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::Recording>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::SharedNoteDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::SharedNoteDto>::sse_encode(value, serializer);
         }
     }
 }
@@ -8158,6 +8266,14 @@ impl SseEncode for crate::api::ShareSignal {
                 unimplemented!("");
             }
         }
+    }
+}
+
+impl SseEncode for crate::api::SharedNoteDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.text, serializer);
+        <Option<String>>::sse_encode(self.mood, serializer);
     }
 }
 

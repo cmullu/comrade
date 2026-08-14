@@ -181,6 +181,7 @@ class MessageInfo {
     this.fromTara = false,
     this.status,
     this.replyTo,
+    this.sharedNote,
   });
 
   final String id;
@@ -198,6 +199,15 @@ class MessageInfo {
   final MessageStatus? status;
   final String? replyTo;
 
+  /// Set when this message is a journal note its sender chose to share — see
+  /// `comrade_core::note`. [content] already carries the same text without the
+  /// marker line, so a bubble ignoring this still shows the words; what this
+  /// adds is the card and the mood.
+  ///
+  /// A label, not an attestation, exactly like [fromTara]: the marker is text
+  /// anybody can type, so it may style a bubble and must never gate anything.
+  final SharedNoteInfo? sharedNote;
+
   MessageInfo copyWith({MessageStatus? status}) => MessageInfo(
         id: id,
         peer: peer,
@@ -207,7 +217,19 @@ class MessageInfo {
         fromTara: fromTara,
         status: status ?? this.status,
         replyTo: replyTo,
+        sharedNote: sharedNote,
       );
+}
+
+/// The journal note a [MessageInfo] carries, as the card draws it.
+@immutable
+class SharedNoteInfo {
+  const SharedNoteInfo({required this.text, this.mood});
+
+  final String text;
+
+  /// The self-reported mood marker the entry carried, if it had one.
+  final String? mood;
 }
 
 /// A stranger's first DM, gated out of the chat list until accepted.
@@ -309,7 +331,10 @@ class ChitthiInfo {
   final String? replyTo;
 }
 
-/// A journal entry — strictly local, never published.
+/// A journal entry — strictly local. Nothing about the journal is synchronised,
+/// published or uploaded; the one way an entry's words reach anybody is the
+/// user handing one to one person (`ComradeRepository.shareJournalEntry`),
+/// which sends a copy and leaves the entry alone.
 @immutable
 class JournalEntryInfo {
   const JournalEntryInfo({

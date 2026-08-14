@@ -230,8 +230,15 @@ pub struct MessageReaction {
 }
 
 /// A private journal entry — the wellbeing pillar's core record. Strictly
-/// local: journal entries are never published to a relay or any network; the
-/// only copy lives sealed inside this encrypted store.
+/// local: this tree is never synchronised, published or uploaded, and the only
+/// copy of an entry lives sealed inside this encrypted store.
+///
+/// Since `comrade_core::note`, a user may *hand one entry to one person* from
+/// the journal screen. That is a copy of the text into an ordinary end-to-end
+/// DM, on a deliberate per-entry tap; the entry itself is not read by anything
+/// else, not marked, and not changed. The guarantee this type carries is
+/// therefore about the store and not about the words: nothing here moves
+/// unless the person who wrote it moves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
     /// Store key. Zero-padded-timestamp-prefixed so ids sort chronologically.
@@ -791,6 +798,11 @@ impl EncryptedStore {
     /// Persist a journal entry, keyed by its id.
     pub fn save_journal_entry(&self, entry: &JournalEntry) -> Result<(), StorageError> {
         self.put(JOURNAL_TREE, &entry.id, entry)
+    }
+
+    /// One journal entry by id.
+    pub fn journal_entry(&self, id: &str) -> Result<Option<JournalEntry>, StorageError> {
+        self.get(JOURNAL_TREE, id)
     }
 
     /// All journal entries, newest first.

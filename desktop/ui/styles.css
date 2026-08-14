@@ -898,6 +898,54 @@ code {
   text-overflow: ellipsis;
 }
 
+/* A journal note somebody chose to share (comrade_core::note). Not a different
+   kind of bubble — same side, same colour, same ticks, because it is an
+   ordinary DM. The header is the one thing the words cannot say: that these
+   were written somewhere private first. currentColor for the same reason the
+   quote above uses it — one rule has to be legible on both backgrounds. */
+.bubble-note {
+  display: block;
+}
+
+.bubble-note-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.bubble-note-label {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+.bubble-note-mood {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* "Show more" on a folded note. A <button> so it is reachable by keyboard,
+   styled back down to a link so it does not read as an action on the message. */
+.bubble-note-more {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.bubble-note-more:hover {
+  opacity: 1;
+}
+
 /* A quote whose original is in the thread: tapping it goes there. Rendered as a
    <button>, so the inherited control styling has to be undone back to the plain
    quote above — everything here is a reset except the cursor and the hover. */

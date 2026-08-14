@@ -11,10 +11,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
@@ -42,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -51,6 +55,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.ComradeCore
+import mullu.comrade.R
 import mullu.comrade.attention.UsageStatsReader
 import mullu.comrade.voice.OneShotRecognizer
 import mullu.comrade.voice.VoiceModelMissingException
@@ -128,6 +133,13 @@ fun JournalScreen(modifier: Modifier = Modifier) {
     var listening by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf<ComradeCore.JournalEntryInfo?>(null) }
+    // The entry whose share sheet is open, the people it may go to, and what
+    // happened to the last send. `shareOptions == null` means "still loading
+    // contacts" — distinct from "you have saved nobody", which has its own copy.
+    var sharing by remember { mutableStateOf<ComradeCore.JournalEntryInfo?>(null) }
+    var shareOptions by remember { mutableStateOf<List<ShareTarget>?>(null) }
+    var sendingTo by remember { mutableStateOf<String?>(null) }
+    var shareResult by remember { mutableStateOf<String?>(null) }
     // True while the mic tap is parked on the speech-model download dialog.
     var awaitingModel by remember { mutableStateOf(false) }
 
@@ -292,9 +304,14 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                             modifier = Modifier.testTag("journal-save"),
                         ) { Text(if (saving) "Saving…" else "Save") }
                     }
+                    // Sharing made the old wording ("never posted, never
+                    // uploaded", full stop) a promise the app no longer keeps
+                    // on its own terms, so it says who the exception belongs
+                    // to: nothing moves unless the person who wrote it moves it.
                     Text(
                         "Only on this phone, sealed by your passcode. Never posted, " +
-                            "never uploaded.",
+                            "never uploaded — a note reaches someone only if you send " +
+                            "it to them yourself.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -360,11 +377,85 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                         )
                     }
                     items(dayEntries, key = { it.id }) { entry ->
-                        JournalEntryCard(entry, onDelete = { confirmDelete = entry })
+                        JournalEntryCard(
+                            entry,
+                            onShare = { sharing = entry },
+                            onDelete = { confirmDelete = entry },
+                        )
                     }
                 }
             }
         }
+    }
+
+    sharing?.let { entry ->
+        // Contacts are read per open rather than held: the list changes from
+        // the Chats tab, and a stale picker is a note sent to a name that is no
+        // longer the one on screen.
+        LaunchedEffect(entry.id) {
+            shareOptions = withContext(Dispatchers.IO) {
+                runCatching {
+                    shareTargets(
+                        ComradeCore.contacts().map {
+                            ShareCandidate(
+                                npub = it.npub,
+                                alias = it.alias,
+                                name = it.name,
+                                comrade = it.comrade,
+                            )
+                        },
+                    )
+                }.getOrDefault(emptyList())
+            }
+        }
+        JournalShareSheet(
+            targets = shareOptions,
+            sendingTo = sendingTo,
+            onPick = { target ->
+                if (sendingTo != null) return@JournalShareSheet
+                sendingTo = target.npub
+                scope.launch {
+                    val outcome = withContext(Dispatchers.IO) {
+                        runCatching {
+                            ComradeCore.shareJournalEntryTyped(target.npub, entry.id)
+                        }
+                    }
+                    sendingTo = null
+                    shareResult = outcome.fold(
+                        onSuccess = { context.getString(R.string.journal_share_sent, target.label) },
+                        onFailure = {
+                            context.getString(
+                                R.string.journal_share_failed,
+                                it.message ?: "unknown error",
+                            )
+                        },
+                    )
+                    // Close on success only: a failed send leaves the sheet up
+                    // so the same note can go to the same person again without
+                    // finding it in the list a second time.
+                    if (outcome.isSuccess) {
+                        sharing = null
+                        shareOptions = null
+                    }
+                }
+            },
+            onDismiss = {
+                if (sendingTo == null) {
+                    sharing = null
+                    shareOptions = null
+                }
+            },
+        )
+    }
+
+    shareResult?.let { message ->
+        AlertDialog(
+            onDismissRequest = { shareResult = null },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { shareResult = null }) { Text("OK") }
+            },
+        )
     }
 
     confirmDelete?.let { entry ->
@@ -395,6 +486,7 @@ fun JournalScreen(modifier: Modifier = Modifier) {
 @Composable
 private fun JournalEntryCard(
     entry: ComradeCore.JournalEntryInfo,
+    onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -416,6 +508,13 @@ private fun JournalEntryCard(
                 }
                 Text(entry.text, style = MaterialTheme.typography.bodyLarge)
             }
+            IconButton(onClick = onShare, modifier = Modifier.testTag("journal-share")) {
+                Icon(
+                    ShareIcon,
+                    contentDescription = stringResource(R.string.journal_share),
+                    tint = MaterialTheme.colorScheme.outline,
+                )
+            }
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Filled.Delete,
@@ -425,6 +524,86 @@ private fun JournalEntryCard(
             }
         }
     }
+}
+
+/**
+ * Pick the one person this note goes to.
+ *
+ * A dialog rather than the system share sheet, and that is the point: Android's
+ * sheet would offer every app on the phone a plaintext copy of the most private
+ * thing Comrade holds. The list here is Comrade's own contacts, the note travels
+ * as an encrypted DM, and nothing else on the device ever sees it.
+ *
+ * One tap sends — there is no second "confirm" step, because the sheet was
+ * opened deliberately from one entry and the row says who it goes to. The tap
+ * that sends is disabled while a send is in flight, so a slow relay cannot turn
+ * an impatient second tap into a second copy.
+ */
+@Composable
+private fun JournalShareSheet(
+    targets: List<ShareTarget>?,
+    sendingTo: String?,
+    onPick: (ShareTarget) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.journal_share_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    stringResource(R.string.journal_share_body),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                when {
+                    targets == null -> CircularProgressIndicator(Modifier.size(24.dp))
+                    targets.isEmpty() -> Text(
+                        stringResource(R.string.journal_share_no_contacts),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    // A scrolling `Column`, not a `LazyColumn`: a dialog gives
+                    // its content unbounded height, which is the one thing a
+                    // lazy list cannot be measured in. Contact lists are small.
+                    else -> Column(
+                        modifier = Modifier
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState())
+                            .testTag("journal-share-targets"),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        targets.forEach { target ->
+                            TextButton(
+                                onClick = { onPick(target) },
+                                enabled = sendingTo == null,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Text(target.label, style = MaterialTheme.typography.bodyLarge)
+                                    Spacer(Modifier.weight(1f))
+                                    if (sendingTo == target.npub) {
+                                        Text(
+                                            stringResource(R.string.journal_share_sending),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = sendingTo == null) { Text("Cancel") }
+        },
+    )
 }
 
 /**

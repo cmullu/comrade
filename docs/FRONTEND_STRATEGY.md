@@ -94,7 +94,8 @@ single Flutter frontend removes the *second* adapter; it does not remove adapter
 | DMs + requests (Vault) | ✅ | ✅ |
 | Calls | ✅ native `org.webrtc` | ✅ webview WebRTC |
 | Couple sandbox | — | ✅ |
-| **Journal** | ✅ `JournalScreen.kt` (330 LOC) | ✗ *(0 refs; `add_journal_entry`/`journal_entries`/`delete_journal_entry` registered, uncalled)* |
+| **Journal** | ✅ `JournalScreen.kt` | ✗ *(0 refs; `add_journal_entry`/`journal_entries`/`delete_journal_entry`/`share_journal_entry` registered, uncalled)* |
+| **Shared journal notes** | ✅ send + render | ⚠ render only — a received note draws as a card (`sharedNoteBody`), but there is no journal screen here to send one *from* |
 | **Tara** | ✅ `TaraScreen.kt` (415 LOC) | ✗ *(0 refs; 5 `tara_*` commands registered, uncalled)* |
 | **Call history** | ✅ `CallHistoryScreen.kt` (147 LOC) | ✗ *(0 refs; `call_history` registered, uncalled)* |
 | **Onboarding / settings** | ✅ (233 / 691 LOC) | ✗ / partial |

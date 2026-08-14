@@ -373,6 +373,17 @@ class RustComradeRepository implements ComradeRepository {
   Future<bool> deleteJournalEntry(String id) =>
       _guard(() => rust.deleteJournalEntry(id: id));
 
+  @override
+  Future<MessageInfo> shareJournalEntry({
+    required String peer,
+    required String entryId,
+  }) async =>
+      _message(
+        await _guard(
+          () => rust.shareJournalEntry(peer: peer, entryId: entryId),
+        ),
+      );
+
   // ── Tara ───────────────────────────────────────────────────────────────────
 
   @override
@@ -721,10 +732,20 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
         IncomingDirectMessage(MessageInfo(
           id: field0.id,
           peer: field0.sender,
-          content: field0.content,
+          // The note's own text when this arrival is a shared journal note, so
+          // a bubble appended live reads exactly as the one `messages()` gives
+          // after a reload. Core parses the marker on both paths — see
+          // `DirectMessageDto::shared_note`.
+          content: field0.sharedNote?.text ?? field0.content,
           createdAt: field0.createdAt.toInt(),
           outgoing: false,
           replyTo: field0.replyTo,
+          sharedNote: field0.sharedNote == null
+              ? null
+              : SharedNoteInfo(
+                  text: field0.sharedNote!.text,
+                  mood: field0.sharedNote!.mood,
+                ),
         )),
       rust.BridgeEvent_IncomingMedia(:final rust.MediaMessageDto field0) =>
         IncomingMedia(_media(field0)),
@@ -868,6 +889,12 @@ MessageInfo _message(rust.MessageDto dto) => MessageInfo(
       fromTara: dto.author == rust.MessageAuthor.tara,
       status: MessageStatus.fromWire(dto.status),
       replyTo: dto.replyTo,
+      sharedNote: dto.sharedNote == null
+          ? null
+          : SharedNoteInfo(
+              text: dto.sharedNote!.text,
+              mood: dto.sharedNote!.mood,
+            ),
     );
 
 MessageRequestInfo _messageRequest(rust.MessageRequestDto dto) =>

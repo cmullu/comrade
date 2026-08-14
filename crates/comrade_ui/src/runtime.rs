@@ -393,6 +393,16 @@ pub struct DirectMessageDto {
     pub upi_intents: Vec<UpiIntentDto>,
     /// Event id (hex) this message replies to, if any (for a quoted preview).
     pub reply_to: Option<String>,
+    /// Set when this arrival is a journal note its sender chose to share, so a
+    /// frontend appending a live event draws the same card
+    /// [`MessageDto::shared_note`] gives it after a reload. Parsed here, in the
+    /// one place that knows the grammar — a frontend re-reading the marker off
+    /// [`Self::content`] is the second implementation this field exists to
+    /// prevent.
+    ///
+    /// Unlike [`MessageDto::content`], [`Self::content`] keeps the marker: this
+    /// is the raw arrival, and a consumer drawing a card reads it from here.
+    pub shared_note: Option<SharedNoteDto>,
 }
 
 impl From<VaultMessage> for DirectMessageDto {
@@ -400,6 +410,7 @@ impl From<VaultMessage> for DirectMessageDto {
         Self {
             id: m.event_id,
             sender: to_npub(&m.sender_pubkey),
+            shared_note: shared_note_of(&m.content),
             content: m.content,
             created_at: m.created_at,
             reply_to: m.reply_to,
@@ -1573,9 +1584,13 @@ struct PeerProfilePatch {
     avatar_failed: bool,
 }
 
-/// A private journal entry as the frontend sees it. Journal entries are
-/// **strictly local**: they are never published to a relay or any network —
-/// the only copy lives sealed inside the encrypted store.
+/// A private journal entry as the frontend sees it. The journal is **strictly
+/// local**: nothing about it is synchronised, published or uploaded, and the
+/// only copy of an entry lives sealed inside the encrypted store.
+///
+/// The one way words written here reach anybody is
+/// [`ComradeRuntime::share_journal_entry`] — one entry, one peer, one tap, as
+/// an ordinary DM. That sends a *copy*; the entry is untouched by it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct JournalEntryDto {
     pub id: String,
@@ -1764,6 +1779,30 @@ pub struct MessageDto {
     pub status: Option<String>,
     /// Event id (hex) this message replies to, if any.
     pub reply_to: Option<String>,
+    /// Set when this message is a journal note its sender chose to share — see
+    /// [`SharedNoteDto`] and `comrade_core::note`. `None` for ordinary
+    /// messages, which is nearly all of them.
+    pub shared_note: Option<SharedNoteDto>,
+}
+
+/// A journal note one person handed to another, as the bubble draws it.
+///
+/// The presence of this is what tells a frontend to draw a note card instead of
+/// a plain bubble; [`MessageDto::content`] already carries the same text with
+/// the marker line off it, so a frontend that ignores this field still shows
+/// the words rather than the wire form.
+///
+/// **A label, not an attestation** — the same standing as [`MessageAuthor`],
+/// and for the same reason: the marker is text anyone can type. The card says
+/// *the sender says this came out of their journal*. Nothing may be gated on
+/// it, and no frontend may word it as a guarantee.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct SharedNoteDto {
+    /// The note as it was written. Kept even though it equals
+    /// [`MessageDto::content`], so a card can be built from this alone.
+    pub text: String,
+    /// The self-reported mood marker the entry carried, if it had one.
+    pub mood: Option<String>,
 }
 
 /// Split a stored/wire message body into who wrote it and what to draw.
@@ -1775,13 +1814,47 @@ pub struct MessageDto {
 /// [`ComradeRuntime::tara_in_chat`] reads the stored rows directly, so the
 /// history keeps meaning the same thing after this function changes.
 ///
-/// One place, called from both [`MessageDto`] construction sites, so a message
-/// cannot read one way when it is sent and another way after a reload.
+/// One place, called from [`read_body`], which is called from both
+/// [`MessageDto`] construction sites — so a message cannot read one way when it
+/// is sent and another way after a reload.
 fn split_author(content: String) -> (MessageAuthor, String) {
     match comrade_core::tara::tara_chat_answer(&content) {
         Some(answer) => (MessageAuthor::Tara, answer.to_string()),
         None => (MessageAuthor::Human, content),
     }
+}
+
+/// Everything a stored/wire body says about itself: who wrote it, whether it is
+/// a shared journal note, and the text a bubble draws.
+///
+/// Both markers work the same way and for the same reasons — see
+/// [`split_author`] and `comrade_core::note` — and both are read here rather
+/// than at the call sites, because a message that parsed on send and not on
+/// reload would change shape under the reader.
+///
+/// A Tara line is never also a note. She answers the sentence she was handed
+/// and has no journal; a body that carries both markers is someone typing, and
+/// the outer one is the claim being made.
+fn read_body(content: String) -> (MessageAuthor, Option<SharedNoteDto>, String) {
+    let (author, body) = split_author(content);
+    if author != MessageAuthor::Human {
+        return (author, None, body);
+    }
+    match shared_note_of(&body) {
+        Some(note) => {
+            let text = note.text.clone();
+            (author, Some(note), text)
+        }
+        None => (author, None, body),
+    }
+}
+
+/// The journal note `content` carries, if it is one. One reader for both DTOs.
+fn shared_note_of(content: &str) -> Option<SharedNoteDto> {
+    comrade_core::note::shared_journal_note(content).map(|note| SharedNoteDto {
+        text: note.text.to_string(),
+        mood: note.mood.map(str::to_string),
+    })
 }
 
 /// Live connectivity status of the off-grid Saathi mesh (mDNS discovery +
@@ -2885,7 +2958,7 @@ impl ComradeRuntime {
             .map_err(|e| UiError::Storage(e.to_string()))?
             .into_iter()
             .map(|m| {
-                let (author, content) = split_author(m.content);
+                let (author, shared_note, content) = read_body(m.content);
                 MessageDto {
                     id: m.id,
                     peer: m.peer_npub,
@@ -2899,6 +2972,7 @@ impl ComradeRuntime {
                     },
                     reply_to: m.reply_to,
                     outgoing: m.outgoing,
+                    shared_note,
                 }
             })
             .collect();
@@ -4099,11 +4173,19 @@ impl ComradeRuntime {
         self.handles().nudge_comrades().await
     }
 
-    // ── Journal (wellbeing pillar #1 — strictly local, never networked) ──────
+    // ── Journal (wellbeing pillar #1 — strictly local) ───────────────────────
+    //
+    // Nothing in this section is synchronised, published or uploaded, and no
+    // engine reads entry text (Tara's opener sees mood markers only, by
+    // construction — see `tara_opener`). The single exception is
+    // `share_journal_entry`, which is not an exception to the rule so much as
+    // the user overriding it for one entry: they pick the entry, they pick the
+    // person, and a copy goes as an ordinary DM.
 
     /// Save a new journal entry. `mood` is an optional self-reported marker.
-    /// The entry never leaves the device: no relay, no network — only the
-    /// encrypted store.
+    /// The entry never leaves the device on its own: no relay, no network —
+    /// only the encrypted store. See [`Self::share_journal_entry`] for the one
+    /// path out, which is a copy the user asks for by hand.
     pub fn add_journal_entry(
         &self,
         text: &str,
@@ -4150,6 +4232,20 @@ impl ComradeRuntime {
             .map_err(|e| UiError::Storage(e.to_string()))?;
         store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
         Ok(removed)
+    }
+
+    /// Hand one journal entry to one person, as an ordinary DM.
+    ///
+    /// Delegates to [`RuntimeHandles::share_journal_entry`], which is where the
+    /// reasoning is — including the three things sharing deliberately does not
+    /// do. See [`Self::send_dm`] for why the network half never runs under the
+    /// runtime lock.
+    pub async fn share_journal_entry(
+        &self,
+        peer: &str,
+        entry_id: &str,
+    ) -> Result<MessageDto, UiError> {
+        self.handles().share_journal_entry(peer, entry_id).await
     }
 
     // ── Tara (wellbeing pillar #4 — reflective companion, strictly local) ────
@@ -5443,7 +5539,7 @@ impl RuntimeHandles {
         // leave a composer that must never look like abandoning it.
         self.nudge_watch.sent(&peer_npub);
 
-        let (author, body) = split_author(content.to_string());
+        let (author, shared_note, body) = read_body(content.to_string());
         let dto = MessageDto {
             id,
             peer: peer_npub.clone(),
@@ -5453,6 +5549,7 @@ impl RuntimeHandles {
             author,
             status: Some(status.into()),
             reply_to: reply_to.map(str::to_string),
+            shared_note,
         };
         if let Some(store) = &self.store {
             let row = comrade_storage::StoredMessage {
@@ -6343,6 +6440,51 @@ impl RuntimeHandles {
             kept_private: false,
             crisis: false,
         })
+    }
+
+    /// Hand one journal entry to one person, as an ordinary DM.
+    ///
+    /// The body is `comrade_core::note`'s wire form, so the peer's Comrade
+    /// draws a note card and any other Nostr client shows text that still says
+    /// where it came from. The returned [`MessageDto`] already carries the
+    /// parsed [`MessageDto::shared_note`] — [`read_body`] does that for every
+    /// message — so the sender's own thread draws the same card immediately.
+    ///
+    /// Three things this deliberately does **not** do:
+    ///
+    /// - **It does not touch the entry.** No "shared" flag, no second copy
+    ///   anywhere but the message history, so the journal screen looks exactly
+    ///   as it did. Deleting the entry afterwards still works and still does not
+    ///   reach into the peer's thread: a delivered message is theirs, and an
+    ///   unsend that cannot be enforced is worse than none.
+    /// - **It shares one entry.** There is no bulk form, no date range, no
+    ///   export. Disclosing two entries takes two deliberate choices, which is
+    ///   what makes an accidental disclosure of the *whole* journal impossible
+    ///   rather than merely discouraged.
+    /// - **It does not screen the words.** [`Self::tara_in_chat`] withholds a
+    ///   distressed question because the user was addressing the *companion*
+    ///   and a crisis hand-off must not be published on a mistyped sigil. Here
+    ///   the user picked an entry and then picked a person: saying "this is
+    ///   what my week was like" to someone who cares is what this pillar exists
+    ///   to make easier, and refusing at that exact moment would be the app
+    ///   deciding a bad week is too shameful to say out loud.
+    ///
+    /// The store read finishes before the first await — the discipline every
+    /// send path in this impl follows.
+    pub async fn share_journal_entry(
+        &self,
+        peer: &str,
+        entry_id: &str,
+    ) -> Result<MessageDto, UiError> {
+        let store = self.store.clone().ok_or(UiError::VaultLocked)?;
+        let entry = store
+            .journal_entry(entry_id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            // Deleted between opening the picker and choosing somebody. Say so
+            // rather than sending a card with nothing in it.
+            .ok_or_else(|| UiError::Engine("that journal entry is gone".into()))?;
+        let line = comrade_core::note::journal_note_line(&entry.text, entry.mood.as_deref());
+        self.send_dm(peer, &line).await
     }
 
     /// Offer an in-app action to `peers`, reporting who was told and who was not.
@@ -7901,6 +8043,9 @@ fn deliver_synthetic_line(
     let _ = tx.send(BridgeEvent::IncomingDirectMessage(DirectMessageDto {
         id: msg.event_id.clone(),
         sender: peer_npub.to_string(),
+        // A rendered control line is Comrade's own words about a transfer, not
+        // anybody's journal.
+        shared_note: None,
         content: line,
         created_at: msg.created_at,
         upi_intents: Vec::new(),
@@ -10600,6 +10745,131 @@ mod tests {
         let entries = rt2.journal_entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].text, "grateful today");
+    }
+
+    #[tokio::test]
+    async fn a_shared_note_reaches_the_thread_as_a_card_and_survives_a_reload() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let entry = rt
+            .add_journal_entry("rough morning, but I went for the walk", Some("😕"))
+            .unwrap();
+        let sent = rt.share_journal_entry(&peer, &entry.id).await.unwrap();
+
+        // The bubble is drawable straight from the send, with the marker line
+        // off the text and the mood beside it.
+        let note = sent.shared_note.clone().expect("sent as a note");
+        assert_eq!(note.text, "rough morning, but I went for the walk");
+        assert_eq!(note.mood.as_deref(), Some("😕"));
+        assert_eq!(sent.content, note.text, "content is the note, not the wire");
+        assert_eq!(sent.author, MessageAuthor::Human);
+
+        // The wire form is what is stored, exactly as Tara's marker is — so the
+        // card is rebuilt from disk rather than from whatever the sending
+        // session happened to hold.
+        let stored = rt
+            .ui
+            .store_ref()
+            .unwrap()
+            .messages_with(&to_npub(&peer))
+            .unwrap();
+        assert!(stored[0]
+            .content
+            .starts_with(comrade_core::note::JOURNAL_NOTE_PREFIX));
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread[0].shared_note, sent.shared_note);
+        assert_eq!(thread[0].content, note.text);
+    }
+
+    #[tokio::test]
+    async fn sharing_a_note_leaves_the_journal_exactly_as_it_was() {
+        // Sharing is a copy. The entry is not marked, not moved, and deleting it
+        // afterwards still works — the chat message is a message from then on.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let entry = rt.add_journal_entry("a hard week", None).unwrap();
+        rt.share_journal_entry(&peer, &entry.id).await.unwrap();
+        assert_eq!(rt.journal_entries().unwrap(), vec![entry.clone()]);
+
+        assert!(rt.delete_journal_entry(&entry.id).unwrap());
+        assert!(rt.journal_entries().unwrap().is_empty());
+        // …and the message stays: a delivered message belongs to both of them.
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].shared_note.as_ref().unwrap().text, "a hard week");
+    }
+
+    #[tokio::test]
+    async fn sharing_an_entry_that_is_gone_says_so_instead_of_sending_nothing() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let entry = rt
+            .add_journal_entry("deleted in the meantime", None)
+            .unwrap();
+        rt.delete_journal_entry(&entry.id).unwrap();
+
+        assert!(matches!(
+            rt.share_journal_entry(&peer, &entry.id).await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(
+            rt.messages_with(&peer).unwrap().is_empty(),
+            "no empty card was sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_message_is_never_drawn_as_a_journal_note() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        for text in [
+            "from my journal: we should talk",
+            "📓 notes from standup",
+            "I wrote about this in my journal",
+        ] {
+            let sent = rt.send_dm(&peer, text).await.unwrap();
+            assert_eq!(sent.shared_note, None, "{text:?}");
+            assert_eq!(sent.content, text);
+        }
+    }
+
+    #[test]
+    fn a_live_arrival_carries_the_same_note_a_reload_would() {
+        // The two paths into a thread are `messages_with` (this DTO's sibling)
+        // and the live `IncomingDirectMessage` event. A frontend appends both to
+        // one list, so a note parsed on only one of them would render as marker
+        // text when it arrived and as a card after a restart.
+        let wire = comrade_core::note::journal_note_line("a hard week", Some("😞"));
+        let dto = DirectMessageDto::from(incoming("aa", "e1", &wire));
+        let note = dto.shared_note.expect("parsed on the live path too");
+        assert_eq!(note.text, "a hard week");
+        assert_eq!(note.mood.as_deref(), Some("😞"));
+        // …and the raw arrival keeps the marker: this DTO is the wire body, and
+        // the card is built from `shared_note`.
+        assert_eq!(dto.content, wire);
+
+        assert_eq!(
+            DirectMessageDto::from(incoming("aa", "e2", "an ordinary hello")).shared_note,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_a_note_needs_an_unlocked_vault() {
+        let rt = ComradeRuntime::new();
+        let (_hex, peer) = stranger();
+        assert!(matches!(
+            rt.share_journal_entry(&peer, "whatever").await,
+            Err(UiError::VaultLocked)
+        ));
     }
 
     #[tokio::test]

@@ -736,6 +736,35 @@ class FakeComradeRepository implements ComradeRepository {
         return _journal.length != before;
       });
 
+  /// Sharing is a copy, and the fake models exactly that: the entry stays in
+  /// the journal untouched and an ordinary outgoing message appears in the
+  /// peer's thread carrying the note. An entry that is gone throws, the same
+  /// case `RuntimeHandles::share_journal_entry` reports.
+  @override
+  Future<MessageInfo> shareJournalEntry({
+    required String peer,
+    required String entryId,
+  }) =>
+      _io(() {
+        _requireUnlocked();
+        final JournalEntryInfo entry = _journal.firstWhere(
+          (JournalEntryInfo e) => e.id == entryId,
+          orElse: () =>
+              throw const ComradeException('that journal entry is gone'),
+        );
+        final MessageInfo msg = MessageInfo(
+          id: _id('msg'),
+          peer: peer,
+          content: entry.text,
+          createdAt: _clock,
+          outgoing: true,
+          status: MessageStatus.sent,
+          sharedNote: SharedNoteInfo(text: entry.text, mood: entry.mood),
+        );
+        (_messages[peer] ??= <MessageInfo>[]).add(msg);
+        return msg;
+      });
+
   // ── Tara ─────────────────────────────────────────────────────────────────
 
   /// Distress cues the real Rust detector looks for. Kept crude on purpose:

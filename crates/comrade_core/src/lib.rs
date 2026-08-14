@@ -12,6 +12,7 @@
  *   call    — voice/video call signaling (WebRTC over the Vault DM channel)
  *   presence— comrade presence beacons (online/offline, to chosen peers only)
  *   nudge   — "they nearly wrote to you": one signal for an abandoned draft
+ *   note    — hand one journal entry to one person: the wire form of a shared note
  *   together— sync-play control channel (watch/listen together; no media moves)
  *   share   — chunked, resumable, playable-early P2P file transfer (no server)
  *   saathi  — Off-grid libp2p mesh (mDNS + Gossipsub)
@@ -60,6 +61,7 @@ pub mod karya;
 pub mod link;
 pub mod media;
 pub mod metrics;
+pub mod note;
 pub mod nudge;
 pub mod pad;
 pub mod presence;

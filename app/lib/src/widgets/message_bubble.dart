@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/models.dart';
 import '../theme/comrade_theme.dart';
 import '../util/display_name.dart';
+import '../util/journal_note.dart';
 import '../util/message_reactions.dart';
 
 /// Delivery-status glyph shown on outgoing bubbles: ✓ sent, ✓✓
@@ -535,7 +536,14 @@ class MessageBubble extends StatelessWidget {
             ),
           if (quotedText != null)
             QuotedPreview(quotedText!, onTap: onQuotedTap),
-          Text(msg.content, style: Theme.of(context).textTheme.bodyLarge),
+          // A shared journal note keeps the bubble it arrived in — it *is* an
+          // ordinary DM — and gains a header saying where it was written, which
+          // is the one thing the words alone cannot say. Mirrors
+          // `SharedNoteBody` on Android and `sharedNoteBody` in `main.js`.
+          if (msg.sharedNote != null)
+            SharedNoteBody(note: msg.sharedNote!, outgoing: msg.outgoing)
+          else
+            Text(msg.content, style: Theme.of(context).textTheme.bodyLarge),
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Row(
@@ -573,6 +581,93 @@ class MessageBubble extends StatelessWidget {
         ),
         if (toggle != null)
           ReactionChipRow(chips: chips, onToggle: toggle, outgoing: out),
+      ],
+    );
+  }
+}
+
+/// A journal note somebody chose to share, drawn inside their chat bubble.
+///
+/// Three decisions worth keeping, all shared with `JournalNoteCard.kt`:
+///
+/// - **It is a header, not a different kind of message.** The bubble keeps its
+///   side, its colour, its ticks and its reply gesture, because that is what it
+///   is: an ordinary DM.
+/// - **It says whose journal.** "From their journal" incoming, "From your
+///   journal" outgoing — the same line on both sides would be ambiguous exactly
+///   where ambiguity is expensive.
+/// - **The header is attribution, not proof.** Core reads it off a text marker
+///   any client could write (`comrade_core::note`), so it says what the sending
+///   Comrade claims, the same standing Tara's label above it has.
+class SharedNoteBody extends StatefulWidget {
+  const SharedNoteBody({
+    required this.note,
+    required this.outgoing,
+    super.key,
+  });
+
+  final SharedNoteInfo note;
+  final bool outgoing;
+
+  @override
+  State<SharedNoteBody> createState() => _SharedNoteBodyState();
+}
+
+class _SharedNoteBodyState extends State<SharedNoteBody> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme colors = Theme.of(context).colorScheme;
+    final NotePreview preview = notePreview(widget.note.text);
+    return Column(
+      key: const Key('journal-note'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Text(
+              noteHeader(outgoing: widget.outgoing),
+              key: const Key('journal-note-label'),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+            if (widget.note.mood != null) ...<Widget>[
+              const SizedBox(width: 6),
+              Text(
+                widget.note.mood!,
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          _expanded ? widget.note.text : preview.text,
+          style: Theme.of(context).textTheme.bodyLarge,
+        ),
+        if (preview.truncated)
+          // A plain tappable line rather than a button: inside a bubble a
+          // Material button reads as an action on the conversation, and this
+          // only unfolds text that is already here.
+          GestureDetector(
+            key: const Key('journal-note-expand'),
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                _expanded ? 'Show less' : 'Show more',
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: colors.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+              ),
+            ),
+          ),
       ],
     );
   }

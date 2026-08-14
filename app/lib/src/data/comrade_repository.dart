@@ -210,6 +210,18 @@ abstract interface class ComradeRepository {
 
   Future<bool> deleteJournalEntry(String id);
 
+  /// Hand one journal entry to one peer, as an ordinary DM, returning the
+  /// message it became.
+  ///
+  /// A copy: the entry is not marked, moved or changed, and deleting it
+  /// afterwards still works. See `RuntimeHandles::share_journal_entry` for what
+  /// this deliberately does not do — there is no bulk form, and nothing screens
+  /// the words.
+  Future<MessageInfo> shareJournalEntry({
+    required String peer,
+    required String entryId,
+  });
+
   // ── Tara (reflective companion — strictly local, not therapy) ────────────
 
   Future<List<TaraMessageInfo>> taraThread();

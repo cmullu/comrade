@@ -167,6 +167,7 @@ pub fn run() {
             commands::add_journal_entry,
             commands::journal_entries,
             commands::delete_journal_entry,
+            commands::share_journal_entry,
             // Tara (reflective companion — strictly local, not therapy)
             commands::tara_send,
             commands::tara_thread,

@@ -386,6 +386,25 @@
          may mention several, and this asks about one at a time. -->
     <string name="mention_which_one">Two contacts answer to @%1$s — which one?</string>
 
+    <!-- Sharing one journal note into a chat (comrade_core::note).
+         The copy has one job: make it unmistakable that this sends a copy of
+         *this* entry to *one* person, and that the journal itself does not
+         move. Never word it as "share your journal" — it is one note. -->
+    <string name="journal_share">Share this note</string>
+    <string name="journal_share_title">Send this note to…</string>
+    <string name="journal_share_body">A copy goes into your chat with them, encrypted like any other message. The entry stays in your journal, and nothing else from it is sent.</string>
+    <string name="journal_share_no_contacts">You haven\'t saved anyone yet. Add a contact from Chats first — a note is only ever sent to someone you chose.</string>
+    <string name="journal_share_sending">Sending…</string>
+    <string name="journal_share_sent">Sent to %1$s.</string>
+    <string name="journal_share_failed">Could not send: %1$s</string>
+    <!-- The header over a shared note's bubble. Attribution, not proof: core
+         reads it off a wire marker any client could write, so it says what the
+         sending Comrade claims. Same standing as tara_author_label. -->
+    <string name="journal_note_from_you">From your journal</string>
+    <string name="journal_note_from_them">From their journal</string>
+    <string name="journal_note_show_more">Show more</string>
+    <string name="journal_note_show_less">Show less</string>
+
     <string name="breathe_title">Take a deep breath</string>
     <string name="breathe_in">Breathe in</string>
     <string name="breathe_hold">Hold</string>
