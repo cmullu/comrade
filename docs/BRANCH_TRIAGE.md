@@ -1,14 +1,16 @@
 # Branch triage — 2026-08-14
 
-Snapshot at `origin/main` = `729845f` (PR #113). **Zero open PRs.** Re-run of
-the 2026-07-31 pass (kept in git history at `docs/BRANCH_TRIAGE.md@d38162b`-era
-commits); main advanced ~90 commits since (PRs #62–#114), which resolved most
-of the previous pass's findings and changed several verdicts.
+Surveyed at `origin/main` = `729845f` (PR #113); revised at `ced79ae` (PR #116)
+when main moved twice mid-pass. One open PR (#121, this pass's own work).
+Re-run of the 2026-07-31 pass (kept in git history at
+`docs/BRANCH_TRIAGE.md@d38162b`-era commits); main advanced ~90 commits since
+(PRs #62–#116), which resolved most of the previous pass's findings and changed
+several verdicts.
 
-11 `claude/*` branches carry commits `git rev-list` counts as unique — but
-**four of those are fully landed with rewritten history** (squash/rework on
+11 `claude/*` branches carried commits `git rev-list` counts as unique — but
+**four of those were fully landed with rewritten history** (squash/rework on
 merge), so `rev-list --count` alone overstates the unlanded work. The real
-split: 3 branches in flight today, 2 carrying genuinely unlanded work, 6 safe
+split: 1 branch still in flight, 2 carrying genuinely unlanded work, 8 safe
 to delete.
 
 The point of this document is to record work that never landed *before* the
@@ -33,15 +35,20 @@ main lacks**, and `git cherry` reports `+` for commits whose content was
 reworked on merge. The decisive test for those is a direct file compare:
 `diff <(git show <branch>:<file>) <file>` over the files the branch touches.
 
-## In flight today — do not touch (3)
+## In flight — do not touch (1)
 
-Pushed 2026-08-14 by concurrent sessions, no PRs open yet:
+Pushed 2026-08-14 by a concurrent session, no PR open yet:
 
 | Branch | Carries |
 | --- | --- |
-| `together-mode-grid-listen-m0niww` | 4 commits: album-grid browsing, untagged-album handling, device-lane flake audit note |
-| `message-threads-chat-x2mfhl` | 1 commit: tap-a-quote jumps to the message without interrupting history reading |
 | `journal-notes-sharing-chats-8o9zgt` | 1 commit: share one journal note to one chat (39 files, all three frontends) |
+
+**Landed while this pass was being written:** `together-mode-grid-listen-m0niww`
+(PR #116) and `message-threads-chat-x2mfhl` (PR #115) both merged the same day —
+`--is-ancestor` now says contained, so both join the safe-to-delete set. Left
+here as the concrete case for the re-fetch rule above: an "in flight, do not
+touch" verdict has a shelf life measured in hours when several sessions run
+concurrently.
 
 ## Landed with rewritten history — safe to delete (4)
 
@@ -71,7 +78,9 @@ file compare against main, not by commit identity.
   work the 2026-07-31 pass called "active" merged.
 
 Also still at zero and safe to delete: everything in the 2026-07-31 pass's
-fully-merged table, plus `together-two-peer-ci-lane`, `together-mode-music-player-0zb618`,
+fully-merged table, plus the two that merged mid-pass
+(`together-mode-grid-listen-m0niww`, `message-threads-chat-x2mfhl`),
+`together-two-peer-ci-lane`, `together-mode-music-player-0zb618`,
 `together-mode-media-controls-6f0b97`, `handoff-*`, `telegram-style-profile-5w9v8c`,
 `in-chat-actions-commands-backgk`, `filesync-integration-analysis-ff8gro`,
 `cognitive-restoration-analysis-e2acrt`, `claude-docs-agent-setup-9jpgs6`,
