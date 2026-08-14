@@ -148,6 +148,17 @@
     })
     .catch(() => {});
 
+  // ── Stretch-break decisions (desktop/ui/stretch_view.mjs) ──────────────────
+  // Flattens the engine's routine into left/right segments and answers "which
+  // stretch is the clock in?" — the routine itself comes from the
+  // `stretch_routine` command, never from here.
+  let stretchView = null;
+  import("./stretch_view.mjs")
+    .then((m) => {
+      stretchView = m;
+    })
+    .catch(() => {});
+
   // ── In-chat command decisions (desktop/ui/chat_commands.mjs) ───────────────
   // What the composer does with a parsed command, the `/` picker's rows, and
   // the sentences for the cases desktop cannot serve. The *grammar* is
@@ -344,8 +355,14 @@
       active: null,
       history: [],
       reflection: null,
-      reading: null,
+      // The reading library: summaries for the list, and the one read open.
+      reads: [],
+      read: null,
       tick: null,
+      // The stretch break. `routine` is the engine's; `startedAt` is a local
+      // wall-clock epoch because the break is purely presentational — nothing
+      // persists, nothing lapses, nothing is scored.
+      stretch: { routine: [], startedAt: null, tick: null, done: false },
     },
   };
 
@@ -739,9 +756,11 @@
       // one's session, history and half-read text rather than leaving them on
       // screen under the new npub.
       stopFocusTick();
+      stopStretch();
       state.focus.active = null;
       state.focus.history = [];
-      state.focus.reading = null;
+      state.focus.reads = [];
+      state.focus.read = null;
       state.focus.reflection = null;
       state.focus.chosen = null;
       showToast(`Vault unlocked · ${shortNpub(id.npub)}`, "success");
@@ -4258,13 +4277,14 @@
     if (!state.identity) return; // vault still locked; the tab paints on unlock
     if (!focusView) await focusReady.catch(() => {});
     try {
-      const [presets, suggested, prompt, active, history, reading] = await Promise.all([
+      const [presets, suggested, prompt, active, history, reads, routine] = await Promise.all([
         safeInvoke("focus_presets", undefined, { silent: true }).catch(() => []),
         safeInvoke("suggested_focus_minutes"),
         safeInvoke("focus_prompt"),
         safeInvoke("active_focus_session"),
         safeInvoke("focus_sessions"),
-        safeInvoke("reading"),
+        safeInvoke("saved_reads"),
+        safeInvoke("stretch_routine", undefined, { silent: true }).catch(() => []),
       ]);
       state.focus.presets = Array.isArray(presets) ? presets : [];
       state.focus.suggested = suggested;
@@ -4272,9 +4292,11 @@
       state.focus.active = active || null;
       // Only finished sessions are history; the running one has its own card.
       state.focus.history = (Array.isArray(history) ? history : []).filter((s) => s.outcome);
-      state.focus.reading = reading || null;
+      state.focus.reads = Array.isArray(reads) ? reads : [];
+      state.focus.stretch.routine = Array.isArray(routine) ? routine : [];
       renderFocus();
       renderReader();
+      renderStretch();
     } catch {
       /* toasted */
     }
@@ -4425,22 +4447,66 @@
     }
   }
 
-  // ── Long read ─────────────────────────────────────────────────────────────
+  // ── Long reads (the library) ──────────────────────────────────────────────
 
   function renderReader() {
     if (!focusView) return;
-    const r = state.focus.reading;
-    $("#reader-compose").hidden = !!r;
+    const r = state.focus.read;
+    $("#reader-library").hidden = !!r;
     $("#reader-open").hidden = !r;
+
+    // The library list — one row per saved read, newest first. Rows are
+    // buttons (textContent only, audit S6); opening fetches the full text.
+    const list = $("#reader-list");
+    list.replaceChildren(
+      ...state.focus.reads.map((s) => {
+        const line = focusView.libraryLine(s);
+        return el("li", { class: "reader-item" }, [
+          el(
+            "button",
+            {
+              class: "reader-item-open",
+              type: "button",
+              onClick: () => handleReaderOpen(s.id),
+            },
+            [
+              el("span", { class: "reader-item-title", text: line.title }),
+              el("span", { class: "reader-item-meta", text: line.meta }),
+            ],
+          ),
+        ]);
+      }),
+    );
+    $("#reader-library-empty").hidden = state.focus.reads.length > 0;
     if (!r) return;
 
     const nav = focusView.readerNav(r.position, r.chunks.length);
-    $("#reader-open-title").textContent = r.title || "Long read";
+    $("#reader-open-title").textContent = r.title || r.source || "Long read";
+    const sourceLine = $("#reader-open-source");
+    // The source under the title, unless it is already standing in as the
+    // title — a header must not say the same thing twice.
+    sourceLine.textContent = r.title && r.source ? r.source : "";
+    sourceLine.hidden = !(r.title && r.source);
     $("#reader-chunk").textContent = r.chunks[nav.position] || "";
     $("#reader-progress").textContent = nav.label;
     $("#reader-prev").disabled = !nav.canPrev;
     $("#reader-next").disabled = !nav.canNext;
     $("#reader-finished").hidden = !nav.atEnd;
+  }
+
+  async function handleReaderOpen(id) {
+    try {
+      const read = await safeInvoke("open_saved_read", { id });
+      if (!read) {
+        // Deleted on another surface since the list painted — refresh it.
+        await loadFocus();
+        return;
+      }
+      state.focus.read = read;
+      renderReader();
+    } catch {
+      /* toasted */
+    }
   }
 
   async function handleReaderSave() {
@@ -4452,12 +4518,16 @@
     const btn = $("#reader-save");
     setBusy(btn, true);
     try {
-      state.focus.reading = await safeInvoke("save_reading", {
+      // Saving opens the read: the person who just pasted an article is the
+      // person who wants to start it.
+      state.focus.read = await safeInvoke("save_read", {
         title: $("#reader-title").value.trim(),
         text,
       });
       $("#reader-title").value = "";
       $("#reader-text").value = "";
+      const reads = await safeInvoke("saved_reads", undefined, { silent: true }).catch(() => null);
+      if (Array.isArray(reads)) state.focus.reads = reads;
       renderReader();
     } catch {
       /* toasted */
@@ -4468,7 +4538,7 @@
 
   async function handleReaderStep(delta) {
     if (!focusView) return;
-    const r = state.focus.reading;
+    const r = state.focus.read;
     if (!r) return;
     const to = focusView.stepReader(r.position, r.chunks.length, delta);
     // null means the position did not change — every step is a write into the
@@ -4476,12 +4546,12 @@
     if (to == null) return;
     // Paint immediately and let the engine's clamped answer overwrite it; the
     // reader should not wait on a disk write to turn the page.
-    state.focus.reading = { ...r, position: to };
+    state.focus.read = { ...r, position: to };
     renderReader();
     try {
-      const updated = await safeInvoke("set_reading_position", { position: to });
+      const updated = await safeInvoke("set_saved_read_position", { id: r.id, position: to });
       if (updated) {
-        state.focus.reading = updated;
+        state.focus.read = updated;
         renderReader();
       }
     } catch {
@@ -4489,13 +4559,93 @@
     }
   }
 
-  async function handleReaderClear() {
+  /** Back to the library, leaving the read (and its place) saved. */
+  async function handleReaderBack() {
+    state.focus.read = null;
+    // Re-list so the row shows the place the reader just got to.
+    const reads = await safeInvoke("saved_reads", undefined, { silent: true }).catch(() => null);
+    if (Array.isArray(reads)) state.focus.reads = reads;
+    renderReader();
+  }
+
+  async function handleReaderRemove() {
+    const r = state.focus.read;
+    if (!r) return;
     try {
-      await safeInvoke("clear_reading");
-      state.focus.reading = null;
+      await safeInvoke("delete_saved_read", { id: r.id });
+      state.focus.read = null;
+      state.focus.reads = state.focus.reads.filter((s) => s.id !== r.id);
       renderReader();
     } catch {
       /* toasted */
+    }
+  }
+
+  // ── Stretch break ─────────────────────────────────────────────────────────
+  //
+  // Paced locally, unlike the focus countdown: a break is purely
+  // presentational — nothing persists, nothing lapses, nothing is scored — so
+  // there is no engine state a per-second re-read would keep honest. The
+  // engine's contribution is the routine itself (`stretch_routine`).
+
+  function renderStretch() {
+    if (!stretchView) return;
+    const st = state.focus.stretch;
+    const segments = stretchView.stretchSegments(st.routine);
+    const running = st.startedAt != null;
+    $("#stretch-idle").hidden = running;
+    $("#stretch-run").hidden = !running;
+    $("#stretch-done").hidden = !st.done;
+    // The bridge failed or answered empty: no player rather than an empty one.
+    $("#stretch-start").disabled = segments.length === 0;
+    if (!running) return;
+
+    const elapsed = (Date.now() - st.startedAt) / 1000;
+    const at = stretchView.stretchAt(segments, elapsed);
+    if (!at) {
+      stopStretch();
+      return;
+    }
+    const figure = $("#stretch-figure");
+    figure.dataset.stretch = at.segment.key;
+    figure.dataset.side = at.segment.side || "";
+    $("#stretch-name").textContent = at.segment.name;
+    $("#stretch-side").textContent = stretchView.sideLabel(at.segment.side);
+    $("#stretch-cue").textContent = at.segment.cue;
+    $("#stretch-bar").style.width = `${stretchView.stretchProgress(segments, elapsed) * 100}%`;
+    if (at.done) {
+      // The routine ran its course: back to rest, with a closing line. Ending
+      // early (the button) shows no line — leaving is not an outcome here.
+      stopStretch();
+      state.focus.stretch.done = true;
+      renderStretch();
+    }
+  }
+
+  function startStretch() {
+    if (!stretchView) return;
+    if (stretchView.stretchSegments(state.focus.stretch.routine).length === 0) return;
+    state.focus.stretch.startedAt = Date.now();
+    state.focus.stretch.done = false;
+    if (!state.focus.stretch.tick) {
+      // 4 fps is plenty for a progress bar; the figure's motion is CSS.
+      state.focus.stretch.tick = setInterval(renderStretch, 250);
+    }
+    renderStretch();
+  }
+
+  function stopStretch() {
+    const st = state.focus.stretch;
+    if (st.tick) clearInterval(st.tick);
+    st.tick = null;
+    st.startedAt = null;
+    st.done = false;
+    // Repaint only when the tab is built (this also runs from the unlock
+    // reset, before the Focus tab has ever painted).
+    if (stretchView && $("#stretch-run")) {
+      $("#stretch-idle").hidden = false;
+      $("#stretch-run").hidden = true;
+      $("#stretch-done").hidden = true;
     }
   }
 
@@ -4668,7 +4818,10 @@
     // URL is an https URL too, and only `parse_music_link` knows the difference.
     const streamLink = await streamLinkReady;
     const asStream = streamLink.planStream(plan.query, target);
-    if (asStream.kind === streamLink.NOT_HTTPS) {
+    // Two refusals, one shape: a scheme we must not carry further, and a page
+    // link a player could never open. Both end here with the sentence naming
+    // the problem — before a session opens and invites somebody to it.
+    if (asStream.kind === streamLink.NOT_HTTPS || asStream.kind === streamLink.NOT_MEDIA) {
       showToast(asStream.message, "warn");
       return;
     }
@@ -6249,7 +6402,10 @@
     $("#reader-save").addEventListener("click", handleReaderSave);
     $("#reader-next").addEventListener("click", () => handleReaderStep(1));
     $("#reader-prev").addEventListener("click", () => handleReaderStep(-1));
-    $("#reader-clear").addEventListener("click", handleReaderClear);
+    $("#reader-back").addEventListener("click", handleReaderBack);
+    $("#reader-remove").addEventListener("click", handleReaderRemove);
+    $("#stretch-start").addEventListener("click", startStretch);
+    $("#stretch-stop").addEventListener("click", stopStretch);
     $("#dm-input").addEventListener("input", (e) => {
       reportDraftEdit();
       // Withdrawn here rather than inside the debounced handler below: a question
@@ -6507,7 +6663,7 @@
     // Couple Sandbox behave believably in browser preview.
     let mockSakha = { paired: false, partnerNpub: null, role: null, ledger: "" };
     // Focus practice state for browser preview (see the `focus_*` cases below).
-    const mockFocus = { active: null, sessions: [], reading: null };
+    const mockFocus = { active: null, sessions: [], reads: [] };
 
     const invoke = async (cmd, args = {}) => {
       await delay(120);
@@ -6856,29 +7012,52 @@
         }
         case "focus_sessions":
           return mockFocus.sessions.slice();
-        case "save_reading":
-          mockFocus.reading = {
+        // The stretch routine is the engine's; this copy exists so the break
+        // player runs in browser preview, and one drifted step here can only
+        // mislead a preview, never a user.
+        case "stretch_routine":
+          return [
+            { key: "neck-tilt", name: "Neck tilt", cue: "Let one ear sink toward that shoulder. (mock)", seconds: 6, mirrored: true },
+            { key: "shoulder-roll", name: "Shoulder rolls", cue: "Slow full circles. (mock)", seconds: 6, mirrored: false },
+            { key: "side-bend", name: "Side bend", cue: "Reach up and lean away. (mock)", seconds: 6, mirrored: true },
+          ];
+        case "save_read": {
+          const read = {
+            id: "mockread_" + Date.now(),
             title: args.title || "",
-            // A stand-in for `attention::chunk_reading`, which splits on
-            // paragraph boundaries. Same shape, not the same algorithm.
+            // A stand-in for `attention::reading_source` (first link's host)…
+            source: (String(args.text).match(/https?:\/\/(?:www\.)?([^/\s:?#]+)/) || [])[1] || "",
+            // …and for `attention::chunk_reading`, which splits on paragraph
+            // boundaries. Same shape, not the same algorithm.
             chunks: String(args.text)
               .split(/\n{2,}/)
               .filter((c) => c.trim()),
             position: 0,
+            added_at: nowSecs(),
           };
-          return mockFocus.reading;
-        case "reading":
-          return mockFocus.reading;
-        case "set_reading_position":
-          if (!mockFocus.reading) return null;
-          mockFocus.reading.position = Math.min(
-            Math.max(0, args.position),
-            mockFocus.reading.chunks.length - 1,
-          );
-          return mockFocus.reading;
-        case "clear_reading": {
-          const had = !!mockFocus.reading;
-          mockFocus.reading = null;
+          mockFocus.reads.unshift(read);
+          return read;
+        }
+        case "saved_reads":
+          return mockFocus.reads.map((r) => ({
+            id: r.id,
+            title: r.title,
+            source: r.source,
+            chunk_count: r.chunks.length,
+            position: r.position,
+            added_at: r.added_at,
+          }));
+        case "open_saved_read":
+          return mockFocus.reads.find((r) => r.id === args.id) || null;
+        case "set_saved_read_position": {
+          const read = mockFocus.reads.find((r) => r.id === args.id);
+          if (!read) return null;
+          read.position = Math.min(Math.max(0, args.position), read.chunks.length - 1);
+          return read;
+        }
+        case "delete_saved_read": {
+          const had = mockFocus.reads.some((r) => r.id === args.id);
+          mockFocus.reads = mockFocus.reads.filter((r) => r.id !== args.id);
           return had;
         }
         // Large attachments. The 10 MB here is a stand-in for

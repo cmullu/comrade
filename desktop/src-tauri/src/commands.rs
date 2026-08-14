@@ -20,8 +20,9 @@ use comrade_ui::{
     ConversationDto, CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto,
     IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
     MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
-    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraChatDto,
-    TaraMessageDto, TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, SakhaStatusDto, SavedReadDto,
+    SavedReadSummaryDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto, TaskState,
+    TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -1376,42 +1377,70 @@ pub async fn focus_reflection(
         .map_err(|e| e.to_string())
 }
 
+/// The guided stretch break, in order. Vault-free like `focus_presets` — a
+/// stretch must not need a passphrase.
 #[tauri::command]
-pub async fn save_reading(
+pub async fn stretch_routine(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Vec<StretchStepDto>, String> {
+    Ok(state.read().await.stretch_routine())
+}
+
+#[tauri::command]
+pub async fn save_read(
     state: tauri::State<'_, Runtime>,
     title: String,
     text: String,
-) -> Result<ReadingDto, String> {
+) -> Result<SavedReadDto, String> {
     state
         .read()
         .await
-        .save_reading(&title, &text)
+        .save_read(&title, &text)
         .map_err(|e| e.to_string())
 }
 
+/// The reading library, newest first — rows only, not the texts.
 #[tauri::command]
-pub async fn reading(state: tauri::State<'_, Runtime>) -> Result<Option<ReadingDto>, String> {
-    state.read().await.reading().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn set_reading_position(
+pub async fn saved_reads(
     state: tauri::State<'_, Runtime>,
-    position: u32,
-) -> Result<Option<ReadingDto>, String> {
+) -> Result<Vec<SavedReadSummaryDto>, String> {
+    state.read().await.saved_reads().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_saved_read(
+    state: tauri::State<'_, Runtime>,
+    id: String,
+) -> Result<Option<SavedReadDto>, String> {
     state
         .read()
         .await
-        .set_reading_position(position)
+        .open_saved_read(&id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn clear_reading(state: tauri::State<'_, Runtime>) -> Result<bool, String> {
+pub async fn set_saved_read_position(
+    state: tauri::State<'_, Runtime>,
+    id: String,
+    position: u32,
+) -> Result<Option<SavedReadDto>, String> {
     state
         .read()
         .await
-        .clear_reading()
+        .set_saved_read_position(&id, position)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_saved_read(
+    state: tauri::State<'_, Runtime>,
+    id: String,
+) -> Result<bool, String> {
+    state
+        .read()
+        .await
+        .delete_saved_read(&id)
         .map_err(|e| e.to_string())
 }
 

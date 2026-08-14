@@ -934,7 +934,37 @@ object ComradeCore {
         val remainingSecs: Long,
     )
 
-    data class ReadingInfo(val title: String, val chunks: List<String>, val position: Int)
+    /** One saved read, opened: the full text chunked, plus where the reader is. */
+    data class SavedReadInfo(
+        val id: String,
+        val title: String,
+        /** Host of the first link in the text ("instagram.com"), or empty. */
+        val source: String,
+        val chunks: List<String>,
+        val position: Int,
+        val addedAt: Long,
+    )
+
+    /** A reading-library row — everything the list needs without the text. */
+    data class SavedReadSummaryInfo(
+        val id: String,
+        val title: String,
+        val source: String,
+        val chunkCount: Int,
+        val position: Int,
+        val addedAt: Long,
+    )
+
+    /** One step of the guided stretch break (`attention::STRETCH_ROUTINE`). */
+    data class StretchStepInfo(
+        val key: String,
+        val name: String,
+        val cue: String,
+        /** Seconds to stay with it — per side, when [mirrored]. */
+        val seconds: Int,
+        /** Done once per side (left, then right) when true. */
+        val mirrored: Boolean,
+    )
 
     private fun uniffi.comrade_ui.AttentionDayDto.toInfo() = AttentionDayInfo(
         date = date,
@@ -953,8 +983,23 @@ object ComradeCore {
         remainingSecs = remainingSecs.toLong(),
     )
 
-    private fun uniffi.comrade_ui.ReadingDto.toInfo() =
-        ReadingInfo(title = title, chunks = chunks, position = position.toInt())
+    private fun uniffi.comrade_ui.SavedReadDto.toInfo() = SavedReadInfo(
+        id = id,
+        title = title,
+        source = source,
+        chunks = chunks,
+        position = position.toInt(),
+        addedAt = addedAt.toLong(),
+    )
+
+    private fun uniffi.comrade_ui.SavedReadSummaryDto.toInfo() = SavedReadSummaryInfo(
+        id = id,
+        title = title,
+        source = source,
+        chunkCount = chunkCount.toInt(),
+        position = position.toInt(),
+        addedAt = addedAt.toLong(),
+    )
 
     fun recordAttentionDayTyped(
         date: String,
@@ -1026,15 +1071,38 @@ object ComradeCore {
     fun focusReflectionTyped(outcome: String): String =
         rethrowing("Focus reflection") { ffi.focusReflection(outcome) }
 
-    fun saveReadingTyped(title: String, text: String): ReadingInfo =
-        rethrowing("Reading") { ffi.saveReading(title, text).toInfo() }
+    /**
+     * The guided stretch break, in order. Vault-free like [focusPresets]:
+     * the routine is a constant of the design, and a stretch must not need
+     * a passphrase.
+     */
+    fun stretchRoutine(): List<StretchStepInfo> = rethrowing("Stretch routine") {
+        ffi.stretchRoutine().map {
+            StretchStepInfo(
+                key = it.key,
+                name = it.name,
+                cue = it.cue,
+                seconds = it.seconds.toInt(),
+                mirrored = it.mirrored,
+            )
+        }
+    }
 
-    fun reading(): ReadingInfo? = rethrowing("Reading") { ffi.reading()?.toInfo() }
+    fun saveReadTyped(title: String, text: String): SavedReadInfo =
+        rethrowing("Reading") { ffi.saveRead(title, text).toInfo() }
 
-    fun setReadingPositionTyped(position: Int): ReadingInfo? =
-        rethrowing("Reading") { ffi.setReadingPosition(position.toUInt())?.toInfo() }
+    /** The reading library, newest first — rows only, not the texts. */
+    fun savedReads(): List<SavedReadSummaryInfo> =
+        rethrowing("Reading") { ffi.savedReads().map { it.toInfo() } }
 
-    fun clearReadingTyped(): Boolean = rethrowing("Reading") { ffi.clearReading() }
+    fun openSavedReadTyped(id: String): SavedReadInfo? =
+        rethrowing("Reading") { ffi.openSavedRead(id)?.toInfo() }
+
+    fun setSavedReadPositionTyped(id: String, position: Int): SavedReadInfo? =
+        rethrowing("Reading") { ffi.setSavedReadPosition(id, position.toUInt())?.toInfo() }
+
+    fun deleteSavedReadTyped(id: String): Boolean =
+        rethrowing("Reading") { ffi.deleteSavedRead(id) }
 
     // ── Encrypted media (NIP-94/96 · Blossom) ─────────────────────────────────
 

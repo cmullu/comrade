@@ -66,6 +66,7 @@ import mullu.comrade.R
 fun FocusScreen(
     onOpenReader: () -> Unit,
     onOpenBreathing: () -> Unit,
+    onOpenStretch: () -> Unit,
     onJournalNote: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -263,11 +264,16 @@ fun FocusScreen(
         }
 
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(onClick = onOpenReader, modifier = Modifier.weight(1f)) {
-                    Text(stringResource(R.string.reader_title))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = onOpenReader, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.reader_title))
+                    }
+                    OutlinedButton(onClick = onOpenStretch, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.stretch_title))
+                    }
                 }
-                OutlinedButton(onClick = onOpenBreathing, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = onOpenBreathing, modifier = Modifier.fillMaxWidth()) {
                     Text(stringResource(R.string.breathe_title))
                 }
             }

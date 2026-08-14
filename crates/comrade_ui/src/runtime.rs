@@ -1737,16 +1737,48 @@ pub struct FocusSessionDto {
     pub remaining_secs: u64,
 }
 
-/// The saved long-read, already split into chapter-sized chunks, plus where
-/// the reader had got to. Chunking is lossless by test
-/// (`comrade_core::attention::chunk_reading`).
+/// One saved read, opened for reading: the full text already split into
+/// chapter-sized chunks (lossless by test —
+/// `comrade_core::attention::chunk_reading`), plus where the reader had got to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
-pub struct ReadingDto {
+pub struct SavedReadDto {
+    pub id: String,
     pub title: String,
+    /// Where it came from — the host of the first link in the text, or empty
+    /// for pasted prose. A label, never something to fetch.
+    pub source: String,
     pub chunks: Vec<String>,
     /// Index into `chunks`, always in range (a stored position past the end
     /// after an edit is clamped rather than trusted).
     pub position: u32,
+    pub added_at: u64,
+}
+
+/// A reading-library row: everything the list needs without hauling the whole
+/// text across the FFI for every entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct SavedReadSummaryDto {
+    pub id: String,
+    pub title: String,
+    /// See [`SavedReadDto::source`].
+    pub source: String,
+    pub chunk_count: u32,
+    pub position: u32,
+    pub added_at: u64,
+}
+
+/// One step of the guided stretch break
+/// (`comrade_core::attention::STRETCH_ROUTINE`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct StretchStepDto {
+    /// Stable key the frontends hang their animation on.
+    pub key: String,
+    pub name: String,
+    pub cue: String,
+    /// Seconds to stay with it — per side, when `mirrored`.
+    pub seconds: u32,
+    /// Done once per side (left, then right) when `true`.
+    pub mirrored: bool,
 }
 
 /// A crisis helpline surfaced when a Tara message carries distress cues.
@@ -4821,63 +4853,128 @@ impl ComradeRuntime {
         Ok(attention::focus_reflection(parsed, prior))
     }
 
-    /// Save text for the distraction-free reader, replacing whatever was
-    /// there, and return it chunked. The user brings the text (paste, share);
-    /// nothing here fetches a URL — a reader that went to the network would
-    /// put an arbitrary-fetch path into the one app that promises not to.
-    pub fn save_reading(&self, title: &str, text: &str) -> Result<ReadingDto, UiError> {
+    /// The guided stretch-break routine, in order.
+    ///
+    /// Vault-free for the same reason [`Self::focus_presets`] is: the routine
+    /// is a constant of the design, not the user's data, and it lives in the
+    /// engine so no frontend keeps a list that could drift from the others'.
+    pub fn stretch_routine(&self) -> Vec<StretchStepDto> {
+        attention::STRETCH_ROUTINE
+            .iter()
+            .map(|s| StretchStepDto {
+                key: s.key.to_string(),
+                name: s.name.to_string(),
+                cue: s.cue.to_string(),
+                seconds: s.seconds,
+                mirrored: s.mirrored,
+            })
+            .collect()
+    }
+
+    /// Add text to the reading library and return it chunked, ready to read.
+    ///
+    /// The user brings the text (paste, or the share sheet); nothing here
+    /// fetches a URL — a reader that went to the network would put an
+    /// arbitrary-fetch path into the one app that promises not to. The source
+    /// label is derived offline from the first link in the text
+    /// ([`attention::reading_source`]) so a library of articles carried in
+    /// from different apps can say where each came from.
+    pub fn save_read(&self, title: &str, text: &str) -> Result<SavedReadDto, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let text = text.trim();
         if text.is_empty() {
             return Err(UiError::Engine("nothing to read".into()));
         }
-        let state = comrade_storage::ReadingState {
+        let now = now_secs();
+        let read = comrade_storage::SavedRead {
+            id: timestamped_store_id(now),
             title: title.trim().to_string(),
+            source: attention::reading_source(text).unwrap_or_default(),
             text: text.to_string(),
             position: 0,
-            updated_at: now_secs(),
+            added_at: now,
+            updated_at: now,
         };
         store
-            .save_reading_state(&state)
+            .save_saved_read(&read)
             .and_then(|()| store.flush())
             .map_err(|e| UiError::Storage(e.to_string()))?;
-        Ok(reading_dto(state))
+        Ok(saved_read_dto(read))
     }
 
-    /// The saved long-read, chunked, or `None` if nothing is saved.
-    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
+    /// The reading library, newest first — rows only, not the texts.
+    ///
+    /// This read may write once: a vault written before the library existed
+    /// holds one read in the old single-slot tree, and the first list moves it
+    /// into the library (position included) rather than losing it. The same
+    /// "reads may write" trade [`Self::active_focus_session`] already makes.
+    pub fn saved_reads(&self) -> Result<Vec<SavedReadSummaryDto>, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        Ok(store
+        if let Some(legacy) = store
             .load_reading_state()
             .map_err(|e| UiError::Storage(e.to_string()))?
-            .map(reading_dto))
+        {
+            let migrated = comrade_storage::SavedRead {
+                id: timestamped_store_id(legacy.updated_at),
+                title: legacy.title,
+                source: attention::reading_source(&legacy.text).unwrap_or_default(),
+                text: legacy.text,
+                position: legacy.position,
+                added_at: legacy.updated_at,
+                updated_at: legacy.updated_at,
+            };
+            store
+                .save_saved_read(&migrated)
+                .and_then(|()| store.clear_reading_state().map(|_| ()))
+                .and_then(|()| store.flush())
+                .map_err(|e| UiError::Storage(e.to_string()))?;
+        }
+        Ok(store
+            .saved_reads()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(saved_read_summary_dto)
+            .collect())
+    }
+
+    /// One saved read, chunked and ready to pick up where it was left off.
+    pub fn open_saved_read(&self, id: &str) -> Result<Option<SavedReadDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        Ok(store
+            .saved_read(id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .map(saved_read_dto))
     }
 
     /// Remember which chunk the reader is on. Clamped to the real chunk count,
     /// so a stored position can never point past the end of the text.
-    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
+    pub fn set_saved_read_position(
+        &self,
+        id: &str,
+        position: u32,
+    ) -> Result<Option<SavedReadDto>, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        let Some(mut state) = store
-            .load_reading_state()
+        let Some(mut read) = store
+            .saved_read(id)
             .map_err(|e| UiError::Storage(e.to_string()))?
         else {
             return Ok(None);
         };
-        let chunks = attention::chunk_reading(&state.text).len() as u32;
-        state.position = position.min(chunks.saturating_sub(1));
-        state.updated_at = now_secs();
+        let chunks = attention::chunk_reading(&read.text).len() as u32;
+        read.position = position.min(chunks.saturating_sub(1));
+        read.updated_at = now_secs();
         store
-            .save_reading_state(&state)
+            .save_saved_read(&read)
             .and_then(|()| store.flush())
             .map_err(|e| UiError::Storage(e.to_string()))?;
-        Ok(Some(reading_dto(state)))
+        Ok(Some(saved_read_dto(read)))
     }
 
-    /// Forget the saved long-read. Returns whether one existed.
-    pub fn clear_reading(&self) -> Result<bool, UiError> {
+    /// Forget one saved read. Returns whether it existed.
+    pub fn delete_saved_read(&self, id: &str) -> Result<bool, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let removed = store
-            .clear_reading_state()
+            .delete_saved_read(id)
             .map_err(|e| UiError::Storage(e.to_string()))?;
         store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
         Ok(removed)
@@ -7473,15 +7570,34 @@ fn focus_dto(session: comrade_storage::FocusSession, now: u64) -> FocusSessionDt
     }
 }
 
-/// The saved long-read, chunked, with its position clamped into range — a
-/// stored position must never be able to point past the end of the text.
-fn reading_dto(state: comrade_storage::ReadingState) -> ReadingDto {
-    let chunks = attention::chunk_reading(&state.text);
+/// A saved read opened for reading: chunked, with its position clamped into
+/// range — a stored position must never point past the end of the text.
+fn saved_read_dto(read: comrade_storage::SavedRead) -> SavedReadDto {
+    let chunks = attention::chunk_reading(&read.text);
     let last = chunks.len().saturating_sub(1) as u32;
-    ReadingDto {
-        title: state.title,
+    SavedReadDto {
+        id: read.id,
+        title: read.title,
+        source: read.source,
         chunks,
-        position: state.position.min(last),
+        position: read.position.min(last),
+        added_at: read.added_at,
+    }
+}
+
+/// A library row. The chunk count is recomputed (chunking is cheap and the
+/// text is the truth), and the position is clamped the same way
+/// [`saved_read_dto`] clamps it so the two views can never disagree on
+/// progress.
+fn saved_read_summary_dto(read: comrade_storage::SavedRead) -> SavedReadSummaryDto {
+    let chunks = attention::chunk_reading(&read.text).len() as u32;
+    SavedReadSummaryDto {
+        id: read.id,
+        title: read.title,
+        source: read.source,
+        chunk_count: chunks,
+        position: read.position.min(chunks.saturating_sub(1)),
+        added_at: read.added_at,
     }
 }
 
@@ -10903,16 +11019,20 @@ mod tests {
             rt.focus_reflection("completed"),
             Err(UiError::VaultLocked)
         ));
+        assert!(matches!(rt.save_read("t", "x"), Err(UiError::VaultLocked)));
+        assert!(matches!(rt.saved_reads(), Err(UiError::VaultLocked)));
         assert!(matches!(
-            rt.save_reading("t", "x"),
+            rt.open_saved_read("id"),
             Err(UiError::VaultLocked)
         ));
-        assert!(matches!(rt.reading(), Err(UiError::VaultLocked)));
         assert!(matches!(
-            rt.set_reading_position(0),
+            rt.set_saved_read_position("id", 0),
             Err(UiError::VaultLocked)
         ));
-        assert!(matches!(rt.clear_reading(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.delete_saved_read("id"),
+            Err(UiError::VaultLocked)
+        ));
     }
 
     #[test]
@@ -10925,6 +11045,22 @@ mod tests {
         assert_eq!(presets, attention::FOCUS_PRESETS.to_vec());
         assert!(!presets.is_empty());
         assert!(presets.windows(2).all(|w| w[0] < w[1]), "ascending");
+    }
+
+    #[test]
+    fn the_stretch_routine_is_drawable_before_the_vault_is_open() {
+        // Same reasoning as the duration chips: the routine is a constant of
+        // the design, and a stretch break must not need a passphrase.
+        let rt = ComradeRuntime::new();
+        let routine = rt.stretch_routine();
+        assert_eq!(routine.len(), attention::STRETCH_ROUTINE.len());
+        for (dto, step) in routine.iter().zip(attention::STRETCH_ROUTINE) {
+            assert_eq!(dto.key, step.key);
+            assert_eq!(dto.seconds, step.seconds);
+            assert_eq!(dto.mirrored, step.mirrored);
+            assert!(!dto.name.is_empty());
+            assert!(!dto.cue.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -11109,38 +11245,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reading_roundtrips_chunked_with_a_clamped_position() {
+    async fn the_reading_library_roundtrips_chunked_with_clamped_positions() {
         let dir = TempDir::new().unwrap();
         let mut rt = ComradeRuntime::new();
         rt.unlock_vault(dir.path(), "pin").await.unwrap();
 
-        assert!(rt.reading().unwrap().is_none());
-        assert!(matches!(
-            rt.save_reading("t", "   "),
-            Err(UiError::Engine(_))
-        ));
+        assert!(rt.saved_reads().unwrap().is_empty());
+        assert!(matches!(rt.save_read("t", "   "), Err(UiError::Engine(_))));
 
         let text = "A paragraph worth a couple of minutes of attention.\n\n".repeat(80);
-        let saved = rt.save_reading("  Walden  ", &text).unwrap();
+        let saved = rt.save_read("  Walden  ", &text).unwrap();
         assert_eq!(saved.title, "Walden");
         assert!(saved.chunks.len() > 1);
         assert_eq!(saved.position, 0);
+        assert_eq!(saved.source, "", "pasted prose carries no source label");
         // Losslessness carries through the DTO: the reader shows exactly what
         // was saved (the trailing trim is the only edit, and it is announced).
         assert_eq!(saved.chunks.concat(), text.trim());
 
-        let moved = rt.set_reading_position(2).unwrap().unwrap();
+        // A second article, this one carried in with a link: the library keys
+        // its source off the first URL's host, offline.
+        let shared = rt
+            .save_read("", "worth a read https://www.instagram.com/p/abc/ tonight")
+            .unwrap();
+        assert_eq!(shared.source, "instagram.com");
+
+        // Both saves can land in the same second, which makes their relative
+        // order a coin toss on the random id tail — newest-first ordering is
+        // pinned in the storage tests with distinct timestamps instead.
+        let rows = rt.saved_reads().unwrap();
+        assert_eq!(rows.len(), 2);
+        let saved_row = rows.iter().find(|r| r.id == saved.id).unwrap();
+        assert_eq!(saved_row.chunk_count as usize, saved.chunks.len());
+
+        let moved = rt.set_saved_read_position(&saved.id, 2).unwrap().unwrap();
         assert_eq!(moved.position, 2);
-        assert_eq!(rt.reading().unwrap().unwrap().position, 2);
+        assert_eq!(
+            rt.open_saved_read(&saved.id).unwrap().unwrap().position,
+            2,
+            "each read keeps its own place"
+        );
+        assert_eq!(rt.open_saved_read(&shared.id).unwrap().unwrap().position, 0);
         // A position past the end is clamped, never trusted.
-        let clamped = rt.set_reading_position(9_999).unwrap().unwrap();
+        let clamped = rt
+            .set_saved_read_position(&saved.id, 9_999)
+            .unwrap()
+            .unwrap();
         assert_eq!(clamped.position as usize, clamped.chunks.len() - 1);
 
-        assert!(rt.clear_reading().unwrap());
-        assert!(!rt.clear_reading().unwrap());
-        assert!(rt.reading().unwrap().is_none());
-        // With nothing saved, moving the position is a clean None.
-        assert!(rt.set_reading_position(0).unwrap().is_none());
+        assert!(rt.delete_saved_read(&saved.id).unwrap());
+        assert!(!rt.delete_saved_read(&saved.id).unwrap());
+        assert_eq!(rt.saved_reads().unwrap().len(), 1);
+        // With the row gone, opening and moving are clean Nones.
+        assert!(rt.open_saved_read(&saved.id).unwrap().is_none());
+        assert!(rt.set_saved_read_position(&saved.id, 0).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pre_library_vaults_single_read_migrates_into_the_library() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        let store = rt.ui.store_ref().unwrap();
+
+        // A vault written before the library existed: one read, mid-progress,
+        // in the old single-slot tree.
+        store
+            .save_reading_state(&comrade_storage::ReadingState {
+                title: "Walden".into(),
+                // Long enough to chunk more than once, so the position below
+                // is real progress and not something the clamp pulls back.
+                text: "A paragraph worth a couple of minutes of attention.\n\n".repeat(80),
+                position: 1,
+                updated_at: 1_700_000_000,
+            })
+            .unwrap();
+
+        let rows = rt.saved_reads().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Walden");
+        assert_eq!(rows[0].position, 1, "progress survives the move");
+
+        // The move happened once: the slot is empty and a second list does not
+        // mint a duplicate.
+        assert!(store.load_reading_state().unwrap().is_none());
+        assert_eq!(rt.saved_reads().unwrap().len(), 1);
     }
 
     #[tokio::test]

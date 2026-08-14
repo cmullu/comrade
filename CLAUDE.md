@@ -19,16 +19,22 @@ comms on Nostr + libp2p.
 | `src/` | Root binary (CLI). |
 
 `android/` and `desktop/` are both still shipping; `app/` does not replace them
-until parity. See `docs/FRONTEND_STRATEGY.md` §7 for the retirement trigger —
-do not delete their code or CI lanes before it fires.
+until parity. See `docs/FRONTEND_STRATEGY.md` §10, *"What has NOT been deleted,
+deliberately"*, for the retirement gate — do not delete their code or CI lanes
+before it fires. (§7's trigger is a different one: when to **reopen** the
+unification question, which is iOS or sustained dual-UI commits.)
 
-**`android/` is the priority frontend** (owner, 2026-08-08). When a feature
-cannot land everywhere at once, Android goes first and the others follow; when
-a design choice suits one frontend and costs another, Android's is the one that
-wins. This is a standing instruction, not a note about one feature — it is why
-the YouTube embed went to Android before desktop despite desktop being the only
-frontend that builds in this sandbox, and it should decide the next such call
-the same way without asking again.
+**`android/` is the priority frontend** (owner, 2026-08-08). The rule and its
+limits are `docs/FRONTEND_STRATEGY.md` §11; the short form is that the focus is
+on getting the Android app working first. When a feature cannot land everywhere
+at once, Android goes first and the others follow; when a design choice suits one
+frontend and costs another, Android's is the one that wins. This is a standing
+instruction, not a note about one feature — it is why the YouTube embed went to
+Android before desktop despite desktop being the only frontend that builds in
+this sandbox, and it should decide the next such call the same way without asking
+again. What it does not license: deleting desktop, treating its parity debt as
+closed, or letting a feature land on Android alone without saying so where the
+feature is documented.
 
 The awkward consequence is worth stating plainly rather than rediscovering: the
 priority frontend is the one this sandbox **cannot compile**. So Android work
