@@ -203,6 +203,45 @@
     <string name="message_action_copy">Copy text</string>
     <string name="react_more">More emoji</string>
     <string name="message_goto_quoted">Go to the quoted message</string>
+    <!-- Threads and topics (see docs/CHAT_THREADS.md). The wording rule these
+         all follow: a topic is a place messages are *filed*, never a claim about
+         the person or the conversation, so nothing here says "organised",
+         "important" or "unresolved". -->
+    <string name="message_action_open_thread">Open thread</string>
+    <string name="message_action_assign_topic">File under a topic…</string>
+    <string name="threads_title">Threads</string>
+    <string name="threads_open">Threads and topics</string>
+    <string name="threads_all">All threads</string>
+    <string name="threads_unfiled">Not filed</string>
+    <string name="threads_empty">No threads yet. Reply to a message and it becomes one.</string>
+    <string name="threads_empty_topic">Nothing filed here yet.</string>
+    <!-- %1$d is the number of replies below the first message. -->
+    <plurals name="thread_replies">
+        <item quantity="one">%1$d reply</item>
+        <item quantity="other">%1$d replies</item>
+    </plurals>
+    <string name="thread_root_missing">The first message isn\'t on this device</string>
+    <string name="thread_preview_attachment">📎 Attachment</string>
+    <string name="thread_preview_empty">(no text)</string>
+    <string name="thread_reply_hint">Reply in this thread</string>
+    <string name="thread_send">Send</string>
+    <string name="thread_close">Close</string>
+    <string name="topics_title">Topics</string>
+    <string name="topics_new">New topic</string>
+    <string name="topics_name_hint">Name it, like Flat deposit</string>
+    <string name="topics_create">Create</string>
+    <string name="topics_cancel">Cancel</string>
+    <string name="topics_none">No topics yet. Name one, then file a thread under it.</string>
+    <string name="topics_archive">Archive</string>
+    <string name="topics_unarchive">Bring back</string>
+    <string name="topics_archived">Archived</string>
+    <string name="topics_show_archived">Show archived</string>
+    <string name="topics_remove_from">Take out of this topic</string>
+    <!-- %1$d threads, %2$d messages under one topic. -->
+    <string name="topics_counts">%1$d · %2$d messages</string>
+    <!-- Confirmation after `/assign #x` or the sheet's file action. %1$s is the topic name. -->
+    <string name="topics_filed">Filed under #%1$s.</string>
+    <string name="topics_unfiled_note">Taken out of that topic.</string>
     <string name="chat_menu_mute">Mute notifications</string>
     <string name="chat_menu_unmute">Unmute notifications</string>
     <!-- Encryption-details dialog -->

@@ -210,6 +210,101 @@ class MessageInfo {
       );
 }
 
+// ── Threads and topics (see `comrade_core::topic`) ───────────────────────────
+
+/// One topic in one conversation — a heading threads are filed under.
+///
+/// The counts are computed on read by core rather than stored, so they cannot
+/// drift when a backfill inserts an old message into the middle of a thread.
+@immutable
+class TopicInfo {
+  const TopicInfo({
+    required this.slug,
+    required this.name,
+    required this.closed,
+    required this.threadCount,
+    required this.messageCount,
+    required this.lastActivityAt,
+    this.mine = true,
+  });
+
+  /// Canonical slug — the id. See `comrade_core::topic::slugify` for why the
+  /// slug *is* the id and what that costs (a topic cannot be renamed into a
+  /// different word).
+  final String slug;
+
+  /// Display name, as first spelled.
+  final String name;
+
+  /// Archived: readable, out of the picker. Nothing deletes a topic.
+  final bool closed;
+  final int threadCount;
+  final int messageCount;
+  final int lastActivityAt;
+
+  /// Whether *this device* named it.
+  final bool mine;
+}
+
+/// One thread as a list row: what it is about, how big it got, where it is filed.
+@immutable
+class ThreadInfo {
+  const ThreadInfo({
+    required this.rootId,
+    required this.preview,
+    required this.rootIsMedia,
+    required this.rootMissing,
+    required this.replyCount,
+    required this.lastAt,
+    required this.unread,
+    this.topicSlug,
+  });
+
+  /// Event id of the root — the thread's id.
+  final String rootId;
+
+  /// Slug of the topic it is filed under, or null for unfiled.
+  final String? topicSlug;
+
+  /// The root's own text. Empty for an uncaptioned attachment and for a root
+  /// that is not on this device — [rootIsMedia] and [rootMissing] say which, so
+  /// the *word* stays here and can be translated rather than coming up from
+  /// core in English.
+  final String preview;
+  final bool rootIsMedia;
+
+  /// Whether the root message is missing from this device's history. Not an
+  /// error and not rare: a thread can be filed before its root is cached.
+  final bool rootMissing;
+
+  /// Messages *below* the root.
+  final int replyCount;
+  final int lastAt;
+  final bool unread;
+}
+
+/// One thread in full — the root and everything that replied into it.
+///
+/// Two lists rather than one merged one, because a merge needs a total order
+/// and every frontend already has its own interleave by `createdAt`.
+@immutable
+class ThreadDetail {
+  const ThreadDetail({
+    required this.rootId,
+    required this.messages,
+    required this.media,
+    this.topicSlug,
+  });
+
+  final String rootId;
+  final String? topicSlug;
+  final List<MessageInfo> messages;
+
+  /// In practice the root or nothing: an attachment carries no `replyTo`, so it
+  /// can start a thread but not join one (`AUDIT.md` TOPIC-2).
+  final List<MediaMessageInfo> media;
+}
+
 /// A stranger's first DM, gated out of the chat list until accepted.
 @immutable
 class MessageRequestInfo {
@@ -615,6 +710,19 @@ class MeshStatusChanged extends BridgeEvent {
 class LedgerUpdated extends BridgeEvent {
   const LedgerUpdated(this.ledger);
   final String ledger;
+}
+
+/// The peer named a topic, filed a thread under one, or archived one — the
+/// structure of [peer]'s conversation moved.
+///
+/// Carries the conversation and nothing else. The sheets re-read the whole
+/// conversation anyway (the counts are derived, not stored — see [TopicInfo]),
+/// so a finer payload would be read and thrown away. Core only emits this when
+/// the visible state actually changed, so a replay off the two-day gift-wrap
+/// backfill redraws nothing.
+class TopicsChanged extends BridgeEvent {
+  const TopicsChanged(this.peer);
+  final String peer;
 }
 
 /// A call signal (offer/answer/ice/ringing/busy/hangup) from a peer.

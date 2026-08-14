@@ -814,6 +814,110 @@ object ComradeCore {
     fun serviceAccess(): uniffi.comrade_core.ServiceAccess =
         uniffi.comrade_core.ServiceAccess(spotify = false, appleMusic = false)
 
+    // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+    //
+    // The `Row` shapes these return are `mullu.comrade.topic`'s, not new ones:
+    // that package has no Android imports so the JVM lane can run its
+    // decisions, and mapping at this boundary is what keeps it that way.
+
+    /**
+     * Every topic in this conversation, oldest first, with live counts.
+     * Closed ones are included — the archive has to be reachable, and
+     * [mullu.comrade.topic.TopicDecisions.visibleTopics] is where the picker
+     * filters.
+     */
+    fun topics(peer: String): List<mullu.comrade.topic.TopicRow> =
+        rethrowing("Topics") { ffi.topics(peer).map { it.toRow() } }
+
+    /**
+     * Every thread in this conversation, most recently active first.
+     * [topicSlug] of null is *all* threads, not the unfiled ones.
+     */
+    fun threads(peer: String, topicSlug: String? = null): List<mullu.comrade.topic.ThreadRow> =
+        rethrowing("Threads") { ffi.threads(peer, topicSlug).map { it.toRow() } }
+
+    /** One thread in full. [rootId] may name any message in it. */
+    fun thread(peer: String, rootId: String): ThreadInfo =
+        rethrowing("Thread") { ffi.thread(peer, rootId).toInfo() }
+
+    /**
+     * Name a topic and tell the peer. Idempotent — the slug is the id, so
+     * naming one that already exists returns it rather than failing.
+     */
+    fun createTopicTyped(peer: String, name: String): mullu.comrade.topic.TopicRow =
+        rethrowing("Topic") { runBlocking { ffi.createTopic(peer, name) }.toRow() }
+
+    /**
+     * File the thread containing [messageId] under [topicName], creating the
+     * topic if it is new — or, with null, take it out of wherever it was.
+     *
+     * Takes the message rather than the thread root because resolving the root
+     * is core's job: filing from a reply must land on the thread it belongs to,
+     * not create a second one.
+     */
+    fun assignThreadTyped(
+        peer: String,
+        messageId: String,
+        topicName: String?,
+    ): mullu.comrade.topic.ThreadRow =
+        rethrowing("Assign") {
+            runBlocking { ffi.assignThread(peer, messageId, topicName) }.toRow()
+        }
+
+    /** Archive a topic, or bring it back. */
+    fun setTopicClosedTyped(
+        peer: String,
+        slug: String,
+        closed: Boolean,
+    ): mullu.comrade.topic.TopicRow =
+        rethrowing("Topic") { runBlocking { ffi.setTopicClosed(peer, slug, closed) }.toRow() }
+
+    /**
+     * Reply inside a thread — addressed to the thread's *root*, whichever
+     * message in it is named. That flatness is what makes a thread a thread
+     * rather than a chain of quotes.
+     */
+    fun sendThreadReplyTyped(peer: String, rootId: String, content: String): MessageInfo =
+        rethrowing("Send") { runBlocking { ffi.sendThreadReply(peer, rootId, content) }.toInfo() }
+
+    /** One thread as the sheet renders it: text and attachments, merged by time. */
+    data class ThreadInfo(
+        val rootId: String,
+        val peer: String,
+        val topicSlug: String?,
+        val messages: List<MessageInfo>,
+        val media: List<MediaMessageInfo>,
+    )
+
+    private fun uniffi.comrade_ui.TopicDto.toRow() = mullu.comrade.topic.TopicRow(
+        slug = slug,
+        name = name,
+        closed = closed,
+        threadCount = threadCount.toInt(),
+        messageCount = messageCount.toInt(),
+        lastActivityAt = lastActivityAt.toLong(),
+        mine = mine,
+    )
+
+    private fun uniffi.comrade_ui.ThreadSummaryDto.toRow() = mullu.comrade.topic.ThreadRow(
+        rootId = rootId,
+        topicSlug = topicSlug,
+        preview = preview,
+        rootIsMedia = rootIsMedia,
+        rootMissing = rootMissing,
+        replyCount = replyCount.toInt(),
+        lastAt = lastAt.toLong(),
+        unread = unread,
+    )
+
+    private fun uniffi.comrade_ui.ThreadDto.toInfo() = ThreadInfo(
+        rootId = rootId,
+        peer = peer,
+        topicSlug = topicSlug,
+        messages = messages.map { it.toInfo() },
+        media = media.map { it.toInfo() },
+    )
+
     /** Name a piece of work. [peer] of null is a note to self — no relay. */
     fun assignTaskTyped(peer: String?, text: String): TaskInfo =
         rethrowing("Task") { runBlocking { ffi.assignTask(peer, text) }.toInfo() }

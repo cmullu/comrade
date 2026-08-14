@@ -52,23 +52,27 @@
 ///   disclosure with no UI to explain it is the one thing this feature must
 ///   not be. It is one line here the day that screen exists.
 ///
-/// And a whole family that `api.rs` deliberately does *not* export yet: the
-/// in-chat commands (`/task`, `@tara`, `/comrade-breathe`, `/play` — see
+/// And a family that `api.rs` deliberately does *not* export yet: the in-chat
+/// commands (`/task`, `@tara`, `/comrade-breathe`, `/play` — see
 /// `docs/CHAT_ACTIONS.md`). They are on the uniffi surface for Kotlin and on
-/// the Tauri surface for desktop, and they were kept off the FRB surface on
-/// purpose. Two reasons, and the second is the real one:
+/// the Tauri surface for desktop, and they are kept off the FRB surface for one
+/// reason only:
 ///
 /// * The composer here has no picker, no mention chips and no aside styling,
 ///   and an aside that looks like a message is precisely the failure that
 ///   feature must not have — `@tara` reaching `sendDmReply` would send somebody
 ///   their own private thought.
-/// * Adding them would have meant regenerating `frb_generated.rs`, and the
-///   change that introduced them could not do that (`flutter_rust_bridge_codegen`
-///   was unavailable), so half of it would have been hand-edited. That file is
-///   generated, never edited by hand.
 ///
-/// The Rust side is complete and frontend-agnostic; this is a UI gap and a
-/// codegen step, in that order.
+/// **A second reason used to be given here and it is no longer true.** It said
+/// adding them would mean regenerating `frb_generated.rs` and that the change
+/// introducing them could not, because `flutter_rust_bridge_codegen` was
+/// unavailable. The threads-and-topics work of 2026-08-14 installed the pinned
+/// 2.12.0 codegen and regenerated, so codegen is a step somebody can take, not
+/// a blocker — see `.claude/rules/flutter.md` for the exact command and why
+/// `--no-web` is not optional. What is left is the UI gap above, and that one is
+/// real: it is a composer, not a bridge.
+///
+/// The Rust side is complete and frontend-agnostic.
 ///
 /// Each is a one-line addition to the interface plus a fake implementation
 /// when a screen wants it. Nothing here is half-wired: every method the
@@ -277,6 +281,75 @@ class RustComradeRepository implements ComradeRepository {
   @override
   Future<int> markConversationRead(String peer) async =>
       (await _guard(() => rust.markConversationRead(peer: peer))).toInt();
+
+  // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+
+  @override
+  Future<List<TopicInfo>> topics(String peer) async =>
+      (await _guard(() => rust.topics(peer: peer))).map(_topic).toList();
+
+  @override
+  Future<List<ThreadInfo>> threads(String peer, {String? topicSlug}) async =>
+      (await _guard(() => rust.threads(peer: peer, topicSlug: topicSlug)))
+          .map(_thread)
+          .toList();
+
+  @override
+  Future<ThreadDetail> thread({
+    required String peer,
+    required String rootId,
+  }) async {
+    final rust.ThreadDto dto =
+        await _guard(() => rust.thread(peer: peer, rootId: rootId));
+    return ThreadDetail(
+      rootId: dto.rootId,
+      topicSlug: dto.topicSlug,
+      messages: dto.messages.map(_message).toList(),
+      media: dto.media.map(_media).toList(),
+    );
+  }
+
+  @override
+  Future<TopicInfo> createTopic({
+    required String peer,
+    required String name,
+  }) async =>
+      _topic(await _guard(() => rust.createTopic(peer: peer, name: name)));
+
+  @override
+  Future<ThreadInfo> assignThread({
+    required String peer,
+    required String messageId,
+    String? topicName,
+  }) async =>
+      _thread(await _guard(
+        () => rust.assignThread(
+          peer: peer,
+          messageId: messageId,
+          topicName: topicName,
+        ),
+      ));
+
+  @override
+  Future<TopicInfo> setTopicClosed({
+    required String peer,
+    required String slug,
+    required bool closed,
+  }) async =>
+      _topic(await _guard(
+        () => rust.setTopicClosed(peer: peer, slug: slug, closed: closed),
+      ));
+
+  @override
+  Future<MessageInfo> sendThreadReply({
+    required String peer,
+    required String rootId,
+    required String content,
+  }) async =>
+      _message(await _guard(
+        () =>
+            rust.sendThreadReply(peer: peer, rootId: rootId, content: content),
+      ));
 
   @override
   Future<List<MessageRequestInfo>> messageRequests() async =>
@@ -795,6 +868,9 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
       // frontend has none of — see divergence D34 in `SCREEN_INVENTORY.md`. Null
       // rather than a stub so nothing here pretends the transfer is possible.
       rust.BridgeEvent_AttachmentHandoff() => null,
+      // The peer reorganised the conversation. Structure, not a message — so no
+      // notification and no chat-list change, only the thread sheets reload.
+      rust.BridgeEvent_TopicsChanged(:final String peer) => TopicsChanged(peer),
     };
 
 /// Flatten the typed `CallSignal` union back into the flat shape the call UI
@@ -881,6 +957,27 @@ MessageRequestInfo _messageRequest(rust.MessageRequestDto dto) =>
       peer: dto.peer,
       lastMessage: dto.lastMessage,
       lastAt: dto.lastAt.toInt(),
+    );
+
+TopicInfo _topic(rust.TopicDto dto) => TopicInfo(
+      slug: dto.slug,
+      name: dto.name,
+      closed: dto.closed,
+      threadCount: dto.threadCount,
+      messageCount: dto.messageCount,
+      lastActivityAt: dto.lastActivityAt.toInt(),
+      mine: dto.mine,
+    );
+
+ThreadInfo _thread(rust.ThreadSummaryDto dto) => ThreadInfo(
+      rootId: dto.rootId,
+      topicSlug: dto.topicSlug,
+      preview: dto.preview,
+      rootIsMedia: dto.rootIsMedia,
+      rootMissing: dto.rootMissing,
+      replyCount: dto.replyCount,
+      lastAt: dto.lastAt.toInt(),
+      unread: dto.unread,
     );
 
 MediaMessageInfo _media(rust.MediaMessageDto dto) => MediaMessageInfo(

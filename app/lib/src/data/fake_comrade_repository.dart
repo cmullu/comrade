@@ -544,6 +544,215 @@ class FakeComradeRepository implements ComradeRepository {
         return previous;
       });
 
+  // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+  //
+  // An in-memory model of the real one, with the two rules that actually matter
+  // to a widget test: the slug is the id (so naming a topic twice is one topic)
+  // and a thread is the transitive closure of `replyTo`. The slug rules here are
+  // deliberately the shapes a test types, not a second implementation of
+  // `comrade_core::topic::slugify` — the real one is where a name is refused.
+
+  /// `peer -> slug -> topic`.
+  final Map<String, Map<String, TopicInfo>> _topics =
+      <String, Map<String, TopicInfo>>{};
+
+  /// `rootId -> slug`, across every conversation, as the real store keys it.
+  final Map<String, String?> _filings = <String, String?>{};
+
+  String _slugify(String name) => name
+      .trim()
+      .replaceFirst(RegExp(r'^#'), '')
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9_-]+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '');
+
+  /// The oldest ancestor of [id] by `replyTo`, bounded the way core's
+  /// `root_of` is. A message we do not hold is its own root, which is what
+  /// keeps a reply to something outside the window visible.
+  String _rootOf(String peer, String id) {
+    final List<MessageInfo> msgs = _messages[peer] ?? const <MessageInfo>[];
+    String current = id;
+    final Set<String> seen = <String>{};
+    for (int i = 0; i < 64; i++) {
+      if (!seen.add(current)) break;
+      final String? parent = msgs
+          .cast<MessageInfo?>()
+          .firstWhere((MessageInfo? m) => m?.id == current, orElse: () => null)
+          ?.replyTo;
+      if (parent == null || parent.isEmpty || parent == current) break;
+      current = parent;
+    }
+    return current;
+  }
+
+  List<ThreadInfo> _threadRows(String peer) {
+    final List<MessageInfo> msgs = _messages[peer] ?? const <MessageInfo>[];
+    final Map<String, List<MessageInfo>> grouped =
+        <String, List<MessageInfo>>{};
+    for (final MessageInfo m in msgs) {
+      (grouped[_rootOf(peer, m.id)] ??= <MessageInfo>[]).add(m);
+    }
+    final List<ThreadInfo> rows = <ThreadInfo>[];
+    grouped.forEach((String root, List<MessageInfo> members) {
+      members.sort(
+          (MessageInfo a, MessageInfo b) => a.createdAt.compareTo(b.createdAt));
+      final MessageInfo? head = members
+          .cast<MessageInfo?>()
+          .firstWhere((MessageInfo? m) => m?.id == root, orElse: () => null);
+      final int readTo = _readPositions[peer] ?? 0;
+      rows.add(ThreadInfo(
+        rootId: root,
+        topicSlug: _filings[root],
+        preview: head?.content ?? '',
+        rootIsMedia: false,
+        rootMissing: head == null,
+        replyCount: members.length - (head == null ? 0 : 1),
+        lastAt: members.last.createdAt,
+        unread:
+            members.any((MessageInfo m) => !m.outgoing && m.createdAt > readTo),
+      ));
+    });
+    rows.sort((ThreadInfo a, ThreadInfo b) => b.lastAt.compareTo(a.lastAt));
+    return rows;
+  }
+
+  @override
+  Future<List<TopicInfo>> topics(String peer) => _io(() {
+        _requireUnlocked();
+        final List<ThreadInfo> rows = _threadRows(peer);
+        return (_topics[peer] ?? const <String, TopicInfo>{})
+            .values
+            .map((TopicInfo t) {
+          final List<ThreadInfo> filed =
+              rows.where((ThreadInfo r) => r.topicSlug == t.slug).toList();
+          return TopicInfo(
+            slug: t.slug,
+            name: t.name,
+            closed: t.closed,
+            mine: t.mine,
+            threadCount: filed.length,
+            messageCount: filed.fold<int>(
+                0, (int a, ThreadInfo r) => a + r.replyCount + 1),
+            lastActivityAt: filed.fold<int>(t.lastActivityAt,
+                (int a, ThreadInfo r) => r.lastAt > a ? r.lastAt : a),
+          );
+        }).toList()
+          ..sort((TopicInfo a, TopicInfo b) => a.slug.compareTo(b.slug));
+      });
+
+  @override
+  Future<List<ThreadInfo>> threads(String peer, {String? topicSlug}) => _io(() {
+        _requireUnlocked();
+        final List<ThreadInfo> rows = _threadRows(peer);
+        return topicSlug == null
+            ? rows
+            : rows.where((ThreadInfo r) => r.topicSlug == topicSlug).toList();
+      });
+
+  @override
+  Future<ThreadDetail> thread({
+    required String peer,
+    required String rootId,
+  }) =>
+      _io(() {
+        _requireUnlocked();
+        final String root = _rootOf(peer, rootId);
+        final List<MessageInfo> members = (_messages[peer] ??
+                const <MessageInfo>[])
+            .where((MessageInfo m) => _rootOf(peer, m.id) == root)
+            .toList()
+          ..sort((MessageInfo a, MessageInfo b) =>
+              a.createdAt.compareTo(b.createdAt));
+        return ThreadDetail(
+          rootId: root,
+          topicSlug: _filings[root],
+          messages: List<MessageInfo>.unmodifiable(members),
+          media: const <MediaMessageInfo>[],
+        );
+      });
+
+  @override
+  Future<TopicInfo> createTopic({
+    required String peer,
+    required String name,
+  }) =>
+      _io(() => _upsertTopic(peer, name));
+
+  TopicInfo _upsertTopic(String peer, String name) {
+    _requireUnlocked();
+    final String slug = _slugify(name);
+    if (slug.length < 2) {
+      // The same sentence `comrade_ui`'s `TOPIC_NAME_REFUSED` gives, and the
+      // same exception type every other refusal here uses — a `StateError`
+      // would escape the sheet's `on ComradeException` and crash the widget
+      // instead of showing the reason (AUDIT TOPIC-1).
+      throw const ComradeException(
+        'A topic name needs two or more letters or digits, and for now Latin ones',
+      );
+    }
+    final Map<String, TopicInfo> byslug =
+        _topics[peer] ??= <String, TopicInfo>{};
+    // The slug is the id: naming the same word twice is the same topic, and the
+    // first spelling is the one that is kept.
+    return byslug[slug] ??= TopicInfo(
+      slug: slug,
+      name: name.trim().replaceFirst(RegExp(r'^#'), ''),
+      closed: false,
+      threadCount: 0,
+      messageCount: 0,
+      lastActivityAt: _clock,
+    );
+  }
+
+  @override
+  Future<ThreadInfo> assignThread({
+    required String peer,
+    required String messageId,
+    String? topicName,
+  }) =>
+      _io(() {
+        _requireUnlocked();
+        final String root = _rootOf(peer, messageId);
+        _filings[root] = (topicName == null || topicName.trim().isEmpty)
+            ? null
+            : _upsertTopic(peer, topicName).slug;
+        return _threadRows(peer).firstWhere((ThreadInfo r) => r.rootId == root);
+      });
+
+  @override
+  Future<TopicInfo> setTopicClosed({
+    required String peer,
+    required String slug,
+    required bool closed,
+  }) =>
+      _io(() {
+        _requireUnlocked();
+        final TopicInfo? existing = _topics[peer]?[slug];
+        if (existing == null) throw StateError('no such topic');
+        final TopicInfo next = TopicInfo(
+          slug: existing.slug,
+          name: existing.name,
+          closed: closed,
+          mine: existing.mine,
+          threadCount: existing.threadCount,
+          messageCount: existing.messageCount,
+          lastActivityAt: existing.lastActivityAt,
+        );
+        _topics[peer]![slug] = next;
+        return next;
+      });
+
+  @override
+  Future<MessageInfo> sendThreadReply({
+    required String peer,
+    required String rootId,
+    required String content,
+  }) =>
+      // Addressed to the *root*, not to `rootId` as given — the flatness is the
+      // feature, and a fake that quoted the last message instead would let a
+      // widget test pass on behaviour the real one does not have.
+      sendDm(peer: peer, content: content, replyTo: _rootOf(peer, rootId));
+
   @override
   Future<List<MessageRequestInfo>> messageRequests() => _io(() {
         _requireUnlocked();
