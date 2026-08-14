@@ -432,6 +432,95 @@ void main() {
     });
   });
 
+  group('a shared journal note', () {
+    testWidgets('is headed by whose journal it came out of',
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm-note',
+              peer: 'npub1x',
+              content: 'rough morning, but I went for the walk',
+              createdAt: 1752321600,
+              outgoing: false,
+              sharedNote: SharedNoteInfo(
+                text: 'rough morning, but I went for the walk',
+                mood: '😕',
+              ),
+            ),
+            onReply: () {},
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('journal-note')), findsOneWidget);
+      expect(find.text('From their journal'), findsOneWidget);
+      expect(find.text('😕'), findsOneWidget);
+      expect(
+          find.text('rough morning, but I went for the walk'), findsOneWidget);
+      // Nothing to unfold: a "show more" that expands nothing would say the
+      // sender wrote more than they did.
+      expect(find.byKey(const Key('journal-note-expand')), findsNothing);
+    });
+
+    testWidgets('a long note folds until it is asked to open',
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      final String long =
+          List<String>.generate(12, (int i) => 'line ${i + 1}').join('\n');
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: MessageInfo(
+              id: 'm-long',
+              peer: 'npub1x',
+              content: long,
+              createdAt: 1752321600,
+              outgoing: true,
+              sharedNote: SharedNoteInfo(text: long),
+            ),
+            onReply: () {},
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('From your journal'), findsOneWidget);
+      expect(find.textContaining('line 12'), findsNothing);
+      await tester.tap(find.byKey(const Key('journal-note-expand')));
+      await tester.pump();
+      expect(find.text('Show less'), findsOneWidget);
+      expect(find.textContaining('line 12'), findsOneWidget);
+    });
+
+    testWidgets('an ordinary message gets no note header',
+        (WidgetTester tester) async {
+      final repo = await unlockedFake();
+      await tester.pumpWidget(
+        harness(
+          MessageBubble(
+            message: const MessageInfo(
+              id: 'm-plain',
+              peer: 'npub1x',
+              content: 'I wrote about this in my journal',
+              createdAt: 1752321600,
+              outgoing: true,
+            ),
+            onReply: () {},
+          ),
+          repo: repo,
+        ),
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('journal-note')), findsNothing);
+    });
+  });
+
   group('DaySeparator', () {
     testWidgets('renders its label', (WidgetTester tester) async {
       final repo = await unlockedFake();

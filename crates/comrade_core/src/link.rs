@@ -325,7 +325,13 @@ impl LinkScopes {
 ///   Tara's thread is the most sensitive text in the product. A linked browser
 ///   is another device by definition, so it does not get them. Not "not yet":
 ///   there is no scope that turns these on, so no host UI can offer one and no
-///   user can be talked into it.
+///   user can be talked into it. **`share_journal_*` is on this list too**, and
+///   naming it here is the point: since `comrade_core::note` a journal entry can
+///   be handed to a peer, which makes it look like an ordinary messaging call
+///   and therefore like something a Messages scope should carry. It is not — it
+///   reads the journal, which is the disclosure this list exists to refuse, and
+///   the fact that the words leave in a DM rather than in a response body
+///   changes nothing about who chose to disclose them.
 /// * **Key material and destructive lifecycle.** Unlocking, locking, minting an
 ///   identity and the panic wipe stay with the key-holder. A revoked session
 ///   must not have been able to wipe the vault, and a session that could
@@ -336,6 +342,7 @@ fn is_never_grantable(method: &str) -> bool {
         || method.starts_with("tara_")
         || method.starts_with("add_journal")
         || method.starts_with("delete_journal")
+        || method.starts_with("share_journal")
         || method.starts_with("clear_tara")
     {
         return true;
@@ -1698,6 +1705,10 @@ mod tests {
             "journal_entries",
             "add_journal_entry",
             "delete_journal_entry",
+            // Reads an entry and sends it. A linked browser must not be able to
+            // pick somebody's journal note and mail it to a contact, however
+            // much the name makes it look like a messaging call.
+            "share_journal_entry",
             "tara_send",
             "tara_thread",
             "tara_opener",

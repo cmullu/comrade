@@ -1851,7 +1851,16 @@ fun ConversationScreen(
                                                             goToQuoted(msg.replyTo)
                                                         }
                                                     }
-                                                    Text(msg.content, style = MaterialTheme.typography.bodyLarge)
+                                                    // A shared journal note keeps the
+                                                    // bubble it arrived in and gains a
+                                                    // header saying where it was
+                                                    // written; see SharedNoteBody.
+                                                    val note = msg.sharedNote
+                                                    if (note != null) {
+                                                        SharedNoteBody(note, outgoing = msg.outgoing)
+                                                    } else {
+                                                        Text(msg.content, style = MaterialTheme.typography.bodyLarge)
+                                                    }
                                                     Row(
                                                         modifier = Modifier
                                                             .align(Alignment.End)

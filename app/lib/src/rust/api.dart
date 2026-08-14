@@ -390,6 +390,15 @@ Future<List<JournalEntryDto>> journalEntries() =>
 Future<bool> deleteJournalEntry({required String id}) =>
     RustLib.instance.api.crateApiDeleteJournalEntry(id: id);
 
+/// Hand one journal entry to one peer, as an ordinary DM. A copy: the entry is
+/// not marked, moved or changed — see `RuntimeHandles::share_journal_entry`.
+///
+/// See [`broadcast_chitthi`] for the lock discipline.
+Future<MessageDto> shareJournalEntry(
+        {required String peer, required String entryId}) =>
+    RustLib.instance.api
+        .crateApiShareJournalEntry(peer: peer, entryId: entryId);
+
 /// Persist the user's message, compute Tara's on-device reply, persist and
 /// return it. `crisis == true` on the reply means the UI must surface
 /// [`tara_crisis_resources`] with it.
@@ -1052,6 +1061,7 @@ class DirectMessageDto {
   final BigInt createdAt;
   final List<UpiIntentDto> upiIntents;
   final String? replyTo;
+  final SharedNoteDto? sharedNote;
 
   const DirectMessageDto({
     required this.id,
@@ -1060,6 +1070,7 @@ class DirectMessageDto {
     required this.createdAt,
     required this.upiIntents,
     this.replyTo,
+    this.sharedNote,
   });
 
   @override
@@ -1069,7 +1080,8 @@ class DirectMessageDto {
       content.hashCode ^
       createdAt.hashCode ^
       upiIntents.hashCode ^
-      replyTo.hashCode;
+      replyTo.hashCode ^
+      sharedNote.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1081,7 +1093,8 @@ class DirectMessageDto {
           content == other.content &&
           createdAt == other.createdAt &&
           upiIntents == other.upiIntents &&
-          replyTo == other.replyTo;
+          replyTo == other.replyTo &&
+          sharedNote == other.sharedNote;
 }
 
 class FoundProfileDto {
@@ -1339,6 +1352,7 @@ class MessageDto {
   final MessageAuthor author;
   final String? status;
   final String? replyTo;
+  final SharedNoteDto? sharedNote;
 
   const MessageDto({
     required this.id,
@@ -1349,6 +1363,7 @@ class MessageDto {
     required this.author,
     this.status,
     this.replyTo,
+    this.sharedNote,
   });
 
   @override
@@ -1360,7 +1375,8 @@ class MessageDto {
       outgoing.hashCode ^
       author.hashCode ^
       status.hashCode ^
-      replyTo.hashCode;
+      replyTo.hashCode ^
+      sharedNote.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1374,7 +1390,8 @@ class MessageDto {
           outgoing == other.outgoing &&
           author == other.author &&
           status == other.status &&
-          replyTo == other.replyTo;
+          replyTo == other.replyTo &&
+          sharedNote == other.sharedNote;
 }
 
 class MessageRequestDto {
@@ -1766,6 +1783,27 @@ sealed class ShareSignal with _$ShareSignal {
   const factory ShareSignal.transport({
     required TransferSignal signal,
   }) = ShareSignal_Transport;
+}
+
+class SharedNoteDto {
+  final String text;
+  final String? mood;
+
+  const SharedNoteDto({
+    required this.text,
+    this.mood,
+  });
+
+  @override
+  int get hashCode => text.hashCode ^ mood.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SharedNoteDto &&
+          runtimeType == other.runtimeType &&
+          text == other.text &&
+          mood == other.mood;
 }
 
 enum StateChange {

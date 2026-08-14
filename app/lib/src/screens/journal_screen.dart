@@ -18,7 +18,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/comrade_repository.dart';
 import '../data/models.dart';
 import '../state/content_providers.dart';
+import '../state/providers.dart';
 import '../util/display_name.dart';
+import '../util/journal_note.dart';
 import '../widgets/app_chrome.dart';
 
 /// Self-reported mood markers, low → high. Stored as the emoji itself.
@@ -91,6 +93,92 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
     if (yes ?? false) await ref.read(journalProvider.notifier).delete(entry.id);
   }
 
+  /// Hand one entry to one person.
+  ///
+  /// A dialog of Comrade's own contacts rather than the platform share sheet,
+  /// and that is the point: the system sheet would offer every app on the
+  /// device a plaintext copy of the most private thing this app holds. The note
+  /// travels as an encrypted DM and nothing else ever sees it.
+  Future<void> _share(JournalEntryInfo entry) async {
+    final List<ContactInfo> contacts =
+        await ref.read(comradeRepositoryProvider).contacts();
+    if (!mounted) return;
+    final List<ShareTarget> targets = shareTargets(
+      contacts
+          .map((ContactInfo c) => (
+                npub: c.npub,
+                alias: c.alias,
+                name: c.name,
+                comrade: c.comrade,
+              ))
+          .toList(),
+    );
+    final ShareTarget? pick = await showDialog<ShareTarget>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('Send this note to…'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(
+                'A copy goes into your chat with them, encrypted like any '
+                'other message. The entry stays in your journal, and nothing '
+                'else from it is sent.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+              const SizedBox(height: 10),
+              if (targets.isEmpty)
+                const Text(
+                  "You haven't saved anyone yet. Add a contact from Chats "
+                  'first — a note is only ever sent to someone you chose.',
+                )
+              else
+                Flexible(
+                  child: ListView(
+                    key: const Key('journal-share-targets'),
+                    shrinkWrap: true,
+                    children: <Widget>[
+                      for (final ShareTarget t in targets)
+                        ListTile(
+                          title: Text(t.label),
+                          onTap: () => Navigator.of(context).pop(t),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (pick == null || !mounted) return;
+    try {
+      await ref
+          .read(comradeRepositoryProvider)
+          .shareJournalEntry(peer: pick.npub, entryId: entry.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sent to ${pick.label}.')),
+      );
+    } on ComradeException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not send: ${e.message}')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final AsyncValue<List<JournalEntryInfo>> entries =
@@ -153,6 +241,7 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
                       padding: const EdgeInsets.only(bottom: 10),
                       child: _JournalEntryCard(
                         entry: entry,
+                        onShare: () => _share(entry),
                         onDelete: () => _confirmDelete(entry),
                       ),
                     ),
@@ -209,7 +298,8 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
             const SizedBox(height: 8),
             Text(
               'Only on this device, sealed by your passcode. Never posted, '
-              'never uploaded.',
+              'never uploaded — a note reaches someone only if you send it to '
+              'them yourself.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
@@ -221,9 +311,14 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
 }
 
 class _JournalEntryCard extends StatelessWidget {
-  const _JournalEntryCard({required this.entry, required this.onDelete});
+  const _JournalEntryCard({
+    required this.entry,
+    required this.onShare,
+    required this.onDelete,
+  });
 
   final JournalEntryInfo entry;
+  final VoidCallback onShare;
   final VoidCallback onDelete;
 
   @override
@@ -258,6 +353,15 @@ class _JournalEntryCard extends StatelessWidget {
                   Text(entry.text,
                       style: Theme.of(context).textTheme.bodyLarge),
                 ],
+              ),
+            ),
+            IconButton(
+              key: const Key('journal-share'),
+              onPressed: onShare,
+              tooltip: 'Share this note',
+              icon: Icon(
+                Icons.share_outlined,
+                color: Theme.of(context).colorScheme.outline,
               ),
             ),
             IconButton(

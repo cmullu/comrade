@@ -181,8 +181,13 @@ map 1:1 onto `ComradeCore.kt`'s methods and `commands.rs`'s commands.
 `journal_screen.dart` ← `ui/JournalScreen.kt` (330)
 
 - **Tree**: composer card (multiline field · 5 mood chips · Save · the
-  "only on this device" line) → day-grouped entry cards with delete.
-- **Backend**: `journal`, `addJournalEntry`, `deleteJournalEntry`.
+  "only on this device" line) → day-grouped entry cards with share and delete.
+- **Backend**: `journal`, `addJournalEntry`, `deleteJournalEntry`,
+  `shareJournalEntry`.
+- **Sharing**: one entry to one saved contact, as an encrypted DM. Comrade's own
+  picker, never the platform share sheet — the system sheet would offer every
+  app on the device a plaintext copy of the most private thing here. The bubble
+  it becomes is `SharedNoteBody` in `message_bubble.dart`.
 - **Not ported**: Vosk dictation (D21).
 
 ### 2.9 Sabha feed

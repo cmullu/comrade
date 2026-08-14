@@ -134,6 +134,17 @@
         })
       : true;
 
+  // ── Shared journal notes (desktop/ui/journal_note.mjs) ─────────────────────
+  // How much of a shared note a bubble shows, and whose journal the header
+  // says it came from. The marker itself is core's (`comrade_core::note`) and
+  // arrives pre-parsed as `msg.shared_note`. Loaded like the modules above.
+  let journalNote = null;
+  import("./journal_note.mjs")
+    .then((m) => {
+      journalNote = m;
+    })
+    .catch(() => {});
+
   // ── Focus view decisions (desktop/ui/focus_view.mjs) ───────────────────────
   // Countdown formatting, which duration chip is selected, and where the
   // reader is. Loaded the same way as the modules above. Every call site here
@@ -1423,14 +1434,21 @@
     const split = chatCommands
       ? chatCommands.splitAuthor(p.content)
       : { author: "human", content: p.content || "" };
+    // A shared journal note needs no such mirror: core parses the marker on
+    // this path too and hands it over as `shared_note`, so the bubble drawn on
+    // arrival is the one a reload gives. (Tara's split is here rather than in
+    // the DTO for historical reasons; one grammar in core is the better shape,
+    // and this is it.)
+    const note = p.shared_note || null;
     list.push({
       id: p.id,
-      content: split.content,
+      content: note ? note.text : split.content,
       author: split.author,
       created_at: p.created_at,
       outgoing: false,
       upi: p.upi_intents || [],
       reply_to: p.reply_to || null,
+      shared_note: note,
     });
     state.dms.set(key, list);
     renderContacts();
@@ -1989,7 +2007,12 @@
     if (m.id) wrap.dataset.msgId = m.id;
     if (hers) wrap.append(el("span", { class: "bubble-author", text: "Tara" }));
     if (m.reply_to) wrap.append(quotePreview(m.reply_to));
-    wrap.append(el("span", { class: "bubble-text", text: m.content }));
+    // A shared journal note keeps the bubble it arrived in — it *is* an
+    // ordinary DM — and gains a header saying where it was written, which is
+    // the one thing the words alone cannot say. See sharedNoteBody.
+    if (m.shared_note)
+      wrap.append(sharedNoteBody(m.shared_note, Boolean(m.outgoing)));
+    else wrap.append(el("span", { class: "bubble-text", text: m.content }));
     wrap.append(
       el(
         "div",
@@ -2005,6 +2028,62 @@
       wrap.append(threadButton(m));
     }
     return wrap;
+  }
+
+  /**
+   * The body of a bubble carrying a journal note somebody chose to share.
+   *
+   * The header is attribution, not proof: core reads the marker off text any
+   * client could write (`comrade_core::note`), so it says what the sending
+   * Comrade claims — the same standing the Tara label above it has, and it must
+   * never gate anything.
+   *
+   * Long notes fold to `notePreview`'s cut with a "show more", because an entry
+   * written to be read alone lands here in a scroll of other messages. Before
+   * the module resolves the note is drawn whole rather than not at all: the
+   * words are the message, and withholding them to wait on a fold would be the
+   * worse failure.
+   */
+  function sharedNoteBody(note, outgoing) {
+    const box = el("div", { class: "bubble-note" });
+    const header = el("div", { class: "bubble-note-head" });
+    header.append(
+      el("span", {
+        class: "bubble-note-label",
+        text: journalNote
+          ? journalNote.noteHeader(outgoing)
+          : outgoing
+            ? "From your journal"
+            : "From their journal",
+      }),
+    );
+    if (note.mood)
+      header.append(el("span", { class: "bubble-note-mood", text: note.mood }));
+    box.append(header);
+
+    const preview = journalNote
+      ? journalNote.notePreview(note.text)
+      : { text: note.text, truncated: false };
+    const body = el("span", { class: "bubble-text", text: preview.text });
+    box.append(body);
+    if (preview.truncated) {
+      let expanded = false;
+      const toggle = el("button", {
+        class: "bubble-note-more",
+        type: "button",
+        text: "Show more",
+      });
+      toggle.addEventListener("click", (e) => {
+        // The bubble itself has handlers; unfolding text is not acting on the
+        // message.
+        e.stopPropagation();
+        expanded = !expanded;
+        body.textContent = expanded ? note.text : preview.text;
+        toggle.textContent = expanded ? "Show less" : "Show more";
+      });
+      box.append(toggle);
+    }
+    return box;
   }
 
   /**

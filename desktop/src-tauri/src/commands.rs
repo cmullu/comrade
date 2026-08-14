@@ -1016,6 +1016,29 @@ pub async fn delete_journal_entry(
         .map_err(|e| e.to_string())
 }
 
+/// Hand one journal entry to one peer, as an ordinary DM — a copy; the entry is
+/// not marked, moved or changed (`RuntimeHandles::share_journal_entry`).
+///
+/// Registered ahead of this window's journal UI, which does not exist yet
+/// (`docs/ATTENTION.md` OQ14) — the same staging the three commands above went
+/// through. Receiving a shared note already works here: `messages_with` carries
+/// `shared_note` on every message, so a note sent from a phone draws as a card
+/// in this window today.
+///
+/// See [`sync_ledger`]'s doc comment for the lock discipline.
+#[tauri::command]
+pub async fn share_journal_entry(
+    state: tauri::State<'_, Runtime>,
+    peer: String,
+    entry_id: String,
+) -> Result<MessageDto, String> {
+    let handles = state.read().await.handles();
+    handles
+        .share_journal_entry(&peer, &entry_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── Tara (reflective companion — strictly local, not therapy) ──────────────────
 
 /// Send a message to Tara and get her on-device reply. A `crisis == true`

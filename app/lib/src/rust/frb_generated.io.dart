@@ -97,6 +97,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ShareOffer dco_decode_box_autoadd_share_offer(dynamic raw);
 
   @protected
+  SharedNoteDto dco_decode_box_autoadd_shared_note_dto(dynamic raw);
+
+  @protected
   TogetherCommandDto dco_decode_box_autoadd_together_command_dto(dynamic raw);
 
   @protected
@@ -311,6 +314,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Recording? dco_decode_opt_box_autoadd_recording(dynamic raw);
 
   @protected
+  SharedNoteDto? dco_decode_opt_box_autoadd_shared_note_dto(dynamic raw);
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_16(dynamic raw);
 
   @protected
@@ -351,6 +357,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareSignal dco_decode_share_signal(dynamic raw);
+
+  @protected
+  SharedNoteDto dco_decode_shared_note_dto(dynamic raw);
 
   @protected
   StateChange dco_decode_state_change(dynamic raw);
@@ -510,6 +519,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareOffer sse_decode_box_autoadd_share_offer(SseDeserializer deserializer);
+
+  @protected
+  SharedNoteDto sse_decode_box_autoadd_shared_note_dto(
+      SseDeserializer deserializer);
 
   @protected
   TogetherCommandDto sse_decode_box_autoadd_together_command_dto(
@@ -751,6 +764,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Recording? sse_decode_opt_box_autoadd_recording(SseDeserializer deserializer);
 
   @protected
+  SharedNoteDto? sse_decode_opt_box_autoadd_shared_note_dto(
+      SseDeserializer deserializer);
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
@@ -791,6 +808,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareSignal sse_decode_share_signal(SseDeserializer deserializer);
+
+  @protected
+  SharedNoteDto sse_decode_shared_note_dto(SseDeserializer deserializer);
 
   @protected
   StateChange sse_decode_state_change(SseDeserializer deserializer);
@@ -967,6 +987,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_share_offer(
       ShareOffer self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_shared_note_dto(
+      SharedNoteDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_together_command_dto(
@@ -1222,6 +1246,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       Recording? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_shared_note_dto(
+      SharedNoteDto? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer);
 
   @protected
@@ -1263,6 +1291,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_share_signal(ShareSignal self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_shared_note_dto(SharedNoteDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_state_change(StateChange self, SseSerializer serializer);

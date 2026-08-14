@@ -373,7 +373,22 @@ object ComradeCore {
         val fromTara: Boolean = false,
         val status: String? = null,
         val replyTo: String? = null,
+        /**
+         * Set when this message is a journal note its sender chose to share —
+         * see `comrade_core::note`. [content] already carries the same text
+         * without the marker line, so a bubble that ignores this still shows
+         * the words; what this adds is the card and the mood.
+         *
+         * Not carried as an enum on [fromTara]'s side because the two are
+         * orthogonal claims about one message, and both are *labels*: the wire
+         * marker is text anybody can type, so this may style a bubble and must
+         * never gate anything.
+         */
+        val sharedNote: SharedNoteInfo? = null,
     )
+
+    /** The journal note a [MessageInfo] carries, as the card draws it. */
+    data class SharedNoteInfo(val text: String, val mood: String?)
 
     private fun uniffi.comrade_ui.MessageDto.toInfo() = MessageInfo(
         id = id,
@@ -384,6 +399,7 @@ object ComradeCore {
         fromTara = author == uniffi.comrade_ui.MessageAuthor.TARA,
         status = status,
         replyTo = replyTo,
+        sharedNote = sharedNote?.let { SharedNoteInfo(text = it.text, mood = it.mood) },
     )
 
     /** Send a DM, returning the stored message or throwing the backend error. */
@@ -576,6 +592,18 @@ object ComradeCore {
 
     fun deleteJournalEntryTyped(id: String): Boolean =
         rethrowing("Journal delete") { ffi.deleteJournalEntry(id) }
+
+    /**
+     * Hand one journal entry to one peer, as an ordinary DM.
+     *
+     * A copy: the entry is not marked, moved or changed, and deleting it later
+     * still works (it does not reach into the message either way). Blocking —
+     * it sends — so call it off the main thread.
+     */
+    fun shareJournalEntryTyped(peer: String, entryId: String): MessageInfo =
+        rethrowing("Journal share") {
+            runBlocking { ffi.shareJournalEntry(peer, entryId) }.toInfo()
+        }
 
     // ── Tara (reflective companion — strictly local, not therapy) ─────────────
 
