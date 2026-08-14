@@ -86,12 +86,13 @@ use comrade_ui::{
     AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, DownloadVerdictDto, DownloadedTrackDto, FocusSessionDto, FoundProfileDto,
-    IceServerDto, IdentityDto, JournalEntryDto, LibraryCandidateDto, MediaBytesDto,
-    MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto,
-    PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, ReadingDto, ShareVerdictDto,
-    TaraChatDto, TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto,
-    UiError, UpiIntentDto, WorkspaceDto,
+    IceServerDto, IdentityDto, ImportReportDto, JournalEntryDto, LibraryCandidateDto,
+    MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto,
+    MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
+    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict,
+    ReadingDto, SavedItemDto, ShareVerdictDto, StretchCursorDto, StretchRoutineDto, TaraChatDto,
+    TaraMessageDto, TaskDto, TaskState, TogetherSessionDto, TurnServerStatusDto, UiError,
+    UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1312,8 +1313,48 @@ impl Comrade {
         self.inner.blocking_read().focus_reflection(&outcome)
     }
 
-    pub fn save_reading(&self, title: String, text: String) -> Result<ReadingDto, UiError> {
-        self.inner.blocking_read().save_reading(&title, &text)
+    // ── The reading shelf (comrade_core::library) ───────────────────────────
+
+    pub fn library_items(&self) -> Result<Vec<SavedItemDto>, UiError> {
+        self.inner.blocking_read().library_items()
+    }
+
+    pub fn save_link(&self, url: String, title: String) -> Result<SavedItemDto, UiError> {
+        self.inner.blocking_read().save_link(&url, &title)
+    }
+
+    pub fn save_text(
+        &self,
+        title: String,
+        text: String,
+        url: Option<String>,
+    ) -> Result<SavedItemDto, UiError> {
+        self.inner.blocking_read().save_text(&title, &text, url)
+    }
+
+    /// The share-sheet entry point: `EXTRA_SUBJECT` and `EXTRA_TEXT` in,
+    /// whatever the engine made of them out. `None` means the payload carried
+    /// nothing worth a row, which the caller treats as a no-op.
+    pub fn save_shared(
+        &self,
+        subject: Option<String>,
+        body: String,
+    ) -> Result<Option<SavedItemDto>, UiError> {
+        self.inner.blocking_read().save_shared(subject, &body)
+    }
+
+    /// Import an export archive. The caller reads the file — only it has the
+    /// picker and the permission — and passes the text.
+    pub fn import_saves(&self, payload: String) -> Result<ImportReportDto, UiError> {
+        self.inner.blocking_read().import_saves(&payload)
+    }
+
+    pub fn open_saved_item(&self, id: String) -> Result<Option<ReadingDto>, UiError> {
+        self.inner.blocking_read().open_saved_item(&id)
+    }
+
+    pub fn delete_saved_item(&self, id: String) -> Result<bool, UiError> {
+        self.inner.blocking_read().delete_saved_item(&id)
     }
 
     pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
@@ -1324,8 +1365,45 @@ impl Comrade {
         self.inner.blocking_read().set_reading_position(position)
     }
 
-    pub fn clear_reading(&self) -> Result<bool, UiError> {
-        self.inner.blocking_read().clear_reading()
+    pub fn close_reading(&self) -> Result<bool, UiError> {
+        self.inner.blocking_read().close_reading()
+    }
+
+    // ── Stretch breaks (comrade_core::stretch) ──────────────────────────────
+
+    pub fn stretch_routines(&self) -> Vec<StretchRoutineDto> {
+        self.inner.blocking_read().stretch_routines()
+    }
+
+    pub fn stretch_step_at(
+        &self,
+        routine_key: String,
+        elapsed_secs: u32,
+    ) -> Result<Option<StretchCursorDto>, UiError> {
+        self.inner
+            .blocking_read()
+            .stretch_step_at(&routine_key, elapsed_secs)
+    }
+
+    pub fn suggested_stretch_routine(&self) -> Result<String, UiError> {
+        self.inner.blocking_read().suggested_stretch_routine()
+    }
+
+    pub fn stretch_break_marks(&self, planned_minutes: u32) -> Vec<u32> {
+        self.inner
+            .blocking_read()
+            .stretch_break_marks(planned_minutes)
+    }
+
+    pub fn stretch_break_due(
+        &self,
+        planned_minutes: u32,
+        elapsed_minutes: u32,
+        last_offered: Option<u32>,
+    ) -> Option<u32> {
+        self.inner
+            .blocking_read()
+            .stretch_break_due(planned_minutes, elapsed_minutes, last_offered)
     }
 
     // ── Calls (voice/video signaling) ───────────────────────────────────────
@@ -1971,13 +2049,43 @@ mod tests {
             Err(UiError::Engine(_))
         ));
 
+        // The shelf, across the same boundary: a save, an open, a position, a
+        // close. This is the lane that proves the new records actually lower and
+        // lift over uniffi rather than only compiling.
         let saved = c
-            .save_reading("Essay".to_string(), "A line worth reading.".to_string())
+            .save_text(
+                "Essay".to_string(),
+                "A line worth reading.".to_string(),
+                None,
+            )
             .unwrap();
-        assert_eq!(saved.chunks.concat(), "A line worth reading.");
+        assert!(saved.has_text);
+        let opened = c.open_saved_item(saved.id.clone()).unwrap().unwrap();
+        assert_eq!(opened.chunks.concat(), "A line worth reading.");
         assert_eq!(c.set_reading_position(0).unwrap().unwrap().position, 0);
-        assert!(c.clear_reading().unwrap());
+        assert!(c.close_reading().unwrap());
         assert!(c.reading().unwrap().is_none());
+        assert_eq!(c.library_items().unwrap().len(), 1);
+
+        let shared = c
+            .save_shared(None, "https://example.com/a-good-read".to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(shared.source, "web");
+        assert_eq!(c.library_items().unwrap().len(), 2);
+        assert!(c.delete_saved_item(shared.id).unwrap());
+
+        let report = c
+            .import_saves("https://example.com/one\nhttps://example.com/two".to_string())
+            .unwrap();
+        assert_eq!(report.added, 2);
+
+        // The stretch surface needs no vault, so it answers here too.
+        assert!(!c.stretch_routines().is_empty());
+        assert!(c.stretch_step_at("neck".to_string(), 0).unwrap().is_some());
+        assert!(!c.suggested_stretch_routine().unwrap().is_empty());
+        assert_eq!(c.stretch_break_marks(90), vec![30, 60]);
+        assert_eq!(c.stretch_break_due(90, 31, None), Some(30));
     }
 
     #[tokio::test]

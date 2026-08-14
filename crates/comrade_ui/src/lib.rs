@@ -73,13 +73,14 @@ pub use runtime::{
     AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BleRouter, BridgeEvent,
     CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime,
     ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, DownloadVerdictDto,
-    DownloadedTrackDto, FocusSessionDto, FoundProfileDto, IceServerDto, JournalEntryDto,
-    LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
-    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
-    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadingDto,
-    RuntimeHandles, SakhaStatusDto, ShareVerdictDto, TaraChatDto, TaraMessageDto, TaskDto,
-    TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto,
-    TogetherShareDto, TurnServerStatusDto,
+    DownloadedTrackDto, FocusSessionDto, FoundProfileDto, IceServerDto, ImportReportDto,
+    JournalEntryDto, LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto,
+    MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto,
+    PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto,
+    ReadingDto, RuntimeHandles, SakhaStatusDto, SavedItemDto, ShareVerdictDto, StretchCursorDto,
+    StretchRoutineDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto, TogetherCommandDto,
+    TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
+    TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────

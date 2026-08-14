@@ -18,10 +18,11 @@ use comrade_ui::{
     AppAction, AttachmentRoute, AttentionDayDto, AttentionSummaryDto, CallRecordDto,
     CallSessionDto, ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto,
     ConversationDto, CrisisResourceDto, FocusSessionDto, FoundProfileDto, IceServerDto,
-    IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto,
-    MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
-    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto, TaraChatDto,
-    TaraMessageDto, TaskDto, TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
+    IdentityDto, ImportReportDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, Mention,
+    MentionMatchDto, MessageDto, MessageRequestDto, MusicService, OfferOutcomeDto, PeerProfileDto,
+    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReadingDto, SakhaStatusDto,
+    SavedItemDto, StretchCursorDto, StretchRoutineDto, TaraChatDto, TaraMessageDto, TaskDto,
+    TaskState, TurnServerStatusDto, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 
@@ -1376,16 +1377,103 @@ pub async fn focus_reflection(
         .map_err(|e| e.to_string())
 }
 
+// ── The reading shelf (comrade_core::library) ─────────────────────────────────
+//
+// The desktop half of what replaced the single pasted long-read. Everything the
+// Android app can do with the shelf, this can do too — the import in particular,
+// because a desktop is where someone's export archive actually lands when they
+// download it.
+
 #[tauri::command]
-pub async fn save_reading(
-    state: tauri::State<'_, Runtime>,
-    title: String,
-    text: String,
-) -> Result<ReadingDto, String> {
+pub async fn library_items(state: tauri::State<'_, Runtime>) -> Result<Vec<SavedItemDto>, String> {
     state
         .read()
         .await
-        .save_reading(&title, &text)
+        .library_items()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_link(
+    state: tauri::State<'_, Runtime>,
+    url: String,
+    title: String,
+) -> Result<SavedItemDto, String> {
+    state
+        .read()
+        .await
+        .save_link(&url, &title)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_text(
+    state: tauri::State<'_, Runtime>,
+    title: String,
+    text: String,
+    url: Option<String>,
+) -> Result<SavedItemDto, String> {
+    state
+        .read()
+        .await
+        .save_text(&title, &text, url)
+        .map_err(|e| e.to_string())
+}
+
+/// Paste-anything: the engine decides whether it is a link or an article.
+///
+/// Desktop has no share sheet, but it has a clipboard, and "paste whatever you
+/// have" is the same decision — so it goes through the same engine call rather
+/// than through a second rule written in JavaScript.
+#[tauri::command]
+pub async fn save_shared(
+    state: tauri::State<'_, Runtime>,
+    subject: Option<String>,
+    body: String,
+) -> Result<Option<SavedItemDto>, String> {
+    state
+        .read()
+        .await
+        .save_shared(subject, &body)
+        .map_err(|e| e.to_string())
+}
+
+/// Import an export archive. The **caller passes the file's text**: the picker
+/// and the read belong to the frontend, and a command that took a path would be
+/// an arbitrary-file-read primitive reachable from the webview.
+#[tauri::command]
+pub async fn import_saves(
+    state: tauri::State<'_, Runtime>,
+    payload: String,
+) -> Result<ImportReportDto, String> {
+    state
+        .read()
+        .await
+        .import_saves(&payload)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_saved_item(
+    state: tauri::State<'_, Runtime>,
+    id: String,
+) -> Result<Option<ReadingDto>, String> {
+    state
+        .read()
+        .await
+        .open_saved_item(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_saved_item(
+    state: tauri::State<'_, Runtime>,
+    id: String,
+) -> Result<bool, String> {
+    state
+        .read()
+        .await
+        .delete_saved_item(&id)
         .map_err(|e| e.to_string())
 }
 
@@ -1407,12 +1495,69 @@ pub async fn set_reading_position(
 }
 
 #[tauri::command]
-pub async fn clear_reading(state: tauri::State<'_, Runtime>) -> Result<bool, String> {
+pub async fn close_reading(state: tauri::State<'_, Runtime>) -> Result<bool, String> {
     state
         .read()
         .await
-        .clear_reading()
+        .close_reading()
         .map_err(|e| e.to_string())
+}
+
+// ── Stretch breaks (comrade_core::stretch) ────────────────────────────────────
+
+/// The choreography. Needs no vault — the routines are a constant of the design,
+/// like the focus presets.
+#[tauri::command]
+pub async fn stretch_routines(
+    state: tauri::State<'_, Runtime>,
+) -> Result<Vec<StretchRoutineDto>, String> {
+    Ok(state.read().await.stretch_routines())
+}
+
+/// Where a running routine is, re-read once a second by the screen — the same
+/// shape as the focus countdown, and for the same reason: the engine owns the
+/// walk so the two frontends cannot step different timelines.
+#[tauri::command]
+pub async fn stretch_step_at(
+    state: tauri::State<'_, Runtime>,
+    routine_key: String,
+    elapsed_secs: u32,
+) -> Result<Option<StretchCursorDto>, String> {
+    state
+        .read()
+        .await
+        .stretch_step_at(&routine_key, elapsed_secs)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn suggested_stretch_routine(state: tauri::State<'_, Runtime>) -> Result<String, String> {
+    state
+        .read()
+        .await
+        .suggested_stretch_routine()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn stretch_break_marks(
+    state: tauri::State<'_, Runtime>,
+    planned_minutes: u32,
+) -> Result<Vec<u32>, String> {
+    Ok(state.read().await.stretch_break_marks(planned_minutes))
+}
+
+#[tauri::command]
+pub async fn stretch_break_due(
+    state: tauri::State<'_, Runtime>,
+    planned_minutes: u32,
+    elapsed_minutes: u32,
+    last_offered: Option<u32>,
+) -> Result<Option<u32>, String> {
+    Ok(state
+        .read()
+        .await
+        .stretch_break_due(planned_minutes, elapsed_minutes, last_offered))
 }
 
 // ── Milestone 3: progressive-disclosure workspace controller ──────────────────

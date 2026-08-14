@@ -56,6 +56,7 @@ use comrade_core::karya::{
     new_task_id, parse_karya_envelope, render_task_line, KaryaEnvelope, Party, Task, TaskSignal,
     TaskState,
 };
+use comrade_core::library;
 use comrade_core::media::{
     build_file_metadata_event, encrypt_media, fetch_and_decrypt_media, FileMetadata,
     MAX_MEDIA_BYTES,
@@ -79,6 +80,7 @@ use comrade_core::share::transport::{
 use comrade_core::share::{
     read_verdict as share_read_verdict, ReadSample, ReadVerdict, ShareSignal,
 };
+use comrade_core::stretch;
 
 /// Read a stored [`SharePrefs`] back into a policy.
 ///
@@ -1702,16 +1704,106 @@ pub struct FocusSessionDto {
     pub remaining_secs: u64,
 }
 
-/// The saved long-read, already split into chapter-sized chunks, plus where
-/// the reader had got to. Chunking is lossless by test
+/// The open long-read, already split into chapter-sized chunks, plus where the
+/// reader had got to. Chunking is lossless by test
 /// (`comrade_core::attention::chunk_reading`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct ReadingDto {
+    /// Which shelf row this is. Carried so a reader screen can delete or
+    /// re-open the item it is showing without asking the shelf again.
+    pub item_id: String,
     pub title: String,
     pub chunks: Vec<String>,
     /// Index into `chunks`, always in range (a stored position past the end
     /// after an edit is clamped rather than trusted).
     pub position: u32,
+    /// Where the text came from, when it came from somewhere.
+    pub url: Option<String>,
+    /// `comrade_core::library::SaveSource::as_str`.
+    pub source: String,
+}
+
+/// One row on the reading shelf.
+///
+/// A row is a *link*, a *text*, or both, and which it is decides what the
+/// frontend can offer: `has_text` false means the reader has nothing to show and
+/// the only honest actions are opening the link elsewhere or pasting the article
+/// in. Nothing in Comrade fetches the page to close that gap — see
+/// `comrade_core::library`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct SavedItemDto {
+    pub id: String,
+    pub title: String,
+    pub url: Option<String>,
+    /// `instagram` / `twitter` / `facebook` / `reddit` / `youtube` /
+    /// `readlater` / `web` / `pasted`. The frontend owns the label.
+    pub source: String,
+    /// Whether there is text to read, as opposed to only a link.
+    pub has_text: bool,
+    /// Rough reading time in minutes; 0 when there is no text.
+    pub estimated_minutes: u32,
+    /// How many chunks the reader would show; 0 when there is no text.
+    pub chunk_count: u32,
+    /// Chunk the reader had got to.
+    pub position: u32,
+    pub saved_at: u64,
+    pub opened_at: Option<u64>,
+    /// When the reader reached the end, if it has.
+    pub finished_at: Option<u64>,
+    /// Whether this is the row the reader currently has open.
+    pub is_open: bool,
+}
+
+/// What an import of an export archive did, in numbers a UI can say out loud.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ImportReportDto {
+    /// `comrade_core::library::ImportFormat::as_str` — what the file was read as.
+    pub format: String,
+    pub added: u32,
+    /// Saves already on the shelf, or named twice in the file.
+    pub duplicates: u32,
+    /// Rows that carried no usable link.
+    pub skipped: u32,
+    /// The per-import cap was reached and the rest of the file was not read.
+    pub truncated: bool,
+    /// The format did not parse and the links were scavenged from the raw text,
+    /// which means the titles are gone. The UI says so rather than presenting a
+    /// wall of bare URLs as a clean import.
+    pub fell_back: bool,
+}
+
+/// One movement in a stretch routine. `key` is looked up in the frontend's own
+/// string table; the engine ships no prose (see `comrade_core::stretch`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct StretchStepDto {
+    pub key: String,
+    pub seconds: u32,
+    /// `neck` / `shoulders` / `arms` / `back` / `hips` / `legs` / `eyes` / `whole`.
+    pub part: String,
+    /// `left` / `right` / `center` — the guide mirrors on this.
+    pub side: String,
+    /// `hold` / `cycle` / `still` — how the guide animates.
+    pub motion: String,
+}
+
+/// A stretch routine and its whole sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct StretchRoutineDto {
+    pub key: String,
+    pub total_seconds: u32,
+    pub steps: Vec<StretchStepDto>,
+}
+
+/// Where a running routine has got to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct StretchCursorDto {
+    pub index: u32,
+    pub step: StretchStepDto,
+    pub secs_into_step: u32,
+    pub secs_left_in_step: u32,
+    pub secs_left_total: u32,
+    /// 0..=1 through the routine, clamped.
+    pub progress: f32,
 }
 
 /// A crisis helpline surfaced when a Tara message carries distress cues.
@@ -4756,66 +4848,458 @@ impl ComradeRuntime {
         Ok(attention::focus_reflection(parsed, prior))
     }
 
-    /// Save text for the distraction-free reader, replacing whatever was
-    /// there, and return it chunked. The user brings the text (paste, share);
-    /// nothing here fetches a URL — a reader that went to the network would
-    /// put an arbitrary-fetch path into the one app that promises not to.
-    pub fn save_reading(&self, title: &str, text: &str) -> Result<ReadingDto, UiError> {
+    // The reading shelf ---------------------------------------------------------
+    //
+    // What replaced the single pasted long-read. The reader still shows one
+    // thing at a time — that is the practice — but what it shows now comes off a
+    // shelf that the share sheet and an export import can both fill, because
+    // "paste the article you meant to read" was a feature that asked the user to
+    // do the collecting twice. See `comrade_core::library`.
+
+    /// Everything on the shelf, newest first.
+    ///
+    /// Also the migration point for a vault written before the shelf existed:
+    /// the legacy one-slot [`comrade_storage::ReadingState`] becomes a saved
+    /// item on first read and the old row is cleared. Doing it here rather than
+    /// at unlock means it happens exactly when it is needed, on a path that
+    /// already has the store — and doing it *at all* is why someone who had an
+    /// article open when they updated does not lose it.
+    pub fn library_items(&self) -> Result<Vec<SavedItemDto>, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        let text = text.trim();
-        if text.is_empty() {
-            return Err(UiError::Engine("nothing to read".into()));
+        self.migrate_legacy_reading(store)?;
+        let open = store
+            .load_open_read()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .item_id;
+        Ok(store
+            .library_items()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .into_iter()
+            .map(|item| saved_item_dto(item, open.as_deref()))
+            .collect())
+    }
+
+    /// Save a link — the share-sheet path, and the import path's per-row call.
+    ///
+    /// `title` may be empty: the engine falls back to the URL's own slug, and
+    /// the frontend to the host. Nothing fetches the page to find a better one.
+    pub fn save_link(&self, url: &str, title: &str) -> Result<SavedItemDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let url = library::strip_tracking(url.trim());
+        if !library::looks_like_url(&url) {
+            return Err(UiError::Engine("that is not a link we can save".into()));
         }
-        let state = comrade_storage::ReadingState {
-            title: title.trim().to_string(),
-            text: text.to_string(),
+        let now = now_secs();
+        // An article saved twice is one row, updated — which is what makes
+        // "share it again to bump it" harmless instead of a second copy.
+        let existing = find_saved_by_url(store, &url)?;
+        let mut item = existing.unwrap_or_else(|| comrade_storage::SavedItem {
+            id: timestamped_store_id(now),
+            url: Some(url.clone()),
+            title: String::new(),
+            source: library::SaveSource::from_url(&url).as_str().to_string(),
+            text: String::new(),
+            saved_at: now,
             position: 0,
-            updated_at: now_secs(),
-        };
+            opened_at: None,
+            finished_at: None,
+        });
+        let title = library::bound_title(title);
+        if !title.is_empty() {
+            item.title = title;
+        } else if item.title.is_empty() {
+            item.title = library::title_from_url(&url);
+        }
         store
-            .save_reading_state(&state)
+            .save_library_item(&item)
             .and_then(|()| store.flush())
             .map_err(|e| UiError::Storage(e.to_string()))?;
-        Ok(reading_dto(state))
+        Ok(saved_item_dto(item, None))
     }
 
-    /// The saved long-read, chunked, or `None` if nothing is saved.
-    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
+    /// Save text to read — a paste, or a shared selection. `url` is provenance
+    /// when the sharing app sent one along.
+    pub fn save_text(
+        &self,
+        title: &str,
+        text: &str,
+        url: Option<String>,
+    ) -> Result<SavedItemDto, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        Ok(store
-            .load_reading_state()
+        if text.trim().is_empty() {
+            return Err(UiError::Engine("nothing to read".into()));
+        }
+        let now = now_secs();
+        let url = url
+            .map(|u| library::strip_tracking(u.trim()))
+            .filter(|u| library::looks_like_url(u));
+        let source = match &url {
+            Some(u) => library::SaveSource::from_url(u),
+            None => library::SaveSource::Pasted,
+        };
+        let title = library::bound_title(title);
+        let item = comrade_storage::SavedItem {
+            id: timestamped_store_id(now),
+            title: if title.is_empty() {
+                url.as_deref()
+                    .map(library::title_from_url)
+                    .unwrap_or_default()
+            } else {
+                title
+            },
+            source: source.as_str().to_string(),
+            // Verbatim, not trimmed: `attention::chunk_reading` is lossless by
+            // test and the reader shows exactly what was saved.
+            text: text.to_string(),
+            url,
+            saved_at: now,
+            position: 0,
+            opened_at: None,
+            finished_at: None,
+        };
+        store
+            .save_library_item(&item)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(saved_item_dto(item, None))
+    }
+
+    /// Take whatever a share sheet handed over and put it on the shelf.
+    ///
+    /// One command rather than two, because deciding whether a payload is a link
+    /// or an article is [`library::parse_shared`]'s job and not a frontend's —
+    /// Android and desktop would otherwise each draw that line, and they would
+    /// draw it differently. `None` when the payload carried nothing usable,
+    /// which the frontend treats as a no-op and not as an error.
+    pub fn save_shared(
+        &self,
+        subject: Option<String>,
+        body: &str,
+    ) -> Result<Option<SavedItemDto>, UiError> {
+        let Some(capture) = library::parse_shared(subject.as_deref(), body) else {
+            return Ok(None);
+        };
+        if capture.text.is_empty() {
+            let url = capture.url.unwrap_or_default();
+            return self.save_link(&url, &capture.title).map(Some);
+        }
+        self.save_text(&capture.title, &capture.text, capture.url)
+            .map(Some)
+    }
+
+    /// Longest import payload accepted, in bytes.
+    ///
+    /// An export archive is a file the user chose, so the cap is generous — but
+    /// it is a cap: this string is held whole in memory and then parsed into a
+    /// `serde_json::Value` tree, and "the app died opening my export" is a worse
+    /// answer than "that file is too big". 16 MiB is several years of Instagram
+    /// saves; a bigger one is a video archive picked by mistake.
+    pub const IMPORT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+    /// Read an export archive and put everything new on the shelf.
+    ///
+    /// The payload is the *file's text* — the frontend reads the file, because
+    /// only it has the picker and the permission. Items already on the shelf are
+    /// counted as duplicates rather than replaced: an import must never
+    /// overwrite a reading position with a fresh zero.
+    pub fn import_saves(&self, payload: &str) -> Result<ImportReportDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        if payload.len() > Self::IMPORT_MAX_BYTES {
+            return Err(UiError::Engine(format!(
+                "that file is larger than {} MiB",
+                Self::IMPORT_MAX_BYTES / (1024 * 1024)
+            )));
+        }
+        let report = library::import_saves(payload);
+        let now = now_secs();
+        // The whole shelf's keys, once — an import of two thousand rows must not
+        // be two thousand full scans.
+        let mut known: std::collections::HashSet<String> = store
+            .library_items()
             .map_err(|e| UiError::Storage(e.to_string()))?
-            .map(reading_dto))
+            .iter()
+            .filter_map(|i| i.url.as_deref().map(library::dedupe_key))
+            .collect();
+        let mut added = 0u32;
+        let mut already = report.duplicates;
+        for (offset, save) in report.items.iter().enumerate() {
+            if !known.insert(library::dedupe_key(&save.url)) {
+                already = already.saturating_add(1);
+                continue;
+            }
+            let item = comrade_storage::SavedItem {
+                // The offset keeps ids distinct inside one second, and keeps the
+                // archive's own order stable on the shelf: `timestamped_store_id`
+                // sorts by the seconds prefix, and a whole import shares one.
+                id: format!("{}-{offset:05}", timestamped_store_id(now)),
+                url: Some(save.url.clone()),
+                title: save.title.clone(),
+                source: save.source.as_str().to_string(),
+                text: String::new(),
+                // The platform's own save date when the archive knew it. This is
+                // the difference between an import that lands in date order and
+                // one that lands as a wall of "just now".
+                saved_at: save.saved_at.unwrap_or(now),
+                position: 0,
+                opened_at: None,
+                finished_at: None,
+            };
+            store
+                .save_library_item(&item)
+                .map_err(|e| UiError::Storage(e.to_string()))?;
+            added = added.saturating_add(1);
+        }
+        store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(ImportReportDto {
+            format: report.format.as_str().to_string(),
+            added,
+            duplicates: already,
+            skipped: report.skipped,
+            truncated: report.truncated,
+            fell_back: report.fell_back,
+        })
     }
 
-    /// Remember which chunk the reader is on. Clamped to the real chunk count,
-    /// so a stored position can never point past the end of the text.
-    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
+    /// Open a saved item in the reader, and return it chunked.
+    ///
+    /// `None` for an unknown id (the row was deleted on another screen) and for
+    /// an item with no text — a bookmark is a link, and the reader has nothing
+    /// to show for it. That second case is not a failure: the frontend offers
+    /// the link and an "add the text" path instead, which is the honest shape of
+    /// a library that does not fetch pages.
+    pub fn open_saved_item(&self, id: &str) -> Result<Option<ReadingDto>, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        let Some(mut state) = store
-            .load_reading_state()
+        let Some(mut item) = store
+            .library_item(id)
             .map_err(|e| UiError::Storage(e.to_string()))?
         else {
             return Ok(None);
         };
-        let chunks = attention::chunk_reading(&state.text).len() as u32;
-        state.position = position.min(chunks.saturating_sub(1));
-        state.updated_at = now_secs();
+        if item.text.trim().is_empty() {
+            return Ok(None);
+        }
+        item.opened_at = Some(now_secs());
         store
-            .save_reading_state(&state)
+            .save_library_item(&item)
+            .and_then(|()| {
+                store.save_open_read(&comrade_storage::OpenRead {
+                    item_id: Some(item.id.clone()),
+                })
+            })
             .and_then(|()| store.flush())
             .map_err(|e| UiError::Storage(e.to_string()))?;
-        Ok(Some(reading_dto(state)))
+        Ok(Some(reading_dto(item)))
     }
 
-    /// Forget the saved long-read. Returns whether one existed.
-    pub fn clear_reading(&self) -> Result<bool, UiError> {
+    /// What the reader has open, chunked, or `None` when nothing is.
+    pub fn reading(&self) -> Result<Option<ReadingDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        self.migrate_legacy_reading(store)?;
+        let Some(id) = store
+            .load_open_read()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .item_id
+        else {
+            return Ok(None);
+        };
+        Ok(store
+            .library_item(&id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .filter(|item| !item.text.trim().is_empty())
+            .map(reading_dto))
+    }
+
+    /// Remember which chunk the reader is on.
+    ///
+    /// Clamped to the real chunk count, so a stored position can never point
+    /// past the end of the text. Reaching the last chunk stamps `finished_at` —
+    /// that is what lets a finished piece leave the shelf without being
+    /// deleted, and it is a timestamp rather than a tally on purpose (gate 3:
+    /// nothing here counts up).
+    pub fn set_reading_position(&self, position: u32) -> Result<Option<ReadingDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let Some(id) = store
+            .load_open_read()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .item_id
+        else {
+            return Ok(None);
+        };
+        let Some(mut item) = store
+            .library_item(&id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let chunks = attention::chunk_reading(&item.text).len() as u32;
+        item.position = position.min(chunks.saturating_sub(1));
+        item.opened_at = Some(now_secs());
+        if chunks > 0 && item.position + 1 >= chunks && item.finished_at.is_none() {
+            item.finished_at = Some(now_secs());
+        }
+        store
+            .save_library_item(&item)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(Some(reading_dto(item)))
+    }
+
+    /// Close the reader, keeping the item and its position.
+    ///
+    /// The replacement for the old `clear_reading`, and a deliberately different
+    /// verb: that one deleted the only saved read, because there was only ever
+    /// one. Deleting is now [`Self::delete_saved_item`], and closing is what a
+    /// back button does.
+    pub fn close_reading(&self) -> Result<bool, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let was_open = store
+            .load_open_read()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .item_id
+            .is_some();
+        store
+            .save_open_read(&comrade_storage::OpenRead::default())
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(was_open)
+    }
+
+    /// Forget one saved item. Returns whether there was one.
+    pub fn delete_saved_item(&self, id: &str) -> Result<bool, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let removed = store
-            .clear_reading_state()
+            .delete_library_item(id)
             .map_err(|e| UiError::Storage(e.to_string()))?;
+        // A pointer at a deleted row would make `reading()` answer `None` for
+        // ever without anything explaining why, so it is cleared with the row.
+        if store
+            .load_open_read()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .item_id
+            .as_deref()
+            == Some(id)
+        {
+            store
+                .save_open_read(&comrade_storage::OpenRead::default())
+                .map_err(|e| UiError::Storage(e.to_string()))?;
+        }
         store.flush().map_err(|e| UiError::Storage(e.to_string()))?;
         Ok(removed)
+    }
+
+    /// Move a vault written before the shelf existed onto the shelf.
+    ///
+    /// Idempotent and cheap: the legacy row is deleted as part of the same pass,
+    /// so the second call finds nothing. It deliberately does *not* open the
+    /// migrated item in the reader — a person who updates the app should find
+    /// their article on the shelf, not be dropped back into chunk 14 of it
+    /// without asking.
+    fn migrate_legacy_reading(
+        &self,
+        store: &comrade_storage::EncryptedStore,
+    ) -> Result<(), UiError> {
+        let Some(legacy) = store
+            .load_reading_state()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+        else {
+            return Ok(());
+        };
+        if !legacy.text.trim().is_empty() {
+            let item = comrade_storage::SavedItem {
+                id: timestamped_store_id(legacy.updated_at),
+                url: None,
+                title: legacy.title.clone(),
+                source: library::SaveSource::Pasted.as_str().to_string(),
+                text: legacy.text.clone(),
+                saved_at: legacy.updated_at,
+                position: legacy.position,
+                opened_at: Some(legacy.updated_at),
+                finished_at: None,
+            };
+            store
+                .save_library_item(&item)
+                .map_err(|e| UiError::Storage(e.to_string()))?;
+        }
+        store
+            .clear_reading_state()
+            .and_then(|_| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    // Stretch breaks ------------------------------------------------------------
+    //
+    // No vault: the choreography is a constant of the design, not the user's
+    // data — the same call `focus_presets` makes. And nothing is stored, the
+    // same call `BreathingScreen` makes: a count of stretch breaks taken would
+    // turn a break into a task.
+
+    /// Every stretch routine, in the order to offer them.
+    pub fn stretch_routines(&self) -> Vec<StretchRoutineDto> {
+        stretch::ROUTINES
+            .iter()
+            .map(|r| StretchRoutineDto {
+                key: r.key.to_string(),
+                total_seconds: r.total_seconds(),
+                steps: r.steps.iter().map(stretch_step_dto).collect(),
+            })
+            .collect()
+    }
+
+    /// Where a routine is at `elapsed_secs`, or `None` once it is done.
+    ///
+    /// Called once a second by the screen running the routine, which is why the
+    /// walk lives here rather than in each frontend: two UIs stepping their own
+    /// copy of the timeline is two chances to drift from the durations the
+    /// symmetry test guards.
+    pub fn stretch_step_at(
+        &self,
+        routine_key: &str,
+        elapsed_secs: u32,
+    ) -> Result<Option<StretchCursorDto>, UiError> {
+        let routine = stretch::routine(routine_key)
+            .ok_or_else(|| UiError::Engine(format!("unknown stretch routine {routine_key:?}")))?;
+        Ok(
+            stretch::step_at(routine, elapsed_secs).map(|c| StretchCursorDto {
+                index: c.index as u32,
+                step: stretch_step_dto(&c.step),
+                secs_into_step: c.secs_into_step,
+                secs_left_in_step: c.secs_left_in_step,
+                secs_left_total: c.secs_left_total,
+                progress: stretch::progress(routine, elapsed_secs),
+            }),
+        )
+    }
+
+    /// Which routine to offer next, rotated so the second break of a day is not
+    /// the first one again. Seeded off the focus history, which is the only
+    /// count of "how many of these has this person been offered" that exists —
+    /// and it is a read, not a tally kept for the purpose.
+    pub fn suggested_stretch_routine(&self) -> Result<String, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let prior = store
+            .focus_sessions()
+            .map_err(|e| UiError::Storage(e.to_string()))?
+            .len() as u64;
+        Ok(stretch::suggest_routine(prior).key.to_string())
+    }
+
+    /// The elapsed-minute marks at which a session of `planned_minutes` should
+    /// offer a stretch. Empty for the short rungs, which are never interrupted.
+    pub fn stretch_break_marks(&self, planned_minutes: u32) -> Vec<u32> {
+        stretch::break_marks(planned_minutes)
+    }
+
+    /// Whether a break is due now, given the last mark already offered.
+    /// `Some(mark)` is both the answer and the value to remember, so the same
+    /// offer cannot reappear every second.
+    pub fn stretch_break_due(
+        &self,
+        planned_minutes: u32,
+        elapsed_minutes: u32,
+        last_offered: Option<u32>,
+    ) -> Option<u32> {
+        stretch::break_due(planned_minutes, elapsed_minutes, last_offered)
     }
 
     /// The session still open, resolving (and persisting) a lapse first so
@@ -7352,16 +7836,76 @@ fn focus_dto(session: comrade_storage::FocusSession, now: u64) -> FocusSessionDt
     }
 }
 
-/// The saved long-read, chunked, with its position clamped into range — a
-/// stored position must never be able to point past the end of the text.
-fn reading_dto(state: comrade_storage::ReadingState) -> ReadingDto {
-    let chunks = attention::chunk_reading(&state.text);
+/// A saved item as the reader sees it: chunked, with its position clamped into
+/// range — a stored position must never be able to point past the end of the
+/// text.
+fn reading_dto(item: comrade_storage::SavedItem) -> ReadingDto {
+    let chunks = attention::chunk_reading(&item.text);
     let last = chunks.len().saturating_sub(1) as u32;
     ReadingDto {
-        title: state.title,
+        item_id: item.id,
+        title: item.title,
+        position: item.position.min(last),
         chunks,
-        position: state.position.min(last),
+        url: item.url,
+        source: item.source,
     }
+}
+
+/// A saved item as the shelf sees it.
+///
+/// `chunk_count` and `estimated_minutes` are derived here rather than stored,
+/// for the reason the chunking itself is: they are functions of the text, and a
+/// stored copy is a second source of truth that goes stale the moment the text
+/// is replaced.
+fn saved_item_dto(item: comrade_storage::SavedItem, open_id: Option<&str>) -> SavedItemDto {
+    let has_text = !item.text.trim().is_empty();
+    SavedItemDto {
+        is_open: open_id == Some(item.id.as_str()),
+        estimated_minutes: library::estimated_minutes(&item.text),
+        chunk_count: if has_text {
+            attention::chunk_reading(&item.text).len() as u32
+        } else {
+            0
+        },
+        has_text,
+        id: item.id,
+        title: item.title,
+        url: item.url,
+        source: item.source,
+        position: item.position,
+        saved_at: item.saved_at,
+        opened_at: item.opened_at,
+        finished_at: item.finished_at,
+    }
+}
+
+fn stretch_step_dto(step: &comrade_core::stretch::StretchStep) -> StretchStepDto {
+    StretchStepDto {
+        key: step.key.to_string(),
+        seconds: step.seconds,
+        part: step.part.as_str().to_string(),
+        side: step.side.as_str().to_string(),
+        motion: step.motion.as_str().to_string(),
+    }
+}
+
+/// The shelf row naming `url`, if there is one, matched on
+/// `library::dedupe_key` so the same article from two apps is one row.
+///
+/// A linear scan. The shelf is capped in the low thousands and this runs on a
+/// save, not in a loop — [`ComradeRuntime::import_saves`] builds a key set
+/// precisely because *it* is the loop.
+fn find_saved_by_url(
+    store: &comrade_storage::EncryptedStore,
+    url: &str,
+) -> Result<Option<comrade_storage::SavedItem>, UiError> {
+    let key = library::dedupe_key(url);
+    Ok(store
+        .library_items()
+        .map_err(|e| UiError::Storage(e.to_string()))?
+        .into_iter()
+        .find(|i| i.url.as_deref().map(library::dedupe_key).as_deref() == Some(key.as_str())))
 }
 
 /// Whether `s` looks like `YYYY-MM-DD`. Deliberately a shape check, not a
@@ -10705,8 +11249,26 @@ mod tests {
             rt.focus_reflection("completed"),
             Err(UiError::VaultLocked)
         ));
+        assert!(matches!(rt.library_items(), Err(UiError::VaultLocked)));
         assert!(matches!(
-            rt.save_reading("t", "x"),
+            rt.save_link("https://example.com/a", "t"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.save_text("t", "x", None),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.save_shared(None, "https://example.com/a"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(
+            rt.import_saves("https://example.com/a"),
+            Err(UiError::VaultLocked)
+        ));
+        assert!(matches!(rt.open_saved_item("x"), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.delete_saved_item("x"),
             Err(UiError::VaultLocked)
         ));
         assert!(matches!(rt.reading(), Err(UiError::VaultLocked)));
@@ -10714,7 +11276,11 @@ mod tests {
             rt.set_reading_position(0),
             Err(UiError::VaultLocked)
         ));
-        assert!(matches!(rt.clear_reading(), Err(UiError::VaultLocked)));
+        assert!(matches!(rt.close_reading(), Err(UiError::VaultLocked)));
+        assert!(matches!(
+            rt.suggested_stretch_routine(),
+            Err(UiError::VaultLocked)
+        ));
     }
 
     #[test]
@@ -10918,18 +11484,26 @@ mod tests {
 
         assert!(rt.reading().unwrap().is_none());
         assert!(matches!(
-            rt.save_reading("t", "   "),
+            rt.save_text("t", "   ", None),
             Err(UiError::Engine(_))
         ));
 
         let text = "A paragraph worth a couple of minutes of attention.\n\n".repeat(80);
-        let saved = rt.save_reading("  Walden  ", &text).unwrap();
+        let saved = rt.save_text("  Walden  ", &text, None).unwrap();
         assert_eq!(saved.title, "Walden");
-        assert!(saved.chunks.len() > 1);
-        assert_eq!(saved.position, 0);
+        assert_eq!(saved.source, "pasted");
+        assert!(saved.has_text);
+        assert!(saved.chunk_count > 1);
+        assert!(saved.estimated_minutes >= 1);
+
+        // Saving does not open the reader — the shelf is where a save lands.
+        assert!(rt.reading().unwrap().is_none());
+        let open = rt.open_saved_item(&saved.id).unwrap().unwrap();
+        assert_eq!(open.item_id, saved.id);
+        assert_eq!(open.position, 0);
         // Losslessness carries through the DTO: the reader shows exactly what
-        // was saved (the trailing trim is the only edit, and it is announced).
-        assert_eq!(saved.chunks.concat(), text.trim());
+        // was saved, byte for byte, including the paragraph breaks.
+        assert_eq!(open.chunks.concat(), text);
 
         let moved = rt.set_reading_position(2).unwrap().unwrap();
         assert_eq!(moved.position, 2);
@@ -10937,12 +11511,210 @@ mod tests {
         // A position past the end is clamped, never trusted.
         let clamped = rt.set_reading_position(9_999).unwrap().unwrap();
         assert_eq!(clamped.position as usize, clamped.chunks.len() - 1);
+        // Reaching the end stamps a finish rather than counting one.
+        let items = rt.library_items().unwrap();
+        assert!(items[0].finished_at.is_some());
+        assert!(items[0].is_open);
 
-        assert!(rt.clear_reading().unwrap());
-        assert!(!rt.clear_reading().unwrap());
+        // Closing keeps the item and its position; only the pointer moves.
+        assert!(rt.close_reading().unwrap());
+        assert!(!rt.close_reading().unwrap());
         assert!(rt.reading().unwrap().is_none());
-        // With nothing saved, moving the position is a clean None.
+        let items = rt.library_items().unwrap();
+        assert_eq!(items.len(), 1, "closing the reader is not deleting");
+        assert!(!items[0].is_open);
+        assert!(items[0].position > 0, "the position survived");
+        // With nothing open, moving the position is a clean None.
         assert!(rt.set_reading_position(0).unwrap().is_none());
+
+        assert!(rt.delete_saved_item(&saved.id).unwrap());
+        assert!(rt.library_items().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_shared_link_and_a_shared_selection_both_land_on_the_shelf() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        // "Share this page" from Instagram: a subject and a tracked URL.
+        let link = rt
+            .save_shared(
+                Some("A good read".into()),
+                "A good read https://www.instagram.com/p/CxAbc123/?igshid=99",
+            )
+            .unwrap()
+            .expect("a link is a save");
+        assert_eq!(link.source, "instagram");
+        assert_eq!(
+            link.url.as_deref(),
+            Some("https://www.instagram.com/p/CxAbc123/")
+        );
+        assert!(!link.has_text, "a bookmark has no body to read");
+        assert_eq!(link.chunk_count, 0);
+
+        // A bookmark cannot be opened in the reader, and that is not an error —
+        // nothing here fetches the page to fill it in.
+        assert!(rt.open_saved_item(&link.id).unwrap().is_none());
+
+        // Sharing it again updates the same row rather than making a second one,
+        // including from a different app with different tracking on the link.
+        let again = rt
+            .save_shared(
+                Some("A better title".into()),
+                "https://instagram.com/p/CxAbc123/?utm_source=elsewhere",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.id, link.id, "the same article is one row");
+        assert_eq!(again.title, "A better title");
+        assert_eq!(rt.library_items().unwrap().len(), 1);
+
+        // "Share this selection": a passage, which is readable.
+        let body = format!("https://example.com/essay {}", "word ".repeat(200));
+        let text = rt
+            .save_shared(Some("Essay".into()), &body)
+            .unwrap()
+            .unwrap();
+        assert!(text.has_text);
+        assert_eq!(text.url.as_deref(), Some("https://example.com/essay"));
+        assert!(rt.open_saved_item(&text.id).unwrap().is_some());
+
+        // An empty share is a no-op, not an error dialog.
+        assert!(rt.save_shared(None, "   ").unwrap().is_none());
+        // Something that is not a link at all is refused by name.
+        assert!(matches!(
+            rt.save_link("not a link", ""),
+            Err(UiError::Engine(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn importing_an_export_archive_fills_the_shelf_and_counts_what_it_skipped() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+
+        let payload = r#"{"saved_saved_media": [
+            {"title": "brianeno", "string_map_data": {"Saved on": {
+                "href": "https://www.instagram.com/p/CxAbc123/", "timestamp": 1690000000}}},
+            {"title": "someone", "string_map_data": {"Saved on": {
+                "href": "https://www.instagram.com/reel/CyDef456/", "timestamp": 1700000000}}}
+        ]}"#;
+        let report = rt.import_saves(payload).unwrap();
+        assert_eq!(report.format, "json");
+        assert_eq!(report.added, 2);
+        assert!(!report.fell_back);
+        assert!(!report.truncated);
+
+        let items = rt.library_items().unwrap();
+        assert_eq!(items.len(), 2);
+        // The platform's own dates survive, so an import lands in date order
+        // rather than as a wall of "just now".
+        assert_eq!(items[0].saved_at, 1700000000);
+        assert_eq!(items[1].saved_at, 1690000000);
+        assert_eq!(items[0].source, "instagram");
+
+        // Re-importing the same file adds nothing and says so.
+        let again = rt.import_saves(payload).unwrap();
+        assert_eq!(again.added, 0);
+        assert_eq!(again.duplicates, 2);
+        assert_eq!(rt.library_items().unwrap().len(), 2);
+
+        // An import must never reset a reading position it did not create.
+        let with_text = rt.save_text("Essay", "Some words to read.", None).unwrap();
+        rt.open_saved_item(&with_text.id).unwrap();
+        rt.import_saves(payload).unwrap();
+        assert_eq!(rt.reading().unwrap().unwrap().item_id, with_text.id);
+
+        // A file bigger than the cap is refused by name rather than parsed.
+        let huge = "x".repeat(ComradeRuntime::IMPORT_MAX_BYTES + 1);
+        assert!(matches!(rt.import_saves(&huge), Err(UiError::Engine(_))));
+    }
+
+    #[tokio::test]
+    async fn a_vault_from_before_the_shelf_keeps_its_saved_read() {
+        // The migration exists so that updating the app does not lose the
+        // article someone had open. Written through the storage API, which is
+        // the only thing that still writes the legacy row.
+        let dir = TempDir::new().unwrap();
+        let mut rt = ComradeRuntime::new();
+        rt.unlock_vault(dir.path(), "pin").await.unwrap();
+        {
+            let store = rt.ui.store_ref().unwrap();
+            store
+                .save_reading_state(&comrade_storage::ReadingState {
+                    title: "Walden".into(),
+                    text: "I went to the woods because I wished to live deliberately.".into(),
+                    position: 0,
+                    updated_at: 1_600_000_000,
+                })
+                .unwrap();
+            store.flush().unwrap();
+        }
+
+        let items = rt.library_items().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Walden");
+        assert_eq!(items[0].source, "pasted");
+        assert_eq!(items[0].saved_at, 1_600_000_000);
+        // It lands on the shelf, not in the reader: someone who updates should
+        // not be dropped back into the middle of something unasked.
+        assert!(rt.reading().unwrap().is_none());
+
+        // Idempotent — the legacy row is gone, so a second pass adds nothing.
+        assert_eq!(rt.library_items().unwrap().len(), 1);
+        assert!(rt
+            .ui
+            .store_ref()
+            .unwrap()
+            .load_reading_state()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn the_stretch_choreography_is_drawable_before_the_vault_is_open() {
+        // Like the duration chips: the routines are a constant of the design,
+        // not the user's data, so a screen can paint them on first frame.
+        let rt = ComradeRuntime::new();
+        let routines = rt.stretch_routines();
+        assert!(!routines.is_empty());
+        let neck = routines.iter().find(|r| r.key == "neck").expect("neck");
+        assert_eq!(
+            neck.total_seconds,
+            neck.steps.iter().map(|s| s.seconds).sum::<u32>(),
+            "the total is derived from the steps, never written twice",
+        );
+        assert!(neck.steps.iter().any(|s| s.side == "left"));
+
+        // The engine owns the walk, so both frontends step the same timeline.
+        let first = rt.stretch_step_at("neck", 0).unwrap().expect("step one");
+        assert_eq!(first.index, 0);
+        assert_eq!(first.progress, 0.0);
+        let mid = rt
+            .stretch_step_at("neck", neck.total_seconds - 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mid.index as usize, neck.steps.len() - 1);
+        assert_eq!(mid.secs_left_total, 1);
+        // Past the end is `None`, so the guide stops instead of holding a
+        // position for ever.
+        assert!(rt
+            .stretch_step_at("neck", neck.total_seconds)
+            .unwrap()
+            .is_none());
+        // An unknown key is an error the caller can see, not a panic.
+        assert!(matches!(
+            rt.stretch_step_at("levitation", 0),
+            Err(UiError::Engine(_))
+        ));
+
+        // The break schedule is a pure function of the plan.
+        assert!(rt.stretch_break_marks(25).is_empty());
+        assert_eq!(rt.stretch_break_marks(90), vec![30, 60]);
+        assert_eq!(rt.stretch_break_due(90, 31, None), Some(30));
+        assert_eq!(rt.stretch_break_due(90, 31, Some(30)), None);
     }
 
     #[tokio::test]

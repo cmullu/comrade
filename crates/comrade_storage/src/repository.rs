@@ -71,8 +71,13 @@ const CONVERSATIONS_TREE: &str = "conversation_meta";
 const ATTENTION_DAYS_TREE: &str = "attention_days";
 /// Focus-session history (attention pillar — strictly local).
 const FOCUS_SESSIONS_TREE: &str = "focus_sessions";
-/// The single saved long-read (title, full text, reading position).
+/// The single saved long-read (title, full text, reading position). Legacy —
+/// read once and migrated into [`LIBRARY_TREE`]; see [`ReadingState`].
 const READING_TREE: &str = "reading_state";
+/// The reading shelf: everything saved to read, keyed by item id. Sealed like
+/// the journal — a list of what someone means to read is a list of what they
+/// are thinking about.
+const LIBRARY_TREE: &str = "library_saves";
 /// Attention preferences: the user's own doom-app package list.
 const ATTENTION_META_TREE: &str = "attention_meta";
 /// Voice/video call log, keyed by call id.
@@ -90,6 +95,9 @@ const IDENTITY_KEY: &str = "self";
 const LEDGER_SNAPSHOT_KEY: &str = "hisab_kitab";
 const LEDGER_STATE_KEY: &str = "hisab_kitab_state";
 const READING_KEY: &str = "current";
+/// Key of the [`OpenRead`] pointer, which lives in the attention-meta tree
+/// rather than in a tree of its own — it is one row and it is attention state.
+const OPEN_READ_KEY: &str = "open_read";
 const ATTENTION_PREFS_KEY: &str = "prefs";
 const SHARE_PREFS_KEY: &str = "prefs";
 
@@ -324,8 +332,64 @@ pub struct StoredTask {
     pub updated_at: u64,
 }
 
+/// One thing on the reading shelf: a link, a text, or both.
+///
+/// This is what replaced the single-slot [`ReadingState`] below — the reader
+/// used to hold exactly one pasted article, which meant "save it for later" was
+/// not a thing the app could do. Rows arrive from the share sheet, from an
+/// import of the user's own platform export, or from a paste
+/// (`comrade_core::library`), and every one of them is sealed like the journal:
+/// what someone saves to read is at least as revealing as what they write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedItem {
+    /// Store key — 128 random bits, hex, minted by `comrade_ui`.
+    pub id: String,
+    /// The link, if there is one. Absent for text with no source (a paste).
+    #[serde(default)]
+    pub url: Option<String>,
+    pub title: String,
+    /// `comrade_core::library::SaveSource::as_str`. A string rather than an
+    /// enum for the reason this crate's other state fields are: no
+    /// `comrade_core` dependency here, and an unrecognised value from a newer
+    /// build must degrade (to "web") rather than fail the tree's read.
+    pub source: String,
+    /// The article body, or empty when only the link was saved. Nothing in
+    /// Comrade fetches a URL to fill this in — see `library`'s module docs.
+    #[serde(default)]
+    pub text: String,
+    /// When it was saved. The platform's own date when an import knew it,
+    /// otherwise when it arrived here.
+    pub saved_at: u64,
+    /// Chunk index the reader had got to, within this item's own chunking.
+    #[serde(default)]
+    pub position: u32,
+    /// When it was last opened — what "pick up where you left off" reads.
+    #[serde(default)]
+    pub opened_at: Option<u64>,
+    /// When the reader reached the end. Kept so a finished piece can drop out
+    /// of the shelf without being deleted; it is **not** a counter and nothing
+    /// aggregates it (gate 3).
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+}
+
+/// Which saved item the reader currently has open.
+///
+/// A pointer rather than a flag on the row, because "open" is a property of the
+/// reader and not of the article: two rows both claiming to be open is a state
+/// that can exist if it lives on the rows, and cannot if it lives here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct OpenRead {
+    #[serde(default)]
+    pub item_id: Option<String>,
+}
+
 /// The one saved long-read for the distraction-free reader: user-supplied
 /// text, held whole (sealed like everything else) with the reading position.
+///
+/// **Legacy.** Superseded by [`SavedItem`]; kept so that a vault written by an
+/// older build still has its saved read, which `ComradeRuntime::library_items`
+/// migrates onto the shelf on first read. Nothing writes this any more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadingState {
     pub title: String,
@@ -911,6 +975,45 @@ impl EncryptedStore {
     /// Delete the saved long-read. Returns `true` if one existed.
     pub fn clear_reading_state(&self) -> Result<bool, StorageError> {
         self.delete(READING_TREE, READING_KEY)
+    }
+
+    // The reading shelf ---------------------------------------------------------
+
+    /// Persist one saved item, keyed by its id (insert or update-in-place), so
+    /// recording a reading position is the same call as saving the article.
+    pub fn save_library_item(&self, item: &SavedItem) -> Result<(), StorageError> {
+        self.put(LIBRARY_TREE, &item.id, item)
+    }
+
+    /// One saved item by id.
+    pub fn library_item(&self, id: &str) -> Result<Option<SavedItem>, StorageError> {
+        self.get(LIBRARY_TREE, id)
+    }
+
+    /// Everything on the shelf, newest save first — the same ordering rule
+    /// [`Self::focus_sessions`] and [`Self::tasks`] use, so every list in the
+    /// app agrees about what "newest" means.
+    pub fn library_items(&self) -> Result<Vec<SavedItem>, StorageError> {
+        let mut items: Vec<SavedItem> = self.values(LIBRARY_TREE)?;
+        items.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
+        Ok(items)
+    }
+
+    /// Forget one saved item. `true` if there was one.
+    pub fn delete_library_item(&self, id: &str) -> Result<bool, StorageError> {
+        self.delete(LIBRARY_TREE, id)
+    }
+
+    /// Point the reader at an item, or at nothing.
+    pub fn save_open_read(&self, open: &OpenRead) -> Result<(), StorageError> {
+        self.put(ATTENTION_META_TREE, OPEN_READ_KEY, open)
+    }
+
+    /// Which item the reader has open; an empty default when none.
+    pub fn load_open_read(&self) -> Result<OpenRead, StorageError> {
+        Ok(self
+            .get(ATTENTION_META_TREE, OPEN_READ_KEY)?
+            .unwrap_or_default())
     }
 
     /// Persist the attention preferences (doom-app list).
@@ -1753,6 +1856,12 @@ mod tests {
             doom_packages: vec!["com.example".into()],
         })
         .unwrap();
+        s.save_library_item(&saved_item("00000000000000000001-lib", 1))
+            .unwrap();
+        s.save_open_read(&OpenRead {
+            item_id: Some("00000000000000000001-lib".into()),
+        })
+        .unwrap();
 
         s.panic_wipe().unwrap();
 
@@ -1760,6 +1869,137 @@ mod tests {
         assert!(s.focus_sessions().unwrap().is_empty());
         assert!(s.load_reading_state().unwrap().is_none());
         assert!(s.load_attention_prefs().unwrap().doom_packages.is_empty());
+        // The shelf is a list of what someone meant to read — as revealing as
+        // the journal, and wiped with it.
+        assert!(s.library_items().unwrap().is_empty());
+        assert!(s.load_open_read().unwrap().item_id.is_none());
+    }
+
+    fn saved_item(id: &str, saved_at: u64) -> SavedItem {
+        SavedItem {
+            id: id.into(),
+            url: Some("https://example.com/essay".into()),
+            title: "An essay".into(),
+            source: "web".into(),
+            text: "The body of the essay.".into(),
+            saved_at,
+            position: 0,
+            opened_at: None,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn library_items_crud_ordering_and_update_in_place() {
+        let (_d, s) = store();
+        assert!(s.library_items().unwrap().is_empty());
+        s.save_library_item(&saved_item("00000000000000000010-aaaa", 10))
+            .unwrap();
+        s.save_library_item(&saved_item("00000000000000000020-bbbb", 20))
+            .unwrap();
+
+        let items = s.library_items().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].saved_at, 20, "newest save first");
+
+        // Recording a reading position updates the row rather than adding one —
+        // the reader writes on every chunk turn, so this is the common path.
+        let mut moved = items[0].clone();
+        moved.position = 4;
+        moved.opened_at = Some(99);
+        s.save_library_item(&moved).unwrap();
+        let items = s.library_items().unwrap();
+        assert_eq!(items.len(), 2, "still two rows");
+        assert_eq!(items[0].position, 4);
+        assert_eq!(items[0].opened_at, Some(99));
+
+        assert_eq!(
+            s.library_item("00000000000000000010-aaaa")
+                .unwrap()
+                .map(|i| i.saved_at),
+            Some(10)
+        );
+        assert!(s.library_item("nope").unwrap().is_none());
+        assert!(s.delete_library_item("00000000000000000010-aaaa").unwrap());
+        assert!(!s.delete_library_item("00000000000000000010-aaaa").unwrap());
+        assert_eq!(s.library_items().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_saved_item_written_by_an_older_build_still_loads() {
+        // Every field added after the first release is `#[serde(default)]`, and
+        // this is what proves it: a row missing them must load, not take the
+        // whole shelf down with it.
+        let legacy: SavedItem =
+            serde_json::from_str(r#"{"id":"x","title":"Walden","source":"pasted","saved_at":5}"#)
+                .unwrap();
+        assert_eq!(legacy.url, None);
+        assert_eq!(legacy.text, "");
+        assert_eq!(legacy.position, 0);
+        assert_eq!(legacy.opened_at, None);
+        assert_eq!(legacy.finished_at, None);
+    }
+
+    #[test]
+    fn the_open_read_pointer_defaults_to_nothing_and_round_trips() {
+        let (_d, s) = store();
+        assert!(s.load_open_read().unwrap().item_id.is_none());
+        s.save_open_read(&OpenRead {
+            item_id: Some("abc".into()),
+        })
+        .unwrap();
+        assert_eq!(s.load_open_read().unwrap().item_id.as_deref(), Some("abc"));
+        // Closing the reader is a pointer at nothing, not a deleted row.
+        s.save_open_read(&OpenRead::default()).unwrap();
+        assert!(s.load_open_read().unwrap().item_id.is_none());
+    }
+
+    #[test]
+    fn a_saved_articles_text_and_title_are_never_plaintext_at_rest() {
+        // What someone saves to read is at least as revealing as what they
+        // write in the journal, and it arrives from platforms that already know
+        // too much. Same guarantee, proven the same way.
+        let dir = TempDir::new().unwrap();
+        let secret_title = "my-very-private-saved-title-0123456789";
+        let secret_url = "https://example.com/my-very-private-saved-path-0123456789";
+        {
+            let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+            s.save_library_item(&SavedItem {
+                id: "00000000000000000001-lib".into(),
+                url: Some(secret_url.into()),
+                title: secret_title.into(),
+                source: "instagram".into(),
+                text: String::new(),
+                saved_at: 1,
+                position: 0,
+                opened_at: None,
+                finished_at: None,
+            })
+            .unwrap();
+            s.flush().unwrap();
+        }
+        let mut leaked = false;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    for secret in [secret_title, secret_url] {
+                        if bytes.windows(secret.len()).any(|w| w == secret.as_bytes()) {
+                            leaked = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            !leaked,
+            "the reading shelf must never be written in plaintext"
+        );
+
+        let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+        let items = s.library_items().unwrap();
+        assert_eq!(items[0].title, secret_title);
+        assert_eq!(items[0].url.as_deref(), Some(secret_url));
     }
 
     #[test]
