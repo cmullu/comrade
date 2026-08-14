@@ -2621,12 +2621,19 @@ two conditions read off one list and fall out of which view came back.
 
 **The grouping is the part worth arguing with**, and it is all in the pure file:
 
-- **The album id is the key; the title is only the fallback.** Two records can
-  share a name and `MediaStore` is the only thing that knows they are different.
-  Where there is no id, the lowercased title is the *whole* key — so two untagged
-  records called *Greatest Hits* merge. Accepted rather than fixed by adding the
-  artist: the id-less path is the untagged remainder, and splitting *that* by
-  artist would scatter a compilation nobody tagged into one tile per guest.
+- **The album id is the key; the title is only the fallback — but the name is
+  asked about first.** Two records can share a name and `MediaStore` is the only
+  thing that knows they are different, so where there is a name the id decides
+  identity. Where there is an id and *no* name, the row is a leftover rather than
+  an album: an id is a number in a column, not evidence that anything was tagged,
+  and keying by it would produce a second untitled group drawn under the same
+  "not in an album" heading as the first. That ordering is what lets
+  `Album.title` promise to be `null` for exactly one group, which is a test
+  rather than a comment. Where there is a name and no id the lowercased title is
+  the *whole* key, so two untagged records called *Greatest Hits* merge —
+  accepted rather than fixed by adding the artist, because the id-less path is
+  the untagged remainder and splitting *that* by artist would scatter a
+  compilation nobody tagged into one tile per guest.
 - **Alphabetical by album, not the order the tracks arrived in.** The opposite of
   `filterTracks`' rule, for the same underlying reason — this list is not
   recomputed under a finger, so ordering helps here where it would jump there.
@@ -2706,7 +2713,7 @@ the tap *after* the one that asked does not ask again.
 
 The grouping, the ordering, the three artist answers, the leftovers, the
 every-track-lands-somewhere property and all six rows of the table above are
-`TogetherDecisionsTest`: **117 tests, green in this sandbox** in about a minute,
+`TogetherDecisionsTest`: **118 tests, green in this sandbox** in about a minute,
 up from 105. Each new behaviour was checked by removing it and watching the test
 go red, because a test that cannot fail is not a test.
 

@@ -908,8 +908,16 @@ object TogetherDecisions {
      * wrong answers.
      */
     fun albumKeyOf(track: Track): String {
-        track.albumId?.let { return "id:$it" }
+        // The name is asked about **first**, and that ordering is the whole
+        // reason [Album.title] can promise to be `null` for exactly one group.
+        // A row with an album id and no album name does happen — an id is a
+        // number in a column, not evidence that anything was tagged — and
+        // keying it by that id would make a second untitled group, drawn under
+        // the same "not in an album" heading as the first. Two tiles with one
+        // name is not a thing to explain to somebody; an unnamed album is not
+        // an album, whatever the provider numbered it.
         val title = named(track.album) ?: return NO_ALBUM_KEY
+        track.albumId?.let { return "id:$it" }
         return "name:${title.lowercase()}"
     }
 

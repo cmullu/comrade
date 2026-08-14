@@ -867,7 +867,7 @@ class TogetherDecisionsTest {
     }
 
     @Test
-    fun theAlbumIdWinsOverTheName() {
+    fun theAlbumIdWinsOverTheNameButOnlyOnceThereIsAName() {
         assertEquals("id:7", TogetherDecisions.albumKeyOf(track("x", album = "Rockstar", albumId = 7L)))
         assertEquals(
             "name:rockstar",
@@ -877,6 +877,30 @@ class TogetherDecisionsTest {
             TogetherDecisions.NO_ALBUM_KEY,
             TogetherDecisions.albumKeyOf(track("x", album = null, albumId = null)),
         )
+        // An id is a number in a column, not evidence that anything was tagged.
+        // Keyed by it, this would be a second untitled group drawn under the same
+        // "not in an album" heading as the first.
+        assertEquals(
+            TogetherDecisions.NO_ALBUM_KEY,
+            TogetherDecisions.albumKeyOf(track("x", album = null, albumId = 7L)),
+        )
+    }
+
+    @Test
+    fun onlyOneGroupIsEverTheOneWithNoAlbum() {
+        // What `Album.title`'s "the one group that is not an album" claims. Two
+        // untitled tiles would be two rows named the same thing, which is not a
+        // state to explain to somebody.
+        val albums = TogetherDecisions.albumsOf(
+            listOf(
+                track("Untagged A", albumId = 3L),
+                track("Untagged B", albumId = 4L),
+                track("Untagged C", album = "", albumId = null),
+                track("Tagged", album = "Zoology", albumId = 5L),
+            ),
+        )
+        assertEquals(1, albums.count { it.title == null })
+        assertEquals(3, albums.single { it.title == null }.tracks.size)
     }
 
     @Test

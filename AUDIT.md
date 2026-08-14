@@ -1308,7 +1308,7 @@ is small; the content problem is the real constraint:
 > (`android/app/src/main/java/mullu/comrade/together/TogetherDecisions.kt`), with
 > the id-over-title keying, the alphabetical album order, the kept-and-last
 > leftovers group and the three artist answers all pinned by tests.
-> `TogetherDecisions` is **117** JVM tests, up from 105.
+> `TogetherDecisions` is **118** JVM tests, up from 105.
 >
 > And tapping a song in your own library now plays it instead of asking who with
 > — `startStepInLibrary` / `mayChoosePerson`, §18's argument applied one screen
