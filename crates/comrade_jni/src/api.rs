@@ -82,7 +82,7 @@ pub use comrade_ui::{
     ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
     IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
     MessageAuthor, MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto,
-    ProfileDto, ReactionDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto,
+    ProfileDto, ReactionDto, RideSignalDto, ShareVerdictDto, TaraMessageDto, TogetherCommandDto,
     TogetherCorrectionDto, TogetherInviteDto, TogetherSessionDto, TogetherShareDto,
     TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
@@ -631,6 +631,19 @@ pub struct _ShareVerdictDto {
     pub relayed_bytes: Option<u64>,
 }
 
+#[frb(mirror(RideSignalDto))]
+pub struct _RideSignalDto {
+    pub peer: String,
+    pub name: Option<String>,
+    pub kind: String,
+    pub phrase: Option<String>,
+    pub maneuver: Option<String>,
+    pub distance_m: Option<u32>,
+    pub note: Option<String>,
+    pub urgency: String,
+    pub created_at: u64,
+}
+
 #[frb(mirror(BridgeEvent))]
 pub enum _BridgeEvent {
     IncomingChitthi(ChitthiDto),
@@ -658,6 +671,7 @@ pub enum _BridgeEvent {
         peer: String,
         name: Option<String>,
     },
+    RideSignal(RideSignalDto),
     TogetherInvited(TogetherInviteDto),
     TogetherJoined {
         session_id: String,

@@ -640,6 +640,9 @@ sealed class BridgeEvent with _$BridgeEvent {
     required String peer,
     String? name,
   }) = BridgeEvent_ComradeNudge;
+  const factory BridgeEvent.rideSignal(
+    RideSignalDto field0,
+  ) = BridgeEvent_RideSignal;
   const factory BridgeEvent.togetherInvited(
     TogetherInviteDto field0,
   ) = BridgeEvent_TogetherInvited;
@@ -1605,6 +1608,57 @@ sealed class RelayPolicy with _$RelayPolicy {
   }) = RelayPolicy_UnderBytes;
   const factory RelayPolicy.askEachTime() = RelayPolicy_AskEachTime;
   const factory RelayPolicy.always() = RelayPolicy_Always;
+}
+
+class RideSignalDto {
+  final String peer;
+  final String? name;
+  final String kind;
+  final String? phrase;
+  final String? maneuver;
+  final int? distanceM;
+  final String? note;
+  final String urgency;
+  final BigInt createdAt;
+
+  const RideSignalDto({
+    required this.peer,
+    this.name,
+    required this.kind,
+    this.phrase,
+    this.maneuver,
+    this.distanceM,
+    this.note,
+    required this.urgency,
+    required this.createdAt,
+  });
+
+  @override
+  int get hashCode =>
+      peer.hashCode ^
+      name.hashCode ^
+      kind.hashCode ^
+      phrase.hashCode ^
+      maneuver.hashCode ^
+      distanceM.hashCode ^
+      note.hashCode ^
+      urgency.hashCode ^
+      createdAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RideSignalDto &&
+          runtimeType == other.runtimeType &&
+          peer == other.peer &&
+          name == other.name &&
+          kind == other.kind &&
+          phrase == other.phrase &&
+          maneuver == other.maneuver &&
+          distanceM == other.distanceM &&
+          note == other.note &&
+          urgency == other.urgency &&
+          createdAt == other.createdAt;
 }
 
 class ShareOffer {

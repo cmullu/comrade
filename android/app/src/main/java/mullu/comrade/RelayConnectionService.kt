@@ -481,6 +481,32 @@ object ChatEventRouter {
                     Notifier.notifyComradeNudge(context, event.peer, title)
                 }
             }
+            is BridgeEvent.RideSignal -> {
+                // Ride mode — see docs/RIDE.md. Routed to the board object
+                // rather than to a screen, the TogetherManager division: the
+                // signal arrives whether or not anyone is looking, and speech
+                // and haptics must fire on arrival, not on recomposition.
+                // Core already refused anything stale, replayed, or from an
+                // unaccepted peer.
+                val sig = event.v1
+                mullu.comrade.ride.RideSignals.onSignal(
+                    context,
+                    mullu.comrade.ride.RideDecisions.Sig(
+                        kind = sig.kind,
+                        phrase = sig.phrase,
+                        maneuver = sig.maneuver,
+                        distanceM = sig.distanceM?.toLong(),
+                        note = sig.note,
+                        urgency = sig.urgency,
+                        peerLabel = sig.name?.takeIf { it.isNotBlank() } ?: peerLabel(sig.peer),
+                        // Arrival time on *this* clock, not the sender's
+                        // `created_at`: core already enforced wire freshness,
+                        // and the screen's age-out must not inherit the peer's
+                        // clock skew on top of it.
+                        atMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
             is BridgeEvent.MeshStatusChanged -> MeshStatusMonitor.update(
                 ComradeCore.MeshStatus(active = event.v1.active, peerCount = event.v1.peerCount.toInt()),
             )

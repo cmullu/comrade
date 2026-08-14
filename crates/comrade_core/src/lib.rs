@@ -64,6 +64,7 @@ pub mod nudge;
 pub mod pad;
 pub mod presence;
 pub mod relay;
+pub mod ride;
 pub mod saathi;
 pub mod sabha;
 pub mod sakha;

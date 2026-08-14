@@ -2777,6 +2777,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RideSignalDto dco_decode_box_autoadd_ride_signal_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_ride_signal_dto(raw);
+  }
+
+  @protected
   ShareOffer dco_decode_box_autoadd_share_offer(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_share_offer(raw);
@@ -2821,6 +2827,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   int dco_decode_box_autoadd_u_16(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
   }
@@ -2883,46 +2895,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           name: dco_decode_opt_String(raw[2]),
         );
       case 10:
+        return BridgeEvent_RideSignal(
+          dco_decode_box_autoadd_ride_signal_dto(raw[1]),
+        );
+      case 11:
         return BridgeEvent_TogetherInvited(
           dco_decode_box_autoadd_together_invite_dto(raw[1]),
         );
-      case 11:
+      case 12:
         return BridgeEvent_TogetherJoined(
           sessionId: dco_decode_String(raw[1]),
           peer: dco_decode_String(raw[2]),
         );
-      case 12:
+      case 13:
         return BridgeEvent_TogetherCommand(
           dco_decode_box_autoadd_together_command_dto(raw[1]),
         );
-      case 13:
+      case 14:
         return BridgeEvent_TogetherCorrection(
           dco_decode_box_autoadd_together_correction_dto(raw[1]),
         );
-      case 14:
+      case 15:
         return BridgeEvent_TogetherEnded(
           sessionId: dco_decode_String(raw[1]),
           peer: dco_decode_String(raw[2]),
           byPeer: dco_decode_bool(raw[3]),
         );
-      case 15:
+      case 16:
         return BridgeEvent_TogetherShare(
           dco_decode_box_autoadd_together_share_dto(raw[1]),
         );
-      case 16:
+      case 17:
         return BridgeEvent_TogetherOutbound(
           sessionId: dco_decode_String(raw[1]),
           json: dco_decode_String(raw[2]),
         );
-      case 17:
+      case 18:
         return BridgeEvent_AttachmentHandoff(
           dco_decode_box_autoadd_attachment_handoff_dto(raw[1]),
         );
-      case 18:
+      case 19:
         return BridgeEvent_MeshStatusChanged(
           dco_decode_box_autoadd_mesh_status_dto(raw[1]),
         );
-      case 19:
+      case 20:
         return BridgeEvent_LedgerUpdated(
           ledger: dco_decode_String(raw[1]),
         );
@@ -3523,6 +3539,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_u_64(raw);
@@ -3652,6 +3674,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       default:
         throw Exception('unreachable');
     }
+  }
+
+  @protected
+  RideSignalDto dco_decode_ride_signal_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return RideSignalDto(
+      peer: dco_decode_String(arr[0]),
+      name: dco_decode_opt_String(arr[1]),
+      kind: dco_decode_String(arr[2]),
+      phrase: dco_decode_opt_String(arr[3]),
+      maneuver: dco_decode_opt_String(arr[4]),
+      distanceM: dco_decode_opt_box_autoadd_u_32(arr[5]),
+      note: dco_decode_opt_String(arr[6]),
+      urgency: dco_decode_String(arr[7]),
+      createdAt: dco_decode_u_64(arr[8]),
+    );
   }
 
   @protected
@@ -4182,6 +4223,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RideSignalDto sse_decode_box_autoadd_ride_signal_dto(
+      SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_ride_signal_dto(deserializer));
+  }
+
+  @protected
   ShareOffer sse_decode_box_autoadd_share_offer(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_share_offer(deserializer));
@@ -4233,6 +4281,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int sse_decode_box_autoadd_u_16(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_u_16(deserializer));
+  }
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_32(deserializer));
   }
 
   @protected
@@ -4290,45 +4344,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         final var_name = sse_decode_opt_String(deserializer);
         return BridgeEvent_ComradeNudge(peer: var_peer, name: var_name);
       case 10:
+        final var_field0 = sse_decode_box_autoadd_ride_signal_dto(deserializer);
+        return BridgeEvent_RideSignal(var_field0);
+      case 11:
         final var_field0 =
             sse_decode_box_autoadd_together_invite_dto(deserializer);
         return BridgeEvent_TogetherInvited(var_field0);
-      case 11:
+      case 12:
         final var_sessionId = sse_decode_String(deserializer);
         final var_peer = sse_decode_String(deserializer);
         return BridgeEvent_TogetherJoined(
             sessionId: var_sessionId, peer: var_peer);
-      case 12:
+      case 13:
         final var_field0 =
             sse_decode_box_autoadd_together_command_dto(deserializer);
         return BridgeEvent_TogetherCommand(var_field0);
-      case 13:
+      case 14:
         final var_field0 =
             sse_decode_box_autoadd_together_correction_dto(deserializer);
         return BridgeEvent_TogetherCorrection(var_field0);
-      case 14:
+      case 15:
         final var_sessionId = sse_decode_String(deserializer);
         final var_peer = sse_decode_String(deserializer);
         final var_byPeer = sse_decode_bool(deserializer);
         return BridgeEvent_TogetherEnded(
             sessionId: var_sessionId, peer: var_peer, byPeer: var_byPeer);
-      case 15:
+      case 16:
         final var_field0 =
             sse_decode_box_autoadd_together_share_dto(deserializer);
         return BridgeEvent_TogetherShare(var_field0);
-      case 16:
+      case 17:
         final var_sessionId = sse_decode_String(deserializer);
         final var_json = sse_decode_String(deserializer);
         return BridgeEvent_TogetherOutbound(
             sessionId: var_sessionId, json: var_json);
-      case 17:
+      case 18:
         final var_field0 =
             sse_decode_box_autoadd_attachment_handoff_dto(deserializer);
         return BridgeEvent_AttachmentHandoff(var_field0);
-      case 18:
+      case 19:
         final var_field0 = sse_decode_box_autoadd_mesh_status_dto(deserializer);
         return BridgeEvent_MeshStatusChanged(var_field0);
-      case 19:
+      case 20:
         final var_ledger = sse_decode_String(deserializer);
         return BridgeEvent_LedgerUpdated(ledger: var_ledger);
       default:
@@ -5097,6 +5154,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -5249,6 +5317,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       default:
         throw UnimplementedError('');
     }
+  }
+
+  @protected
+  RideSignalDto sse_decode_ride_signal_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    final var_peer = sse_decode_String(deserializer);
+    final var_name = sse_decode_opt_String(deserializer);
+    final var_kind = sse_decode_String(deserializer);
+    final var_phrase = sse_decode_opt_String(deserializer);
+    final var_maneuver = sse_decode_opt_String(deserializer);
+    final var_distanceM = sse_decode_opt_box_autoadd_u_32(deserializer);
+    final var_note = sse_decode_opt_String(deserializer);
+    final var_urgency = sse_decode_String(deserializer);
+    final var_createdAt = sse_decode_u_64(deserializer);
+    return RideSignalDto(
+        peer: var_peer,
+        name: var_name,
+        kind: var_kind,
+        phrase: var_phrase,
+        maneuver: var_maneuver,
+        distanceM: var_distanceM,
+        note: var_note,
+        urgency: var_urgency,
+        createdAt: var_createdAt);
   }
 
   @protected
@@ -5781,6 +5873,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_ride_signal_dto(
+      RideSignalDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_ride_signal_dto(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_share_offer(
       ShareOffer self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -5833,6 +5932,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_16(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self, serializer);
   }
 
   @protected
@@ -5891,49 +5996,52 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_i_32(9, serializer);
         sse_encode_String(peer, serializer);
         sse_encode_opt_String(name, serializer);
-      case BridgeEvent_TogetherInvited(field0: final field0):
+      case BridgeEvent_RideSignal(field0: final field0):
         sse_encode_i_32(10, serializer);
+        sse_encode_box_autoadd_ride_signal_dto(field0, serializer);
+      case BridgeEvent_TogetherInvited(field0: final field0):
+        sse_encode_i_32(11, serializer);
         sse_encode_box_autoadd_together_invite_dto(field0, serializer);
       case BridgeEvent_TogetherJoined(
           sessionId: final sessionId,
           peer: final peer
         ):
-        sse_encode_i_32(11, serializer);
+        sse_encode_i_32(12, serializer);
         sse_encode_String(sessionId, serializer);
         sse_encode_String(peer, serializer);
       case BridgeEvent_TogetherCommand(field0: final field0):
-        sse_encode_i_32(12, serializer);
+        sse_encode_i_32(13, serializer);
         sse_encode_box_autoadd_together_command_dto(field0, serializer);
       case BridgeEvent_TogetherCorrection(field0: final field0):
-        sse_encode_i_32(13, serializer);
+        sse_encode_i_32(14, serializer);
         sse_encode_box_autoadd_together_correction_dto(field0, serializer);
       case BridgeEvent_TogetherEnded(
           sessionId: final sessionId,
           peer: final peer,
           byPeer: final byPeer
         ):
-        sse_encode_i_32(14, serializer);
+        sse_encode_i_32(15, serializer);
         sse_encode_String(sessionId, serializer);
         sse_encode_String(peer, serializer);
         sse_encode_bool(byPeer, serializer);
       case BridgeEvent_TogetherShare(field0: final field0):
-        sse_encode_i_32(15, serializer);
+        sse_encode_i_32(16, serializer);
         sse_encode_box_autoadd_together_share_dto(field0, serializer);
       case BridgeEvent_TogetherOutbound(
           sessionId: final sessionId,
           json: final json
         ):
-        sse_encode_i_32(16, serializer);
+        sse_encode_i_32(17, serializer);
         sse_encode_String(sessionId, serializer);
         sse_encode_String(json, serializer);
       case BridgeEvent_AttachmentHandoff(field0: final field0):
-        sse_encode_i_32(17, serializer);
+        sse_encode_i_32(18, serializer);
         sse_encode_box_autoadd_attachment_handoff_dto(field0, serializer);
       case BridgeEvent_MeshStatusChanged(field0: final field0):
-        sse_encode_i_32(18, serializer);
+        sse_encode_i_32(19, serializer);
         sse_encode_box_autoadd_mesh_status_dto(field0, serializer);
       case BridgeEvent_LedgerUpdated(ledger: final ledger):
-        sse_encode_i_32(19, serializer);
+        sse_encode_i_32(20, serializer);
         sse_encode_String(ledger, serializer);
     }
   }
@@ -6552,6 +6660,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_32(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -6660,6 +6778,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case RelayPolicy_Always():
         sse_encode_i_32(3, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_ride_signal_dto(
+      RideSignalDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.peer, serializer);
+    sse_encode_opt_String(self.name, serializer);
+    sse_encode_String(self.kind, serializer);
+    sse_encode_opt_String(self.phrase, serializer);
+    sse_encode_opt_String(self.maneuver, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.distanceM, serializer);
+    sse_encode_opt_String(self.note, serializer);
+    sse_encode_String(self.urgency, serializer);
+    sse_encode_u_64(self.createdAt, serializer);
   }
 
   @protected
