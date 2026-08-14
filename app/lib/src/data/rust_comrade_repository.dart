@@ -278,6 +278,75 @@ class RustComradeRepository implements ComradeRepository {
   Future<int> markConversationRead(String peer) async =>
       (await _guard(() => rust.markConversationRead(peer: peer))).toInt();
 
+  // ── Threads and topics (see `comrade_core::topic`) ───────────────────────
+
+  @override
+  Future<List<TopicInfo>> topics(String peer) async =>
+      (await _guard(() => rust.topics(peer: peer))).map(_topic).toList();
+
+  @override
+  Future<List<ThreadInfo>> threads(String peer, {String? topicSlug}) async =>
+      (await _guard(() => rust.threads(peer: peer, topicSlug: topicSlug)))
+          .map(_thread)
+          .toList();
+
+  @override
+  Future<ThreadDetail> thread({
+    required String peer,
+    required String rootId,
+  }) async {
+    final rust.ThreadDto dto =
+        await _guard(() => rust.thread(peer: peer, rootId: rootId));
+    return ThreadDetail(
+      rootId: dto.rootId,
+      topicSlug: dto.topicSlug,
+      messages: dto.messages.map(_message).toList(),
+      media: dto.media.map(_media).toList(),
+    );
+  }
+
+  @override
+  Future<TopicInfo> createTopic({
+    required String peer,
+    required String name,
+  }) async =>
+      _topic(await _guard(() => rust.createTopic(peer: peer, name: name)));
+
+  @override
+  Future<ThreadInfo> assignThread({
+    required String peer,
+    required String messageId,
+    String? topicName,
+  }) async =>
+      _thread(await _guard(
+        () => rust.assignThread(
+          peer: peer,
+          messageId: messageId,
+          topicName: topicName,
+        ),
+      ));
+
+  @override
+  Future<TopicInfo> setTopicClosed({
+    required String peer,
+    required String slug,
+    required bool closed,
+  }) async =>
+      _topic(await _guard(
+        () => rust.setTopicClosed(peer: peer, slug: slug, closed: closed),
+      ));
+
+  @override
+  Future<MessageInfo> sendThreadReply({
+    required String peer,
+    required String rootId,
+    required String content,
+  }) async =>
+      _message(await _guard(
+        () =>
+            rust.sendThreadReply(peer: peer, rootId: rootId, content: content),
+      ));
+
   @override
   Future<List<MessageRequestInfo>> messageRequests() async =>
       (await _guard(rust.messageRequests)).map(_messageRequest).toList();
@@ -789,6 +858,9 @@ BridgeEvent? mapBridgeEvent(rust.BridgeEvent event) => switch (event) {
       // frontend has none of — see divergence D34 in `SCREEN_INVENTORY.md`. Null
       // rather than a stub so nothing here pretends the transfer is possible.
       rust.BridgeEvent_AttachmentHandoff() => null,
+      // The peer reorganised the conversation. Structure, not a message — so no
+      // notification and no chat-list change, only the thread sheets reload.
+      rust.BridgeEvent_TopicsChanged(:final String peer) => TopicsChanged(peer),
     };
 
 /// Flatten the typed `CallSignal` union back into the flat shape the call UI
@@ -875,6 +947,27 @@ MessageRequestInfo _messageRequest(rust.MessageRequestDto dto) =>
       peer: dto.peer,
       lastMessage: dto.lastMessage,
       lastAt: dto.lastAt.toInt(),
+    );
+
+TopicInfo _topic(rust.TopicDto dto) => TopicInfo(
+      slug: dto.slug,
+      name: dto.name,
+      closed: dto.closed,
+      threadCount: dto.threadCount,
+      messageCount: dto.messageCount,
+      lastActivityAt: dto.lastActivityAt.toInt(),
+      mine: dto.mine,
+    );
+
+ThreadInfo _thread(rust.ThreadSummaryDto dto) => ThreadInfo(
+      rootId: dto.rootId,
+      topicSlug: dto.topicSlug,
+      preview: dto.preview,
+      rootIsMedia: dto.rootIsMedia,
+      rootMissing: dto.rootMissing,
+      replyCount: dto.replyCount,
+      lastAt: dto.lastAt.toInt(),
+      unread: dto.unread,
     );
 
 MediaMessageInfo _media(rust.MediaMessageDto dto) => MediaMessageInfo(
