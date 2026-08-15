@@ -1067,3 +1067,75 @@ val TagIcon: ImageVector = materialIcon(name = "Filled.Tag") {
         close()
     }
 }
+
+/**
+ * A motorcycle, for Ride mode — drawn as an adventure bike rather than the
+ * Material "two-wheeler" scooter glyph, because the two read as different
+ * vehicles and this feature is about the one you sit on for six hours.
+ *
+ * The silhouette is a Himalayan 411's: two equal, spoked-looking wheels (a
+ * scooter's front wheel is visibly smaller), a high flat handlebar, and the
+ * tall screen-and-rack over the front wheel that is the model's one
+ * unmistakable line. Inlined like every other icon here rather than taking
+ * `material-icons-extended` for one glyph — the position this file has held
+ * since the first icon.
+ */
+val MotorcycleIcon: ImageVector = materialIcon(name = "Filled.Motorcycle") {
+    materialPath {
+        // Rear wheel.
+        moveTo(5.5f, 14.0f)
+        curveTo(3.6f, 14.0f, 2.0f, 15.6f, 2.0f, 17.5f)
+        curveTo(2.0f, 19.4f, 3.6f, 21.0f, 5.5f, 21.0f)
+        curveTo(7.4f, 21.0f, 9.0f, 19.4f, 9.0f, 17.5f)
+        curveTo(9.0f, 15.6f, 7.4f, 14.0f, 5.5f, 14.0f)
+        close()
+        moveTo(5.5f, 19.5f)
+        curveTo(4.4f, 19.5f, 3.5f, 18.6f, 3.5f, 17.5f)
+        curveTo(3.5f, 16.4f, 4.4f, 15.5f, 5.5f, 15.5f)
+        curveTo(6.6f, 15.5f, 7.5f, 16.4f, 7.5f, 17.5f)
+        curveTo(7.5f, 18.6f, 6.6f, 19.5f, 5.5f, 19.5f)
+        close()
+        // Front wheel — the same size as the rear, which is the adventure-bike
+        // tell and the thing that stops this reading as a scooter.
+        moveTo(18.5f, 14.0f)
+        curveTo(16.6f, 14.0f, 15.0f, 15.6f, 15.0f, 17.5f)
+        curveTo(15.0f, 19.4f, 16.6f, 21.0f, 18.5f, 21.0f)
+        curveTo(20.4f, 21.0f, 22.0f, 19.4f, 22.0f, 17.5f)
+        curveTo(22.0f, 15.6f, 20.4f, 14.0f, 18.5f, 14.0f)
+        close()
+        moveTo(18.5f, 19.5f)
+        curveTo(17.4f, 19.5f, 16.5f, 18.6f, 16.5f, 17.5f)
+        curveTo(16.5f, 16.4f, 17.4f, 15.5f, 18.5f, 15.5f)
+        curveTo(19.6f, 15.5f, 20.5f, 16.4f, 20.5f, 17.5f)
+        curveTo(20.5f, 18.6f, 19.6f, 19.5f, 18.5f, 19.5f)
+        close()
+        // Tank, seat and the frame line joining the two hubs.
+        moveTo(15.8f, 10.0f)
+        lineTo(13.2f, 10.0f)
+        lineTo(11.6f, 12.2f)
+        lineTo(8.2f, 12.2f)
+        lineTo(7.0f, 10.6f)
+        lineTo(5.0f, 10.6f)
+        lineTo(5.0f, 12.1f)
+        lineTo(6.2f, 12.1f)
+        lineTo(7.4f, 13.7f)
+        lineTo(5.5f, 13.7f)
+        lineTo(5.5f, 15.2f)
+        lineTo(12.4f, 15.2f)
+        lineTo(14.6f, 12.1f)
+        lineTo(17.4f, 15.2f)
+        lineTo(18.9f, 15.2f)
+        close()
+        // High flat bar and the tall screen over the front wheel — the
+        // Himalayan's one unmistakable line at this size.
+        moveTo(16.4f, 4.4f)
+        lineTo(19.6f, 4.4f)
+        lineTo(19.6f, 5.8f)
+        lineTo(18.6f, 5.8f)
+        lineTo(18.0f, 9.2f)
+        lineTo(16.5f, 9.2f)
+        lineTo(17.0f, 5.8f)
+        lineTo(16.4f, 5.8f)
+        close()
+    }
+}

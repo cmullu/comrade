@@ -185,6 +185,43 @@ class MainActivityUiTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("nav-drawer-button").performClick()
         composeRule.waitForIdle()
+
+        // Ride opens, and *stays* open across a recomposition. Asserted on a
+        // device for the same reason the Tasks tap above is: this screen
+        // shipped killing the process on open, from the same defect
+        // (`AUDIT.md` 2026-08-04) — an early `return@Column`, so the Column
+        // emitted a different number of composable groups once state flipped,
+        // which throws on the recomposition and not on the first frame.
+        //
+        // So a bare "the tag exists" assertion would have passed against the
+        // broken build. The waits are what make this a regression test: the
+        // comrade list arrives asynchronously and the card's clock ticks once a
+        // second, so sitting here past a tick forces the recomposition that
+        // used to crash, and the seat buttons must still be there afterwards.
+        composeRule.onNodeWithTag("drawer-ride").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("ride-seat-driver").assertIsDisplayed()
+        composeRule.onNodeWithTag("ride-card").assertDoesNotExist()
+        Thread.sleep(1_500)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("ride-seat-driver").assertIsDisplayed()
+
+        // Picking a seat is the other group-count flip: the setup arm is
+        // replaced by the card, the music controls and the phrase grid. It has
+        // to survive its own tick too.
+        composeRule.onNodeWithTag("ride-seat-pillion").performClick()
+        composeRule.waitForIdle()
+        Thread.sleep(1_500)
+        composeRule.waitForIdle()
+        // Still alive, and still showing *a* ride screen — with no comrade
+        // chosen the setup arm is correct, so assert the process survived
+        // rather than which arm won, which depends on the device's contacts.
+        composeRule.onNodeWithText("Ride").assertIsDisplayed()
+
+        Espresso.pressBack()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("nav-drawer-button").performClick()
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag("drawer-settings").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("Your identity key").assertIsDisplayed()

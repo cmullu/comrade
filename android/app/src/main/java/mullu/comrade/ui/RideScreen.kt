@@ -106,15 +106,19 @@ fun RideScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text(
-            stringResource(R.string.ride_title),
-            style = MaterialTheme.typography.headlineSmall,
-        )
-        Text(
             stringResource(R.string.ride_subtitle),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        // One `if/else`, never an early `return@Column`. Both arms are reached
+        // by state that flips while the screen is open — the comrade list
+        // arriving, a seat being picked — and an early return makes the Column
+        // emit a different number of composable groups before and after that
+        // flip, which throws on the *recomposition* rather than the first
+        // frame. That is not a hypothesis: `AUDIT.md`'s 2026-08-04 entry
+        // records `TaskListScreen` killing the process for exactly this, and
+        // this screen shipped with the same shape.
         val chosenRole = role
         val chosenPeer = peer
         if (chosenRole == null || chosenPeer == null) {
@@ -130,60 +134,59 @@ fun RideScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            return@Column
-        }
-
-        GlanceCard(
-            card = RideDecisions.card(nowMs, board.quick, board.route),
-            driving = chosenRole == RideDecisions.Role.Driver,
-        )
-
-        MusicControls(
-            controls = RideDecisions.controlsFor(chosenRole),
-            live = together as? TogetherManager.UiState.Live,
-            onPlayPause = { playing, posMs -> TogetherManager.setState(posMs, !playing) },
-            onNext = { TogetherManager.skipForward(context) },
-            onPrevious = { TogetherManager.skipBack(context) },
-        )
-
-        HorizontalDivider()
-
-        if (RideDecisions.mayComposeQuick(chosenRole)) {
-            PhraseGrid(
-                onSend = { phrase ->
-                    scope.launch {
-                        withContext(Dispatchers.IO) {
-                            runCatching { ComradeCore.rideSendQuick(chosenPeer.npub, phrase) }
-                        }
-                    }
-                },
+        } else {
+            GlanceCard(
+                card = RideDecisions.card(nowMs, board.quick, board.route),
+                driving = chosenRole == RideDecisions.Role.Driver,
             )
-        }
 
-        if (RideDecisions.mayComposeRoute(chosenRole)) {
-            RouteComposer(
-                onSend = { maneuver, distanceM, note ->
-                    scope.launch {
-                        withContext(Dispatchers.IO) {
-                            runCatching {
-                                ComradeCore.rideSendRoute(
-                                    chosenPeer.npub,
-                                    maneuver,
-                                    distanceM,
-                                    note,
-                                )
+            MusicControls(
+                controls = RideDecisions.controlsFor(chosenRole),
+                live = together as? TogetherManager.UiState.Live,
+                onPlayPause = { playing, posMs -> TogetherManager.setState(posMs, !playing) },
+                onNext = { TogetherManager.skipForward(context) },
+                onPrevious = { TogetherManager.skipBack(context) },
+            )
+
+            HorizontalDivider()
+
+            if (RideDecisions.mayComposeQuick(chosenRole)) {
+                PhraseGrid(
+                    onSend = { phrase ->
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                runCatching { ComradeCore.rideSendQuick(chosenPeer.npub, phrase) }
                             }
                         }
-                    }
-                },
-            )
-        }
+                    },
+                )
+            }
 
-        TextButton(
-            onClick = { role = null },
-            modifier = Modifier.testTag("ride-change-seat"),
-        ) {
-            Text(stringResource(R.string.ride_change_seat))
+            if (RideDecisions.mayComposeRoute(chosenRole)) {
+                RouteComposer(
+                    onSend = { maneuver, distanceM, note ->
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                runCatching {
+                                    ComradeCore.rideSendRoute(
+                                        chosenPeer.npub,
+                                        maneuver,
+                                        distanceM,
+                                        note,
+                                    )
+                                }
+                            }
+                        }
+                    },
+                )
+            }
+
+            TextButton(
+                onClick = { role = null },
+                modifier = Modifier.testTag("ride-change-seat"),
+            ) {
+                Text(stringResource(R.string.ride_change_seat))
+            }
         }
     }
 }
@@ -280,6 +283,9 @@ private fun GlanceCard(card: RideDecisions.Card?, driving: Boolean) {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // `if/else`, not an early return — `card` flips from null the
+            // moment a signal arrives, which is a recomposition. See the note
+            // in `RideScreen`.
             if (card == null) {
                 Text(
                     stringResource(R.string.ride_nothing_yet),
@@ -295,26 +301,26 @@ private fun GlanceCard(card: RideDecisions.Card?, driving: Boolean) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                return@Column
-            }
-            card.glyph?.let { glyph ->
-                Text(glyph, fontSize = 56.sp, textAlign = TextAlign.Center)
-            }
-            Text(
-                card.headline,
-                fontSize = if (card.urgency == "urgent") 40.sp else 32.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.testTag("ride-card-headline"),
-            )
-            card.detail?.let { detail ->
-                Spacer(Modifier.height(6.dp))
+            } else {
+                card.glyph?.let { glyph ->
+                    Text(glyph, fontSize = 56.sp, textAlign = TextAlign.Center)
+                }
                 Text(
-                    detail,
-                    style = MaterialTheme.typography.bodyMedium,
+                    card.headline,
+                    fontSize = if (card.urgency == "urgent") 40.sp else 32.sp,
+                    fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("ride-card-headline"),
                 )
+                card.detail?.let { detail ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        detail,
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -334,54 +340,57 @@ private fun MusicControls(
     onPrevious: () -> Unit,
 ) {
     Text(stringResource(R.string.ride_music), style = MaterialTheme.typography.titleMedium)
+    // `if/else` rather than an early `return` from the composable: `live` flips
+    // the moment a Together session starts or ends, and that is a
+    // recomposition. See the note in `RideScreen`.
     if (live == null) {
         Text(
             stringResource(R.string.ride_music_none),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        return
-    }
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        if (controls.previous) {
-            OutlinedButton(
-                onClick = onPrevious,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(64.dp)
-                    .testTag("ride-previous"),
-            ) {
-                Text(stringResource(R.string.ride_previous))
+    } else {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (controls.previous) {
+                OutlinedButton(
+                    onClick = onPrevious,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(64.dp)
+                        .testTag("ride-previous"),
+                ) {
+                    Text(stringResource(R.string.ride_previous))
+                }
             }
-        }
-        if (controls.playPause) {
-            Button(
-                onClick = { onPlayPause(live.playing, live.positionMs) },
-                modifier = Modifier
-                    .weight(2f)
-                    .height(64.dp)
-                    .testTag("ride-play-pause"),
-            ) {
-                Text(
-                    stringResource(
-                        if (live.playing) R.string.ride_pause else R.string.ride_play,
-                    ),
-                    fontSize = 20.sp,
-                )
+            if (controls.playPause) {
+                Button(
+                    onClick = { onPlayPause(live.playing, live.positionMs) },
+                    modifier = Modifier
+                        .weight(2f)
+                        .height(64.dp)
+                        .testTag("ride-play-pause"),
+                ) {
+                    Text(
+                        stringResource(
+                            if (live.playing) R.string.ride_pause else R.string.ride_play,
+                        ),
+                        fontSize = 20.sp,
+                    )
+                }
             }
-        }
-        if (controls.next) {
-            OutlinedButton(
-                onClick = onNext,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(64.dp)
-                    .testTag("ride-next"),
-            ) {
-                Text(stringResource(R.string.ride_next))
+            if (controls.next) {
+                OutlinedButton(
+                    onClick = onNext,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(64.dp)
+                        .testTag("ride-next"),
+                ) {
+                    Text(stringResource(R.string.ride_next))
+                }
             }
         }
     }
