@@ -824,7 +824,7 @@
       and a screen that borrowed a satnav's vocabulary would be borrowing a
       confidence nobody measured. What the pillion sends is a suggestion.
     -->
-    <string name="ride_title">Riding together</string>
+    <string name="ride_title">Ride</string>
     <string name="ride_subtitle">For the two of you on one bike. Say the few things the engine drowns out.</string>
     <string name="ride_note">No location is shared \u2014 only the words you tap. Anything you send stops being shown after a minute, because by then it isn\u2019t true any more.</string>
     <string name="ride_who_with">Riding with</string>

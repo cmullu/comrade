@@ -230,6 +230,51 @@ than the list above.
   signal on a highway. This is the single most valuable follow-up, and it is
   the same engine-lifecycle work `docs/TOGETHER.md` §5 already defers.
 
+## 9a. It crashed on open, and the defect had a name already
+
+_2026-08-15, reported from a handset: "the app is closing when I click on
+riding together."_
+
+`RideScreen` used an early `return@Column` — three of them, counting
+`GlanceCard` and `MusicControls` — so the Column emitted a **different number
+of composable groups** before and after its state flipped. That throws on the
+**recomposition**, not on the first frame, which is why the screen appeared and
+then took the process with it a moment later: the comrade list arrives
+asynchronously and the card's clock ticks once a second, so the fatal
+recomposition was never more than a second away.
+
+This is not a new diagnosis. `AUDIT.md`'s 2026-08-04 entry records
+`TaskListScreen` killing the process on open for exactly this, notes that its
+two early returns were *"the only two early `return@Column`s in the Android
+source"*, and replaced them with a single `when`. This screen added three more.
+All are now `if/else`, and the comment at each one says why so the next person
+does not reintroduce it a third time.
+
+**Why nothing caught it.** Every lane in this repo asserts about values; the
+JVM lane cannot see a composition at all, and the APK lane only proves the code
+compiles. `RideDecisions` had 14 green tests throughout — the decisions were
+never wrong, the composition around them was. That is the same sentence the
+Tasks entry ends on.
+
+**What now covers it:** `MainActivityUiTest` taps `drawer-ride`, waits past a
+clock tick, picks a seat, and waits past another — because the assertion that
+matters is not "the screen drew" but "it survived the recomposition". A bare
+existence check would have passed against the broken build.
+
+**One left, and it is not this feature's:** `ui/TogetherScreen.kt:1043` still
+carries an early `return@Column`. It is out of this change's scope and is
+recorded here rather than fixed silently.
+
+### Named "Ride", with a motorcycle on it
+
+The drawer said *Riding together*, which is a sentence; the other items are
+nouns. It is **Ride** now, and it carries `MotorcycleIcon` — an adventure bike
+drawn to a Himalayan 411's silhouette (two equal wheels, high flat bar, the
+tall screen over the front wheel) rather than Material's scooter glyph, which
+reads as a different vehicle. Inlined in `AppIcons.kt` like every other icon
+here, so nothing takes `material-icons-extended` for one glyph. The screen also
+stopped printing its own title under the app bar's copy of it.
+
 ## 10. Deliberately out of scope
 
 - **Free-text messaging.** That is the chat, and it already exists. The

@@ -119,6 +119,7 @@ import mullu.comrade.ui.StretchScreen
 import mullu.comrade.ui.StarOutlineIcon
 import mullu.comrade.ui.TaraScreen
 import mullu.comrade.ui.TaskListScreen
+import mullu.comrade.ui.MotorcycleIcon
 import mullu.comrade.ui.PeopleHugIcon
 import mullu.comrade.ui.TimerIcon
 import mullu.comrade.ui.peerTitle
@@ -1530,7 +1531,7 @@ private fun ComradeDrawerSheet(
         // otherwise would cost the four daily ones room.
         NavigationDrawerItem(
             label = { Text(stringResource(R.string.ride_title)) },
-            icon = { Icon(PeopleHugIcon, contentDescription = null) },
+            icon = { Icon(MotorcycleIcon, contentDescription = null) },
             selected = false,
             onClick = onOpenRide,
             modifier = Modifier.testTag("drawer-ride"),

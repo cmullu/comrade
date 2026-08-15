@@ -52,6 +52,21 @@ than flipping it.
 
 ## Compose
 
+**Never early-return out of a composable — use `if/else` or `when`.** This has
+now killed the process on two separate screens: `TaskListScreen` (2026-08-04)
+and `RideScreen` (2026-08-15), both reported from a handset, both green on every
+CI lane. An early `return`/`return@Column` makes the enclosing layout emit a
+different number of composable groups on either side of the branch, so it throws
+on the **recomposition**, not the first frame — the screen draws, then dies a
+moment later when a flow emits or a load completes. That delay is what makes it
+read as unrelated to the code you just wrote.
+
+It is invisible to everything runnable here: the JVM lane cannot see a
+composition, and the typecheck lanes only prove it compiles. Cover a new screen
+with an emulator test in `MainActivityUiTest` that opens it **and waits past a
+state change**, since a bare "the node exists" assertion passes against the
+broken build.
+
 Give every data-driven `LazyColumn` a stable `key` — existing screens all do
 (`ui/ChatsScreen.kt`, `ui/FeedScreen.kt`, `ui/CallHistoryScreen.kt`). Without
 one, list state reattaches to the wrong item on reorder.
