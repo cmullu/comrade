@@ -6866,9 +6866,40 @@ impl RuntimeHandles {
                 "ride note too long, or distance beyond the next maneuver".into(),
             ));
         }
-        let json = RideEnvelope::new(signal)
+        let json = RideEnvelope::new(signal, now_ms())
             .to_json()
             .map_err(|e| UiError::Engine(e.to_string()))?;
+
+        // **Both radios and the relay, always** — and the "always" is the
+        // decision. `send_together` returns as soon as a local radio takes the
+        // frame, which is right for a session: `LocalRadios::send` reports only
+        // that a radio *accepted* it, never that it arrived, and a together
+        // session repairs a lost signal on its next heartbeat ten seconds
+        // later.
+        //
+        // A ride signal has no such repair. There is no heartbeat, no Lamport
+        // counter to notice a gap, and deliberately no outbox retry — so a
+        // frame a radio swallowed is a "pull over" that silently never
+        // happened. Against that, the cost of also publishing is one gift wrap
+        // for a feature that emits a handful of signals on a whole ride, not
+        // ten a second.
+        //
+        // The receiver collapses the pair: the two copies are byte-identical
+        // (that is what `RideEnvelope::at_ms` is for) so the ride arm's
+        // cross-transport dedup drops whichever lands second.
+        //
+        // This is also the single best case for the local radios in the whole
+        // app, which is why it is worth the wire at all: two people on one
+        // motorcycle are a metre apart, and the mobile data they are riding
+        // through is the worst link either of them has. A LAN or BLE hop is
+        // ~1-5 ms against a relay's hundreds — and unlike the WiFi mesh, which
+        // is only up in the off-grid workspace, Bluetooth is always present
+        // (see `send_together`'s note on `LocalRadios`).
+        let peer_pk = parse_pubkey(target)?;
+        let created_at = now_secs();
+        let local_id = local_message_id(&to_npub(target), &json, created_at);
+        self.try_mesh(&peer_pk, &local_id, &json, None, created_at)
+            .await;
         self.send_control_envelope(target, &json).await
     }
 
@@ -10735,9 +10766,23 @@ fn dispatch_incoming_dm(
     //     like a nudge: a stranger must not be able to put "pull over" on a
     //     moving driver's screen, and returning either way keeps an ungated
     //     one from surfacing as a message request full of JSON. Freshness and
-    //     dedup live in `handle_ride`.
+    //     same-transport dedup live in `handle_ride`.
+    //
+    //     The **cross-transport** check is here rather than there because it is
+    //     a property of the delivery, not of the signal: a ride signal is sent
+    //     on the local radios *and* the relay (`RuntimeHandles::ride_send`
+    //     says why), and the two copies carry different wrapper event ids, so
+    //     the event-id set inside `handle_ride` cannot pair them. Without this
+    //     line one tap buzzes a driver twice.
+    //
+    //     It keys on content, which is only safe because `RideEnvelope::at_ms`
+    //     makes two *sends* differ — otherwise the fixed catalog would make a
+    //     deliberately repeated "pull over" identical to the first and it would
+    //     be eaten for the next two minutes.
     if let Some(env) = parse_ride_envelope(&msg.content) {
-        if matches!(gate, IncomingGate::Accepted) {
+        if matches!(gate, IncomingGate::Accepted)
+            && !route.is_cross_transport_duplicate(&peer_npub, &msg.content)
+        {
             handle_ride(
                 store,
                 tx,
@@ -16747,11 +16792,14 @@ mod tests {
             })
             .unwrap();
 
-        let envelope = RideEnvelope::new(RideSignal::Route {
-            maneuver: RideManeuver::Left,
-            distance_m: Some(400),
-            note: Some("after the petrol pump".into()),
-        })
+        let envelope = RideEnvelope::new(
+            RideSignal::Route {
+                maneuver: RideManeuver::Left,
+                distance_m: Some(400),
+                note: Some("after the petrol pump".into()),
+            },
+            1_754_160_000_123,
+        )
         .to_json()
         .unwrap();
 
@@ -16797,6 +16845,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_ride_signal_on_two_transports_raises_one_card_but_a_repeat_still_raises_its_own() {
+        // `ride_send` publishes on the local radios *and* the relay, because a
+        // ride signal has no heartbeat or outbox to repair a loss. These are
+        // the two properties that makes safe: the pair collapses, and a phrase
+        // said twice on purpose does not.
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(comrade_storage::EncryptedStore::open(dir.path(), "pin").unwrap());
+        let vault = test_vault().await;
+        let (tx, mut rx) = broadcast::channel(16);
+        let dedup = SeenSet::new(CALL_SIGNAL_DEDUP_CAPACITY);
+        let outbox = Arc::new(Outbox::new());
+        let transport_dedup = SeenSet::with_ttl(
+            CROSS_TRANSPORT_DEDUP_CAPACITY,
+            std::time::Duration::from_secs(CROSS_TRANSPORT_DEDUP_SECS),
+        );
+        let (hex, peer) = stranger();
+        store
+            .set_conversation_meta(&comrade_storage::ConversationMeta {
+                peer_npub: peer.clone(),
+                state: "accepted".into(),
+                profile_shared: true,
+                last_read_at: 0,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let said = |at_ms: u64| {
+            RideEnvelope::new(
+                RideSignal::Quick {
+                    phrase: RidePhrase::PullOver,
+                },
+                at_ms,
+            )
+            .to_json()
+            .unwrap()
+        };
+
+        // One tap, taking both roads. The wrapper event ids differ — they are
+        // different deliveries — so only the content comparison can pair them.
+        let first = said(1_754_160_000_123);
+        let mut over_radio = incoming(&hex, "mesh-1", &first);
+        over_radio.created_at = now_secs();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &DmRoute {
+                label: TRANSPORT_MESH,
+                dedup: &transport_dedup,
+                mesh: None,
+                together: None,
+            },
+            over_radio,
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeEvent::RideSignal(_))),
+            "the copy that arrives first must raise the card"
+        );
+
+        let mut over_relay = incoming(&hex, "relay-1", &first);
+        over_relay.created_at = now_secs();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &relay_route(&transport_dedup),
+            over_relay,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "one tap must not buzz a driver twice because it took two roads"
+        );
+
+        // And the trap: the catalog is fixed, so "pull over" said again is the
+        // same signal with a different instant. Inside the two-minute dedup
+        // window, and it must still arrive — on a motorcycle the repeat is the
+        // likely case, not a double-send.
+        let mut again = incoming(&hex, "mesh-2", &said(1_754_160_004_500));
+        again.created_at = now_secs();
+        dispatch_incoming_dm(
+            &vault,
+            Some(&store),
+            &tx,
+            &dedup,
+            &outbox,
+            &DmRoute {
+                label: TRANSPORT_MESH,
+                dedup: &transport_dedup,
+                mesh: None,
+                together: None,
+            },
+            again,
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(BridgeEvent::RideSignal(_))),
+            "a phrase deliberately repeated must raise its own card"
+        );
+    }
+
+    #[tokio::test]
     async fn a_strangers_ride_signal_is_dropped_not_surfaced() {
         // The gate that matters most: an unaccepted peer must not be able to
         // put "pull over" on a moving driver's screen — and the attempt must
@@ -16815,9 +16967,12 @@ mod tests {
         let route = relay_route(&transport_dedup);
         let (hex, _peer) = stranger();
 
-        let envelope = RideEnvelope::new(RideSignal::Quick {
-            phrase: RidePhrase::PullOver,
-        })
+        let envelope = RideEnvelope::new(
+            RideSignal::Quick {
+                phrase: RidePhrase::PullOver,
+            },
+            1_754_160_000_123,
+        )
         .to_json()
         .unwrap();
         let mut msg = incoming(&hex, "r3", &envelope);

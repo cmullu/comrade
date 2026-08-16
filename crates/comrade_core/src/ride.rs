@@ -305,16 +305,34 @@ pub struct RideEnvelope {
     /// How many seconds this signal stays worth showing, clamped by the
     /// receiver to [`RIDE_MAX_TTL_SECS`].
     pub ttl_secs: u64,
+    /// The sender's clock when this was said, in milliseconds.
+    ///
+    /// **This is an identity, not a deadline** — freshness is still measured
+    /// from the carrying DM's own `created_at`, which is what the age gate and
+    /// [`ride_expires_at`] read, exactly as a nudge does. What `at_ms` buys is
+    /// that one *send* is byte-identical wherever it goes and two *sends* never
+    /// are, which is what makes a signal taking both the local radios and the
+    /// relay collapse to one card on arrival while a phrase deliberately
+    /// repeated stays two.
+    ///
+    /// Without it the two are indistinguishable: the catalog is fixed, so
+    /// tapping `pull_over` twice produces byte-identical JSON, and the
+    /// receiver's cross-transport dedup — which keys on content for two minutes
+    /// — would eat the second one. On a motorcycle the repeat is the more
+    /// likely of the two.
+    pub at_ms: u64,
     /// What is being said.
     pub signal: RideSignal,
 }
 
 impl RideEnvelope {
-    /// Wrap one signal for the wire with the standard TTL.
-    pub fn new(signal: RideSignal) -> Self {
+    /// Wrap one signal for the wire with the standard TTL, said at `at_ms` on
+    /// the sender's clock (see the field for why that is carried).
+    pub fn new(signal: RideSignal, at_ms: u64) -> Self {
         Self {
             comrade_ride: RIDE_ENVELOPE_MARKER,
             ttl_secs: RIDE_TTL_SECS,
+            at_ms,
             signal,
         }
     }
@@ -353,9 +371,12 @@ mod tests {
 
     #[test]
     fn a_quick_signal_round_trips_and_carries_exactly_its_stated_fields() {
-        let env = RideEnvelope::new(RideSignal::Quick {
-            phrase: RidePhrase::SlowDown,
-        });
+        let env = RideEnvelope::new(
+            RideSignal::Quick {
+                phrase: RidePhrase::SlowDown,
+            },
+            1_754_160_000_123,
+        );
         let json = env.to_json().unwrap();
         // The exact key set is the privacy claim: no position, no speed, no
         // heading, no identity beyond the DM that carries it. Adding a field
@@ -369,7 +390,7 @@ mod tests {
             .map(|k| k.as_str())
             .collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["comrade_ride", "signal", "ttl_secs"]);
+        assert_eq!(keys, ["at_ms", "comrade_ride", "signal", "ttl_secs"]);
         let mut signal_keys: Vec<&str> = value["signal"]
             .as_object()
             .unwrap()
@@ -383,22 +404,28 @@ mod tests {
 
     #[test]
     fn a_route_signal_round_trips_with_and_without_its_optional_fields() {
-        let bare = RideEnvelope::new(RideSignal::Route {
-            maneuver: RideManeuver::Left,
-            distance_m: None,
-            note: None,
-        });
+        let bare = RideEnvelope::new(
+            RideSignal::Route {
+                maneuver: RideManeuver::Left,
+                distance_m: None,
+                note: None,
+            },
+            1_754_160_000_123,
+        );
         let json = bare.to_json().unwrap();
         // Absent options are absent keys, not nulls — a receiver must not
         // learn "they chose to say nothing" as a distinct value.
         assert!(!json.contains("distance_m") && !json.contains("note"));
         assert_eq!(parse_ride_envelope(&json).unwrap(), bare);
 
-        let full = RideEnvelope::new(RideSignal::Route {
-            maneuver: RideManeuver::Stop,
-            distance_m: Some(400),
-            note: Some("after the petrol pump".into()),
-        });
+        let full = RideEnvelope::new(
+            RideSignal::Route {
+                maneuver: RideManeuver::Stop,
+                distance_m: Some(400),
+                note: Some("after the petrol pump".into()),
+            },
+            1_754_160_000_456,
+        );
         assert_eq!(parse_ride_envelope(&full.to_json().unwrap()).unwrap(), full);
     }
 
@@ -432,6 +459,32 @@ mod tests {
         }
         assert_eq!(RidePhrase::parse("faster"), None);
         assert_eq!(RideManeuver::parse("north"), None);
+    }
+
+    #[test]
+    fn one_send_is_one_set_of_bytes_and_two_sends_are_never_the_same_ones() {
+        // The whole reason `at_ms` is on the wire. A ride signal goes out on
+        // the local radios *and* the relay, and the receiver collapses the pair
+        // by comparing content — so the two copies of one send must be
+        // byte-identical.
+        let signal = RideSignal::Quick {
+            phrase: RidePhrase::PullOver,
+        };
+        let over_radio = RideEnvelope::new(signal.clone(), 1_754_160_000_123);
+        let over_relay = RideEnvelope::new(signal.clone(), 1_754_160_000_123);
+        assert_eq!(over_radio.to_json().unwrap(), over_relay.to_json().unwrap());
+
+        // And the trap that comparison sets: the catalog is fixed, so a phrase
+        // deliberately said twice is otherwise the same bytes, and the
+        // receiver's content dedup runs for two minutes. On a motorcycle
+        // "pull over" said again a few seconds later is the *likely* case, not
+        // a double-send, and it has to arrive.
+        let said_again = RideEnvelope::new(signal, 1_754_160_004_500);
+        assert_ne!(
+            over_radio.to_json().unwrap(),
+            said_again.to_json().unwrap(),
+            "a repeated phrase must not look like a duplicate of the first"
+        );
     }
 
     #[test]
