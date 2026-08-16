@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.media.MediaPlayer
 import android.util.Base64
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -21,13 +20,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -282,73 +279,30 @@ private fun InlineImage(
     }
 }
 
-/** Voice notes / audio clips: a single tap both decrypts and plays. */
+/**
+ * Voice notes and audio clips, played by the same bar the journal's voice
+ * entries use ([AudioPlayerBar]).
+ *
+ * This bubble used to be a play button and the words "Voice message" — no
+ * length, no progress, no way back over the sentence you missed. Sharing the
+ * player with the journal is what fixed that, and is why the fix cannot drift
+ * back apart: there is one implementation to improve.
+ *
+ * The decrypt still happens on the tap, not on the scroll — [MediaCache.resolveFile]
+ * is the resolver, so a thread of voice notes costs nothing until one is played.
+ * No duration is passed: a chat note is an AAC/ADTS stream with no duration
+ * header, so the bar falls back to whatever `MediaPlayer` reports. See
+ * `journal/JournalRecordings.kt` for why the journal's own recordings use a
+ * container that does carry one.
+ */
 @Composable
 private fun InlineAudio(info: ComradeCore.MediaMessageInfo) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var loading by remember(info.eventId) { mutableStateOf(false) }
-    var error by remember(info.eventId) { mutableStateOf<String?>(null) }
-    var player by remember(info.eventId) { mutableStateOf<MediaPlayer?>(null) }
-    var playing by remember(info.eventId) { mutableStateOf(false) }
-
-    DisposableEffect(info.eventId) {
-        onDispose { player?.release() }
-    }
-
-    fun togglePlay() {
-        val existing = player
-        if (existing != null) {
-            if (playing) existing.pause() else existing.start()
-            playing = !playing
-            return
-        }
-        loading = true
-        error = null
-        scope.launch {
-            // `MediaPlayer.prepare()` (the synchronous variant) blocks, so the
-            // whole setup — not just the file decrypt — needs to run off Main.
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    val file = MediaCache.resolveFile(context, info)
-                    MediaPlayer().apply {
-                        setDataSource(file.absolutePath)
-                        setOnCompletionListener { mp ->
-                            playing = false
-                            mp.seekTo(0)
-                        }
-                        prepare()
-                    }
-                }
-            }.onSuccess {
-                player = it
-                it.start()
-                playing = true
-                loading = false
-            }.onFailure {
-                error = it.message ?: "Could not play audio"
-                loading = false
-            }
-        }
-    }
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        FilledIconButton(onClick = ::togglePlay, enabled = !loading) {
-            when {
-                loading -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                playing -> Text("⏸", style = MaterialTheme.typography.titleMedium)
-                else -> Text("▶", style = MaterialTheme.typography.titleMedium)
-            }
-        }
-        Text(
-            error ?: "Voice message",
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-        )
-    }
+    AudioPlayerBar(
+        resolve = { MediaCache.resolveFile(context, info) },
+        key = info.eventId,
+        label = "Voice message",
+    )
 }
 
 /**

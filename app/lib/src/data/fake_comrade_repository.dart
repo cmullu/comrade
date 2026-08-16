@@ -200,13 +200,28 @@ class FakeComradeRepository implements ComradeRepository {
         title: 'The walk after the argument',
         text: '',
         mood: '😕',
-        video: const JournalVideoInfo(
+        recording: const JournalRecordingInfo(
           fileName: 'jv-1723800000000-2f1a.mp4',
           mime: 'video/mp4',
           durationMs: 47000,
           sizeBytes: 12897485,
         ),
         createdAt: yesterday - 60,
+      ))
+      // …and a voice entry, so the other branch of the recording line is
+      // exercised too. Both kinds render here; neither plays (docs/JOURNAL.md).
+      ..add(JournalEntryInfo(
+        id: 'j4',
+        title: 'Said it out loud at last',
+        text: '',
+        mood: '🙂',
+        recording: const JournalRecordingInfo(
+          fileName: 'ja-1723800000000-2f1b.m4a',
+          mime: 'audio/mp4',
+          durationMs: 72000,
+          sizeBytes: 348160,
+        ),
+        createdAt: yesterday - 120,
       ));
 
     _calls

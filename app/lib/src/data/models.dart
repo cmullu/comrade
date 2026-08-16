@@ -438,7 +438,7 @@ class JournalEntryInfo {
     required this.createdAt,
     this.title,
     this.mood,
-    this.video,
+    this.recording,
   });
 
   final String id;
@@ -449,22 +449,25 @@ class JournalEntryInfo {
   final String text;
   final String? mood;
 
-  /// Set when the entry is a video journal recording — see [JournalVideoInfo].
-  final JournalVideoInfo? video;
+  /// Set when the entry is a recording — spoken or filmed. See
+  /// [JournalRecordingInfo].
+  final JournalRecordingInfo? recording;
   final int createdAt;
 }
 
-/// The recording behind a video journal entry.
+/// The recording behind a journal entry — a voice entry or a video entry.
+///
+/// [mime] is what says which of the two it is, and the only thing that does.
 ///
 /// **Recorded on Android; this frontend does not yet capture or play one**
 /// (`docs/JOURNAL.md`). [fileName] names a file in the *recording device's* own
-/// private journal-video folder, so it is meaningful only on the device that
-/// made it — the footage is never synchronised anywhere. What this model is
-/// for is making sure a video entry is still drawn as something, with its title
-/// and its length, rather than as a blank card with no text in it.
+/// private journal folder for that kind, so it is meaningful only on the device
+/// that made it — a recording is never synchronised anywhere. What this model
+/// is for is making sure such an entry is still drawn as something, with its
+/// title and its length, rather than as a blank card with no text in it.
 @immutable
-class JournalVideoInfo {
-  const JournalVideoInfo({
+class JournalRecordingInfo {
+  const JournalRecordingInfo({
     required this.fileName,
     required this.mime,
     required this.durationMs,
@@ -472,6 +475,9 @@ class JournalVideoInfo {
   });
 
   final String fileName;
+
+  /// `video/mp4` or `audio/mp4` — also the only thing that says which kind of
+  /// recording this is.
   final String mime;
 
   /// Length in milliseconds, or zero when it could not be read.

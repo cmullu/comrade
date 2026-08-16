@@ -1,10 +1,11 @@
-/// How a video journal entry draws in a frontend that cannot play one.
+/// How a journal recording — voice or video — draws in a frontend that cannot
+/// play one.
 ///
-/// Recording, the dedicated folder that keeps a clip out of the gallery, and
+/// Recording, the dedicated folders that keep a clip out of the gallery, and
 /// the orphan sweep are Android's (`docs/JOURNAL.md`). What has to be right
 /// here is that an entry made over there is still *legible* over here: a title,
-/// a clip line, and — because sharing sends words and a recording has none —
-/// no share control offering a send the core would refuse.
+/// a clip line naming which kind it is, and — because sharing sends words and a
+/// recording has none — no share control offering a send the core would refuse.
 library;
 
 import 'package:comrade/src/data/fake_comrade_repository.dart';
@@ -33,6 +34,7 @@ void main() {
     await openJournal(tester);
 
     expect(find.text('The walk after the argument'), findsOneWidget);
+    expect(find.textContaining('Video entry'), findsOneWidget);
     // Length and size, formatted by the same rules Android uses.
     expect(
       find.textContaining('0:47'),
@@ -43,16 +45,31 @@ void main() {
     // And it says where the footage actually is, rather than offering a play
     // control this frontend cannot honour.
     expect(
-        find.textContaining('on the phone that recorded it'), findsOneWidget);
-    expect(find.byKey(const Key('journal-video-line')), findsOneWidget);
+      find.textContaining('on the phone that recorded it'),
+      findsNWidgets(2),
+      reason: 'both the video and the voice entry say where the file is',
+    );
+    expect(find.byKey(const Key('journal-recording-line')), findsNWidgets(2));
+  });
+
+  testWidgets('a voice entry is named as one, not as a video',
+      (WidgetTester tester) async {
+    await openJournal(tester);
+
+    expect(find.text('Said it out loud at last'), findsOneWidget);
+    // The kind comes off the mime, and getting it wrong is how a voice entry
+    // ends up offering a video player it has no picture for.
+    expect(find.textContaining('Voice entry'), findsOneWidget);
+    expect(find.textContaining('1:12'), findsOneWidget);
+    expect(find.textContaining('340 KB'), findsOneWidget);
   });
 
   testWidgets('an entry with no words offers no way to share it',
       (WidgetTester tester) async {
     await openJournal(tester);
 
-    // Two seeded entries have text; the video entry has none. A share control
-    // on that third card would open a picker for a send the core refuses.
+    // Two seeded entries have text; the two recording entries have none. A
+    // share control on either would open a picker for a send the core refuses.
     expect(find.byKey(const Key('journal-share')), findsNWidgets(2));
   });
 
@@ -64,6 +81,6 @@ void main() {
         find.text('Slept badly, but the morning walk helped.'), findsOneWidget);
     // Titles are opt-in: the entries that never had one draw no heading at
     // all rather than a placeholder.
-    expect(find.byKey(const Key('journal-entry-title')), findsOneWidget);
+    expect(find.byKey(const Key('journal-entry-title')), findsNWidgets(2));
   });
 }

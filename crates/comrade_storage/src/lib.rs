@@ -52,7 +52,7 @@ use zeroize::Zeroizing;
 pub use error::StorageError;
 pub use repository::{
     AttentionDay, AttentionPrefs, CallRecord, Chitthi, ChitthiCache, Contact, ConversationMeta,
-    FocusSession, JournalEntry, JournalVideo, LedgerState, MessageReaction, PeerPresence,
+    FocusSession, JournalEntry, JournalRecording, LedgerState, MessageReaction, PeerPresence,
     ReadingState, SavedRead, SharePrefs, StoredIdentity, StoredMessage, StoredTask, StoredTopic,
     TaraMessage, ThreadTopic, VaultCache,
 };

@@ -86,7 +86,7 @@ use comrade_ui::{
     AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, DownloadVerdictDto, DownloadedTrackDto, FocusSessionDto, FoundProfileDto,
-    IceServerDto, IdentityDto, JournalEntryDto, JournalVideoDto, LibraryCandidateDto,
+    IceServerDto, IdentityDto, JournalEntryDto, JournalRecordingDto, LibraryCandidateDto,
     MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto,
     MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
     PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict,
@@ -1023,24 +1023,25 @@ impl Comrade {
             .add_journal_entry(&text, mood.as_deref())
     }
 
-    /// Save a video journal entry over a recording the frontend has already
-    /// written to its own journal-video directory.
+    /// Save a journal entry that is a recording — spoken or filmed — over a
+    /// file the frontend has already written to its own directory for that
+    /// kind. `recording.mime` is what picks the player and may not be blank.
     ///
     /// The core never touches the file. Deleting the entry
     /// ([`Comrade::delete_journal_entry`]) removes the record and leaves the
-    /// footage for the caller to delete — see `JournalVideoDto`.
-    pub fn add_journal_video(
+    /// footage for the caller to delete — see `JournalRecordingDto`.
+    pub fn add_journal_recording(
         &self,
         title: Option<String>,
         text: String,
         mood: Option<String>,
-        video: JournalVideoDto,
+        recording: JournalRecordingDto,
     ) -> Result<JournalEntryDto, UiError> {
-        self.inner.blocking_read().add_journal_video(
+        self.inner.blocking_read().add_journal_recording(
             title.as_deref(),
             &text,
             mood.as_deref(),
-            video,
+            recording,
         )
     }
 
@@ -1060,7 +1061,7 @@ impl Comrade {
         self.inner.blocking_read().journal_entries()
     }
 
-    /// Remove an entry. For a video entry this removes the record only — the
+    /// Remove an entry. For a recording entry this removes the record only — the
     /// caller owns the file and must delete it too.
     pub fn delete_journal_entry(&self, id: String) -> Result<bool, UiError> {
         self.inner.blocking_read().delete_journal_entry(&id)

@@ -28,7 +28,48 @@ import mullu.comrade.voice.WakeWordService
  * Not thread-safe: drive it from a single UI gesture (press to [start], release
  * to [stop]). One instance records one clip at a time.
  */
-class VoiceRecorder(private val context: Context) {
+class VoiceRecorder(
+    private val context: Context,
+    private val profile: Profile = Profile.ChatVoiceNote,
+) {
+
+    /**
+     * What container a recorder writes, where it writes it, and what the result
+     * is called.
+     *
+     * Two, because the two callers want genuinely different things out of the
+     * same encoder — see each profile. Everything else about recording (the
+     * mic, the bit rate, the contention with the wake word) is identical, which
+     * is why this is a parameter rather than a second recorder class.
+     */
+    enum class Profile(
+        internal val subdirectory: String,
+        internal val namePrefix: String,
+        internal val extension: String,
+        /** The MIME type of the clips this profile produces. */
+        val mimeType: String,
+    ) {
+        /**
+         * Chat voice notes: AAC in an ADTS stream, in `cacheDir/voice-notes`.
+         *
+         * A raw elementary stream, which is what suits a clip that is recorded,
+         * encrypted, sent and played once. It carries no duration header and
+         * cannot be seeked accurately, and neither matters for a bubble that
+         * plays start to finish.
+         */
+        ChatVoiceNote("voice-notes", "vn-", "aac", "audio/aac"),
+
+        /**
+         * Journal voice entries: AAC inside MPEG-4, in the journal's capture
+         * directory.
+         *
+         * A kept recording that gets listed with its length and scrubbed back
+         * and forth, so it needs the duration and seek index that MPEG-4 writes
+         * and ADTS does not — see `journal/JournalRecordings.kt`'s
+         * `JOURNAL_AUDIO_MIME`.
+         */
+        JournalEntry("journal-capture", "capture-", "m4a", "audio/mp4"),
+    }
 
     private var recorder: MediaRecorder? = null
     private var outputFile: File? = null
@@ -36,6 +77,31 @@ class VoiceRecorder(private val context: Context) {
 
     /** Whether a recording is currently in progress. */
     val isRecording: Boolean get() = recorder != null
+
+    /**
+     * How long the current recording has been running, in milliseconds, or `0`
+     * when nothing is recording.
+     *
+     * Drives the elapsed counter the journal shows while a voice entry is being
+     * spoken, and is the fallback length when a container will not say how long
+     * it is. Read it as often as a UI wants — it is two field reads.
+     */
+    val elapsedMs: Long
+        get() = if (recorder == null) 0L else System.currentTimeMillis() - startedAtMs
+
+    /**
+     * How long the clip [stop] last returned ran for, in milliseconds.
+     *
+     * A stopwatch reading, not a container's: it counts from the tap, so it is
+     * a few tens of milliseconds longer than the audio actually captured. Only
+     * good enough as a fallback when the file itself will not say — which is
+     * exactly how `JournalRecordingStore.adopt` uses it.
+     */
+    var lastClipMs: Long = 0L
+        private set
+
+    /** The MIME type of the clips this instance produces, from its profile. */
+    val mimeType: String get() = profile.mimeType
 
     /**
      * Begin capturing from the microphone into a fresh cache file.
@@ -54,14 +120,21 @@ class VoiceRecorder(private val context: Context) {
         // device. Restored in stop()/cancel(), and on a failed start below.
         WakeWordService.pause(MicHolder.VOICE_NOTE)
 
-        val dir = File(context.cacheDir, "voice-notes").apply { mkdirs() }
-        // A non-colliding name; the file is short-lived and deleted after send.
-        val file = File(dir, "vn-${System.nanoTime()}.aac")
+        val dir = File(context.cacheDir, profile.subdirectory).apply { mkdirs() }
+        // A non-colliding name. For a chat note the file is short-lived and
+        // deleted after send; for a journal entry it is moved into the journal's
+        // own folder and renamed there (JournalRecordingStore.adopt).
+        val file = File(dir, "${profile.namePrefix}${System.nanoTime()}.${profile.extension}")
 
         val rec = newRecorder()
         return try {
             rec.setAudioSource(MediaRecorder.AudioSource.MIC)
-            rec.setOutputFormat(MediaRecorder.OutputFormat.AAC_ADTS)
+            rec.setOutputFormat(
+                when (profile) {
+                    Profile.ChatVoiceNote -> MediaRecorder.OutputFormat.AAC_ADTS
+                    Profile.JournalEntry -> MediaRecorder.OutputFormat.MPEG_4
+                },
+            )
             rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             // Speech-tuned: mono, 32 kbps AAC at 44.1 kHz. Small and clear.
             rec.setAudioChannels(1)
@@ -95,12 +168,17 @@ class VoiceRecorder(private val context: Context) {
      * captured no frames and throws from `stop()`; that (an accidental tap
      * rather than a held press) is treated as "no voice note" — the file is
      * deleted and `null` returned. On success the caller owns the returned file
-     * and must delete it once the bytes have been sent.
+     * and must delete it (chat) or move it somewhere it belongs (journal).
+     *
+     * [lastClipMs] is set from the same stopwatch before this returns, because
+     * [elapsedMs] necessarily reads zero once the recorder is released and the
+     * journal needs the length *after* the stop, not during it.
      */
     fun stop(): File? {
         val rec = recorder ?: return null
         val file = outputFile
         val heldMs = System.currentTimeMillis() - startedAtMs
+        lastClipMs = heldMs
         recorder = null
         outputFile = null
 
@@ -148,7 +226,15 @@ class VoiceRecorder(private val context: Context) {
     companion object {
         private const val TAG = "VoiceRecorder"
 
-        /** The MIME type of the clips this recorder produces. */
+        /**
+         * The MIME type of a **chat voice note**, which is what this class
+         * produced when it had only one output format.
+         *
+         * Kept because both callers of it record chat notes and are correct.
+         * New code should read [Profile.mimeType] off the profile it chose — a
+         * journal entry is `audio/mp4`, not this, and a caller that reaches for
+         * the constant out of habit would label an M4A as an ADTS stream.
+         */
         const val MIME_TYPE = "audio/aac"
 
         /** Shorter presses than this are treated as accidental taps, not notes. */

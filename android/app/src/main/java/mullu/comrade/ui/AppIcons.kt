@@ -779,6 +779,50 @@ val WifiTetheringIcon: ImageVector = materialIcon(name = "Filled.WifiTethering")
     }
 }
 
+/**
+ * Material "graphic eq" (filled) — recording a **voice journal entry**.
+ *
+ * Deliberately not [MicIcon], which the journal composer already spends on
+ * dictation. Two mics side by side, one of which silently turns speech into
+ * typed text and one of which keeps the voice, is the confusion this whole
+ * control exists to end; a level meter says "your voice, kept" in a way a
+ * second microphone cannot.
+ */
+val VoiceEntryIcon: ImageVector = materialIcon(name = "Filled.GraphicEq") {
+    materialPath {
+        moveTo(7.0f, 18.0f)
+        horizontalLineToRelative(2.0f)
+        verticalLineTo(6.0f)
+        horizontalLineTo(7.0f)
+        verticalLineToRelative(12.0f)
+        close()
+        moveTo(11.0f, 22.0f)
+        horizontalLineToRelative(2.0f)
+        verticalLineTo(2.0f)
+        horizontalLineToRelative(-2.0f)
+        verticalLineToRelative(20.0f)
+        close()
+        moveTo(3.0f, 14.0f)
+        horizontalLineToRelative(2.0f)
+        verticalLineToRelative(-4.0f)
+        horizontalLineTo(3.0f)
+        verticalLineToRelative(4.0f)
+        close()
+        moveTo(15.0f, 18.0f)
+        horizontalLineToRelative(2.0f)
+        verticalLineTo(6.0f)
+        horizontalLineToRelative(-2.0f)
+        verticalLineToRelative(12.0f)
+        close()
+        moveTo(19.0f, 10.0f)
+        verticalLineToRelative(4.0f)
+        horizontalLineToRelative(2.0f)
+        verticalLineToRelative(-4.0f)
+        horizontalLineToRelative(-2.0f)
+        close()
+    }
+}
+
 /** Material "stop" (filled) — stop and send an in-progress voice note. */
 val StopIcon: ImageVector = materialIcon(name = "Filled.Stop") {
     materialPath {

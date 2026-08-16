@@ -1040,11 +1040,13 @@ JournalEntryInfo _journalEntry(rust.JournalEntryDto dto) => JournalEntryInfo(
       title: dto.title,
       text: dto.text,
       mood: dto.mood,
-      video: dto.video == null ? null : _journalVideo(dto.video!),
+      recording:
+          dto.recording == null ? null : _journalRecording(dto.recording!),
       createdAt: dto.createdAt.toInt(),
     );
 
-JournalVideoInfo _journalVideo(rust.JournalVideoDto dto) => JournalVideoInfo(
+JournalRecordingInfo _journalRecording(rust.JournalRecordingDto dto) =>
+    JournalRecordingInfo(
       fileName: dto.fileName,
       mime: dto.mime,
       durationMs: dto.durationMs.toInt(),

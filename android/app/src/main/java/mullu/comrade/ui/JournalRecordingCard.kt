@@ -43,89 +43,153 @@ import kotlinx.coroutines.withContext
 import mullu.comrade.ComradeCore
 import mullu.comrade.R
 import mullu.comrade.journal.JOURNAL_TITLE_MAX_CHARS
-import mullu.comrade.journal.JournalVideoStore
+import mullu.comrade.journal.JournalRecordingStore
+import mullu.comrade.journal.RecordingKind
 import mullu.comrade.journal.formatClipLength
 import mullu.comrade.journal.formatClipSize
-import mullu.comrade.journal.journalVideoTitle
+import mullu.comrade.journal.journalRecordingTitle
+import mullu.comrade.journal.recordingKindOf
 
 /**
- * The strip a video journal entry draws above its words: a play target, the
- * clip's length and size, and nothing else.
+ * What a journal entry's recording draws on its card.
  *
- * A still frame is deliberately **not** decoded for it. Rendering a thumbnail
- * would mean a `MediaMetadataRetriever` per card on every scroll of the
- * journal, and the first frame of a video someone recorded about their worst
- * day is exactly the image they would least like drawn, unasked, on a list they
- * scroll past in public. A plain card that has to be tapped is the more private
- * default and it costs nothing to draw.
+ * **The two kinds get different controls, and that is the point of the split.**
+ * A video is watched, so it gets a poster that opens full screen — a 280 dp
+ * inline video is a thumbnail, not a look at it. A voice entry has nothing to
+ * look at, so a full-screen player would be a black rectangle with a slider on
+ * it; it plays in place instead, with the transport controls right there on the
+ * card ([AudioPlayerBar]). Giving audio the video treatment would have been
+ * consistency at the cost of the thing actually being used.
  *
- * [onPlay] is null when the file is missing, and then the strip says so instead
- * of offering a tap that opens an empty player — see [JournalVideoStore.fileFor]
- * for how a recording can go missing while its entry survives.
+ * Neither decodes anything until it is asked to. For video that also means no
+ * still frame is extracted for the poster: a `MediaMetadataRetriever` per card
+ * on every scroll is the cost, and the first frame of a video someone recorded
+ * about their worst day is exactly the image they would least like drawn,
+ * unasked, on a list they scroll past in public.
+ *
+ * [available] is false when the file is missing, and then the card says so
+ * instead of offering a control that opens nothing — see
+ * [JournalRecordingStore.fileFor] for how a recording can go missing while its
+ * entry survives.
  */
 @Composable
-fun JournalVideoStrip(
-    video: ComradeCore.JournalVideoInfo,
+fun JournalRecordingStrip(
+    recording: ComradeCore.JournalRecordingInfo,
     available: Boolean,
-    onPlay: () -> Unit,
+    onPlayVideo: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val length = formatClipLength(video.durationMs)
-    val size = formatClipSize(video.sizeBytes)
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .then(if (available) Modifier.clickable(onClick = onPlay) else Modifier)
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .testTag("journal-video-strip"),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text(
-            if (available) "▶" else "⚠",
-            style = MaterialTheme.typography.titleMedium,
-            color = if (available) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.error
-            },
-        )
-        Column(Modifier.weight(1f)) {
-            Text(
-                if (available) {
-                    stringResource(R.string.journal_video_play)
-                } else {
-                    stringResource(R.string.journal_video_missing)
+    val context = LocalContext.current
+    val kind = recordingKindOf(recording.mime)
+    val detail = listOf(
+        formatClipLength(recording.durationMs),
+        formatClipSize(recording.sizeBytes),
+    ).filter { it.isNotEmpty() }.joinToString(" · ")
+
+    when {
+        !available -> MissingRecording(modifier)
+        kind == RecordingKind.Audio -> Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .testTag("journal-audio-strip"),
+        ) {
+            AudioPlayerBar(
+                // Resolved on the tap, not on the scroll: a list of voice
+                // entries must not touch the filesystem once per row per frame.
+                resolve = {
+                    withContext(Dispatchers.IO) {
+                        JournalRecordingStore.fileFor(context, recording.mime, recording.fileName)
+                    }
                 },
-                style = MaterialTheme.typography.bodyMedium,
+                key = recording.fileName,
+                // The stored length, not the player's: it was measured when the
+                // entry was saved and is what the rest of the card already says.
+                knownDurationMs = recording.durationMs,
             )
-            // Length and size are both optional — an unreadable container gives
-            // neither, and a line reading "· " would be worse than no line.
-            val detail = listOf(length, size).filter { it.isNotEmpty() }.joinToString(" · ")
             if (detail.isNotEmpty()) {
                 Text(
                     detail,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 58.dp),
                 )
+            }
+        }
+        else -> Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable(onClick = onPlayVideo)
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .testTag("journal-video-strip"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                "▶",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.journal_video_play),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (detail.isNotEmpty()) {
+                    Text(
+                        detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
 }
 
+/** The same strip when the file behind the entry has gone. */
+@Composable
+private fun MissingRecording(modifier: Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag("journal-recording-missing"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            "⚠",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
+        Text(
+            stringResource(R.string.journal_video_missing),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+}
+
 /**
- * A recording, full screen, with the platform's own transport controls.
+ * A video entry, full screen, with the platform's own transport controls.
  *
  * Plays straight off the app-private file — no `FileProvider`, no content URI,
  * no copy into the cache — because this process can read its own storage and
- * every other route would put a second, exportable copy of the footage
+ * every other route would put a second, exportable copy of the recording
  * somewhere. Same `VideoView` the chat viewer uses ([MediaViewerDialog]).
+ *
+ * Audio never comes here: a voice entry plays on its card ([AudioPlayerBar]).
  */
 @Composable
 fun JournalVideoPlayerDialog(
     fileName: String,
+    mime: String,
     heading: String,
     onDismiss: () -> Unit,
 ) {
@@ -135,7 +199,7 @@ fun JournalVideoPlayerDialog(
 
     LaunchedEffect(fileName) {
         val resolved = withContext(Dispatchers.IO) {
-            runCatching { JournalVideoStore.fileFor(context, fileName) }.getOrNull()
+            runCatching { JournalRecordingStore.fileFor(context, mime, fileName) }.getOrNull()
         }
         file = resolved
         missing = resolved == null
@@ -217,16 +281,16 @@ fun JournalVideoPlayerDialog(
  *
  * Saving with the box left empty is a first-class outcome, not a validation
  * error: an untitled recording is headed with the day it was taken
- * ([mullu.comrade.journal.journalVideoHeading]), which is a real answer. The
- * dialog asks because a title is what makes a clip findable later, and then
+ * ([mullu.comrade.journal.journalRecordingHeading]), which is a real answer.
+ * The dialog asks because a title is what makes a clip findable later, and then
  * gets out of the way.
  *
  * [onSave] receives the raw text; the caller normalises it with
- * [journalVideoTitle], which is also what the character counter here counts
+ * [journalRecordingTitle], which is also what the character counter here counts
  * against — so the count and what is actually stored cannot disagree.
  */
 @Composable
-fun JournalVideoTitleDialog(
+fun JournalRecordingTitleDialog(
     initial: String,
     saving: Boolean,
     onSave: (String) -> Unit,
@@ -236,7 +300,7 @@ fun JournalVideoTitleDialog(
     // Keyed on [initial] so reopening this over a different entry starts from
     // that entry's title rather than from whatever was last typed here.
     var draft by remember(initial) { mutableStateOf(initial) }
-    val normalised = journalVideoTitle(draft)
+    val normalised = journalRecordingTitle(draft)
     Dialog(onDismissRequest = { if (!saving) onDismiss() }) {
         Column(
             Modifier
@@ -245,11 +309,11 @@ fun JournalVideoTitleDialog(
                     RoundedCornerShape(16.dp),
                 )
                 .padding(20.dp)
-                .testTag("journal-video-title-dialog"),
+                .testTag("journal-recording-title-dialog"),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                stringResource(R.string.journal_video_title_prompt),
+                stringResource(R.string.journal_recording_title_prompt),
                 style = MaterialTheme.typography.titleMedium,
             )
             OutlinedTextField(
@@ -266,7 +330,7 @@ fun JournalVideoTitleDialog(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .testTag("journal-video-title-input"),
+                    .testTag("journal-recording-title-input"),
             )
             Text(
                 stringResource(R.string.journal_video_where),
@@ -292,7 +356,7 @@ fun JournalVideoTitleDialog(
                 TextButton(
                     onClick = { onSave(draft) },
                     enabled = !saving,
-                    modifier = Modifier.testTag("journal-video-title-save"),
+                    modifier = Modifier.testTag("journal-recording-title-save"),
                 ) {
                     Text(
                         if (saving) {
