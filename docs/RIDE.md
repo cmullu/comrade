@@ -36,16 +36,20 @@ controls a person steering a motorcycle may be offered.
 
 ## 2. The wire protocol
 
-`comrade_core::ride` — pure, framework-free, 9 unit tests. An eighth control
+`comrade_core::ride` — pure, framework-free, 10 unit tests. An eighth control
 envelope on the convention documented in `comrade_core::dm`, riding the same
 NIP-44/NIP-17 gift-wrapped DM channel as receipts, profile shares, call
 signals, presence beacons, nudges and together envelopes:
 
 ```jsonc
-{ "comrade_ride": 1, "ttl_secs": 60,
+{ "comrade_ride": 1, "ttl_secs": 60, "at_ms": 1755331200123,
   "signal": { "kind": "route", "maneuver": "left",
               "distance_m": 400, "note": "after the petrol pump" } }
 ```
+
+`at_ms` is an **identity, not a deadline** — freshness comes from the carrying
+DM's own `created_at`. It exists so one send is byte-identical on both roads it
+takes and two sends never are; §7a is the whole argument.
 
 Two signal kinds, and that is the whole vocabulary:
 
@@ -174,6 +178,54 @@ already opens a voice-only connection in every mode (§16, "Talking over it"),
 which is the actual answer to "have a chat since the engine noise is higher"
 whenever both hands are free enough to press one button.
 
+## 7a. Both roads at once, and why not the faster one only
+
+_Added 2026-08-16._
+
+Two people on one motorcycle are a metre apart, and the mobile data they are
+riding through is the worst link either of them has. That is the strongest case
+for the local radios anywhere in this app, so a ride signal now takes them —
+`try_mesh`, which is the WiFi mesh *and* Bluetooth, the latter always present
+(`send_together`'s note on `LocalRadios` has the detail).
+
+**It takes the relay as well, every time, and that is the decision.**
+`send_together` returns the moment a radio accepts a frame. That is right for a
+session and wrong here, for a reason stated plainly in `LocalRadios::send`'s own
+doc: the boolean means a radio *took* it, never that it arrived. A together
+session repairs a lost signal on its next heartbeat ten seconds later. A ride
+signal has no heartbeat, no Lamport counter to notice a gap, and deliberately no
+outbox retry — so a frame a radio swallowed is a "pull over" that silently never
+happened. Publishing as well costs one gift wrap for a feature that emits a
+handful of signals across a whole ride.
+
+### The two hazards that buys, and what closes them
+
+**One tap must not buzz twice.** The two copies carry different wrapper event
+ids — they are different deliveries — so the event-id set inside `handle_ride`
+cannot pair them. The dispatcher's `is_cross_transport_duplicate` can, because
+it keys on *content*, and the ride arm now runs it.
+
+**A phrase said twice must still arrive twice**, and this is the trap under
+that. The catalog is fixed, so tapping `pull_over` again produces byte-identical
+JSON, and the content window is two minutes — long enough to cover exactly the
+moment a rider repeats themselves because the first one did not take. Content
+dedup alone would eat it.
+
+`RideEnvelope::at_ms` is what separates the two: one *send* is byte-identical
+wherever it goes, two *sends* never are. It is an identity, not a deadline —
+freshness is still measured from the carrying DM's `created_at`, as a nudge's is
+— and it is inside the E2E envelope, so no relay learns it.
+
+Both halves are one test
+(`one_ride_signal_on_two_transports_raises_one_card_but_a_repeat_still_raises_its_own`),
+because asserting either alone would pass against the build that gets the other
+wrong.
+
+**What this does not do:** start the WiFi mesh for a ride. That is still
+engine-lifecycle work (AUDIT A1 / `docs/COMMS_ARCHITECTURE.md` ADR-4), so
+outside the off-grid workspace the local rung is Bluetooth — which, for two
+seats of one motorcycle, is the right radio anyway.
+
 ## 8. Where the code lives
 
 | Layer | What it owns |
@@ -223,12 +275,7 @@ than the list above.
   is a foreground service, not a flag.
 - **A "we have arrived" or any notion of a trip.** There is no trip object,
   no start, no end, and no history. Each signal stands alone.
-- **Mesh transport.** Ride signals take whatever `send_control_envelope`
-  takes, which is the relay. Two phones on one motorcycle are the best
-  possible case for the Saathi mesh (§5a's millisecond tier, one metre apart)
-  and the worst possible case for a relay round trip through a patchy mobile
-  signal on a highway. This is the single most valuable follow-up, and it is
-  the same engine-lifecycle work `docs/TOGETHER.md` §5 already defers.
+- ~~**Mesh transport.**~~ Built 2026-08-16 — see §7a.
 
 ## 9a. It crashed on open, and the defect had a name already
 
