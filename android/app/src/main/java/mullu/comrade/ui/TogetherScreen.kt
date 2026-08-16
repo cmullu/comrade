@@ -1010,6 +1010,14 @@ private fun LibraryBrowser(
             )
         }
         if (!libraryGranted) {
+            // `if/else`, never an early `return@Column`: `libraryGranted` flips
+            // the moment the permission is granted, and an early return makes
+            // this Column emit a different number of composable groups either
+            // side of that flip — which throws on the recomposition rather than
+            // the first frame. `TaskListScreen` (2026-08-04) and `RideScreen`
+            // (2026-08-15) both killed the process that way; see
+            // `.claude/rules/android.md`.
+            //
             // Asking, not an empty list: "no music here" and "not allowed to
             // look" are different sentences with different next steps, the same
             // distinction `MediaLibraryAccess` draws for an invitation.
@@ -1040,106 +1048,106 @@ private fun LibraryBrowser(
             if (step == MediaLibraryAccess.Step.Ask) {
                 Button(onClick = onAsk) { Text(stringResource(R.string.together_library_allow)) }
             }
-            return@Column
-        }
-        // Not while a record is open: everything on that screen is one album's
-        // worth, so there is nothing there to narrow, and a field that switched
-        // the view out from under the record would make back mean two things.
-        if (open == null) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                singleLine = true,
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                placeholder = { Text(stringResource(R.string.together_library_search)) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-            )
-        }
-        when {
-            loaded == null -> Text(
-                stringResource(R.string.together_library_loading),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TogetherMuted,
-            )
+        } else {
+            // Not while a record is open: everything on that screen is one album's
+            // worth, so there is nothing there to narrow, and a field that switched
+            // the view out from under the record would make back mean two things.
+            if (open == null) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                    placeholder = { Text(stringResource(R.string.together_library_search)) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                )
+            }
+            when {
+                loaded == null -> Text(
+                    stringResource(R.string.together_library_loading),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TogetherMuted,
+                )
 
-            // One record, opened from the grid. Its own tracks are the queue,
-            // which is what the person was looking at when they chose.
-            open != null -> LazyColumn(Modifier.fillMaxSize()) {
-                items(open.tracks, key = { it.uri }) { track ->
-                    TrackRow(track, onClick = { onPlay(track, open.tracks) })
-                }
-                // A different sentence from the other two views, because "search
-                // to find the rest" names an action this screen does not have —
-                // the field is deliberately not drawn inside a record. What is
-                // true here is that this record may be missing rows, since the
-                // 2,000-row cut falls in *track title* order and lands inside
-                // whichever albums sort late.
-                if (loaded.truncated) {
-                    item(key = "truncated") {
-                        Text(
-                            stringResource(R.string.together_album_partial),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TogetherMuted,
-                            modifier = Modifier.padding(16.dp),
-                        )
+                // One record, opened from the grid. Its own tracks are the queue,
+                // which is what the person was looking at when they chose.
+                open != null -> LazyColumn(Modifier.fillMaxSize()) {
+                    items(open.tracks, key = { it.uri }) { track ->
+                        TrackRow(track, onClick = { onPlay(track, open.tracks) })
+                    }
+                    // A different sentence from the other two views, because "search
+                    // to find the rest" names an action this screen does not have —
+                    // the field is deliberately not drawn inside a record. What is
+                    // true here is that this record may be missing rows, since the
+                    // 2,000-row cut falls in *track title* order and lands inside
+                    // whichever albums sort late.
+                    if (loaded.truncated) {
+                        item(key = "truncated") {
+                            Text(
+                                stringResource(R.string.together_album_partial),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TogetherMuted,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                        }
                     }
                 }
-            }
 
-            // The two "nothing" sentences, which are different sentences: with
-            // nothing typed an empty answer means the phone has no music, and
-            // with something typed it means that query found none. That used to
-            // be two conditions read off one list; now it falls out of which
-            // view [TogetherDecisions.browse] returned.
-            view is TogetherDecisions.Browse.Albums && view.albums.isEmpty() -> Text(
-                stringResource(R.string.together_library_empty),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TogetherMuted,
-            )
+                // The two "nothing" sentences, which are different sentences: with
+                // nothing typed an empty answer means the phone has no music, and
+                // with something typed it means that query found none. That used to
+                // be two conditions read off one list; now it falls out of which
+                // view [TogetherDecisions.browse] returned.
+                view is TogetherDecisions.Browse.Albums && view.albums.isEmpty() -> Text(
+                    stringResource(R.string.together_library_empty),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TogetherMuted,
+                )
 
-            view is TogetherDecisions.Browse.Tracks && view.tracks.isEmpty() -> Text(
-                stringResource(R.string.together_library_no_match),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TogetherMuted,
-            )
+                view is TogetherDecisions.Browse.Tracks && view.tracks.isEmpty() -> Text(
+                    stringResource(R.string.together_library_no_match),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TogetherMuted,
+                )
 
-            view is TogetherDecisions.Browse.Albums -> LazyVerticalGrid(
-                // Adaptive rather than a fixed column count, so the same code
-                // draws two columns on a phone and five on a tablet or in
-                // landscape — the alternative is a screen-width breakpoint this
-                // file would have to guess.
-                columns = GridCells.Adaptive(minSize = GRID_TILE_DP.dp),
-                state = gridState,
-                modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                contentPadding = PaddingValues(vertical = 8.dp),
-            ) {
-                // A stable key, like every data-driven list in this app: without
-                // one, tile state reattaches to the wrong item as the library is
-                // re-read.
-                items(view.albums, key = { it.key }) { album ->
-                    AlbumTile(
-                        album,
-                        noAlbum = noAlbum,
-                        // Not a fact about the record while the page was cut —
-                        // see `albumSubtitle`.
-                        partial = loaded.truncated,
-                        onClick = { openAlbum = album.key },
-                    )
+                view is TogetherDecisions.Browse.Albums -> LazyVerticalGrid(
+                    // Adaptive rather than a fixed column count, so the same code
+                    // draws two columns on a phone and five on a tablet or in
+                    // landscape — the alternative is a screen-width breakpoint this
+                    // file would have to guess.
+                    columns = GridCells.Adaptive(minSize = GRID_TILE_DP.dp),
+                    state = gridState,
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp),
+                ) {
+                    // A stable key, like every data-driven list in this app: without
+                    // one, tile state reattaches to the wrong item as the library is
+                    // re-read.
+                    items(view.albums, key = { it.key }) { album ->
+                        AlbumTile(
+                            album,
+                            noAlbum = noAlbum,
+                            // Not a fact about the record while the page was cut —
+                            // see `albumSubtitle`.
+                            partial = loaded.truncated,
+                            onClick = { openAlbum = album.key },
+                        )
+                    }
+                    if (loaded.truncated) {
+                        item(key = "truncated", span = { GridItemSpan(maxLineSpan) }) { TruncatedNote() }
+                    }
                 }
-                if (loaded.truncated) {
-                    item(key = "truncated", span = { GridItemSpan(maxLineSpan) }) { TruncatedNote() }
-                }
-            }
 
-            view is TogetherDecisions.Browse.Tracks -> LazyColumn(Modifier.fillMaxSize()) {
-                items(view.tracks, key = { it.uri }) { track ->
-                    TrackRow(track, onClick = { onPlay(track, view.tracks) })
+                view is TogetherDecisions.Browse.Tracks -> LazyColumn(Modifier.fillMaxSize()) {
+                    items(view.tracks, key = { it.uri }) { track ->
+                        TrackRow(track, onClick = { onPlay(track, view.tracks) })
+                    }
+                    if (loaded.truncated) item(key = "truncated") { TruncatedNote() }
                 }
-                if (loaded.truncated) item(key = "truncated") { TruncatedNote() }
             }
         }
     }
