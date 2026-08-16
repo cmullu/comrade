@@ -3,6 +3,7 @@ package mullu.comrade.ui
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,17 +48,25 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import mullu.comrade.ComradeCore
 import mullu.comrade.R
 import mullu.comrade.attention.UsageStatsReader
+import mullu.comrade.journal.AdoptedVideo
+import mullu.comrade.journal.JOURNAL_VIDEO_MIME
+import mullu.comrade.journal.JournalVideoStore
+import mullu.comrade.journal.journalVideoHeading
+import mullu.comrade.journal.journalVideoTitle
 import mullu.comrade.voice.OneShotRecognizer
 import mullu.comrade.voice.VoiceModelMissingException
 import mullu.comrade.voice.VoskModel
@@ -142,13 +152,198 @@ fun JournalScreen(modifier: Modifier = Modifier) {
     var shareResult by remember { mutableStateOf<String?>(null) }
     // True while the mic tap is parked on the speech-model download dialog.
     var awaitingModel by remember { mutableStateOf(false) }
+    // ── Video journal state ────────────────────────────────────────────────
+    // The recording that has been made but not yet saved: the title dialog is
+    // up over it, and until it resolves the file is an orphan on disk.
+    var pendingVideo by remember { mutableStateOf<AdoptedVideo?>(null) }
+    var savingVideo by remember { mutableStateOf(false) }
+    // The entry whose recording is playing, and the one being retitled.
+    var playing by remember { mutableStateOf<ComradeCore.JournalEntryInfo?>(null) }
+    var renaming by remember { mutableStateOf<ComradeCore.JournalEntryInfo?>(null) }
+    // Which recordings are actually on disk, by file name. A card must not
+    // offer a tap that opens an empty player, and the entry alone cannot say:
+    // the record and the footage are two separate deletes (AUDIT J-1).
+    var playableFiles by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Capability-gated, like the composer's capture modes: a device with no
+    // camera gets no record button rather than one that fails on tap.
+    val canRecordVideo = remember {
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+    }
 
     suspend fun reload() {
-        entries = withContext(Dispatchers.IO) {
+        val loaded = withContext(Dispatchers.IO) {
             runCatching { ComradeCore.journal() }.getOrDefault(emptyList())
+        }
+        entries = loaded
+        val referenced = loaded.mapNotNull { it.video?.fileName }.toSet()
+        playableFiles = withContext(Dispatchers.IO) {
+            referenced.filter { JournalVideoStore.fileFor(context, it) != null }.toSet()
         }
     }
     LaunchedEffect(Unit) { reload() }
+
+    // Recordings nothing points at, cleaned up once per visit to this screen.
+    //
+    // Deleting a video entry is two writes — the sealed record, then the file —
+    // and anything that kills the app between them leaves footage the user can
+    // neither see nor remove. This is what finds it.
+    //
+    // The record button stays disabled until this finishes, and that is not
+    // politeness: a recording is unreferenced between `adopt` and the entry
+    // being saved, so a sweep overlapping a capture would delete exactly the
+    // clip the user just made. Gating on `sweeping` makes "no capture during
+    // the sweep" a fact rather than a race that is usually won — and the wait
+    // is a directory listing and one store read, so nobody sees it.
+    var sweeping by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                JournalVideoStore.discardStaleCaptures(context)
+                val referenced = ComradeCore.journal().mapNotNull { it.video?.fileName }.toSet()
+                JournalVideoStore.sweepOrphans(context, referenced)
+            }
+        }
+        sweeping = false
+    }
+
+    // ── Recording a video entry ─────────────────────────────────────────────
+    //
+    // The camera app writes into `cache/journal-capture/` through the existing
+    // FileProvider; the finished file is moved into the journal's own folder
+    // under `filesDir` (JournalVideoStore), which no gallery on the phone can
+    // see and no other app can open. The camera is only ever granted the one
+    // file it is writing, never the directory of everything already recorded.
+    var captureTarget by remember { mutableStateOf<File?>(null) }
+
+    fun captureFinished(ok: Boolean) {
+        val file = captureTarget
+        captureTarget = null
+        if (file == null) return
+        if (!ok) {
+            // Backed out of the camera. Nothing was recorded and nothing is kept.
+            scope.launch { withContext(Dispatchers.IO) { file.delete() } }
+            return
+        }
+        scope.launch {
+            val adopted = withContext(Dispatchers.IO) {
+                runCatching {
+                    JournalVideoStore.adopt(
+                        context,
+                        file,
+                        createdAtMs = System.currentTimeMillis(),
+                        nonce = System.nanoTime(),
+                    )
+                }.getOrNull()
+            }
+            if (adopted == null) {
+                error = context.getString(R.string.journal_video_capture_failed)
+            } else {
+                pendingVideo = adopted
+            }
+        }
+    }
+
+    val recordVideo = rememberLauncherForActivityResult(
+        ActivityResultContracts.CaptureVideo(),
+    ) { ok -> captureFinished(ok) }
+
+    fun startRecording() {
+        error = null
+        scope.launch {
+            val target = withContext(Dispatchers.IO) {
+                runCatching {
+                    JournalVideoStore.newCaptureFile(context, System.nanoTime())
+                }.getOrNull()
+            }
+            if (target == null) {
+                error = context.getString(R.string.journal_video_capture_failed)
+                return@launch
+            }
+            captureTarget = target
+            val uri: Uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                target,
+            )
+            runCatching { recordVideo.launch(uri) }.onFailure {
+                // No camera app on the device. Say so rather than leaving the
+                // button looking broken, and drop the file we just made.
+                captureTarget = null
+                withContext(Dispatchers.IO) { target.delete() }
+                error = context.getString(R.string.journal_video_no_camera)
+            }
+        }
+    }
+
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            startRecording()
+        } else {
+            error = context.getString(R.string.journal_video_needs_camera)
+        }
+    }
+
+    fun recordWithPermission() {
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) startRecording() else cameraPermission.launch(Manifest.permission.CAMERA)
+    }
+
+    /**
+     * Keep the pending recording as an entry, under [rawTitle].
+     *
+     * The words in the composer come with it, so "record this, and here is what
+     * I could not say to camera" is one entry rather than two — and the mood
+     * chips apply to it exactly as they do to a typed entry.
+     */
+    fun keepRecording(rawTitle: String) {
+        val video = pendingVideo ?: return
+        if (savingVideo) return
+        savingVideo = true
+        error = null
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    ComradeCore.addJournalVideoTyped(
+                        title = journalVideoTitle(rawTitle),
+                        text = draft.trim(),
+                        mood = mood,
+                        fileName = video.fileName,
+                        mime = JOURNAL_VIDEO_MIME,
+                        durationMs = video.durationMs,
+                        sizeBytes = video.sizeBytes,
+                    )
+                }
+            }.onSuccess {
+                pendingVideo = null
+                savingVideo = false
+                draft = ""
+                mood = null
+                reload()
+            }.onFailure {
+                savingVideo = false
+                // The file is still there and the dialog stays up, so a locked
+                // vault or a full disk costs a retry rather than the recording.
+                error = it.message ?: context.getString(R.string.journal_video_capture_failed)
+            }
+        }
+    }
+
+    /** Throw the pending recording away — the file, not just the dialog. */
+    fun discardRecording() {
+        val video = pendingVideo ?: return
+        if (savingVideo) return
+        pendingVideo = null
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { JournalVideoStore.delete(context, video.fileName) }
+            }
+        }
+    }
 
     fun save() {
         val text = draft.trim()
@@ -290,6 +485,25 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                                 },
                             )
                         }
+                        // Recording sits next to dictation, not behind a menu:
+                        // the two are the same gesture — say it instead of
+                        // typing it — and one of them being a second-class
+                        // control would say the other is the real journal.
+                        if (canRecordVideo) {
+                            IconButton(
+                                onClick = { recordWithPermission() },
+                                enabled = !sweeping && pendingVideo == null && !savingVideo,
+                                modifier = Modifier.testTag("journal-record"),
+                            ) {
+                                Icon(
+                                    VideocamIcon,
+                                    contentDescription = stringResource(
+                                        R.string.journal_video_record,
+                                    ),
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
                         if (listening) {
                             Text(
                                 "Listening…",
@@ -308,10 +522,23 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                     // uploaded", full stop) a promise the app no longer keeps
                     // on its own terms, so it says who the exception belongs
                     // to: nothing moves unless the person who wrote it moves it.
+                    //
+                    // Video entries put a second qualifier on it. "Sealed by
+                    // your passcode" is true of what you write and NOT of the
+                    // footage (AUDIT J-1), so the sentence now says which is
+                    // which rather than covering both with the stronger claim.
+                    // Do not shorten this back until J-1 closes.
                     Text(
-                        "Only on this phone, sealed by your passcode. Never posted, " +
-                            "never uploaded — a note reaches someone only if you send " +
-                            "it to them yourself.",
+                        if (canRecordVideo) {
+                            "Only on this phone. What you write is sealed by your passcode; " +
+                                "a recording is kept in Comrade's own folder, out of your " +
+                                "gallery. Never posted, never uploaded — it reaches someone " +
+                                "only if you send it to them yourself."
+                        } else {
+                            "Only on this phone, sealed by your passcode. Never posted, " +
+                                "never uploaded — a note reaches someone only if you send " +
+                                "it to them yourself."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -379,6 +606,11 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                     items(dayEntries, key = { it.id }) { entry ->
                         JournalEntryCard(
                             entry,
+                            videoPlayable = entry.video?.let { it.fileName in playableFiles }
+                                ?: false,
+                            dayLabel = day,
+                            onPlay = { playing = entry },
+                            onRename = { renaming = entry },
                             onShare = { sharing = entry },
                             onDelete = { confirmDelete = entry },
                         )
@@ -458,11 +690,74 @@ fun JournalScreen(modifier: Modifier = Modifier) {
         )
     }
 
+    // Name the recording just made. No dismiss-by-tapping-outside: the file is
+    // on disk and unreferenced until this resolves, so both ways out are
+    // deliberate — keep it, or throw it away.
+    pendingVideo?.let {
+        JournalVideoTitleDialog(
+            initial = "",
+            saving = savingVideo,
+            onSave = { keepRecording(it) },
+            onDismiss = { /* Answer the dialog; there is a recording waiting. */ },
+            onDiscard = { discardRecording() },
+        )
+    }
+
+    renaming?.let { entry ->
+        JournalVideoTitleDialog(
+            initial = entry.title.orEmpty(),
+            saving = savingVideo,
+            onSave = { raw ->
+                // Guarded rather than early-returned: a second tap on a slow
+                // store must not start a second write of the same title.
+                if (!savingVideo) {
+                    savingVideo = true
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            runCatching {
+                                ComradeCore.setJournalEntryTitleTyped(
+                                    entry.id,
+                                    journalVideoTitle(raw),
+                                )
+                            }
+                        }
+                        savingVideo = false
+                        renaming = null
+                        reload()
+                    }
+                }
+            },
+            onDismiss = { if (!savingVideo) renaming = null },
+        )
+    }
+
+    playing?.let { entry ->
+        val video = entry.video
+        if (video != null) {
+            JournalVideoPlayerDialog(
+                fileName = video.fileName,
+                heading = journalVideoHeading(
+                    entry.title,
+                    dayLabel(entry.createdAt, System.currentTimeMillis() / 1000),
+                ),
+                onDismiss = { playing = null },
+            )
+        }
+    }
+
     confirmDelete?.let { entry ->
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             title = { Text("Delete this entry?") },
-            text = { Text("It will be removed from this phone. There is no other copy.") },
+            text = {
+                Text(
+                    if (entry.video != null) {
+                        stringResource(R.string.journal_video_delete_body)
+                    } else {
+                        "It will be removed from this phone. There is no other copy."
+                    },
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -470,6 +765,15 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                         scope.launch {
                             withContext(Dispatchers.IO) {
                                 runCatching { ComradeCore.deleteJournalEntryTyped(entry.id) }
+                                // The record first, then the file. A kill in
+                                // between leaves an orphaned file the sweep
+                                // finds on the next open — the other order
+                                // would leave an entry pointing at nothing.
+                                entry.video?.let {
+                                    runCatching {
+                                        JournalVideoStore.delete(context, it.fileName)
+                                    }
+                                }
                             }
                             reload()
                         }
@@ -486,9 +790,14 @@ fun JournalScreen(modifier: Modifier = Modifier) {
 @Composable
 private fun JournalEntryCard(
     entry: ComradeCore.JournalEntryInfo,
+    videoPlayable: Boolean,
+    dayLabel: String,
+    onPlay: () -> Unit,
+    onRename: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    val video = entry.video
     OutlinedCard(Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
@@ -506,14 +815,56 @@ private fun JournalEntryCard(
                         color = MaterialTheme.colorScheme.outline,
                     )
                 }
-                Text(entry.text, style = MaterialTheme.typography.bodyLarge)
+                // A titled entry leads with its title. Untitled ones draw no
+                // heading at all rather than a placeholder — the vast majority
+                // of typed entries have none, and a card headed "Untitled"
+                // every time is noise.
+                val heading = if (video != null) {
+                    journalVideoHeading(entry.title, dayLabel)
+                } else {
+                    entry.title
+                }
+                heading?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("journal-entry-title"),
+                    )
+                }
+                if (video != null) {
+                    JournalVideoStrip(
+                        video = video,
+                        available = videoPlayable,
+                        onPlay = onPlay,
+                        modifier = Modifier.padding(top = 2.dp, end = 6.dp),
+                    )
+                }
+                // A video entry with no words has nothing to draw here, and an
+                // empty Text would still take a line's worth of space.
+                if (entry.text.isNotBlank()) {
+                    Text(entry.text, style = MaterialTheme.typography.bodyLarge)
+                }
             }
-            IconButton(onClick = onShare, modifier = Modifier.testTag("journal-share")) {
-                Icon(
-                    ShareIcon,
-                    contentDescription = stringResource(R.string.journal_share),
-                    tint = MaterialTheme.colorScheme.outline,
-                )
+            if (video != null) {
+                IconButton(onClick = onRename, modifier = Modifier.testTag("journal-rename")) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = stringResource(R.string.journal_video_rename),
+                        tint = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            }
+            // Sharing sends the words, never the recording (the core refuses an
+            // entry with none). A control that cannot work is not offered.
+            if (entry.text.isNotBlank()) {
+                IconButton(onClick = onShare, modifier = Modifier.testTag("journal-share")) {
+                    Icon(
+                        ShareIcon,
+                        contentDescription = stringResource(R.string.journal_share),
+                        tint = MaterialTheme.colorScheme.outline,
+                    )
+                }
             }
             IconButton(onClick = onDelete) {
                 Icon(

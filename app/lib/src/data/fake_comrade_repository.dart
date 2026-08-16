@@ -190,6 +190,23 @@ class FakeComradeRepository implements ComradeRepository {
         text: 'Long day. Wrote the difficult message and did not send it.',
         mood: '😐',
         createdAt: yesterday,
+      ))
+      // A video entry, so the branch that draws one — a title, a clip line,
+      // and no share control because there are no words to send — is exercised
+      // by every widget test that renders the journal. Recorded on Android
+      // (docs/JOURNAL.md); this frontend only ever shows one.
+      ..add(JournalEntryInfo(
+        id: 'j3',
+        title: 'The walk after the argument',
+        text: '',
+        mood: '😕',
+        video: const JournalVideoInfo(
+          fileName: 'jv-1723800000000-2f1a.mp4',
+          mime: 'video/mp4',
+          durationMs: 47000,
+          sizeBytes: 12897485,
+        ),
+        createdAt: yesterday - 60,
       ));
 
     _calls

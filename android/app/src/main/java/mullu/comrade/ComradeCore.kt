@@ -579,17 +579,102 @@ object ComradeCore {
 
     // ── Journal (strictly local) ──────────────────────────────────────────────
 
-    data class JournalEntryInfo(val id: String, val text: String, val mood: String?, val createdAt: Long)
+    data class JournalEntryInfo(
+        val id: String,
+        val title: String?,
+        val text: String,
+        val mood: String?,
+        val video: JournalVideoInfo?,
+        val createdAt: Long,
+    )
+
+    /**
+     * A video journal recording, as the entry records it.
+     *
+     * [fileName] names a file in `JournalVideoStore`'s directory — the core
+     * holds the description and the frontend holds the footage, so deleting an
+     * entry is two calls and both have to happen (see
+     * [deleteJournalEntryTyped]).
+     */
+    data class JournalVideoInfo(
+        val fileName: String,
+        val mime: String,
+        val durationMs: Long,
+        val sizeBytes: Long,
+    )
+
+    private fun uniffi.comrade_ui.JournalVideoDto.toInfo() =
+        JournalVideoInfo(
+            fileName = fileName,
+            mime = mime,
+            durationMs = durationMs.toLong(),
+            sizeBytes = sizeBytes.toLong(),
+        )
 
     private fun uniffi.comrade_ui.JournalEntryDto.toInfo() =
-        JournalEntryInfo(id = id, text = text, mood = mood, createdAt = createdAt.toLong())
+        JournalEntryInfo(
+            id = id,
+            title = title,
+            text = text,
+            mood = mood,
+            video = video?.toInfo(),
+            createdAt = createdAt.toLong(),
+        )
 
     fun addJournalEntryTyped(text: String, mood: String?): JournalEntryInfo =
         rethrowing("Journal") { ffi.addJournalEntry(text, mood?.ifBlank { null }).toInfo() }
 
+    /**
+     * Save a video journal entry over a recording already written to
+     * `JournalVideoStore`'s folder.
+     *
+     * Call order matters and it is the file first: this writes the entry that
+     * points at [fileName], so the file has to be in place before it. Blocking
+     * — call it off the main thread.
+     */
+    fun addJournalVideoTyped(
+        title: String?,
+        text: String,
+        mood: String?,
+        fileName: String,
+        mime: String,
+        durationMs: Long,
+        sizeBytes: Long,
+    ): JournalEntryInfo =
+        rethrowing("Journal video") {
+            ffi.addJournalVideo(
+                title?.ifBlank { null },
+                text,
+                mood?.ifBlank { null },
+                uniffi.comrade_ui.JournalVideoDto(
+                    fileName = fileName,
+                    mime = mime,
+                    durationMs = durationMs.toULong(),
+                    sizeBytes = sizeBytes.toULong(),
+                ),
+            ).toInfo()
+        }
+
+    /**
+     * Rename an entry, or clear its title with `null`/blank. Returns `null`
+     * when no entry has that id — a list on screen that has gone stale.
+     */
+    fun setJournalEntryTitleTyped(id: String, title: String?): JournalEntryInfo? =
+        rethrowing("Journal rename") {
+            ffi.setJournalEntryTitle(id, title?.ifBlank { null })?.toInfo()
+        }
+
     fun journal(): List<JournalEntryInfo> =
         rethrowing("Journal") { ffi.journalEntries().map { it.toInfo() } }
 
+    /**
+     * Remove an entry. Returns whether one existed.
+     *
+     * For a video entry this removes the sealed record only — the recording is
+     * a file `JournalVideoStore.delete` has to remove separately. Delete the
+     * record first: the leftover then is an orphaned file, which the sweep
+     * finds, rather than an entry pointing at footage that is gone.
+     */
     fun deleteJournalEntryTyped(id: String): Boolean =
         rethrowing("Journal delete") { ffi.deleteJournalEntry(id) }
 

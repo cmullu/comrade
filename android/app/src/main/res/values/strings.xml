@@ -461,6 +461,31 @@
     <string name="journal_note_show_more">Show more</string>
     <string name="journal_note_show_less">Show less</string>
 
+    <!-- The video journal (docs/JOURNAL.md).
+         Two things this copy must keep straight, because getting either wrong
+         would be the app claiming something it does not do:
+           * The recording is on this phone only and no gallery can see it —
+             that IS true, and it is the reason someone would use this at all.
+           * The recording is NOT sealed by the passcode the way the words are.
+             Never write "encrypted" or "sealed" about the footage until
+             AUDIT J-1 closes. journal_video_where is the line that has to say
+             both halves without hedging either. -->
+    <string name="journal_video_record">Record a video entry</string>
+    <string name="journal_video_play">Play this recording</string>
+    <string name="journal_video_rename">Rename this recording</string>
+    <string name="journal_video_title_prompt">Name this recording</string>
+    <string name="journal_video_title_hint">The walk after the argument</string>
+    <string name="journal_video_keep">Keep</string>
+    <string name="journal_video_saving">Saving…</string>
+    <string name="journal_video_discard">Discard</string>
+    <string name="journal_video_where">Kept in Comrade\'s own folder on this phone — your gallery never sees it, and no other app can open it. What you write stays sealed by your passcode; the recording itself is protected by the phone, not the passcode.</string>
+    <string name="journal_video_missing">This recording is no longer on this phone</string>
+    <string name="journal_video_missing_body">The recording is gone from this phone. The entry is still here — you can delete it if it is no use without the video.</string>
+    <string name="journal_video_delete_body">The entry and its recording will both be removed from this phone. There is no other copy.</string>
+    <string name="journal_video_capture_failed">Could not save the recording.</string>
+    <string name="journal_video_needs_camera">Camera permission is needed to record a video entry.</string>
+    <string name="journal_video_no_camera">No camera app on this phone to record with.</string>
+
     <string name="breathe_title">Take a deep breath</string>
     <string name="breathe_in">Breathe in</string>
     <string name="breathe_hold">Hold</string>
