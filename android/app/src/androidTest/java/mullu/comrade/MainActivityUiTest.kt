@@ -44,9 +44,18 @@ class MainActivityUiTest {
     // queryable Compose hierarchy, which fails the semantics assertions below.
     // The outer rule runs first, so the permission is already granted when
     // MainShell mounts and the app never prompts.
+    // RECORD_AUDIO joins it for the journal's voice-entry leg below: without
+    // the grant, tapping record pops the runtime permission dialog over the
+    // app, which pauses the Activity and empties the Compose hierarchy the
+    // assertions read.
     @get:Rule
     val rules: RuleChain = RuleChain
-        .outerRule(GrantPermissionRule.grant(Manifest.permission.POST_NOTIFICATIONS))
+        .outerRule(
+            GrantPermissionRule.grant(
+                Manifest.permission.POST_NOTIFICATIONS,
+                Manifest.permission.RECORD_AUDIO,
+            ),
+        )
         .around(composeRule)
 
     private fun hasText(text: String) =
@@ -155,6 +164,43 @@ class MainActivityUiTest {
         Thread.sleep(1_500)
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("journal-save").assertIsDisplayed()
+
+        // Recording a voice entry, which is the sharpest version of the same
+        // hazard: while it runs, an elapsed counter recomposes the composer
+        // four times a second, and a status line appears where none was. That
+        // is a changing composable-group count on a timer — the exact shape
+        // that killed TaskListScreen and RideScreen, and the exact shape no
+        // lane but this one can see.
+        //
+        // Conditional because the button is capability-gated on a microphone
+        // and an emulator image without one is a legitimate configuration, not
+        // a failure. RECORD_AUDIO is pre-granted above so no system dialog can
+        // cover the app mid-test.
+        if (hasTag("journal-record-audio")) {
+            composeRule.onNodeWithTag("journal-record-audio").performClick()
+            composeRule.waitForIdle()
+            // Sit through several ticks of the counter, then assert the screen
+            // is still there. A "the button exists" check would pass against a
+            // build that dies on the first tick.
+            Thread.sleep(1_500)
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("journal-record-audio").assertIsDisplayed()
+            // Stop, and let it settle. Either the title dialog comes up over a
+            // real recording or an error line says the mic gave nothing — on a
+            // headless emulator both are legitimate. What is asserted is that
+            // the composer survived the whole round trip.
+            composeRule.onNodeWithTag("journal-record-audio").performClick()
+            composeRule.waitForIdle()
+            Thread.sleep(1_000)
+            composeRule.waitForIdle()
+            if (hasTag("journal-recording-title-dialog")) {
+                // A recording was actually captured: throw it away rather than
+                // leaving a file behind for the next run to sweep.
+                composeRule.onNodeWithText("Discard").performClick()
+                composeRule.waitForIdle()
+            }
+            composeRule.onNodeWithTag("journal-input").assertIsDisplayed()
+        }
 
         // Settings is a pushed screen now, reached from the navigation drawer
         // (Telegram-style) rather than a bottom-nav tab. The hamburger only

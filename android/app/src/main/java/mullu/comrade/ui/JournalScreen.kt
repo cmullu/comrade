@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,11 +63,13 @@ import kotlinx.coroutines.withContext
 import mullu.comrade.ComradeCore
 import mullu.comrade.R
 import mullu.comrade.attention.UsageStatsReader
-import mullu.comrade.journal.AdoptedVideo
-import mullu.comrade.journal.JOURNAL_VIDEO_MIME
-import mullu.comrade.journal.JournalVideoStore
-import mullu.comrade.journal.journalVideoHeading
-import mullu.comrade.journal.journalVideoTitle
+import mullu.comrade.journal.AdoptedRecording
+import mullu.comrade.journal.JournalRecordingStore
+import mullu.comrade.journal.RecordingKind
+import mullu.comrade.journal.formatClipLength
+import mullu.comrade.journal.journalRecordingHeading
+import mullu.comrade.journal.journalRecordingTitle
+import mullu.comrade.media.VoiceRecorder
 import mullu.comrade.voice.OneShotRecognizer
 import mullu.comrade.voice.VoiceModelMissingException
 import mullu.comrade.voice.VoskModel
@@ -152,41 +155,61 @@ fun JournalScreen(modifier: Modifier = Modifier) {
     var shareResult by remember { mutableStateOf<String?>(null) }
     // True while the mic tap is parked on the speech-model download dialog.
     var awaitingModel by remember { mutableStateOf(false) }
-    // ── Video journal state ────────────────────────────────────────────────
+    // ── Recording state (voice entries and video entries alike) ────────────
     // The recording that has been made but not yet saved: the title dialog is
     // up over it, and until it resolves the file is an orphan on disk.
-    var pendingVideo by remember { mutableStateOf<AdoptedVideo?>(null) }
-    var savingVideo by remember { mutableStateOf(false) }
+    var pendingRecording by remember { mutableStateOf<AdoptedRecording?>(null) }
+    var savingRecording by remember { mutableStateOf(false) }
+    // The in-process voice recorder, and the counter it drives while running.
+    // A recorder holds the mic, so a composition that leaves this screen
+    // mid-record must not leak it — see the DisposableEffect below.
+    val voiceRecorder = remember { VoiceRecorder(context, VoiceRecorder.Profile.JournalEntry) }
+    var speaking by remember { mutableStateOf(false) }
+    var spokenMs by remember { mutableLongStateOf(0L) }
     // The entry whose recording is playing, and the one being retitled.
     var playing by remember { mutableStateOf<ComradeCore.JournalEntryInfo?>(null) }
     var renaming by remember { mutableStateOf<ComradeCore.JournalEntryInfo?>(null) }
     // Which recordings are actually on disk, by file name. A card must not
-    // offer a tap that opens an empty player, and the entry alone cannot say:
-    // the record and the footage are two separate deletes (AUDIT J-1).
+    // offer a control that plays nothing, and the entry alone cannot say:
+    // the record and the file are two separate deletes (AUDIT J-1).
     var playableFiles by remember { mutableStateOf<Set<String>>(emptySet()) }
     // Capability-gated, like the composer's capture modes: a device with no
-    // camera gets no record button rather than one that fails on tap.
+    // camera (or no mic) gets no button for it rather than one that fails on
+    // tap. Two features, two questions — a tablet with a mic and no camera can
+    // still keep a voice journal.
     val canRecordVideo = remember {
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
     }
+    val canRecordAudio = remember {
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)
+    }
+
+    // The recorder holds the mic for as long as it runs, so leaving the screen
+    // mid-sentence — back-navigation, a tab switch — has to give it back rather
+    // than leave the wake word (and every other mic user) locked out.
+    DisposableEffect(Unit) { onDispose { voiceRecorder.cancel() } }
 
     suspend fun reload() {
         val loaded = withContext(Dispatchers.IO) {
             runCatching { ComradeCore.journal() }.getOrDefault(emptyList())
         }
         entries = loaded
-        val referenced = loaded.mapNotNull { it.video?.fileName }.toSet()
         playableFiles = withContext(Dispatchers.IO) {
-            referenced.filter { JournalVideoStore.fileFor(context, it) != null }.toSet()
+            loaded
+                .mapNotNull { it.recording }
+                .filter { JournalRecordingStore.fileFor(context, it.mime, it.fileName) != null }
+                .map { it.fileName }
+                .toSet()
         }
     }
     LaunchedEffect(Unit) { reload() }
 
     // Recordings nothing points at, cleaned up once per visit to this screen.
     //
-    // Deleting a video entry is two writes — the sealed record, then the file —
-    // and anything that kills the app between them leaves footage the user can
-    // neither see nor remove. This is what finds it.
+    // Deleting a recording entry is two writes — the sealed record, then the
+    // file — and anything that kills the app between them leaves a recording
+    // the user can neither see nor remove. This is what finds it, in both
+    // folders.
     //
     // The record button stays disabled until this finishes, and that is not
     // politeness: a recording is unreferenced between `adopt` and the entry
@@ -198,19 +221,19 @@ fun JournalScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             runCatching {
-                JournalVideoStore.discardStaleCaptures(context)
-                val referenced = ComradeCore.journal().mapNotNull { it.video?.fileName }.toSet()
-                JournalVideoStore.sweepOrphans(context, referenced)
+                JournalRecordingStore.discardStaleCaptures(context)
+                val referenced = ComradeCore.journal().mapNotNull { it.recording?.fileName }.toSet()
+                JournalRecordingStore.sweepOrphans(context, referenced)
             }
         }
         sweeping = false
     }
 
-    // ── Recording a video entry ─────────────────────────────────────────────
+    // ── Filming a video entry ───────────────────────────────────────────────
     //
     // The camera app writes into `cache/journal-capture/` through the existing
     // FileProvider; the finished file is moved into the journal's own folder
-    // under `filesDir` (JournalVideoStore), which no gallery on the phone can
+    // under `filesDir` (JournalRecordingStore), which no gallery on the phone can
     // see and no other app can open. The camera is only ever granted the one
     // file it is writing, never the directory of everything already recorded.
     var captureTarget by remember { mutableStateOf<File?>(null) }
@@ -227,8 +250,9 @@ fun JournalScreen(modifier: Modifier = Modifier) {
         scope.launch {
             val adopted = withContext(Dispatchers.IO) {
                 runCatching {
-                    JournalVideoStore.adopt(
+                    JournalRecordingStore.adopt(
                         context,
+                        RecordingKind.Video,
                         file,
                         createdAtMs = System.currentTimeMillis(),
                         nonce = System.nanoTime(),
@@ -238,7 +262,7 @@ fun JournalScreen(modifier: Modifier = Modifier) {
             if (adopted == null) {
                 error = context.getString(R.string.journal_video_capture_failed)
             } else {
-                pendingVideo = adopted
+                pendingRecording = adopted
             }
         }
     }
@@ -247,12 +271,16 @@ fun JournalScreen(modifier: Modifier = Modifier) {
         ActivityResultContracts.CaptureVideo(),
     ) { ok -> captureFinished(ok) }
 
-    fun startRecording() {
+    fun startFilming() {
         error = null
         scope.launch {
             val target = withContext(Dispatchers.IO) {
                 runCatching {
-                    JournalVideoStore.newCaptureFile(context, System.nanoTime())
+                    JournalRecordingStore.newCaptureFile(
+                        context,
+                        RecordingKind.Video,
+                        System.nanoTime(),
+                    )
                 }.getOrNull()
             }
             if (target == null) {
@@ -279,18 +307,109 @@ fun JournalScreen(modifier: Modifier = Modifier) {
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            startRecording()
+            startFilming()
         } else {
             error = context.getString(R.string.journal_video_needs_camera)
         }
     }
 
-    fun recordWithPermission() {
+    fun filmWithPermission() {
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.CAMERA,
         ) == PackageManager.PERMISSION_GRANTED
-        if (granted) startRecording() else cameraPermission.launch(Manifest.permission.CAMERA)
+        if (granted) startFilming() else cameraPermission.launch(Manifest.permission.CAMERA)
+    }
+
+    // ── Speaking a voice entry ──────────────────────────────────────────────
+    //
+    // Recorded in this process rather than handed to another app: there is no
+    // system "record me a voice memo" intent worth relying on, and doing it here
+    // means the file is written straight into the journal's own capture
+    // directory and never passes through anything that could keep a copy.
+    //
+    // Tap to start, tap to stop — not press-and-hold, which is right for a chat
+    // note of a few seconds and wrong for a journal entry that may run minutes.
+
+    /** Stop the recorder and offer what it captured, or say why there is none. */
+    fun finishSpeaking() {
+        if (!speaking) return
+        speaking = false
+        val clip = voiceRecorder.stop()
+        val heldMs = voiceRecorder.lastClipMs
+        if (clip == null) {
+            // stop() returns null for a press too brief to have captured
+            // anything — an accidental double tap, not a recording.
+            error = context.getString(R.string.journal_audio_too_short)
+            return
+        }
+        scope.launch {
+            val adopted = withContext(Dispatchers.IO) {
+                runCatching {
+                    JournalRecordingStore.adopt(
+                        context,
+                        RecordingKind.Audio,
+                        clip,
+                        createdAtMs = System.currentTimeMillis(),
+                        nonce = System.nanoTime(),
+                        knownDurationMs = heldMs,
+                    )
+                }.getOrNull()
+            }
+            if (adopted == null) {
+                error = context.getString(R.string.journal_audio_capture_failed)
+            } else {
+                pendingRecording = adopted
+            }
+        }
+    }
+
+    fun startSpeaking() {
+        error = null
+        if (!voiceRecorder.start()) {
+            // No mic, permission refused underneath us, or the encoder is busy.
+            // Say so rather than leave the control stuck in a recording pose.
+            error = context.getString(R.string.journal_audio_capture_failed)
+            return
+        }
+        spokenMs = 0L
+        speaking = true
+    }
+
+    val micPermissionForEntry = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            startSpeaking()
+        } else {
+            error = context.getString(R.string.journal_audio_needs_mic)
+        }
+    }
+
+    fun speakWithPermission() {
+        if (speaking) {
+            finishSpeaking()
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            startSpeaking()
+        } else {
+            micPermissionForEntry.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    // The elapsed counter, ticking only while something is being said. Read off
+    // the recorder rather than accumulated here, so a dropped frame or a slow
+    // recomposition cannot make the number drift from the clip's real length.
+    LaunchedEffect(speaking) {
+        while (speaking) {
+            spokenMs = voiceRecorder.elapsedMs
+            kotlinx.coroutines.delay(200)
+        }
     }
 
     /**
@@ -301,46 +420,51 @@ fun JournalScreen(modifier: Modifier = Modifier) {
      * chips apply to it exactly as they do to a typed entry.
      */
     fun keepRecording(rawTitle: String) {
-        val video = pendingVideo ?: return
-        if (savingVideo) return
-        savingVideo = true
+        val recording = pendingRecording ?: return
+        if (savingRecording) return
+        savingRecording = true
         error = null
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    ComradeCore.addJournalVideoTyped(
-                        title = journalVideoTitle(rawTitle),
+                    ComradeCore.addJournalRecordingTyped(
+                        title = journalRecordingTitle(rawTitle),
                         text = draft.trim(),
                         mood = mood,
-                        fileName = video.fileName,
-                        mime = JOURNAL_VIDEO_MIME,
-                        durationMs = video.durationMs,
-                        sizeBytes = video.sizeBytes,
+                        fileName = recording.fileName,
+                        // The mime the store adopted it under, not a constant
+                        // picked here — this is the one field that decides
+                        // which player the card draws.
+                        mime = recording.mime,
+                        durationMs = recording.durationMs,
+                        sizeBytes = recording.sizeBytes,
                     )
                 }
             }.onSuccess {
-                pendingVideo = null
-                savingVideo = false
+                pendingRecording = null
+                savingRecording = false
                 draft = ""
                 mood = null
                 reload()
             }.onFailure {
-                savingVideo = false
+                savingRecording = false
                 // The file is still there and the dialog stays up, so a locked
                 // vault or a full disk costs a retry rather than the recording.
-                error = it.message ?: context.getString(R.string.journal_video_capture_failed)
+                error = it.message ?: context.getString(R.string.journal_recording_save_failed)
             }
         }
     }
 
     /** Throw the pending recording away — the file, not just the dialog. */
     fun discardRecording() {
-        val video = pendingVideo ?: return
-        if (savingVideo) return
-        pendingVideo = null
+        val recording = pendingRecording ?: return
+        if (savingRecording) return
+        pendingRecording = null
         scope.launch {
             withContext(Dispatchers.IO) {
-                runCatching { JournalVideoStore.delete(context, video.fileName) }
+                runCatching {
+                    JournalRecordingStore.delete(context, recording.kind, recording.fileName)
+                }
             }
         }
     }
@@ -470,14 +594,24 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        // Three ways to put something down, side by side and
+                        // none of them behind a menu: type it, say it as words
+                        // (dictation, which transcribes), or keep your voice
+                        // (a recording). The middle one is the reason the third
+                        // exists — a mic that silently turns speech into text
+                        // is not what "record this" means, and reaching for it
+                        // expecting a voice memo is exactly how this looked
+                        // broken.
+                        val captureIdle =
+                            !sweeping && pendingRecording == null && !savingRecording
                         IconButton(
                             onClick = { dictateWithPermission() },
-                            enabled = !listening,
+                            enabled = !listening && !speaking,
                             modifier = Modifier.testTag("journal-mic"),
                         ) {
                             Icon(
                                 MicIcon,
-                                contentDescription = "Dictate",
+                                contentDescription = stringResource(R.string.journal_dictate),
                                 tint = if (listening) {
                                     MaterialTheme.colorScheme.error
                                 } else {
@@ -485,14 +619,33 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                                 },
                             )
                         }
-                        // Recording sits next to dictation, not behind a menu:
-                        // the two are the same gesture — say it instead of
-                        // typing it — and one of them being a second-class
-                        // control would say the other is the real journal.
+                        if (canRecordAudio) {
+                            IconButton(
+                                onClick = { speakWithPermission() },
+                                enabled = speaking || (captureIdle && !listening),
+                                modifier = Modifier.testTag("journal-record-audio"),
+                            ) {
+                                Icon(
+                                    if (speaking) StopIcon else VoiceEntryIcon,
+                                    contentDescription = stringResource(
+                                        if (speaking) {
+                                            R.string.journal_audio_stop
+                                        } else {
+                                            R.string.journal_audio_record
+                                        },
+                                    ),
+                                    tint = if (speaking) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.primary
+                                    },
+                                )
+                            }
+                        }
                         if (canRecordVideo) {
                             IconButton(
-                                onClick = { recordWithPermission() },
-                                enabled = !sweeping && pendingVideo == null && !savingVideo,
+                                onClick = { filmWithPermission() },
+                                enabled = captureIdle && !speaking,
                                 modifier = Modifier.testTag("journal-record"),
                             ) {
                                 Icon(
@@ -504,9 +657,21 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                                 )
                             }
                         }
-                        if (listening) {
-                            Text(
-                                "Listening…",
+                        // One status line for both mic states, because only one
+                        // can be true at a time and two would leave a gap where
+                        // the other used to be.
+                        when {
+                            speaking -> Text(
+                                stringResource(
+                                    R.string.journal_audio_recording,
+                                    formatClipLength(spokenMs).ifEmpty { "0:00" },
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testTag("journal-audio-elapsed"),
+                            )
+                            listening -> Text(
+                                stringResource(R.string.journal_listening),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -514,7 +679,7 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                         Spacer(Modifier.weight(1f))
                         Button(
                             onClick = { save() },
-                            enabled = draft.isNotBlank() && !saving,
+                            enabled = draft.isNotBlank() && !saving && !speaking,
                             modifier = Modifier.testTag("journal-save"),
                         ) { Text(if (saving) "Saving…" else "Save") }
                     }
@@ -523,13 +688,13 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                     // on its own terms, so it says who the exception belongs
                     // to: nothing moves unless the person who wrote it moves it.
                     //
-                    // Video entries put a second qualifier on it. "Sealed by
-                    // your passcode" is true of what you write and NOT of the
-                    // footage (AUDIT J-1), so the sentence now says which is
+                    // Recordings put a second qualifier on it. "Sealed by your
+                    // passcode" is true of what you write and NOT of a voice or
+                    // video recording (AUDIT J-1), so the sentence says which is
                     // which rather than covering both with the stronger claim.
                     // Do not shorten this back until J-1 closes.
                     Text(
-                        if (canRecordVideo) {
+                        if (canRecordVideo || canRecordAudio) {
                             "Only on this phone. What you write is sealed by your passcode; " +
                                 "a recording is kept in Comrade's own folder, out of your " +
                                 "gallery. Never posted, never uploaded — it reaches someone " +
@@ -606,10 +771,10 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                     items(dayEntries, key = { it.id }) { entry ->
                         JournalEntryCard(
                             entry,
-                            videoPlayable = entry.video?.let { it.fileName in playableFiles }
-                                ?: false,
+                            recordingPlayable = entry.recording
+                                ?.let { it.fileName in playableFiles } ?: false,
                             dayLabel = day,
-                            onPlay = { playing = entry },
+                            onPlayVideo = { playing = entry },
                             onRename = { renaming = entry },
                             onShare = { sharing = entry },
                             onDelete = { confirmDelete = entry },
@@ -693,10 +858,10 @@ fun JournalScreen(modifier: Modifier = Modifier) {
     // Name the recording just made. No dismiss-by-tapping-outside: the file is
     // on disk and unreferenced until this resolves, so both ways out are
     // deliberate — keep it, or throw it away.
-    pendingVideo?.let {
-        JournalVideoTitleDialog(
+    pendingRecording?.let {
+        JournalRecordingTitleDialog(
             initial = "",
-            saving = savingVideo,
+            saving = savingRecording,
             onSave = { keepRecording(it) },
             onDismiss = { /* Answer the dialog; there is a recording waiting. */ },
             onDiscard = { discardRecording() },
@@ -704,39 +869,42 @@ fun JournalScreen(modifier: Modifier = Modifier) {
     }
 
     renaming?.let { entry ->
-        JournalVideoTitleDialog(
+        JournalRecordingTitleDialog(
             initial = entry.title.orEmpty(),
-            saving = savingVideo,
+            saving = savingRecording,
             onSave = { raw ->
                 // Guarded rather than early-returned: a second tap on a slow
                 // store must not start a second write of the same title.
-                if (!savingVideo) {
-                    savingVideo = true
+                if (!savingRecording) {
+                    savingRecording = true
                     scope.launch {
                         withContext(Dispatchers.IO) {
                             runCatching {
                                 ComradeCore.setJournalEntryTitleTyped(
                                     entry.id,
-                                    journalVideoTitle(raw),
+                                    journalRecordingTitle(raw),
                                 )
                             }
                         }
-                        savingVideo = false
+                        savingRecording = false
                         renaming = null
                         reload()
                     }
                 }
             },
-            onDismiss = { if (!savingVideo) renaming = null },
+            onDismiss = { if (!savingRecording) renaming = null },
         )
     }
 
+    // Only video opens a screen of its own. A voice entry plays on its card
+    // (JournalRecordingStrip), so `playing` is never set for one.
     playing?.let { entry ->
-        val video = entry.video
-        if (video != null) {
+        val recording = entry.recording
+        if (recording != null) {
             JournalVideoPlayerDialog(
-                fileName = video.fileName,
-                heading = journalVideoHeading(
+                fileName = recording.fileName,
+                mime = recording.mime,
+                heading = journalRecordingHeading(
                     entry.title,
                     dayLabel(entry.createdAt, System.currentTimeMillis() / 1000),
                 ),
@@ -751,8 +919,8 @@ fun JournalScreen(modifier: Modifier = Modifier) {
             title = { Text("Delete this entry?") },
             text = {
                 Text(
-                    if (entry.video != null) {
-                        stringResource(R.string.journal_video_delete_body)
+                    if (entry.recording != null) {
+                        stringResource(R.string.journal_recording_delete_body)
                     } else {
                         "It will be removed from this phone. There is no other copy."
                     },
@@ -769,9 +937,13 @@ fun JournalScreen(modifier: Modifier = Modifier) {
                                 // between leaves an orphaned file the sweep
                                 // finds on the next open — the other order
                                 // would leave an entry pointing at nothing.
-                                entry.video?.let {
+                                entry.recording?.let {
                                     runCatching {
-                                        JournalVideoStore.delete(context, it.fileName)
+                                        JournalRecordingStore.delete(
+                                            context,
+                                            it.mime,
+                                            it.fileName,
+                                        )
                                     }
                                 }
                             }
@@ -790,14 +962,14 @@ fun JournalScreen(modifier: Modifier = Modifier) {
 @Composable
 private fun JournalEntryCard(
     entry: ComradeCore.JournalEntryInfo,
-    videoPlayable: Boolean,
+    recordingPlayable: Boolean,
     dayLabel: String,
-    onPlay: () -> Unit,
+    onPlayVideo: () -> Unit,
     onRename: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    val video = entry.video
+    val recording = entry.recording
     OutlinedCard(Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
@@ -819,8 +991,8 @@ private fun JournalEntryCard(
                 // heading at all rather than a placeholder — the vast majority
                 // of typed entries have none, and a card headed "Untitled"
                 // every time is noise.
-                val heading = if (video != null) {
-                    journalVideoHeading(entry.title, dayLabel)
+                val heading = if (recording != null) {
+                    journalRecordingHeading(entry.title, dayLabel)
                 } else {
                     entry.title
                 }
@@ -832,25 +1004,25 @@ private fun JournalEntryCard(
                         modifier = Modifier.testTag("journal-entry-title"),
                     )
                 }
-                if (video != null) {
-                    JournalVideoStrip(
-                        video = video,
-                        available = videoPlayable,
-                        onPlay = onPlay,
+                if (recording != null) {
+                    JournalRecordingStrip(
+                        recording = recording,
+                        available = recordingPlayable,
+                        onPlayVideo = onPlayVideo,
                         modifier = Modifier.padding(top = 2.dp, end = 6.dp),
                     )
                 }
-                // A video entry with no words has nothing to draw here, and an
-                // empty Text would still take a line's worth of space.
+                // A recording entry with no words has nothing to draw here, and
+                // an empty Text would still take a line's worth of space.
                 if (entry.text.isNotBlank()) {
                     Text(entry.text, style = MaterialTheme.typography.bodyLarge)
                 }
             }
-            if (video != null) {
+            if (recording != null) {
                 IconButton(onClick = onRename, modifier = Modifier.testTag("journal-rename")) {
                     Icon(
                         Icons.Filled.Edit,
-                        contentDescription = stringResource(R.string.journal_video_rename),
+                        contentDescription = stringResource(R.string.journal_recording_rename),
                         tint = MaterialTheme.colorScheme.outline,
                     )
                 }

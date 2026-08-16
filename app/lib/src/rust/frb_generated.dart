@@ -71,7 +71,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -877075678;
+  int get rustContentHash => 137798744;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -93,11 +93,11 @@ abstract class RustLibApi extends BaseApi {
   Future<JournalEntryDto> crateApiAddJournalEntry(
       {required String text, String? mood});
 
-  Future<JournalEntryDto> crateApiAddJournalVideo(
+  Future<JournalEntryDto> crateApiAddJournalRecording(
       {String? title,
       required String text,
       String? mood,
-      required JournalVideoDto video});
+      required JournalRecordingDto recording});
 
   List<WorkspaceKeyLabel> crateApiAllWorkspaces();
 
@@ -464,18 +464,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<JournalEntryDto> crateApiAddJournalVideo(
+  Future<JournalEntryDto> crateApiAddJournalRecording(
       {String? title,
       required String text,
       String? mood,
-      required JournalVideoDto video}) {
+      required JournalRecordingDto recording}) {
     return handler.executeNormal(NormalTask(
       callFfi: (port_) {
         final serializer = SseSerializer(generalizedFrbRustBinding);
         sse_encode_opt_String(title, serializer);
         sse_encode_String(text, serializer);
         sse_encode_opt_String(mood, serializer);
-        sse_encode_box_autoadd_journal_video_dto(video, serializer);
+        sse_encode_box_autoadd_journal_recording_dto(recording, serializer);
         pdeCallFfi(generalizedFrbRustBinding, serializer,
             funcId: 5, port: port_);
       },
@@ -483,15 +483,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         decodeSuccessData: sse_decode_journal_entry_dto,
         decodeErrorData: sse_decode_ui_error,
       ),
-      constMeta: kCrateApiAddJournalVideoConstMeta,
-      argValues: [title, text, mood, video],
+      constMeta: kCrateApiAddJournalRecordingConstMeta,
+      argValues: [title, text, mood, recording],
       apiImpl: this,
     ));
   }
 
-  TaskConstMeta get kCrateApiAddJournalVideoConstMeta => const TaskConstMeta(
-        debugName: 'add_journal_video',
-        argNames: ['title', 'text', 'mood', 'video'],
+  TaskConstMeta get kCrateApiAddJournalRecordingConstMeta =>
+      const TaskConstMeta(
+        debugName: 'add_journal_recording',
+        argNames: ['title', 'text', 'mood', 'recording'],
       );
 
   @override
@@ -3051,9 +3052,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  JournalVideoDto dco_decode_box_autoadd_journal_video_dto(dynamic raw) {
+  JournalRecordingDto dco_decode_box_autoadd_journal_recording_dto(
+      dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_journal_video_dto(raw);
+    return dco_decode_journal_recording_dto(raw);
   }
 
   @protected
@@ -3587,18 +3589,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       title: dco_decode_opt_String(arr[1]),
       text: dco_decode_String(arr[2]),
       mood: dco_decode_opt_String(arr[3]),
-      video: dco_decode_opt_box_autoadd_journal_video_dto(arr[4]),
+      recording: dco_decode_opt_box_autoadd_journal_recording_dto(arr[4]),
       createdAt: dco_decode_u_64(arr[5]),
     );
   }
 
   @protected
-  JournalVideoDto dco_decode_journal_video_dto(dynamic raw) {
+  JournalRecordingDto dco_decode_journal_recording_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
     if (arr.length != 4)
       throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
-    return JournalVideoDto(
+    return JournalRecordingDto(
       fileName: dco_decode_String(arr[0]),
       mime: dco_decode_String(arr[1]),
       durationMs: dco_decode_u_64(arr[2]),
@@ -3889,9 +3891,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  JournalVideoDto? dco_decode_opt_box_autoadd_journal_video_dto(dynamic raw) {
+  JournalRecordingDto? dco_decode_opt_box_autoadd_journal_recording_dto(
+      dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_journal_video_dto(raw);
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_journal_recording_dto(raw);
   }
 
   @protected
@@ -4627,10 +4632,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  JournalVideoDto sse_decode_box_autoadd_journal_video_dto(
+  JournalRecordingDto sse_decode_box_autoadd_journal_recording_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_journal_video_dto(deserializer));
+    return (sse_decode_journal_recording_dto(deserializer));
   }
 
   @protected
@@ -5177,26 +5182,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     final var_title = sse_decode_opt_String(deserializer);
     final var_text = sse_decode_String(deserializer);
     final var_mood = sse_decode_opt_String(deserializer);
-    final var_video =
-        sse_decode_opt_box_autoadd_journal_video_dto(deserializer);
+    final var_recording =
+        sse_decode_opt_box_autoadd_journal_recording_dto(deserializer);
     final var_createdAt = sse_decode_u_64(deserializer);
     return JournalEntryDto(
         id: var_id,
         title: var_title,
         text: var_text,
         mood: var_mood,
-        video: var_video,
+        recording: var_recording,
         createdAt: var_createdAt);
   }
 
   @protected
-  JournalVideoDto sse_decode_journal_video_dto(SseDeserializer deserializer) {
+  JournalRecordingDto sse_decode_journal_recording_dto(
+      SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     final var_fileName = sse_decode_String(deserializer);
     final var_mime = sse_decode_String(deserializer);
     final var_durationMs = sse_decode_u_64(deserializer);
     final var_sizeBytes = sse_decode_u_64(deserializer);
-    return JournalVideoDto(
+    return JournalRecordingDto(
         fileName: var_fileName,
         mime: var_mime,
         durationMs: var_durationMs,
@@ -5637,12 +5643,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  JournalVideoDto? sse_decode_opt_box_autoadd_journal_video_dto(
+  JournalRecordingDto? sse_decode_opt_box_autoadd_journal_recording_dto(
       SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_journal_video_dto(deserializer));
+      return (sse_decode_box_autoadd_journal_recording_dto(deserializer));
     } else {
       return null;
     }
@@ -6464,10 +6470,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_box_autoadd_journal_video_dto(
-      JournalVideoDto self, SseSerializer serializer) {
+  void sse_encode_box_autoadd_journal_recording_dto(
+      JournalRecordingDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_journal_video_dto(self, serializer);
+    sse_encode_journal_recording_dto(self, serializer);
   }
 
   @protected
@@ -6952,13 +6958,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.title, serializer);
     sse_encode_String(self.text, serializer);
     sse_encode_opt_String(self.mood, serializer);
-    sse_encode_opt_box_autoadd_journal_video_dto(self.video, serializer);
+    sse_encode_opt_box_autoadd_journal_recording_dto(
+        self.recording, serializer);
     sse_encode_u_64(self.createdAt, serializer);
   }
 
   @protected
-  void sse_encode_journal_video_dto(
-      JournalVideoDto self, SseSerializer serializer) {
+  void sse_encode_journal_recording_dto(
+      JournalRecordingDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.fileName, serializer);
     sse_encode_String(self.mime, serializer);
@@ -7318,13 +7325,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_opt_box_autoadd_journal_video_dto(
-      JournalVideoDto? self, SseSerializer serializer) {
+  void sse_encode_opt_box_autoadd_journal_recording_dto(
+      JournalRecordingDto? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     sse_encode_bool(self != null, serializer);
     if (self != null) {
-      sse_encode_box_autoadd_journal_video_dto(self, serializer);
+      sse_encode_box_autoadd_journal_recording_dto(self, serializer);
     }
   }
 

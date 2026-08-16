@@ -584,27 +584,29 @@ object ComradeCore {
         val title: String?,
         val text: String,
         val mood: String?,
-        val video: JournalVideoInfo?,
+        val recording: JournalRecordingInfo?,
         val createdAt: Long,
     )
 
     /**
-     * A video journal recording, as the entry records it.
+     * A journal recording — a voice entry or a video entry — as the entry
+     * records it.
      *
-     * [fileName] names a file in `JournalVideoStore`'s directory — the core
-     * holds the description and the frontend holds the footage, so deleting an
-     * entry is two calls and both have to happen (see
+     * [mime] is what says which of the two it is, and the only thing that does.
+     * [fileName] names a file in `JournalRecordingStore`'s directory for that
+     * kind — the core holds the description and the frontend holds the file, so
+     * deleting an entry is two calls and both have to happen (see
      * [deleteJournalEntryTyped]).
      */
-    data class JournalVideoInfo(
+    data class JournalRecordingInfo(
         val fileName: String,
         val mime: String,
         val durationMs: Long,
         val sizeBytes: Long,
     )
 
-    private fun uniffi.comrade_ui.JournalVideoDto.toInfo() =
-        JournalVideoInfo(
+    private fun uniffi.comrade_ui.JournalRecordingDto.toInfo() =
+        JournalRecordingInfo(
             fileName = fileName,
             mime = mime,
             durationMs = durationMs.toLong(),
@@ -617,7 +619,7 @@ object ComradeCore {
             title = title,
             text = text,
             mood = mood,
-            video = video?.toInfo(),
+            recording = recording?.toInfo(),
             createdAt = createdAt.toLong(),
         )
 
@@ -625,14 +627,14 @@ object ComradeCore {
         rethrowing("Journal") { ffi.addJournalEntry(text, mood?.ifBlank { null }).toInfo() }
 
     /**
-     * Save a video journal entry over a recording already written to
-     * `JournalVideoStore`'s folder.
+     * Save a journal entry that is a recording — spoken or filmed — over a file
+     * already written to `JournalRecordingStore`'s folder for its kind.
      *
      * Call order matters and it is the file first: this writes the entry that
      * points at [fileName], so the file has to be in place before it. Blocking
      * — call it off the main thread.
      */
-    fun addJournalVideoTyped(
+    fun addJournalRecordingTyped(
         title: String?,
         text: String,
         mood: String?,
@@ -641,12 +643,12 @@ object ComradeCore {
         durationMs: Long,
         sizeBytes: Long,
     ): JournalEntryInfo =
-        rethrowing("Journal video") {
-            ffi.addJournalVideo(
+        rethrowing("Journal recording") {
+            ffi.addJournalRecording(
                 title?.ifBlank { null },
                 text,
                 mood?.ifBlank { null },
-                uniffi.comrade_ui.JournalVideoDto(
+                uniffi.comrade_ui.JournalRecordingDto(
                     fileName = fileName,
                     mime = mime,
                     durationMs = durationMs.toULong(),
@@ -670,8 +672,8 @@ object ComradeCore {
     /**
      * Remove an entry. Returns whether one existed.
      *
-     * For a video entry this removes the sealed record only — the recording is
-     * a file `JournalVideoStore.delete` has to remove separately. Delete the
+     * For a recording entry this removes the sealed record only — the file is
+     * one `JournalRecordingStore.delete` has to remove separately. Delete the
      * record first: the leftover then is an orphaned file, which the sweep
      * finds, rather than an entry pointing at footage that is gone.
      */

@@ -384,16 +384,18 @@ Future<BigInt> nudgeComrades() => RustLib.instance.api.crateApiNudgeComrades();
 Future<JournalEntryDto> addJournalEntry({required String text, String? mood}) =>
     RustLib.instance.api.crateApiAddJournalEntry(text: text, mood: mood);
 
-/// Save a video journal entry over a recording the frontend has already written
-/// to its own journal-video directory. The core never opens, moves or deletes
-/// that file — see `JournalVideoDto` for the split and what it costs.
-Future<JournalEntryDto> addJournalVideo(
+/// Save a journal entry that is a recording — a voice entry or a video entry the
+/// frontend has already written to its own directory for that kind. The core
+/// never opens, moves or deletes that file — see `JournalRecordingDto` for the
+/// split and what it costs. `recording.mime` is what picks the player, and it
+/// may not be blank.
+Future<JournalEntryDto> addJournalRecording(
         {String? title,
         required String text,
         String? mood,
-        required JournalVideoDto video}) =>
-    RustLib.instance.api.crateApiAddJournalVideo(
-        title: title, text: text, mood: mood, video: video);
+        required JournalRecordingDto recording}) =>
+    RustLib.instance.api.crateApiAddJournalRecording(
+        title: title, text: text, mood: mood, recording: recording);
 
 /// Rename an entry, or clear the title with `None`. `None` back means no entry
 /// has that id. Only the title changes — not the words, the mood, the recording
@@ -405,7 +407,7 @@ Future<JournalEntryDto?> setJournalEntryTitle(
 Future<List<JournalEntryDto>> journalEntries() =>
     RustLib.instance.api.crateApiJournalEntries();
 
-/// Remove an entry. For a video entry this removes the record only: the file is
+/// Remove an entry. For a recording entry this removes the record only: the file is
 /// the frontend's and the frontend must delete it too.
 Future<bool> deleteJournalEntry({required String id}) =>
     RustLib.instance.api.crateApiDeleteJournalEntry(id: id);
@@ -1245,7 +1247,7 @@ class JournalEntryDto {
   final String? title;
   final String text;
   final String? mood;
-  final JournalVideoDto? video;
+  final JournalRecordingDto? recording;
   final BigInt createdAt;
 
   const JournalEntryDto({
@@ -1253,7 +1255,7 @@ class JournalEntryDto {
     this.title,
     required this.text,
     this.mood,
-    this.video,
+    this.recording,
     required this.createdAt,
   });
 
@@ -1263,7 +1265,7 @@ class JournalEntryDto {
       title.hashCode ^
       text.hashCode ^
       mood.hashCode ^
-      video.hashCode ^
+      recording.hashCode ^
       createdAt.hashCode;
 
   @override
@@ -1275,17 +1277,17 @@ class JournalEntryDto {
           title == other.title &&
           text == other.text &&
           mood == other.mood &&
-          video == other.video &&
+          recording == other.recording &&
           createdAt == other.createdAt;
 }
 
-class JournalVideoDto {
+class JournalRecordingDto {
   final String fileName;
   final String mime;
   final BigInt durationMs;
   final BigInt sizeBytes;
 
-  const JournalVideoDto({
+  const JournalRecordingDto({
     required this.fileName,
     required this.mime,
     required this.durationMs,
@@ -1302,7 +1304,7 @@ class JournalVideoDto {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is JournalVideoDto &&
+      other is JournalRecordingDto &&
           runtimeType == other.runtimeType &&
           fileName == other.fileName &&
           mime == other.mime &&

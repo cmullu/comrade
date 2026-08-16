@@ -264,38 +264,51 @@ pub struct JournalEntry {
     /// Optional self-reported mood marker (an emoji or short tag).
     #[serde(default)]
     pub mood: Option<String>,
-    /// Set when the entry is a recorded video rather than (or as well as)
-    /// written words. See [`JournalVideo`] for what is and is not sealed.
-    #[serde(default)]
-    pub video: Option<JournalVideo>,
+    /// Set when the entry is a recording — spoken or filmed — rather than (or
+    /// as well as) written words. See [`JournalRecording`] for what is and is
+    /// not sealed.
+    ///
+    /// `alias = "video"` is load-bearing, not tidiness: this field shipped
+    /// under that name when only video entries existed, and every entry already
+    /// written to a phone spells it that way. Removing the alias silently drops
+    /// the recording off those entries, which reads as the app having lost
+    /// somebody's footage.
+    #[serde(default, alias = "video")]
+    pub recording: Option<JournalRecording>,
     pub created_at: u64,
 }
 
-/// A video journal recording, as the store knows it.
+/// A journal recording — a voice entry or a video entry — as the store knows it.
 ///
-/// **The store holds the description, not the footage.** Everything in this
+/// **The store holds the description, not the recording.** Everything in this
 /// struct is sealed with the rest of the entry — the title, the length, when it
-/// was taken — but the video file itself is far too large to keep as a redb
+/// was taken — but the media file itself is far too large to keep as a redb
 /// value, so it lives on the frontend's own disk and this record only names it.
 ///
 /// That split is deliberate and it has a cost worth stating plainly rather than
 /// leaving to be discovered: the words are protected by the vault passcode and
-/// the footage is not. The footage is protected by the platform's app sandbox
+/// the recording is not. The file is protected by the platform's app sandbox
 /// and whatever full-disk encryption the device has — real protection, but a
 /// different and weaker promise than the one the rest of the journal makes.
-/// Tracked as AUDIT J-1; nothing in this crate may describe the footage as
+/// Tracked as AUDIT J-1; nothing in this crate may describe the recording as
 /// sealed until that closes.
 ///
+/// [`mime`](Self::mime) is what says whether this is audio or video, and it is
+/// the only thing that does. There is deliberately no second `kind` field: two
+/// sources of truth for one fact is two sources that can disagree, and the
+/// frontends already have to read the mime to choose a player.
+///
 /// [`file_name`](Self::file_name) is a bare name and never a path. The
-/// directory is the frontend's decision (`filesDir/journal-videos` on Android),
-/// so a record does not go stale when an OS moves an app's private storage —
-/// and so the store never learns a filesystem layout it has no business
-/// knowing.
+/// directory is the frontend's decision (`filesDir/journal-videos` and
+/// `filesDir/journal-audio` on Android), so a record does not go stale when an
+/// OS moves an app's private storage — and so the store never learns a
+/// filesystem layout it has no business knowing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JournalVideo {
-    /// Name of the file inside the frontend's journal-video directory.
+pub struct JournalRecording {
+    /// Name of the file inside the frontend's directory for this kind.
     pub file_name: String,
-    /// The recording's MIME type, e.g. `video/mp4`.
+    /// The recording's MIME type — `video/mp4` or `audio/aac`. Also the only
+    /// thing that says which kind of recording this is.
     pub mime: String,
     /// How long the recording runs, in milliseconds. Zero when the frontend
     /// could not read it — a length of zero must render as "unknown", never
@@ -1689,7 +1702,7 @@ mod tests {
                 title: None,
                 text: text.into(),
                 mood: mood.map(String::from),
-                video: None,
+                recording: None,
                 created_at: at,
             })
             .unwrap();
@@ -1708,32 +1721,45 @@ mod tests {
     }
 
     #[test]
-    fn journal_video_entry_roundtrips() {
+    fn a_recording_entry_roundtrips_for_either_kind() {
         let (_d, s) = store();
-        let entry = JournalEntry {
-            id: "00000000000000000042-vvvv".into(),
-            title: Some("The walk after the argument".into()),
-            text: String::new(),
-            mood: Some("😕".into()),
-            video: Some(JournalVideo {
-                file_name: "jv-1723800000000-abc123.mp4".into(),
-                mime: "video/mp4".into(),
-                duration_ms: 47_000,
-                size_bytes: 12_345_678,
-            }),
-            created_at: 42,
-        };
-        s.save_journal_entry(&entry).unwrap();
-        assert_eq!(s.journal_entry(&entry.id).unwrap().as_ref(), Some(&entry));
-        // …and it comes back through the list read, not just the keyed one:
-        // the video screen renders from `journal_entries`.
-        assert_eq!(s.journal_entries().unwrap(), vec![entry]);
+        for (id, file_name, mime) in [
+            (
+                "00000000000000000042-vvvv",
+                "jv-1723800000000-abc123.mp4",
+                "video/mp4",
+            ),
+            (
+                "00000000000000000043-aaaa",
+                "ja-1723800000000-abc124.aac",
+                "audio/aac",
+            ),
+        ] {
+            let entry = JournalEntry {
+                id: id.into(),
+                title: Some("The walk after the argument".into()),
+                text: String::new(),
+                mood: Some("😕".into()),
+                recording: Some(JournalRecording {
+                    file_name: file_name.into(),
+                    mime: mime.into(),
+                    duration_ms: 47_000,
+                    size_bytes: 12_345_678,
+                }),
+                created_at: 42,
+            };
+            s.save_journal_entry(&entry).unwrap();
+            assert_eq!(s.journal_entry(&entry.id).unwrap().as_ref(), Some(&entry));
+        }
+        // …and both come back through the list read, not just the keyed one:
+        // the journal screen renders every kind from `journal_entries`.
+        assert_eq!(s.journal_entries().unwrap().len(), 2);
     }
 
     #[test]
     fn journal_entry_written_before_titles_still_reads() {
         // Entries are serde_json values sealed one at a time, so a store that
-        // predates `title`/`video` holds rows without those keys. They must
+        // predates `title`/`recording` holds rows without those keys. They must
         // keep opening: the alternative is a journal that silently loses every
         // entry someone wrote before this feature shipped.
         let (_d, s) = store();
@@ -1753,11 +1779,48 @@ mod tests {
         assert_eq!(entries[0].text, "written before the fields existed");
         assert_eq!(entries[0].mood.as_deref(), Some("🙂"));
         assert_eq!(entries[0].title, None);
-        assert_eq!(entries[0].video, None);
+        assert_eq!(entries[0].recording, None);
     }
 
     #[test]
-    fn journal_video_title_never_plaintext_at_rest() {
+    fn a_video_entry_written_under_the_old_field_name_still_reads() {
+        // `recording` shipped as `video`, so every entry already on a phone
+        // spells it that way. Without `#[serde(alias = "video")]` this
+        // deserialises to `recording: None` — the entry survives, the card
+        // stops offering the recording, and it reads as the app having lost
+        // somebody's footage rather than as a rename.
+        let (_d, s) = store();
+        s.put(
+            JOURNAL_TREE,
+            "00000000000000000008-vid",
+            &serde_json::json!({
+                "id": "00000000000000000008-vid",
+                "title": "The walk after the argument",
+                "text": "",
+                "mood": "😕",
+                "video": {
+                    "file_name": "jv-1723800000000-abc123.mp4",
+                    "mime": "video/mp4",
+                    "duration_ms": 47_000,
+                    "size_bytes": 12_345_678,
+                },
+                "created_at": 8,
+            }),
+        )
+        .unwrap();
+        let entries = s.journal_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        let recording = entries[0]
+            .recording
+            .as_ref()
+            .expect("a pre-rename video entry must keep its recording");
+        assert_eq!(recording.file_name, "jv-1723800000000-abc123.mp4");
+        assert_eq!(recording.mime, "video/mp4");
+        assert_eq!(recording.duration_ms, 47_000);
+    }
+
+    #[test]
+    fn journal_recording_title_never_plaintext_at_rest() {
         // A video's *title* is as revealing as an entry's text — often more so,
         // because it is the one line someone writes to find the clip again. It
         // gets the same ciphertext-on-disk guarantee, proven the same way as
@@ -1771,7 +1834,7 @@ mod tests {
                 title: Some(secret_title.into()),
                 text: String::new(),
                 mood: None,
-                video: Some(JournalVideo {
+                recording: Some(JournalRecording {
                     file_name: "jv-1-a.mp4".into(),
                     mime: "video/mp4".into(),
                     duration_ms: 1_000,
@@ -1821,7 +1884,7 @@ mod tests {
                 title: None,
                 text: secret_thought.into(),
                 mood: None,
-                video: None,
+                recording: None,
                 created_at: 1,
             })
             .unwrap();

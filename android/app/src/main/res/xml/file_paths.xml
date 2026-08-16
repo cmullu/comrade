@@ -8,12 +8,14 @@
          write into them. Separate from media/ because purgeDecryptedMedia sweeps
          that directory and must not race a capture still being written. -->
     <cache-path name="capture" path="capture/" />
-    <!-- Where the camera writes a video journal recording while it is still
-         recording it. Its own directory, and deliberately NOT the journal's
-         own folder under filesDir: the camera app is another app, and the only
-         thing it is ever granted is the one file it is writing. The finished
-         recording is moved into filesDir/journal-videos by
-         JournalVideoStore.adopt, which no other app can reach at all. -->
+    <!-- Where a journal recording is written while it is still being made —
+         by the camera app for a video entry, by this app's own MediaRecorder
+         for a voice entry. Its own directory, and deliberately NOT either of
+         the journal's own folders under filesDir: the camera app is another
+         app, and the only thing it is ever granted is the one file it is
+         writing. The finished recording is moved into filesDir/journal-videos
+         or filesDir/journal-audio by JournalRecordingStore.adopt, neither of
+         which any other app can reach at all. -->
     <cache-path name="journal-capture" path="journal-capture/" />
     <!-- Where a large attachment handed straight over by a peer lands, so the
          person it was sent to can open it in whatever app handles its type. Its

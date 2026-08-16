@@ -74,7 +74,7 @@ pub use runtime::{
     CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime,
     ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, DownloadVerdictDto,
     DownloadedTrackDto, FocusSessionDto, FoundProfileDto, IceServerDto, JournalEntryDto,
-    JournalVideoDto, LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto,
+    JournalRecordingDto, LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto,
     MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto,
     PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto,
     RideSignalDto, RuntimeHandles, SakhaStatusDto, SavedReadDto, SavedReadSummaryDto,

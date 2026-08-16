@@ -1,15 +1,17 @@
-/// Presentation rules for a video journal entry.
+/// Presentation rules for a journal recording — a voice entry or a video entry.
 ///
 /// The Kotlin original is
-/// `android/app/src/main/java/mullu/comrade/journal/JournalVideos.kt`, and the
-/// numbers and cases here are the same ones, pinned by mirrored tests — the
+/// `android/app/src/main/java/mullu/comrade/journal/JournalRecordings.kt`, and
+/// the numbers and cases here are the same ones, pinned by mirrored tests — the
 /// discipline `journal_note.dart` already keeps.
 ///
-/// **Only the presentation half is ported.** Recording, the dedicated folder
-/// and the orphan sweep are Android's; this frontend shows a video entry it
-/// finds in the journal but does not yet capture or play one
+/// **Only the presentation half is ported.** Recording, the two dedicated
+/// folders and the orphan sweep are Android's; this frontend shows a recording
+/// entry it finds in the journal but does not yet capture or play one
 /// (`docs/JOURNAL.md`). What lives here is what stops such an entry drawing as
-/// a blank card.
+/// a blank card — plus [clipProgress] and [playbackLabel], which nothing here
+/// calls yet and which exist so that the day this frontend grows a player, its
+/// counter reads identically to Android's rather than being invented again.
 library;
 
 /// How long a title may be, matching `JOURNAL_TITLE_MAX_CHARS`.
@@ -20,7 +22,7 @@ const int journalTitleMaxChars = 80;
 /// Blank is `null` rather than `''`, so "has a title" is one question with one
 /// answer. Newlines collapse to spaces because a heading is one line, and the
 /// cut at the cap is hard, with no ellipsis written into the data.
-String? journalVideoTitle(String? raw) {
+String? journalRecordingTitle(String? raw) {
   if (raw == null) {
     return null;
   }
@@ -37,8 +39,8 @@ String? journalVideoTitle(String? raw) {
 ///
 /// A recording always has something to be called — a card headed with nothing
 /// looks broken — and the day is the one fact about it that is never a guess.
-String journalVideoHeading(String? title, String dayLabel) =>
-    journalVideoTitle(title) ?? dayLabel;
+String journalRecordingHeading(String? title, String dayLabel) =>
+    journalRecordingTitle(title) ?? dayLabel;
 
 /// A clip's length as `m:ss`, or `h:mm:ss` past an hour.
 ///
@@ -87,4 +89,36 @@ String _trimDecimal(double value) {
   return rounded == rounded.roundToDouble()
       ? rounded.toInt().toString()
       : rounded.toString();
+}
+
+/// How far through a clip playback is, as `0..1` for a progress bar.
+///
+/// Zero for an unknown or absent duration rather than a divide by zero, and
+/// clamped at both ends: a player can report a position past the duration it
+/// reported earlier, and a slider handed 1.04 is a slider drawn outside its
+/// track.
+double clipProgress(int positionMs, int durationMs) {
+  if (durationMs <= 0) {
+    return 0;
+  }
+  return (positionMs / durationMs).clamp(0.0, 1.0);
+}
+
+/// The counter under a player: `0:07 / 0:23`, or just `0:07` when the total is
+/// unknown.
+///
+/// Dropping the total rather than showing `0:07 / 0:00` is the same rule
+/// [formatClipLength] follows — a clip whose container will not say how long it
+/// is still plays, and a zero total would say it has already ended. The
+/// position is clamped to the duration, because a player that reports 0:24 of a
+/// 0:23 clip is a player the user reads as broken.
+String playbackLabel(int positionMs, int durationMs) {
+  final int safePosition = positionMs < 0 ? 0 : positionMs;
+  if (durationMs <= 0) {
+    final String elapsed = formatClipLength(safePosition);
+    return elapsed.isEmpty ? '0:00' : elapsed;
+  }
+  final int shown = safePosition > durationMs ? durationMs : safePosition;
+  final String elapsed = shown <= 0 ? '0:00' : formatClipLength(shown);
+  return '$elapsed / ${formatClipLength(durationMs)}';
 }

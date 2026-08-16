@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -877075678;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 137798744;
 
 // Section: executor
 
@@ -185,7 +185,7 @@ fn wire__crate__api__add_journal_entry_impl(
         },
     )
 }
-fn wire__crate__api__add_journal_video_impl(
+fn wire__crate__api__add_journal_recording_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -193,7 +193,7 @@ fn wire__crate__api__add_journal_video_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "add_journal_video",
+            debug_name: "add_journal_recording",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -210,12 +210,16 @@ fn wire__crate__api__add_journal_video_impl(
             let api_title = <Option<String>>::sse_decode(&mut deserializer);
             let api_text = <String>::sse_decode(&mut deserializer);
             let api_mood = <Option<String>>::sse_decode(&mut deserializer);
-            let api_video = <crate::api::JournalVideoDto>::sse_decode(&mut deserializer);
+            let api_recording = <crate::api::JournalRecordingDto>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, crate::api::UiError>((move || {
-                    let output_ok =
-                        crate::api::add_journal_video(api_title, api_text, api_mood, api_video)?;
+                    let output_ok = crate::api::add_journal_recording(
+                        api_title,
+                        api_text,
+                        api_mood,
+                        api_recording,
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -3897,15 +3901,15 @@ const _: fn() = || {
         let _: Option<String> = JournalEntryDto.title;
         let _: String = JournalEntryDto.text;
         let _: Option<String> = JournalEntryDto.mood;
-        let _: Option<crate::api::JournalVideoDto> = JournalEntryDto.video;
+        let _: Option<crate::api::JournalRecordingDto> = JournalEntryDto.recording;
         let _: u64 = JournalEntryDto.created_at;
     }
     {
-        let JournalVideoDto = None::<crate::api::JournalVideoDto>.unwrap();
-        let _: String = JournalVideoDto.file_name;
-        let _: String = JournalVideoDto.mime;
-        let _: u64 = JournalVideoDto.duration_ms;
-        let _: u64 = JournalVideoDto.size_bytes;
+        let JournalRecordingDto = None::<crate::api::JournalRecordingDto>.unwrap();
+        let _: String = JournalRecordingDto.file_name;
+        let _: String = JournalRecordingDto.mime;
+        let _: u64 = JournalRecordingDto.duration_ms;
+        let _: u64 = JournalRecordingDto.size_bytes;
     }
     {
         let MediaBytesDto = None::<crate::api::MediaBytesDto>.unwrap();
@@ -4840,27 +4844,27 @@ impl SseDecode for crate::api::JournalEntryDto {
         let mut var_title = <Option<String>>::sse_decode(deserializer);
         let mut var_text = <String>::sse_decode(deserializer);
         let mut var_mood = <Option<String>>::sse_decode(deserializer);
-        let mut var_video = <Option<crate::api::JournalVideoDto>>::sse_decode(deserializer);
+        let mut var_recording = <Option<crate::api::JournalRecordingDto>>::sse_decode(deserializer);
         let mut var_createdAt = <u64>::sse_decode(deserializer);
         return crate::api::JournalEntryDto {
             id: var_id,
             title: var_title,
             text: var_text,
             mood: var_mood,
-            video: var_video,
+            recording: var_recording,
             created_at: var_createdAt,
         };
     }
 }
 
-impl SseDecode for crate::api::JournalVideoDto {
+impl SseDecode for crate::api::JournalRecordingDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_fileName = <String>::sse_decode(deserializer);
         let mut var_mime = <String>::sse_decode(deserializer);
         let mut var_durationMs = <u64>::sse_decode(deserializer);
         let mut var_sizeBytes = <u64>::sse_decode(deserializer);
-        return crate::api::JournalVideoDto {
+        return crate::api::JournalRecordingDto {
             file_name: var_fileName,
             mime: var_mime,
             duration_ms: var_durationMs,
@@ -5322,11 +5326,11 @@ impl SseDecode for Option<crate::api::JournalEntryDto> {
     }
 }
 
-impl SseDecode for Option<crate::api::JournalVideoDto> {
+impl SseDecode for Option<crate::api::JournalRecordingDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::JournalVideoDto>::sse_decode(deserializer));
+            return Some(<crate::api::JournalRecordingDto>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -6167,7 +6171,7 @@ fn pde_ffi_dispatcher_primary_impl(
         2 => wire__crate__api__accept_request_impl(port, ptr, rust_vec_len, data_len),
         3 => wire__crate__api__add_contact_impl(port, ptr, rust_vec_len, data_len),
         4 => wire__crate__api__add_journal_entry_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__add_journal_video_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__add_journal_recording_impl(port, ptr, rust_vec_len, data_len),
         7 => wire__crate__api__announce_presence_impl(port, ptr, rust_vec_len, data_len),
         8 => wire__crate__api__assign_thread_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__api__back_impl(port, ptr, rust_vec_len, data_len),
@@ -6916,7 +6920,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::JournalEntryDto> {
             self.0.title.into_into_dart().into_dart(),
             self.0.text.into_into_dart().into_dart(),
             self.0.mood.into_into_dart().into_dart(),
-            self.0.video.into_into_dart().into_dart(),
+            self.0.recording.into_into_dart().into_dart(),
             self.0.created_at.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -6934,7 +6938,7 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::JournalEntryDto>>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::JournalVideoDto> {
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::JournalRecordingDto> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.0.file_name.into_into_dart().into_dart(),
@@ -6946,13 +6950,13 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::JournalVideoDto> {
     }
 }
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
-    for FrbWrapper<crate::api::JournalVideoDto>
+    for FrbWrapper<crate::api::JournalRecordingDto>
 {
 }
-impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::JournalVideoDto>>
-    for crate::api::JournalVideoDto
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::JournalRecordingDto>>
+    for crate::api::JournalRecordingDto
 {
-    fn into_into_dart(self) -> FrbWrapper<crate::api::JournalVideoDto> {
+    fn into_into_dart(self) -> FrbWrapper<crate::api::JournalRecordingDto> {
         self.into()
     }
 }
@@ -8460,12 +8464,12 @@ impl SseEncode for crate::api::JournalEntryDto {
         <Option<String>>::sse_encode(self.title, serializer);
         <String>::sse_encode(self.text, serializer);
         <Option<String>>::sse_encode(self.mood, serializer);
-        <Option<crate::api::JournalVideoDto>>::sse_encode(self.video, serializer);
+        <Option<crate::api::JournalRecordingDto>>::sse_encode(self.recording, serializer);
         <u64>::sse_encode(self.created_at, serializer);
     }
 }
 
-impl SseEncode for crate::api::JournalVideoDto {
+impl SseEncode for crate::api::JournalRecordingDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.file_name, serializer);
@@ -8838,12 +8842,12 @@ impl SseEncode for Option<crate::api::JournalEntryDto> {
     }
 }
 
-impl SseEncode for Option<crate::api::JournalVideoDto> {
+impl SseEncode for Option<crate::api::JournalRecordingDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
-            <crate::api::JournalVideoDto>::sse_encode(value, serializer);
+            <crate::api::JournalRecordingDto>::sse_encode(value, serializer);
         }
     }
 }

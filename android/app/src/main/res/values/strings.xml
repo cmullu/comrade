@@ -471,9 +471,19 @@
              AUDIT J-1 closes. journal_video_where is the line that has to say
              both halves without hedging either. -->
     <string name="journal_video_record">Record a video entry</string>
+    <string name="journal_dictate">Dictate — turns what you say into text</string>
+    <string name="journal_listening">Listening…</string>
+    <string name="journal_audio_record">Record a voice entry — keeps your voice</string>
+    <string name="journal_audio_stop">Stop recording</string>
+    <string name="journal_audio_recording">Recording %1$s</string>
+    <string name="journal_audio_too_short">That was too short to keep. Hold on a moment longer.</string>
+    <string name="journal_audio_capture_failed">Could not record. Another app may be using the microphone.</string>
+    <string name="journal_audio_needs_mic">Microphone permission is needed to record a voice entry.</string>
+    <string name="journal_recording_save_failed">Could not save the recording.</string>
+    <string name="journal_recording_rename">Rename this recording</string>
+    <string name="journal_recording_title_prompt">Name this recording</string>
+    <string name="journal_recording_delete_body">The entry and its recording will both be removed from this phone. There is no other copy.</string>
     <string name="journal_video_play">Play this recording</string>
-    <string name="journal_video_rename">Rename this recording</string>
-    <string name="journal_video_title_prompt">Name this recording</string>
     <string name="journal_video_title_hint">The walk after the argument</string>
     <string name="journal_video_keep">Keep</string>
     <string name="journal_video_saving">Saving…</string>
@@ -481,7 +491,6 @@
     <string name="journal_video_where">Kept in Comrade\'s own folder on this phone — your gallery never sees it, and no other app can open it. What you write stays sealed by your passcode; the recording itself is protected by the phone, not the passcode.</string>
     <string name="journal_video_missing">This recording is no longer on this phone</string>
     <string name="journal_video_missing_body">The recording is gone from this phone. The entry is still here — you can delete it if it is no use without the video.</string>
-    <string name="journal_video_delete_body">The entry and its recording will both be removed from this phone. There is no other copy.</string>
     <string name="journal_video_capture_failed">Could not save the recording.</string>
     <string name="journal_video_needs_camera">Camera permission is needed to record a video entry.</string>
     <string name="journal_video_no_camera">No camera app on this phone to record with.</string>

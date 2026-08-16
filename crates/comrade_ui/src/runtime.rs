@@ -1636,27 +1636,30 @@ pub struct JournalEntryDto {
     pub text: String,
     /// Optional self-reported mood marker (an emoji or short tag).
     pub mood: Option<String>,
-    /// Present when this entry is a video journal recording.
-    pub video: Option<JournalVideoDto>,
+    /// Present when this entry is a recording — spoken or filmed.
+    pub recording: Option<JournalRecordingDto>,
     pub created_at: u64,
 }
 
-/// A video journal recording as the frontend sees it.
+/// A journal recording — a voice entry or a video entry — as the frontend sees it.
 ///
-/// The runtime never opens the file and never reads a frame: it stores what the
-/// frontend told it about the recording and hands the same description back.
-/// Everything about where the footage lives — which directory, whether the
-/// gallery can see it, when it is deleted — is the frontend's, because it is a
-/// platform question and each frontend answers it differently.
+/// The runtime never opens the file and never reads a frame or a sample: it
+/// stores what the frontend told it about the recording and hands the same
+/// description back. Everything about where the file lives — which directory,
+/// whether the gallery can see it, when it is deleted — is the frontend's,
+/// because it is a platform question and each frontend answers it differently.
 ///
-/// Read [`comrade_storage::JournalVideo`] before writing any copy about this:
-/// the description here is sealed by the vault, the footage is not (AUDIT J-1).
+/// [`mime`](Self::mime) is what tells a frontend which player to draw, and it is
+/// the only thing that does — see [`comrade_storage::JournalRecording`] for why
+/// there is no second `kind` field. Read that type before writing any copy about
+/// this: the description here is sealed by the vault, the file is not (AUDIT J-1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
-pub struct JournalVideoDto {
-    /// Name of the file inside the frontend's own journal-video directory —
+pub struct JournalRecordingDto {
+    /// Name of the file inside the frontend's own directory for this kind —
     /// a bare name, never a path.
     pub file_name: String,
-    /// The recording's MIME type, e.g. `video/mp4`.
+    /// The recording's MIME type — `video/mp4` or `audio/aac`. Also the only
+    /// thing that says whether this is watched or listened to.
     pub mime: String,
     /// Length in milliseconds, or zero when the frontend could not read one.
     pub duration_ms: u64,
@@ -1664,8 +1667,8 @@ pub struct JournalVideoDto {
     pub size_bytes: u64,
 }
 
-impl From<comrade_storage::JournalVideo> for JournalVideoDto {
-    fn from(v: comrade_storage::JournalVideo) -> Self {
+impl From<comrade_storage::JournalRecording> for JournalRecordingDto {
+    fn from(v: comrade_storage::JournalRecording) -> Self {
         Self {
             file_name: v.file_name,
             mime: v.mime,
@@ -1675,8 +1678,8 @@ impl From<comrade_storage::JournalVideo> for JournalVideoDto {
     }
 }
 
-impl From<JournalVideoDto> for comrade_storage::JournalVideo {
-    fn from(v: JournalVideoDto) -> Self {
+impl From<JournalRecordingDto> for comrade_storage::JournalRecording {
+    fn from(v: JournalRecordingDto) -> Self {
         Self {
             file_name: v.file_name,
             mime: v.mime,
@@ -1693,7 +1696,7 @@ impl From<comrade_storage::JournalEntry> for JournalEntryDto {
             title: e.title,
             text: e.text,
             mood: e.mood,
-            video: e.video.map(JournalVideoDto::from),
+            recording: e.recording.map(JournalRecordingDto::from),
             created_at: e.created_at,
         }
     }
@@ -4629,7 +4632,7 @@ impl ComradeRuntime {
                 .map(str::trim)
                 .filter(|m| !m.is_empty())
                 .map(String::from),
-            video: None,
+            recording: None,
             created_at,
         };
         store
@@ -4639,35 +4642,41 @@ impl ComradeRuntime {
         Ok(entry.into())
     }
 
-    /// Save a video journal entry: a recording the frontend has already put on
-    /// disk, plus the title, words and mood that go with it.
+    /// Save a journal entry that is a recording — a voice entry or a video
+    /// entry the frontend has already put on disk — plus the title, words and
+    /// mood that go with it.
     ///
     /// Separate from [`Self::add_journal_entry`] rather than a widened version
     /// of it, because the two have genuinely different rules. A typed entry is
-    /// its text and is rejected empty; a video entry *is* the recording, so
-    /// empty text is the normal case and it is the [`JournalVideoDto::file_name`]
-    /// that may not be blank. Folding them together would mean one function
-    /// that validates neither properly.
+    /// its text and is rejected empty; a recording entry *is* the recording, so
+    /// empty text is the normal case and it is the
+    /// [`JournalRecordingDto::file_name`] that may not be blank. Folding them
+    /// together would mean one function that validates neither properly.
+    ///
+    /// One function for both kinds, though, because audio and video differ here
+    /// in nothing at all: the same validation, the same record, the same
+    /// locality. Only [`JournalRecordingDto::mime`] tells them apart, and it is
+    /// the frontend that has to act on that difference.
     ///
     /// The runtime does not create, move, verify or delete the file. The caller
     /// wrote it somewhere of the caller's choosing and is the only party that
     /// can clean it up — which is also why [`Self::delete_journal_entry`]
-    /// removes the record and leaves the footage to the frontend.
+    /// removes the record and leaves the file to the frontend.
     ///
     /// Strictly local, exactly like the rest of the journal. There is no share
-    /// path for a video entry: [`Self::share_journal_entry`] sends text, and a
+    /// path for a recording: [`Self::share_journal_entry`] sends text, and a
     /// note whose text is empty has nothing to send.
-    pub fn add_journal_video(
+    pub fn add_journal_recording(
         &self,
         title: Option<&str>,
         text: &str,
         mood: Option<&str>,
-        video: JournalVideoDto,
+        recording: JournalRecordingDto,
     ) -> Result<JournalEntryDto, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
-        let file_name = video.file_name.trim();
+        let file_name = recording.file_name.trim();
         if file_name.is_empty() {
-            return Err(UiError::Engine("journal video has no file".into()));
+            return Err(UiError::Engine("journal recording has no file".into()));
         }
         // A name with a separator in it is a path, and a path is how one
         // frontend's record reaches outside the directory another frontend
@@ -4675,7 +4684,17 @@ impl ComradeRuntime {
         // reading of `../../secrets.mp4` to recover.
         if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
             return Err(UiError::Engine(
-                "journal video file name must be a bare name".into(),
+                "journal recording file name must be a bare name".into(),
+            ));
+        }
+        // The mime is the *only* thing that says whether this is watched or
+        // listened to, so a blank one is not a cosmetic gap — it decides which
+        // player the frontend draws, and defaulting it here would be this
+        // layer guessing at something the caller knows for certain.
+        let mime = recording.mime.trim();
+        if mime.is_empty() {
+            return Err(UiError::Engine(
+                "journal recording has no mime type — it is what picks the player".into(),
             ));
         }
         let created_at = now_secs();
@@ -4684,9 +4703,10 @@ impl ComradeRuntime {
             title: clean_optional(title),
             text: text.trim().to_string(),
             mood: clean_optional(mood),
-            video: Some(comrade_storage::JournalVideo {
+            recording: Some(comrade_storage::JournalRecording {
                 file_name: file_name.to_string(),
-                ..video.into()
+                mime: mime.to_string(),
+                ..recording.into()
             }),
             created_at,
         };
@@ -4741,7 +4761,7 @@ impl ComradeRuntime {
     /// Delete a journal entry by id. Returns whether one existed.
     ///
     /// Removes the record only. For a video entry the footage is the
-    /// frontend's file in the frontend's directory (see [`JournalVideoDto`]),
+    /// frontend's file in the frontend's directory (see [`JournalRecordingDto`]),
     /// and the frontend must delete it — this call cannot, and a caller that
     /// forgets leaves an orphan the user has no way to see or remove.
     pub fn delete_journal_entry(&self, id: &str) -> Result<bool, UiError> {
@@ -12117,8 +12137,8 @@ mod tests {
     }
 
     /// A recording the frontend claims to have written, for the tests below.
-    fn a_recording(file_name: &str) -> JournalVideoDto {
-        JournalVideoDto {
+    fn a_recording(file_name: &str) -> JournalRecordingDto {
+        JournalRecordingDto {
             file_name: file_name.into(),
             mime: "video/mp4".into(),
             duration_ms: 47_000,
@@ -12126,13 +12146,23 @@ mod tests {
         }
     }
 
+    /// The same, spoken rather than filmed.
+    fn a_voice_recording(file_name: &str) -> JournalRecordingDto {
+        JournalRecordingDto {
+            mime: "audio/aac".into(),
+            duration_ms: 72_000,
+            size_bytes: 348_160,
+            ..a_recording(file_name)
+        }
+    }
+
     #[tokio::test]
-    async fn a_video_entry_keeps_its_title_and_needs_no_words() {
+    async fn a_recording_entry_keeps_its_title_and_needs_no_words() {
         let dir = TempDir::new().unwrap();
         let rt = offline_runtime(&dir).await;
 
         let entry = rt
-            .add_journal_video(
+            .add_journal_recording(
                 Some("  The walk after the argument  "),
                 "   ",
                 Some("😕"),
@@ -12140,15 +12170,15 @@ mod tests {
             )
             .unwrap();
 
-        // Empty text is the normal case for a video entry, unlike a typed one.
+        // Empty text is the normal case for a recording, unlike a typed entry.
         assert_eq!(entry.text, "");
         assert_eq!(entry.title.as_deref(), Some("The walk after the argument"));
         assert_eq!(entry.mood.as_deref(), Some("😕"));
         assert_eq!(
-            entry.video.as_ref().unwrap().file_name,
+            entry.recording.as_ref().unwrap().file_name,
             "jv-1723800000000-abc123.mp4"
         );
-        assert_eq!(entry.video.as_ref().unwrap().duration_ms, 47_000);
+        assert_eq!(entry.recording.as_ref().unwrap().duration_ms, 47_000);
 
         // …and it is in the one list the journal screen reads, alongside
         // typed entries rather than in a second place of its own.
@@ -12156,26 +12186,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_video_entry_without_a_file_is_refused() {
+    async fn a_voice_entry_takes_the_same_path_as_a_filmed_one() {
+        // Audio and video differ in nothing this layer does. The point of the
+        // test is that there is no second code path to keep in step — only the
+        // mime comes back different, which is what the frontend switches on.
         let dir = TempDir::new().unwrap();
         let rt = offline_runtime(&dir).await;
 
-        // Nothing to play: an entry like this would draw a video card over a
-        // file that does not exist, which reads as footage the app has lost.
+        let spoken = rt
+            .add_journal_recording(
+                Some("Said it out loud"),
+                "",
+                Some("🙂"),
+                a_voice_recording("ja-1723800000000-abc124.aac"),
+            )
+            .unwrap();
+        let filmed = rt
+            .add_journal_recording(None, "", None, a_recording("jv-1-a.mp4"))
+            .unwrap();
+
+        let spoken_recording = spoken.recording.as_ref().unwrap();
+        assert_eq!(spoken_recording.mime, "audio/aac");
+        assert_eq!(spoken_recording.duration_ms, 72_000);
+        assert_eq!(spoken_recording.file_name, "ja-1723800000000-abc124.aac");
+        assert_eq!(spoken.title.as_deref(), Some("Said it out loud"));
+        assert_eq!(filmed.recording.as_ref().unwrap().mime, "video/mp4");
+
+        // Both are in the one list, newest first, with nothing separating them.
+        let entries = rt.journal_entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.recording.is_some()));
+    }
+
+    #[tokio::test]
+    async fn a_recording_entry_without_a_file_or_a_mime_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+
+        // Nothing to play: an entry like this would draw a card over a file
+        // that does not exist, which reads as the app having lost a recording.
         assert!(matches!(
-            rt.add_journal_video(Some("titled"), "", None, a_recording("   ")),
+            rt.add_journal_recording(Some("titled"), "", None, a_recording("   ")),
             Err(UiError::Engine(_))
         ));
         // A path, not a name — the frontend's directory is not a suggestion.
         for escape in ["../../secrets.mp4", "sub/dir.mp4", "a\\b.mp4", "..mp4"] {
             assert!(
                 matches!(
-                    rt.add_journal_video(None, "", None, a_recording(escape)),
+                    rt.add_journal_recording(None, "", None, a_recording(escape)),
                     Err(UiError::Engine(_))
                 ),
                 "{escape} should not be accepted as a file name"
             );
         }
+        // No mime is no answer to "watched or listened to", and guessing here
+        // would draw a silent black rectangle over somebody's voice entry.
+        assert!(matches!(
+            rt.add_journal_recording(
+                None,
+                "",
+                None,
+                JournalRecordingDto {
+                    mime: "  ".into(),
+                    ..a_recording("jv-1-a.mp4")
+                },
+            ),
+            Err(UiError::Engine(_))
+        ));
         assert!(rt.journal_entries().unwrap().is_empty());
     }
 
@@ -12185,7 +12262,7 @@ mod tests {
         let rt = offline_runtime(&dir).await;
 
         let entry = rt
-            .add_journal_video(
+            .add_journal_recording(
                 Some("Untitled"),
                 "a few words too",
                 Some("🙂"),
@@ -12200,7 +12277,7 @@ mod tests {
         assert_eq!(renamed.title.as_deref(), Some("Sunday morning"));
         assert_eq!(renamed.text, entry.text);
         assert_eq!(renamed.mood, entry.mood);
-        assert_eq!(renamed.video, entry.video);
+        assert_eq!(renamed.recording, entry.recording);
         // Renaming is not writing: the entry keeps its place in the history.
         assert_eq!(renamed.created_at, entry.created_at);
 
@@ -12259,7 +12336,7 @@ mod tests {
         let (_hex, peer) = stranger();
 
         let entry = rt
-            .add_journal_video(Some("The walk"), "", Some("😕"), a_recording("jv-1-a.mp4"))
+            .add_journal_recording(Some("The walk"), "", Some("😕"), a_recording("jv-1-a.mp4"))
             .unwrap();
         assert!(matches!(
             rt.share_journal_entry(&peer, &entry.id).await,
@@ -12269,7 +12346,7 @@ mod tests {
 
         // A video entry the user *did* write words on shares those words.
         let with_words = rt
-            .add_journal_video(
+            .add_journal_recording(
                 Some("The walk"),
                 "said it out loud at last",
                 None,

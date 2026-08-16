@@ -11,12 +11,13 @@
 /// listen is worse than no mic button — the same "no fake switches" rule the
 /// Android settings screen already states about the mesh.
 ///
-/// **Video entries are shown here but not recorded here**, for the same reason
-/// and by the same rule (`docs/JOURNAL.md`): capture, the dedicated folder that
-/// keeps a recording out of the gallery, and the orphan sweep are all Android's,
-/// and the footage never leaves the device that made it — so there is nothing
-/// for this frontend to play even when it can see the entry. What it draws is
-/// the title and the clip's length, so a video entry is not a blank card.
+/// **Recording entries — voice and video alike — are shown here but not
+/// recorded here**, for the same reason and by the same rule
+/// (`docs/JOURNAL.md`): capture, the dedicated folders that keep a recording out
+/// of the gallery, and the orphan sweep are all Android's, and a recording never
+/// leaves the device that made it — so there is nothing for this frontend to
+/// play even when it can see the entry. What it draws is the title and the
+/// clip's length, so such an entry is not a blank card.
 library;
 
 import 'package:flutter/material.dart';
@@ -28,7 +29,7 @@ import '../state/content_providers.dart';
 import '../state/providers.dart';
 import '../util/display_name.dart';
 import '../util/journal_note.dart';
-import '../util/journal_video.dart';
+import '../util/journal_recording.dart';
 import '../widgets/app_chrome.dart';
 
 /// Self-reported mood markers, low → high. Stored as the emoji itself.
@@ -318,31 +319,33 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
       );
 }
 
-/// The one line a video entry draws in place of a player.
+/// The one line a recording entry draws in place of a player.
 ///
 /// Says what the entry is and how long the recording runs, and says plainly
-/// that the footage is on the phone that recorded it. Offering a play control
-/// that cannot play would be a fake switch; saying nothing at all would make a
-/// wordless video entry look like an empty card.
-class _VideoLine extends StatelessWidget {
-  const _VideoLine({required this.video});
+/// that it is on the phone that made it. Offering a play control that cannot
+/// play would be a fake switch; saying nothing at all would make a wordless
+/// voice or video entry look like an empty card.
+class _RecordingLine extends StatelessWidget {
+  const _RecordingLine({required this.recording});
 
-  final JournalVideoInfo video;
+  final JournalRecordingInfo recording;
 
   @override
   Widget build(BuildContext context) {
-    final String length = formatClipLength(video.durationMs);
-    final String size = formatClipSize(video.sizeBytes);
+    final bool spoken = recording.mime.startsWith('audio/');
+    final String kind = spoken ? 'Voice entry' : 'Video entry';
+    final String length = formatClipLength(recording.durationMs);
+    final String size = formatClipSize(recording.sizeBytes);
     final String detail = <String>[length, size]
         .where((String part) => part.isNotEmpty)
         .join(' · ');
     return Padding(
-      key: const Key('journal-video-line'),
+      key: const Key('journal-recording-line'),
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: <Widget>[
           Icon(
-            Icons.videocam_outlined,
+            spoken ? Icons.graphic_eq : Icons.videocam_outlined,
             size: 18,
             color: Theme.of(context).colorScheme.outline,
           ),
@@ -350,8 +353,8 @@ class _VideoLine extends StatelessWidget {
           Expanded(
             child: Text(
               detail.isEmpty
-                  ? 'Video entry — on the phone that recorded it'
-                  : 'Video entry · $detail — on the phone that recorded it',
+                  ? '$kind — on the phone that recorded it'
+                  : '$kind · $detail — on the phone that recorded it',
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
@@ -412,7 +415,8 @@ class _JournalEntryCard extends StatelessWidget {
                           .titleSmall
                           ?.copyWith(fontWeight: FontWeight.w600),
                     ),
-                  if (entry.video != null) _VideoLine(video: entry.video!),
+                  if (entry.recording != null)
+                    _RecordingLine(recording: entry.recording!),
                   // A video entry often has no words at all, and an empty Text
                   // still takes a line's worth of space.
                   if (entry.text.isNotEmpty)
