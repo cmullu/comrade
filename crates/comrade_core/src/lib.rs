@@ -23,6 +23,9 @@
  *   relay   — NIP-65 relay-list metadata + outbox-model routing
  *   media   — NIP-94/96 encrypted media staging + pluggable uploaders
  *   link    — sign a keyless client (a browser tab) in to a device holding the vault
+ *   travel  — where the locals eat, and what this place is: legendary-restaurant
+ *             ranking, attractions, and facts from one (deliberately blurred)
+ *             coordinate
  *
  * Store-and-forward, privacy, and anonymity primitives adapted from
  * permissionlesstech/bitchat (see `docs/BITCHAT_ADOPTION.md` for the full
@@ -76,6 +79,7 @@ pub mod share;
 pub mod tara;
 pub mod together;
 pub mod topic;
+pub mod travel;
 pub mod vault;
 
 pub use error::CoreError;

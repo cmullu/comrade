@@ -1183,3 +1183,36 @@ val MotorcycleIcon: ImageVector = materialIcon(name = "Filled.Motorcycle") {
         close()
     }
 }
+
+/**
+ * Material "explore" (filled) — a compass rose, for the Travel tab.
+ *
+ * A compass rather than a map pin or a fork: the tab is about *looking around
+ * where you already are*, not about navigating to somewhere or about food
+ * alone. A pin says "this is a location feature", which is what the permission
+ * dialog is for; a fork would misname the half of the tab that is museums and
+ * beaches.
+ */
+val ExploreIcon: ImageVector = materialIcon(name = "Filled.Explore") {
+    materialPath {
+        // The dial.
+        moveTo(12.0f, 10.9f)
+        curveTo(11.39f, 10.9f, 10.9f, 11.39f, 10.9f, 12.0f)
+        curveTo(10.9f, 12.61f, 11.39f, 13.1f, 12.0f, 13.1f)
+        curveTo(12.61f, 13.1f, 13.1f, 12.61f, 13.1f, 12.0f)
+        curveTo(13.1f, 11.39f, 12.61f, 10.9f, 12.0f, 10.9f)
+        close()
+        moveTo(12.0f, 2.0f)
+        curveTo(6.48f, 2.0f, 2.0f, 6.48f, 2.0f, 12.0f)
+        curveTo(2.0f, 17.52f, 6.48f, 22.0f, 12.0f, 22.0f)
+        curveTo(17.52f, 22.0f, 22.0f, 17.52f, 22.0f, 12.0f)
+        curveTo(22.0f, 6.48f, 17.52f, 2.0f, 12.0f, 2.0f)
+        close()
+        moveTo(14.19f, 14.19f)
+        lineTo(6.0f, 18.0f)
+        lineTo(9.81f, 9.81f)
+        lineTo(18.0f, 6.0f)
+        lineTo(14.19f, 14.19f)
+        close()
+    }
+}

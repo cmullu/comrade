@@ -768,6 +768,8 @@ pub enum _UiError {
     Catalogue(String),
     Download(String),
     CatalogueUnavailable,
+    Travel(String),
+    TravelUnavailable,
 }
 
 // ── Stateless helpers (no runtime needed) ────────────────────────────────────

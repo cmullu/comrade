@@ -6718,6 +6718,8 @@ extension UiErrorPatterns on UiError {
     TResult Function(UiError_Catalogue value)? catalogue,
     TResult Function(UiError_Download value)? download,
     TResult Function(UiError_CatalogueUnavailable value)? catalogueUnavailable,
+    TResult Function(UiError_Travel value)? travel,
+    TResult Function(UiError_TravelUnavailable value)? travelUnavailable,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -6744,6 +6746,10 @@ extension UiErrorPatterns on UiError {
         return download(_that);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable(_that);
+      case UiError_Travel() when travel != null:
+        return travel(_that);
+      case UiError_TravelUnavailable() when travelUnavailable != null:
+        return travelUnavailable(_that);
       case _:
         return orElse();
     }
@@ -6776,6 +6782,9 @@ extension UiErrorPatterns on UiError {
     required TResult Function(UiError_Download value) download,
     required TResult Function(UiError_CatalogueUnavailable value)
         catalogueUnavailable,
+    required TResult Function(UiError_Travel value) travel,
+    required TResult Function(UiError_TravelUnavailable value)
+        travelUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -6801,6 +6810,10 @@ extension UiErrorPatterns on UiError {
         return download(_that);
       case UiError_CatalogueUnavailable():
         return catalogueUnavailable(_that);
+      case UiError_Travel():
+        return travel(_that);
+      case UiError_TravelUnavailable():
+        return travelUnavailable(_that);
     }
   }
 
@@ -6829,6 +6842,8 @@ extension UiErrorPatterns on UiError {
     TResult? Function(UiError_Catalogue value)? catalogue,
     TResult? Function(UiError_Download value)? download,
     TResult? Function(UiError_CatalogueUnavailable value)? catalogueUnavailable,
+    TResult? Function(UiError_Travel value)? travel,
+    TResult? Function(UiError_TravelUnavailable value)? travelUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -6854,6 +6869,10 @@ extension UiErrorPatterns on UiError {
         return download(_that);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable(_that);
+      case UiError_Travel() when travel != null:
+        return travel(_that);
+      case UiError_TravelUnavailable() when travelUnavailable != null:
+        return travelUnavailable(_that);
       case _:
         return null;
     }
@@ -6884,6 +6903,8 @@ extension UiErrorPatterns on UiError {
     TResult Function(String field0)? catalogue,
     TResult Function(String field0)? download,
     TResult Function()? catalogueUnavailable,
+    TResult Function(String field0)? travel,
+    TResult Function()? travelUnavailable,
     required TResult orElse(),
   }) {
     final _that = this;
@@ -6910,6 +6931,10 @@ extension UiErrorPatterns on UiError {
         return download(_that.field0);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable();
+      case UiError_Travel() when travel != null:
+        return travel(_that.field0);
+      case UiError_TravelUnavailable() when travelUnavailable != null:
+        return travelUnavailable();
       case _:
         return orElse();
     }
@@ -6941,6 +6966,8 @@ extension UiErrorPatterns on UiError {
     required TResult Function(String field0) catalogue,
     required TResult Function(String field0) download,
     required TResult Function() catalogueUnavailable,
+    required TResult Function(String field0) travel,
+    required TResult Function() travelUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -6966,6 +6993,10 @@ extension UiErrorPatterns on UiError {
         return download(_that.field0);
       case UiError_CatalogueUnavailable():
         return catalogueUnavailable();
+      case UiError_Travel():
+        return travel(_that.field0);
+      case UiError_TravelUnavailable():
+        return travelUnavailable();
     }
   }
 
@@ -6994,6 +7025,8 @@ extension UiErrorPatterns on UiError {
     TResult? Function(String field0)? catalogue,
     TResult? Function(String field0)? download,
     TResult? Function()? catalogueUnavailable,
+    TResult? Function(String field0)? travel,
+    TResult? Function()? travelUnavailable,
   }) {
     final _that = this;
     switch (_that) {
@@ -7019,6 +7052,10 @@ extension UiErrorPatterns on UiError {
         return download(_that.field0);
       case UiError_CatalogueUnavailable() when catalogueUnavailable != null:
         return catalogueUnavailable();
+      case UiError_Travel() when travel != null:
+        return travel(_that.field0);
+      case UiError_TravelUnavailable() when travelUnavailable != null:
+        return travelUnavailable();
       case _:
         return null;
     }
@@ -7552,6 +7589,91 @@ class UiError_CatalogueUnavailable extends UiError {
   @override
   String toString() {
     return 'UiError.catalogueUnavailable()';
+  }
+}
+
+/// @nodoc
+
+class UiError_Travel extends UiError {
+  const UiError_Travel(this.field0) : super._();
+
+  final String field0;
+
+  /// Create a copy of UiError
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @pragma('vm:prefer-inline')
+  $UiError_TravelCopyWith<UiError_Travel> get copyWith =>
+      _$UiError_TravelCopyWithImpl<UiError_Travel>(this, _$identity);
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is UiError_Travel &&
+            (identical(other.field0, field0) || other.field0 == field0));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, field0);
+
+  @override
+  String toString() {
+    return 'UiError.travel(field0: $field0)';
+  }
+}
+
+/// @nodoc
+abstract mixin class $UiError_TravelCopyWith<$Res>
+    implements $UiErrorCopyWith<$Res> {
+  factory $UiError_TravelCopyWith(
+          UiError_Travel value, $Res Function(UiError_Travel) _then) =
+      _$UiError_TravelCopyWithImpl;
+  @useResult
+  $Res call({String field0});
+}
+
+/// @nodoc
+class _$UiError_TravelCopyWithImpl<$Res>
+    implements $UiError_TravelCopyWith<$Res> {
+  _$UiError_TravelCopyWithImpl(this._self, this._then);
+
+  final UiError_Travel _self;
+  final $Res Function(UiError_Travel) _then;
+
+  /// Create a copy of UiError
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  $Res call({
+    Object? field0 = null,
+  }) {
+    return _then(UiError_Travel(
+      null == field0
+          ? _self.field0
+          : field0 // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+
+class UiError_TravelUnavailable extends UiError {
+  const UiError_TravelUnavailable() : super._();
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is UiError_TravelUnavailable);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  String toString() {
+    return 'UiError.travelUnavailable()';
   }
 }
 

@@ -56,3 +56,9 @@ nip96-http = ["media-http"]
 # default for the same reason `media-http` is: a plain `cargo test` should not
 # build a TLS stack, and nothing in the default build reaches a third party.
 catalogue-http = ["dep:reqwest"]
+# Travel guide lookups (Overpass/OpenStreetMap, Google Places, Wikipedia). Off by
+# default for the same reason the two above are — and with one difference worth
+# noting: `travel.rs`'s request builders *and* its response parsers are compiled
+# unconditionally, so `cargo test --workspace` covers every fixture. Only the
+# socket is behind this flag.
+travel-http = ["dep:reqwest"]

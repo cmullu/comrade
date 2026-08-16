@@ -87,6 +87,11 @@ media-http = ["comrade_ui/media-http"]
 # a recording by name. The APK workflows pass `--features media-http,catalogue-http`;
 # the lean workspace test build leaves both off and exercises the offline paths.
 catalogue-http = ["comrade_ui/catalogue-http"]
+# Turn on the real Travel guide lookups so the shipped app's Travel tab can
+# actually reach OpenStreetMap, Wikipedia and (with the user's own key) Google
+# Places. The APK workflows pass it; without it `travel_guide` can only answer
+# `UiError::TravelUnavailable`, which is the honest failure and not a feature.
+travel-http = ["comrade_ui/travel-http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

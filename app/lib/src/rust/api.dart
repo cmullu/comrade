@@ -2351,6 +2351,10 @@ sealed class UiError with _$UiError implements FrbException {
     String field0,
   ) = UiError_Download;
   const factory UiError.catalogueUnavailable() = UiError_CatalogueUnavailable;
+  const factory UiError.travel(
+    String field0,
+  ) = UiError_Travel;
+  const factory UiError.travelUnavailable() = UiError_TravelUnavailable;
 }
 
 class UpiIntentDto {

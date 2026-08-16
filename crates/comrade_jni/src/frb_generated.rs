@@ -4253,6 +4253,10 @@ const _: fn() = || {
             let _: String = field0;
         }
         crate::api::UiError::CatalogueUnavailable => {}
+        crate::api::UiError::Travel(field0) => {
+            let _: String = field0;
+        }
+        crate::api::UiError::TravelUnavailable => {}
     }
     {
         let UpiIntentDto = None::<crate::api::UpiIntentDto>.unwrap();
@@ -6100,6 +6104,13 @@ impl SseDecode for crate::api::UiError {
             10 => {
                 return crate::api::UiError::CatalogueUnavailable;
             }
+            11 => {
+                let mut var_field0 = <String>::sse_decode(deserializer);
+                return crate::api::UiError::Travel(var_field0);
+            }
+            12 => {
+                return crate::api::UiError::TravelUnavailable;
+            }
             _ => {
                 unimplemented!("");
             }
@@ -7912,6 +7923,10 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::UiError> {
                 [9.into_dart(), field0.into_into_dart().into_dart()].into_dart()
             }
             crate::api::UiError::CatalogueUnavailable => [10.into_dart()].into_dart(),
+            crate::api::UiError::Travel(field0) => {
+                [11.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::UiError::TravelUnavailable => [12.into_dart()].into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -9451,6 +9466,13 @@ impl SseEncode for crate::api::UiError {
             }
             crate::api::UiError::CatalogueUnavailable => {
                 <i32>::sse_encode(10, serializer);
+            }
+            crate::api::UiError::Travel(field0) => {
+                <i32>::sse_encode(11, serializer);
+                <String>::sse_encode(field0, serializer);
+            }
+            crate::api::UiError::TravelUnavailable => {
+                <i32>::sse_encode(12, serializer);
             }
             _ => {
                 unimplemented!("");

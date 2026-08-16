@@ -37,6 +37,21 @@
         android:name="android.hardware.bluetooth_le"
         android:required="false" />
 
+    <!-- Travel tab: where the locals eat, and what this place is.
+
+         COARSE only, and that is the whole permission this feature asks for.
+         `comrade_core::travel` rounds whatever fix it is given to a ~150 m
+         geohash cell before a coordinate leaves the device, so FINE would be
+         asking for precision the app immediately throws away — the same
+         argument the BLE entries above make with `neverForLocation`, one step
+         further. A guide with a kilometre-wide radius does not need a satellite
+         lock, and the tab degrades to "location unavailable" rather than
+         nagging when the permission is refused. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-feature
+        android:name="android.hardware.location"
+        android:required="false" />
+
     <!-- "Hey Comrade" voice assistant: microphone + always-listening service -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
