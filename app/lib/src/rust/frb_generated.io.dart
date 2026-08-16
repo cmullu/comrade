@@ -61,6 +61,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityDto dco_decode_box_autoadd_identity_dto(dynamic raw);
 
   @protected
+  JournalEntryDto dco_decode_box_autoadd_journal_entry_dto(dynamic raw);
+
+  @protected
+  JournalVideoDto dco_decode_box_autoadd_journal_video_dto(dynamic raw);
+
+  @protected
   MediaBytesDto dco_decode_box_autoadd_media_bytes_dto(dynamic raw);
 
   @protected
@@ -197,6 +203,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   JournalEntryDto dco_decode_journal_entry_dto(dynamic raw);
 
   @protected
+  JournalVideoDto dco_decode_journal_video_dto(dynamic raw);
+
+  @protected
   KeypairDto dco_decode_keypair_dto(dynamic raw);
 
   @protected
@@ -297,6 +306,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IdentityDto? dco_decode_opt_box_autoadd_identity_dto(dynamic raw);
+
+  @protected
+  JournalEntryDto? dco_decode_opt_box_autoadd_journal_entry_dto(dynamic raw);
+
+  @protected
+  JournalVideoDto? dco_decode_opt_box_autoadd_journal_video_dto(dynamic raw);
 
   @protected
   MediaBytesDto? dco_decode_opt_box_autoadd_media_bytes_dto(dynamic raw);
@@ -479,6 +494,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityDto sse_decode_box_autoadd_identity_dto(SseDeserializer deserializer);
 
   @protected
+  JournalEntryDto sse_decode_box_autoadd_journal_entry_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  JournalVideoDto sse_decode_box_autoadd_journal_video_dto(
+      SseDeserializer deserializer);
+
+  @protected
   MediaBytesDto sse_decode_box_autoadd_media_bytes_dto(
       SseDeserializer deserializer);
 
@@ -628,6 +651,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   JournalEntryDto sse_decode_journal_entry_dto(SseDeserializer deserializer);
 
   @protected
+  JournalVideoDto sse_decode_journal_video_dto(SseDeserializer deserializer);
+
+  @protected
   KeypairDto sse_decode_keypair_dto(SseDeserializer deserializer);
 
   @protected
@@ -742,6 +768,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IdentityDto? sse_decode_opt_box_autoadd_identity_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  JournalEntryDto? sse_decode_opt_box_autoadd_journal_entry_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  JournalVideoDto? sse_decode_opt_box_autoadd_journal_video_dto(
       SseDeserializer deserializer);
 
   @protected
@@ -941,6 +975,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       IdentityDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_journal_entry_dto(
+      JournalEntryDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_journal_video_dto(
+      JournalVideoDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_media_bytes_dto(
       MediaBytesDto self, SseSerializer serializer);
 
@@ -1101,6 +1143,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       JournalEntryDto self, SseSerializer serializer);
 
   @protected
+  void sse_encode_journal_video_dto(
+      JournalVideoDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_keypair_dto(KeypairDto self, SseSerializer serializer);
 
   @protected
@@ -1224,6 +1270,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_identity_dto(
       IdentityDto? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_journal_entry_dto(
+      JournalEntryDto? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_journal_video_dto(
+      JournalVideoDto? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_media_bytes_dto(

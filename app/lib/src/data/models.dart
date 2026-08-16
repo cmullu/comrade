@@ -436,13 +436,47 @@ class JournalEntryInfo {
     required this.id,
     required this.text,
     required this.createdAt,
+    this.title,
     this.mood,
+    this.video,
   });
 
   final String id;
+
+  /// What the user called this entry, when they named it. Most typed entries
+  /// have none and are drawn from their text alone.
+  final String? title;
   final String text;
   final String? mood;
+
+  /// Set when the entry is a video journal recording — see [JournalVideoInfo].
+  final JournalVideoInfo? video;
   final int createdAt;
+}
+
+/// The recording behind a video journal entry.
+///
+/// **Recorded on Android; this frontend does not yet capture or play one**
+/// (`docs/JOURNAL.md`). [fileName] names a file in the *recording device's* own
+/// private journal-video folder, so it is meaningful only on the device that
+/// made it — the footage is never synchronised anywhere. What this model is
+/// for is making sure a video entry is still drawn as something, with its title
+/// and its length, rather than as a blank card with no text in it.
+@immutable
+class JournalVideoInfo {
+  const JournalVideoInfo({
+    required this.fileName,
+    required this.mime,
+    required this.durationMs,
+    required this.sizeBytes,
+  });
+
+  final String fileName;
+  final String mime;
+
+  /// Length in milliseconds, or zero when it could not be read.
+  final int durationMs;
+  final int sizeBytes;
 }
 
 /// One turn of the Tara thread.

@@ -143,6 +143,19 @@ class MainActivityUiTest {
         composeRule.onNodeWithText("Together").performClick()
         composeRule.waitForIdle()
 
+        // The Journal tab, and it has to stay up *past* its loads. Three
+        // separate effects land asynchronously here — the entry list, the
+        // attention mirror, and (since the video journal) the orphan sweep —
+        // and each one is a recomposition that a wrong group count would kill.
+        // A bare "the composer exists" assertion passes against that build,
+        // which is why this sits through them and asserts again afterwards.
+        composeRule.onNodeWithText("Journal").performClick()
+        composeRule.waitForIdle()
+        composeRule.waitUntil(timeoutMillis = 15_000) { hasTag("journal-input") }
+        Thread.sleep(1_500)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("journal-save").assertIsDisplayed()
+
         // Settings is a pushed screen now, reached from the navigation drawer
         // (Telegram-style) rather than a bottom-nav tab. The hamburger only
         // lives on the chat list, so return there before opening the drawer.

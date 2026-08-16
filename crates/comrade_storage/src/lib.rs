@@ -52,9 +52,9 @@ use zeroize::Zeroizing;
 pub use error::StorageError;
 pub use repository::{
     AttentionDay, AttentionPrefs, CallRecord, Chitthi, ChitthiCache, Contact, ConversationMeta,
-    FocusSession, JournalEntry, LedgerState, MessageReaction, PeerPresence, ReadingState,
-    SavedRead, SharePrefs, StoredIdentity, StoredMessage, StoredTask, StoredTopic, TaraMessage,
-    ThreadTopic, VaultCache,
+    FocusSession, JournalEntry, JournalVideo, LedgerState, MessageReaction, PeerPresence,
+    ReadingState, SavedRead, SharePrefs, StoredIdentity, StoredMessage, StoredTask, StoredTopic,
+    TaraMessage, ThreadTopic, VaultCache,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────

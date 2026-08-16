@@ -86,13 +86,13 @@ use comrade_ui::{
     AppAction, AttentionDayDto, AttentionSummaryDto, BridgeEvent, CallRecordDto, CallSessionDto,
     ChatCommand, ChitthiDto, CommandSpec, ComradeDto, ComradeRuntime, ContactDto, ConversationDto,
     CrisisResourceDto, DownloadVerdictDto, DownloadedTrackDto, FocusSessionDto, FoundProfileDto,
-    IceServerDto, IdentityDto, JournalEntryDto, LibraryCandidateDto, MediaBytesDto,
-    MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto, MessageRequestDto,
-    MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto,
-    PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict, SavedReadDto,
-    SavedReadSummaryDto, ShareVerdictDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto,
-    TaskState, ThreadDto, ThreadSummaryDto, TogetherSessionDto, TopicDto, TurnServerStatusDto,
-    UiError, UpiIntentDto, WorkspaceDto,
+    IceServerDto, IdentityDto, JournalEntryDto, JournalVideoDto, LibraryCandidateDto,
+    MediaBytesDto, MediaMessageDto, Mention, MentionMatchDto, MeshStatusDto, MessageDto,
+    MessageRequestDto, MetricDto, MusicService, OfferOutcomeDto, PeerProfileDto, PlayPlan,
+    PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict,
+    SavedReadDto, SavedReadSummaryDto, ShareVerdictDto, StretchStepDto, TaraChatDto,
+    TaraMessageDto, TaskDto, TaskState, ThreadDto, ThreadSummaryDto, TogetherSessionDto, TopicDto,
+    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1023,10 +1023,45 @@ impl Comrade {
             .add_journal_entry(&text, mood.as_deref())
     }
 
+    /// Save a video journal entry over a recording the frontend has already
+    /// written to its own journal-video directory.
+    ///
+    /// The core never touches the file. Deleting the entry
+    /// ([`Comrade::delete_journal_entry`]) removes the record and leaves the
+    /// footage for the caller to delete — see `JournalVideoDto`.
+    pub fn add_journal_video(
+        &self,
+        title: Option<String>,
+        text: String,
+        mood: Option<String>,
+        video: JournalVideoDto,
+    ) -> Result<JournalEntryDto, UiError> {
+        self.inner.blocking_read().add_journal_video(
+            title.as_deref(),
+            &text,
+            mood.as_deref(),
+            video,
+        )
+    }
+
+    /// Rename an entry, or clear the title with `None`. Returns `None` when no
+    /// entry has that id. Nothing but the title changes.
+    pub fn set_journal_entry_title(
+        &self,
+        id: String,
+        title: Option<String>,
+    ) -> Result<Option<JournalEntryDto>, UiError> {
+        self.inner
+            .blocking_read()
+            .set_journal_entry_title(&id, title.as_deref())
+    }
+
     pub fn journal_entries(&self) -> Result<Vec<JournalEntryDto>, UiError> {
         self.inner.blocking_read().journal_entries()
     }
 
+    /// Remove an entry. For a video entry this removes the record only — the
+    /// caller owns the file and must delete it too.
     pub fn delete_journal_entry(&self, id: String) -> Result<bool, UiError> {
         self.inner.blocking_read().delete_journal_entry(&id)
     }

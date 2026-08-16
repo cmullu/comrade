@@ -80,12 +80,12 @@ pub use comrade_core::together::{MusicLink, Recording, StateChange, SyncVerdict,
 pub use comrade_ui::{
     AttachmentHandoffDto, BridgeEvent, CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto,
     ComradeDto, ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, FoundProfileDto,
-    IceServerDto, IdentityDto, JournalEntryDto, MediaBytesDto, MediaMessageDto, MeshStatusDto,
-    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, PeerProfileDto, PresenceDto,
-    ProfileDto, ReactionDto, RideSignalDto, ShareVerdictDto, SharedNoteDto, TaraMessageDto,
-    ThreadDto, ThreadSummaryDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
-    TogetherSessionDto, TogetherShareDto, TopicDto, TurnServerStatusDto, UiError, UpiIntentDto,
-    WorkspaceDto,
+    IceServerDto, IdentityDto, JournalEntryDto, JournalVideoDto, MediaBytesDto, MediaMessageDto,
+    MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto, MetricDto, PeerProfileDto,
+    PresenceDto, ProfileDto, ReactionDto, RideSignalDto, ShareVerdictDto, SharedNoteDto,
+    TaraMessageDto, ThreadDto, ThreadSummaryDto, TogetherCommandDto, TogetherCorrectionDto,
+    TogetherInviteDto, TogetherSessionDto, TogetherShareDto, TopicDto, TurnServerStatusDto,
+    UiError, UpiIntentDto, WorkspaceDto,
 };
 
 /// The process-global runtime every function in this module reads.
@@ -320,9 +320,19 @@ pub struct _MetricDto {
 #[frb(mirror(JournalEntryDto))]
 pub struct _JournalEntryDto {
     pub id: String,
+    pub title: Option<String>,
     pub text: String,
     pub mood: Option<String>,
+    pub video: Option<JournalVideoDto>,
     pub created_at: u64,
+}
+
+#[frb(mirror(JournalVideoDto))]
+pub struct _JournalVideoDto {
+    pub file_name: String,
+    pub mime: String,
+    pub duration_ms: u64,
+    pub size_bytes: u64,
 }
 
 #[frb(mirror(TaraMessageDto))]
@@ -1276,10 +1286,38 @@ pub fn add_journal_entry(text: String, mood: Option<String>) -> Result<JournalEn
         .add_journal_entry(&text, mood.as_deref())
 }
 
+/// Save a video journal entry over a recording the frontend has already written
+/// to its own journal-video directory. The core never opens, moves or deletes
+/// that file — see `JournalVideoDto` for the split and what it costs.
+pub fn add_journal_video(
+    title: Option<String>,
+    text: String,
+    mood: Option<String>,
+    video: JournalVideoDto,
+) -> Result<JournalEntryDto, UiError> {
+    runtime()
+        .blocking_read()
+        .add_journal_video(title.as_deref(), &text, mood.as_deref(), video)
+}
+
+/// Rename an entry, or clear the title with `None`. `None` back means no entry
+/// has that id. Only the title changes — not the words, the mood, the recording
+/// or when it was written.
+pub fn set_journal_entry_title(
+    id: String,
+    title: Option<String>,
+) -> Result<Option<JournalEntryDto>, UiError> {
+    runtime()
+        .blocking_read()
+        .set_journal_entry_title(&id, title.as_deref())
+}
+
 pub fn journal_entries() -> Result<Vec<JournalEntryDto>, UiError> {
     runtime().blocking_read().journal_entries()
 }
 
+/// Remove an entry. For a video entry this removes the record only: the file is
+/// the frontend's and the frontend must delete it too.
 pub fn delete_journal_entry(id: String) -> Result<bool, UiError> {
     runtime().blocking_read().delete_journal_entry(&id)
 }

@@ -1037,9 +1037,18 @@ ChitthiInfo _chitthi(rust.ChitthiDto dto) => ChitthiInfo(
 
 JournalEntryInfo _journalEntry(rust.JournalEntryDto dto) => JournalEntryInfo(
       id: dto.id,
+      title: dto.title,
       text: dto.text,
       mood: dto.mood,
+      video: dto.video == null ? null : _journalVideo(dto.video!),
       createdAt: dto.createdAt.toInt(),
+    );
+
+JournalVideoInfo _journalVideo(rust.JournalVideoDto dto) => JournalVideoInfo(
+      fileName: dto.fileName,
+      mime: dto.mime,
+      durationMs: dto.durationMs.toInt(),
+      sizeBytes: dto.sizeBytes.toInt(),
     );
 
 TaraMessageInfo _taraMessage(rust.TaraMessageDto dto) => TaraMessageInfo(

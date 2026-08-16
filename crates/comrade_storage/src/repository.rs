@@ -255,11 +255,56 @@ pub struct MessageReaction {
 pub struct JournalEntry {
     /// Store key. Zero-padded-timestamp-prefixed so ids sort chronologically.
     pub id: String,
+    /// What the entry is called, when the user gave it a name. Optional
+    /// because most typed entries never had one and must keep reading after
+    /// the field arrived — a note is its text first, and a title second.
+    #[serde(default)]
+    pub title: Option<String>,
     pub text: String,
     /// Optional self-reported mood marker (an emoji or short tag).
     #[serde(default)]
     pub mood: Option<String>,
+    /// Set when the entry is a recorded video rather than (or as well as)
+    /// written words. See [`JournalVideo`] for what is and is not sealed.
+    #[serde(default)]
+    pub video: Option<JournalVideo>,
     pub created_at: u64,
+}
+
+/// A video journal recording, as the store knows it.
+///
+/// **The store holds the description, not the footage.** Everything in this
+/// struct is sealed with the rest of the entry — the title, the length, when it
+/// was taken — but the video file itself is far too large to keep as a redb
+/// value, so it lives on the frontend's own disk and this record only names it.
+///
+/// That split is deliberate and it has a cost worth stating plainly rather than
+/// leaving to be discovered: the words are protected by the vault passcode and
+/// the footage is not. The footage is protected by the platform's app sandbox
+/// and whatever full-disk encryption the device has — real protection, but a
+/// different and weaker promise than the one the rest of the journal makes.
+/// Tracked as AUDIT J-1; nothing in this crate may describe the footage as
+/// sealed until that closes.
+///
+/// [`file_name`](Self::file_name) is a bare name and never a path. The
+/// directory is the frontend's decision (`filesDir/journal-videos` on Android),
+/// so a record does not go stale when an OS moves an app's private storage —
+/// and so the store never learns a filesystem layout it has no business
+/// knowing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalVideo {
+    /// Name of the file inside the frontend's journal-video directory.
+    pub file_name: String,
+    /// The recording's MIME type, e.g. `video/mp4`.
+    pub mime: String,
+    /// How long the recording runs, in milliseconds. Zero when the frontend
+    /// could not read it — a length of zero must render as "unknown", never
+    /// as an empty clip.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Size of the file on disk in bytes, as it was when the entry was saved.
+    #[serde(default)]
+    pub size_bytes: u64,
 }
 
 /// One turn of the Tara reflective-companion conversation — the user's message
@@ -1641,8 +1686,10 @@ mod tests {
         ] {
             s.save_journal_entry(&JournalEntry {
                 id: id.into(),
+                title: None,
                 text: text.into(),
                 mood: mood.map(String::from),
+                video: None,
                 created_at: at,
             })
             .unwrap();
@@ -1661,6 +1708,107 @@ mod tests {
     }
 
     #[test]
+    fn journal_video_entry_roundtrips() {
+        let (_d, s) = store();
+        let entry = JournalEntry {
+            id: "00000000000000000042-vvvv".into(),
+            title: Some("The walk after the argument".into()),
+            text: String::new(),
+            mood: Some("😕".into()),
+            video: Some(JournalVideo {
+                file_name: "jv-1723800000000-abc123.mp4".into(),
+                mime: "video/mp4".into(),
+                duration_ms: 47_000,
+                size_bytes: 12_345_678,
+            }),
+            created_at: 42,
+        };
+        s.save_journal_entry(&entry).unwrap();
+        assert_eq!(s.journal_entry(&entry.id).unwrap().as_ref(), Some(&entry));
+        // …and it comes back through the list read, not just the keyed one:
+        // the video screen renders from `journal_entries`.
+        assert_eq!(s.journal_entries().unwrap(), vec![entry]);
+    }
+
+    #[test]
+    fn journal_entry_written_before_titles_still_reads() {
+        // Entries are serde_json values sealed one at a time, so a store that
+        // predates `title`/`video` holds rows without those keys. They must
+        // keep opening: the alternative is a journal that silently loses every
+        // entry someone wrote before this feature shipped.
+        let (_d, s) = store();
+        s.put(
+            JOURNAL_TREE,
+            "00000000000000000007-old",
+            &serde_json::json!({
+                "id": "00000000000000000007-old",
+                "text": "written before the fields existed",
+                "mood": "🙂",
+                "created_at": 7,
+            }),
+        )
+        .unwrap();
+        let entries = s.journal_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "written before the fields existed");
+        assert_eq!(entries[0].mood.as_deref(), Some("🙂"));
+        assert_eq!(entries[0].title, None);
+        assert_eq!(entries[0].video, None);
+    }
+
+    #[test]
+    fn journal_video_title_never_plaintext_at_rest() {
+        // A video's *title* is as revealing as an entry's text — often more so,
+        // because it is the one line someone writes to find the clip again. It
+        // gets the same ciphertext-on-disk guarantee, proven the same way as
+        // `journal_text_never_plaintext_at_rest`.
+        let dir = TempDir::new().unwrap();
+        let secret_title = "the-conversation-i-could-not-have-0123456789";
+        {
+            let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+            s.save_journal_entry(&JournalEntry {
+                id: "00000000000000000001-test".into(),
+                title: Some(secret_title.into()),
+                text: String::new(),
+                mood: None,
+                video: Some(JournalVideo {
+                    file_name: "jv-1-a.mp4".into(),
+                    mime: "video/mp4".into(),
+                    duration_ms: 1_000,
+                    size_bytes: 2_048,
+                }),
+                created_at: 1,
+            })
+            .unwrap();
+            s.flush().unwrap();
+        }
+        let mut leaked = false;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if bytes
+                        .windows(secret_title.len())
+                        .any(|w| w == secret_title.as_bytes())
+                    {
+                        leaked = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            !leaked,
+            "a video journal title must never hit disk in plaintext"
+        );
+
+        let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
+        assert_eq!(
+            s.journal_entries().unwrap()[0].title.as_deref(),
+            Some(secret_title)
+        );
+    }
+
+    #[test]
     fn journal_text_never_plaintext_at_rest() {
         // The journal holds the most sensitive words a user writes — prove the
         // entry body is ciphertext on disk, same guarantee as the nsec test.
@@ -1670,8 +1818,10 @@ mod tests {
             let s = EncryptedStore::open(dir.path(), "passphrase").unwrap();
             s.save_journal_entry(&JournalEntry {
                 id: "00000000000000000001-test".into(),
+                title: None,
                 text: secret_thought.into(),
                 mood: None,
+                video: None,
                 created_at: 1,
             })
             .unwrap();

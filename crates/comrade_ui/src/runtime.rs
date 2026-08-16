@@ -1630,18 +1630,70 @@ struct PeerProfilePatch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct JournalEntryDto {
     pub id: String,
+    /// What the user called this entry, when they named it. Most typed entries
+    /// have no title and are drawn from their text alone.
+    pub title: Option<String>,
     pub text: String,
     /// Optional self-reported mood marker (an emoji or short tag).
     pub mood: Option<String>,
+    /// Present when this entry is a video journal recording.
+    pub video: Option<JournalVideoDto>,
     pub created_at: u64,
+}
+
+/// A video journal recording as the frontend sees it.
+///
+/// The runtime never opens the file and never reads a frame: it stores what the
+/// frontend told it about the recording and hands the same description back.
+/// Everything about where the footage lives — which directory, whether the
+/// gallery can see it, when it is deleted — is the frontend's, because it is a
+/// platform question and each frontend answers it differently.
+///
+/// Read [`comrade_storage::JournalVideo`] before writing any copy about this:
+/// the description here is sealed by the vault, the footage is not (AUDIT J-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct JournalVideoDto {
+    /// Name of the file inside the frontend's own journal-video directory —
+    /// a bare name, never a path.
+    pub file_name: String,
+    /// The recording's MIME type, e.g. `video/mp4`.
+    pub mime: String,
+    /// Length in milliseconds, or zero when the frontend could not read one.
+    pub duration_ms: u64,
+    /// Size on disk in bytes when the entry was saved.
+    pub size_bytes: u64,
+}
+
+impl From<comrade_storage::JournalVideo> for JournalVideoDto {
+    fn from(v: comrade_storage::JournalVideo) -> Self {
+        Self {
+            file_name: v.file_name,
+            mime: v.mime,
+            duration_ms: v.duration_ms,
+            size_bytes: v.size_bytes,
+        }
+    }
+}
+
+impl From<JournalVideoDto> for comrade_storage::JournalVideo {
+    fn from(v: JournalVideoDto) -> Self {
+        Self {
+            file_name: v.file_name,
+            mime: v.mime,
+            duration_ms: v.duration_ms,
+            size_bytes: v.size_bytes,
+        }
+    }
 }
 
 impl From<comrade_storage::JournalEntry> for JournalEntryDto {
     fn from(e: comrade_storage::JournalEntry) -> Self {
         Self {
             id: e.id,
+            title: e.title,
             text: e.text,
             mood: e.mood,
+            video: e.video.map(JournalVideoDto::from),
             created_at: e.created_at,
         }
     }
@@ -4571,11 +4623,13 @@ impl ComradeRuntime {
         let created_at = now_secs();
         let entry = comrade_storage::JournalEntry {
             id: timestamped_store_id(created_at),
+            title: None,
             text: text.to_string(),
             mood: mood
                 .map(str::trim)
                 .filter(|m| !m.is_empty())
                 .map(String::from),
+            video: None,
             created_at,
         };
         store
@@ -4583,6 +4637,94 @@ impl ComradeRuntime {
             .and_then(|()| store.flush())
             .map_err(|e| UiError::Storage(e.to_string()))?;
         Ok(entry.into())
+    }
+
+    /// Save a video journal entry: a recording the frontend has already put on
+    /// disk, plus the title, words and mood that go with it.
+    ///
+    /// Separate from [`Self::add_journal_entry`] rather than a widened version
+    /// of it, because the two have genuinely different rules. A typed entry is
+    /// its text and is rejected empty; a video entry *is* the recording, so
+    /// empty text is the normal case and it is the [`JournalVideoDto::file_name`]
+    /// that may not be blank. Folding them together would mean one function
+    /// that validates neither properly.
+    ///
+    /// The runtime does not create, move, verify or delete the file. The caller
+    /// wrote it somewhere of the caller's choosing and is the only party that
+    /// can clean it up — which is also why [`Self::delete_journal_entry`]
+    /// removes the record and leaves the footage to the frontend.
+    ///
+    /// Strictly local, exactly like the rest of the journal. There is no share
+    /// path for a video entry: [`Self::share_journal_entry`] sends text, and a
+    /// note whose text is empty has nothing to send.
+    pub fn add_journal_video(
+        &self,
+        title: Option<&str>,
+        text: &str,
+        mood: Option<&str>,
+        video: JournalVideoDto,
+    ) -> Result<JournalEntryDto, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let file_name = video.file_name.trim();
+        if file_name.is_empty() {
+            return Err(UiError::Engine("journal video has no file".into()));
+        }
+        // A name with a separator in it is a path, and a path is how one
+        // frontend's record reaches outside the directory another frontend
+        // chose for it. Refuse rather than normalise: there is no correct
+        // reading of `../../secrets.mp4` to recover.
+        if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+            return Err(UiError::Engine(
+                "journal video file name must be a bare name".into(),
+            ));
+        }
+        let created_at = now_secs();
+        let entry = comrade_storage::JournalEntry {
+            id: timestamped_store_id(created_at),
+            title: clean_optional(title),
+            text: text.trim().to_string(),
+            mood: clean_optional(mood),
+            video: Some(comrade_storage::JournalVideo {
+                file_name: file_name.to_string(),
+                ..video.into()
+            }),
+            created_at,
+        };
+        store
+            .save_journal_entry(&entry)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(entry.into())
+    }
+
+    /// Rename a journal entry, or clear its title with `None`/an empty string.
+    ///
+    /// Returns the updated entry, or `None` when no entry has that id — the
+    /// same shape [`Self::delete_journal_entry`] uses for "there was nothing
+    /// there", so a stale list on screen fails the same quiet way twice.
+    ///
+    /// Only the title changes. Retitling is not a rewrite: the words, the mood,
+    /// the recording and the time it was written all stay as they were, and in
+    /// particular `created_at` is untouched so renaming an entry does not move
+    /// it to the top of the user's own history.
+    pub fn set_journal_entry_title(
+        &self,
+        id: &str,
+        title: Option<&str>,
+    ) -> Result<Option<JournalEntryDto>, UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        let Some(mut entry) = store
+            .journal_entry(id)
+            .map_err(|e| UiError::Storage(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        entry.title = clean_optional(title);
+        store
+            .save_journal_entry(&entry)
+            .and_then(|()| store.flush())
+            .map_err(|e| UiError::Storage(e.to_string()))?;
+        Ok(Some(entry.into()))
     }
 
     /// All journal entries, newest first.
@@ -4597,6 +4739,11 @@ impl ComradeRuntime {
     }
 
     /// Delete a journal entry by id. Returns whether one existed.
+    ///
+    /// Removes the record only. For a video entry the footage is the
+    /// frontend's file in the frontend's directory (see [`JournalVideoDto`]),
+    /// and the frontend must delete it — this call cannot, and a caller that
+    /// forgets leaves an orphan the user has no way to see or remove.
     pub fn delete_journal_entry(&self, id: &str) -> Result<bool, UiError> {
         let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
         let removed = store
@@ -7168,6 +7315,17 @@ impl RuntimeHandles {
             // Deleted between opening the picker and choosing somebody. Say so
             // rather than sending a card with nothing in it.
             .ok_or_else(|| UiError::Engine("that journal entry is gone".into()))?;
+        // What travels is the words. A video entry's recording has no share
+        // path at all — nothing here uploads a file — so an entry that is only
+        // a recording has nothing to send, and sending the mood marker alone
+        // would put a card in someone's chat that says less than nothing about
+        // what was actually shared.
+        if entry.text.trim().is_empty() {
+            return Err(UiError::Engine(
+                "that entry has no words to send — sharing sends what you wrote, not a recording"
+                    .into(),
+            ));
+        }
         let line = comrade_core::note::journal_note_line(&entry.text, entry.mood.as_deref());
         self.send_dm(peer, &line).await
     }
@@ -8255,6 +8413,18 @@ fn iso_date(unix_secs: u64) -> String {
 fn timestamped_store_id(created_at: u64) -> String {
     let tail = nostr_sdk::prelude::Keys::generate().public_key().to_hex();
     format!("{created_at:020}-{}", &tail[..12])
+}
+
+/// A trimmed optional field, with whitespace-only treated as absent.
+///
+/// A title of `"   "` is a user who tapped save on an empty box, not a user who
+/// named something; storing it would put a blank line where the frontend draws
+/// a heading and make "has a title" answer yes.
+fn clean_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from)
 }
 
 /// This identity's own bio, from the settings tree.
@@ -11946,6 +12116,119 @@ mod tests {
         assert_eq!(thread[0].content, note.text);
     }
 
+    /// A recording the frontend claims to have written, for the tests below.
+    fn a_recording(file_name: &str) -> JournalVideoDto {
+        JournalVideoDto {
+            file_name: file_name.into(),
+            mime: "video/mp4".into(),
+            duration_ms: 47_000,
+            size_bytes: 12_345_678,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_video_entry_keeps_its_title_and_needs_no_words() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+
+        let entry = rt
+            .add_journal_video(
+                Some("  The walk after the argument  "),
+                "   ",
+                Some("😕"),
+                a_recording("jv-1723800000000-abc123.mp4"),
+            )
+            .unwrap();
+
+        // Empty text is the normal case for a video entry, unlike a typed one.
+        assert_eq!(entry.text, "");
+        assert_eq!(entry.title.as_deref(), Some("The walk after the argument"));
+        assert_eq!(entry.mood.as_deref(), Some("😕"));
+        assert_eq!(
+            entry.video.as_ref().unwrap().file_name,
+            "jv-1723800000000-abc123.mp4"
+        );
+        assert_eq!(entry.video.as_ref().unwrap().duration_ms, 47_000);
+
+        // …and it is in the one list the journal screen reads, alongside
+        // typed entries rather than in a second place of its own.
+        assert_eq!(rt.journal_entries().unwrap(), vec![entry]);
+    }
+
+    #[tokio::test]
+    async fn a_video_entry_without_a_file_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+
+        // Nothing to play: an entry like this would draw a video card over a
+        // file that does not exist, which reads as footage the app has lost.
+        assert!(matches!(
+            rt.add_journal_video(Some("titled"), "", None, a_recording("   ")),
+            Err(UiError::Engine(_))
+        ));
+        // A path, not a name — the frontend's directory is not a suggestion.
+        for escape in ["../../secrets.mp4", "sub/dir.mp4", "a\\b.mp4", "..mp4"] {
+            assert!(
+                matches!(
+                    rt.add_journal_video(None, "", None, a_recording(escape)),
+                    Err(UiError::Engine(_))
+                ),
+                "{escape} should not be accepted as a file name"
+            );
+        }
+        assert!(rt.journal_entries().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retitling_an_entry_changes_only_its_title() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+
+        let entry = rt
+            .add_journal_video(
+                Some("Untitled"),
+                "a few words too",
+                Some("🙂"),
+                a_recording("jv-1-a.mp4"),
+            )
+            .unwrap();
+
+        let renamed = rt
+            .set_journal_entry_title(&entry.id, Some("  Sunday morning  "))
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.title.as_deref(), Some("Sunday morning"));
+        assert_eq!(renamed.text, entry.text);
+        assert_eq!(renamed.mood, entry.mood);
+        assert_eq!(renamed.video, entry.video);
+        // Renaming is not writing: the entry keeps its place in the history.
+        assert_eq!(renamed.created_at, entry.created_at);
+
+        // Whitespace clears the title rather than storing a blank heading.
+        let cleared = rt
+            .set_journal_entry_title(&entry.id, Some("   "))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.title, None);
+        assert_eq!(
+            rt.set_journal_entry_title(&entry.id, None)
+                .unwrap()
+                .unwrap()
+                .title,
+            None
+        );
+
+        // …and the change is what the list reads back, not just what the call
+        // returned.
+        assert_eq!(rt.journal_entries().unwrap()[0].title, None);
+
+        // A stale list on screen retitles nothing and says so.
+        assert!(rt
+            .set_journal_entry_title("00000000000000000001-gone", Some("x"))
+            .unwrap()
+            .is_none());
+    }
+
     #[tokio::test]
     async fn sharing_a_note_leaves_the_journal_exactly_as_it_was() {
         // Sharing is a copy. The entry is not marked, not moved, and deleting it
@@ -11964,6 +12247,42 @@ mod tests {
         let thread = rt.messages_with(&peer).unwrap();
         assert_eq!(thread.len(), 1);
         assert_eq!(thread[0].shared_note.as_ref().unwrap().text, "a hard week");
+    }
+
+    #[tokio::test]
+    async fn a_recording_has_no_share_path_and_says_so() {
+        // Sharing sends the words. Nothing in this app uploads a journal
+        // recording, so an entry that is only a recording must fail loudly
+        // rather than put a card carrying just a mood in somebody's chat.
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let (_hex, peer) = stranger();
+
+        let entry = rt
+            .add_journal_video(Some("The walk"), "", Some("😕"), a_recording("jv-1-a.mp4"))
+            .unwrap();
+        assert!(matches!(
+            rt.share_journal_entry(&peer, &entry.id).await,
+            Err(UiError::Engine(_))
+        ));
+        assert!(rt.messages_with(&peer).unwrap().is_empty());
+
+        // A video entry the user *did* write words on shares those words.
+        let with_words = rt
+            .add_journal_video(
+                Some("The walk"),
+                "said it out loud at last",
+                None,
+                a_recording("jv-2-b.mp4"),
+            )
+            .unwrap();
+        rt.share_journal_entry(&peer, &with_words.id).await.unwrap();
+        let thread = rt.messages_with(&peer).unwrap();
+        assert_eq!(thread.len(), 1);
+        assert_eq!(
+            thread[0].shared_note.as_ref().unwrap().text,
+            "said it out loud at last"
+        );
     }
 
     #[tokio::test]

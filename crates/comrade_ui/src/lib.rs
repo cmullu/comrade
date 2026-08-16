@@ -74,12 +74,12 @@ pub use runtime::{
     CallRecordDto, CallSessionDto, CallSignalDto, ChitthiDto, ComradeDto, ComradeRuntime,
     ContactDto, ConversationDto, CrisisResourceDto, DirectMessageDto, DownloadVerdictDto,
     DownloadedTrackDto, FocusSessionDto, FoundProfileDto, IceServerDto, JournalEntryDto,
-    LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto, MeshStatusDto,
-    MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto, PeerProfileDto,
-    PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, RideSignalDto,
-    RuntimeHandles, SakhaStatusDto, SavedReadDto, SavedReadSummaryDto, ShareVerdictDto,
-    SharedNoteDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto, ThreadDto,
-    ThreadSummaryDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
+    JournalVideoDto, LibraryCandidateDto, MediaBytesDto, MediaMessageDto, MentionMatchDto,
+    MeshStatusDto, MessageAuthor, MessageDto, MessageRequestDto, MetricDto, OfferOutcomeDto,
+    PeerProfileDto, PlayPlan, PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto,
+    RideSignalDto, RuntimeHandles, SakhaStatusDto, SavedReadDto, SavedReadSummaryDto,
+    ShareVerdictDto, SharedNoteDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto,
+    ThreadDto, ThreadSummaryDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
     TogetherSessionDto, TogetherShareDto, TopicDto, TurnServerStatusDto,
 };
 
