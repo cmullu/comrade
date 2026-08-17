@@ -68,6 +68,9 @@ pub use runtime::play_route;
 // The catalogue rung: one network call and one pure decision, both free
 // functions so no caller can hold a lock across the lookup (see their docs).
 pub use runtime::{audio_plan, catalogue_lookup, download_track, download_verdict};
+// The travel guide: one network call, deliberately a free function so no caller
+// can hold the runtime lock across three round trips (see its doc).
+pub use runtime::{travel_guide, TravelCache, TRAVEL_NO_KEY_NOTICE};
 
 pub use runtime::{
     AttachmentHandoffDto, AttentionDayDto, AttentionSummaryDto, BleRouter, BridgeEvent,
@@ -80,7 +83,8 @@ pub use runtime::{
     RideSignalDto, RuntimeHandles, SakhaStatusDto, SavedReadDto, SavedReadSummaryDto,
     ShareVerdictDto, SharedNoteDto, StretchStepDto, TaraChatDto, TaraMessageDto, TaskDto,
     ThreadDto, ThreadSummaryDto, TogetherCommandDto, TogetherCorrectionDto, TogetherInviteDto,
-    TogetherSessionDto, TogetherShareDto, TopicDto, TurnServerStatusDto,
+    TogetherSessionDto, TogetherShareDto, TopicDto, TravelFactDto, TravelGuideDto, TravelPlaceDto,
+    TurnServerStatusDto,
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────────
@@ -133,6 +137,20 @@ pub enum UiError {
     /// search, not that the search found nothing.
     #[error("this build has no catalogue support — rebuild with the `catalogue-http` feature")]
     CatalogueUnavailable,
+
+    /// A travel lookup failed outright — every provider refused, and there was
+    /// no cached guide for this cell to fall back to. Partial failures are
+    /// *not* this: they arrive as [`runtime::TravelGuideDto::notice`], because a
+    /// guide missing only its ratings is still worth reading.
+    #[error("travel lookup failed: {0}")]
+    Travel(String),
+
+    /// Same argument as [`Self::CatalogueUnavailable`], one feature over: this
+    /// build was compiled without `travel-http`, so it cannot reach a places
+    /// provider at all. An empty guide would read as "there is nothing near
+    /// you", which is a wrong answer produced silently.
+    #[error("this build has no travel support — rebuild with the `travel-http` feature")]
+    TravelUnavailable,
 }
 
 // ── DTOs (serializable across any IPC/FFI boundary) ──────────────────────────────

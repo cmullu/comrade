@@ -706,6 +706,12 @@ String describeUiError(rust.UiError error) => switch (error) {
       // Cargo feature is off is a wrong answer delivered confidently.
       rust.UiError_CatalogueUnavailable() =>
         'This build cannot search for music.',
+      rust.UiError_Travel(:final String field0) => field0,
+      // Same argument one feature over: "there is nothing near you" and "this
+      // build cannot look places up" are different answers, and only one of
+      // them is about the neighbourhood.
+      rust.UiError_TravelUnavailable() =>
+        'This build cannot look up places nearby.',
     };
 
 /// `"audio"`/`"video"` — the wire strings the rest of the app already speaks.

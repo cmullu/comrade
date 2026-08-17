@@ -131,11 +131,13 @@ jobs:
         # so the shipped APK can actually send and receive attachments.
         # catalogue-http turns on the recording lookup Together's search needs;
         # the feature being off is what makes a search box unable to search.
+        # travel-http turns on the Travel tab's place lookups (OpenStreetMap,
+        # Wikipedia, and Google Places when the user has supplied a key).
         run: |
           cargo ndk \
             --target ${{ matrix.target }} \
             --output-dir android/app/src/main/jniLibs \
-            -- build --release -p comrade_jni --features media-http,catalogue-http
+            -- build --release -p comrade_jni --features media-http,catalogue-http,travel-http
 
       - name: Upload JNI .so artifact
         uses: actions/upload-artifact@v4

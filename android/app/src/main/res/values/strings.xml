@@ -883,4 +883,34 @@
     <!-- Said once, where it matters: the mode is only honest if the driver is
          not reading. -->
     <string name="ride_driver_note">Keep your eyes up. Anything urgent is spoken and buzzed \u2014 you don\u2019t need to look at this.</string>
+
+    <!-- ── Travel tab (docs/TRAVEL.md) ─────────────────────────────────── -->
+    <string name="travel_tab">Travel</string>
+    <string name="travel_eat_heading">Where the locals eat</string>
+    <string name="travel_do_heading">Things to do</string>
+    <string name="travel_facts_heading">About this place</string>
+    <string name="travel_need_permission">Comrade needs your approximate location to find what\u2019s worth eating and seeing around you.</string>
+    <string name="travel_grant_location">Use my location</string>
+    <string name="travel_permission_denied">Location is off, so there is nothing to look around. You can turn it on in Android settings.</string>
+    <!-- Said plainly rather than as a spinner that never stops: the three
+         reasons a fix does not arrive all need the same next step. -->
+    <string name="travel_no_fix">Couldn\u2019t get a location fix. Step outside or turn location on, then try again.</string>
+    <string name="travel_locating">Finding where you are\u2026</string>
+    <string name="travel_loading">Looking around\u2026</string>
+    <string name="travel_retry">Try again</string>
+    <string name="travel_refresh">Refresh</string>
+    <string name="travel_empty">Nothing to show for this spot yet. Try a wider radius.</string>
+    <string name="travel_radius">How far to look</string>
+    <string name="travel_open">Open in maps</string>
+    <string name="travel_read_more">Read more</string>
+    <!-- The privacy line, shown on the tab rather than buried in settings,
+         because it is the reason somebody might use this at all. -->
+    <string name="travel_privacy_note">Your exact position never leaves this phone \u2014 lookups are rounded to a ~150 m block first.</string>
+    <string name="travel_api_key_title">Google Places API key</string>
+    <string name="travel_api_key_note">Review counts in the thousands come from Google Maps, which needs a key of your own. Comrade ships none, and stores yours in the encrypted vault.</string>
+    <string name="travel_api_key_hint">Paste your key</string>
+    <string name="travel_api_key_save">Save key</string>
+    <string name="travel_api_key_clear">Remove key</string>
+    <string name="travel_api_key_present">A key is saved on this device.</string>
+    <string name="travel_api_key_absent">No key saved \u2014 places and facts still work; ratings do not.</string>
 </resources>

@@ -100,6 +100,7 @@ import mullu.comrade.ui.ConversationScreen
 import mullu.comrade.ui.CloudIcon
 import mullu.comrade.ui.CopyIcon
 import mullu.comrade.ui.conversationMenu
+import mullu.comrade.ui.ExploreIcon
 import mullu.comrade.ui.FeedScreen
 import mullu.comrade.ui.FocusScreen
 import mullu.comrade.ui.HeartIcon
@@ -464,6 +465,13 @@ private enum class MainTab(val label: String, val icon: ImageVector) {
     // and this feature is about the person more than the music.
     Together("Together", PeopleHugIcon),
     Focus("Focus", TimerIcon),
+    // Sixth slot, added 2026-08-16 with the Travel guide. A NavigationBar is
+    // comfortable at five and tight at six — labels shrink rather than wrap —
+    // and this took the sixth rather than pushing an existing tab into the
+    // drawer, because deciding which of the five is least used is not a call
+    // this change is entitled to make. If a seventh is ever wanted, that
+    // decision has to be made first.
+    Travel("Travel", ExploreIcon),
     Tara("Tara", HeartIcon),
 }
 
@@ -1081,6 +1089,7 @@ private fun MainShell(
                                             MainTab.Tara -> "Tara"
                                             MainTab.Together -> "Together"
                                             MainTab.Focus -> stringResource(R.string.attention_tab)
+                                            MainTab.Travel -> stringResource(R.string.travel_tab)
                                         },
                                     )
                                 },
@@ -1176,6 +1185,7 @@ private fun MainShell(
                             )
                         }
                         MainTab.Journal -> JournalScreen(modifier = content)
+                        MainTab.Travel -> mullu.comrade.ui.TravelScreen(modifier = content)
                         MainTab.Tara -> TaraScreen(modifier = content)
                         MainTab.Focus -> when (focusNav) {
                             FocusNav.Sessions -> FocusScreen(

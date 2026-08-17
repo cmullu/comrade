@@ -87,6 +87,27 @@ jobs:
           cargo clippy -p comrade_core -p comrade_ui -p comrade_jni --all-targets
           --features comrade_jni/catalogue-http --locked -- -D warnings
 
+      # The Travel tab reaches three third-party hosts, and the guards on those
+      # requests (HTTPS-only, no redirects, bounded read, the API key in a
+      # header rather than the query string) only compile under `travel-http`.
+      # Same argument as the two lanes above, and the same three crates for the
+      # same reason: `comrade_ui::travel_guide`'s fetch half is two `#[cfg]`
+      # branches and only one compiles per configuration.
+      #
+      # The *parsers* deliberately do not need this lane — `comrade_core::travel`
+      # compiles its request builders and response parsers unconditionally, so
+      # the fixtures run in the plain `cargo test` above. This lane exists for
+      # the socket guards and the feature-gated branch.
+      - name: cargo test (travel-http)
+        run: >-
+          cargo test -p comrade_core -p comrade_ui -p comrade_jni
+          --features comrade_jni/travel-http --locked
+
+      - name: cargo clippy (travel-http)
+        run: >-
+          cargo clippy -p comrade_core -p comrade_ui -p comrade_jni --all-targets
+          --features comrade_jni/travel-http --locked -- -D warnings
+
   # The desktop Tauri crate is excluded from the workspace (needs system
   # webview libs), so it gets its own compile+lint lane — without this it is
   # never built by any automated process (audit T2/O1).

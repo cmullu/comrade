@@ -157,6 +157,8 @@ fun SettingsScreen(
         UpdatesSection()
         TurnRelaySection()
         ShareRelaySection()
+
+        TravelRatingsSection()
         VaultLockSection(onLock = onLock)
 
         VoiceSection()
@@ -427,6 +429,89 @@ private fun ShareRelaySection() {
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(start = 4.dp),
                     )
+                }
+            }
+        }
+    }
+}
+
+// ── Travel ratings ───────────────────────────────────────────────────────────
+
+/**
+ * The Google Places API key the Travel tab's ratings half needs.
+ *
+ * **Comrade ships no key and is not going to.** Review counts in the thousands
+ * exist in one place the public can query, and it bills per request — a key
+ * baked into an app binary is a key that gets scraped, billed to whoever owns
+ * it, and revoked out from under every install. So the key is the user's, it
+ * lives in the encrypted vault (`comrade_ui`'s `app_settings` tree, not a
+ * plaintext preference), and it is write-only from this screen: the field never
+ * reads an existing key back, only replaces or clears it.
+ *
+ * Without one the tab still works — OpenStreetMap places and Wikipedia facts
+ * need no account — and says so on the guide itself rather than looking broken.
+ */
+@Composable
+private fun TravelRatingsSection() {
+    var configured by remember { mutableStateOf(runCatching { ComradeCore.travelRatingsConfigured() }.getOrDefault(false)) }
+    var draft by remember { mutableStateOf("") }
+    var failure by remember { mutableStateOf<String?>(null) }
+
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                stringResource(R.string.travel_api_key_title),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                stringResource(R.string.travel_api_key_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                stringResource(
+                    if (configured) R.string.travel_api_key_present else R.string.travel_api_key_absent,
+                ),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            OutlinedTextField(
+                value = draft,
+                onValueChange = {
+                    draft = it
+                    failure = null
+                },
+                singleLine = true,
+                label = { Text(stringResource(R.string.travel_api_key_hint)) },
+                // Masked like any other credential field on this screen.
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            failure?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        runCatching { ComradeCore.setTravelApiKeyTyped(draft) }
+                            .onSuccess {
+                                draft = ""
+                                failure = null
+                            }
+                            .onFailure { failure = it.message }
+                        // Read back rather than assume: what core reports is
+                        // what core will use.
+                        configured = runCatching { ComradeCore.travelRatingsConfigured() }.getOrDefault(false)
+                    },
+                    enabled = draft.isNotBlank(),
+                ) { Text(stringResource(R.string.travel_api_key_save)) }
+                if (configured) {
+                    OutlinedButton(
+                        onClick = {
+                            runCatching { ComradeCore.setTravelApiKeyTyped("") }
+                                .onFailure { failure = it.message }
+                            configured = runCatching { ComradeCore.travelRatingsConfigured() }.getOrDefault(false)
+                        },
+                    ) { Text(stringResource(R.string.travel_api_key_clear)) }
                 }
             }
         }

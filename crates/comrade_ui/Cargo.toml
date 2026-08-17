@@ -38,6 +38,12 @@ media-http = ["comrade_core/media-http"]
 # ladder, the licence gate — are always compiled and always tested, and only the
 # socket is behind the flag. A frontend that ships search turns this on.
 catalogue-http = ["comrade_core/catalogue-http"]
+# Enable the real Travel guide lookups (Overpass, Google Places, Wikipedia) in
+# the underlying core. Same argument again: the ranking, the merge, the privacy
+# blur and every response parser are always compiled and always tested, and only
+# the socket is behind the flag. A frontend that ships the Travel tab turns this
+# on — `comrade_jni` does, because Android is where the tab lives.
+travel-http = ["comrade_core/travel-http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

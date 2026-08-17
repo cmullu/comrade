@@ -83,6 +83,7 @@ use comrade_core::share::{
     read_verdict as share_read_verdict, ReadSample, ReadVerdict, ShareSignal,
 };
 use comrade_core::topic::{parse_topic_envelope, TopicSignal};
+use comrade_core::travel::{self, GuideCache, Place, TravelGuide, TravelQuery};
 
 /// Read a stored [`SharePrefs`] back into a policy.
 ///
@@ -223,6 +224,14 @@ const PUBLISH_ATTEMPTS: u32 = 5;
 const SETTINGS_TREE: &str = "app_settings";
 /// Settings key holding the optional [`TurnConfig`] for WebRTC calls.
 const TURN_CONFIG_KEY: &str = "turn_server";
+/// Settings key holding the user's own Google Places API key, used by the
+/// Travel guide's ratings half.
+///
+/// In the **encrypted** store rather than a device preference, and for a
+/// sharper reason than the usual one: this key is billable. A plaintext
+/// preference file is readable by anything with a debug bridge and a rooted
+/// phone, and the person who pays for the quota is the user.
+const TRAVEL_PLACES_KEY: &str = "travel_places_api_key";
 /// Settings key holding the high-watermark (unix seconds) of the newest
 /// inbox message this device has processed — see [`advance_watermark`] and
 /// [`ComradeRuntime::spawn_event_loops`]'s `since_floor` computation.
@@ -2356,6 +2365,19 @@ pub struct ComradeRuntime {
     /// been told otherwise relays nothing, which is the safe direction to
     /// default in.
     share_policy: Arc<Mutex<RelayPolicy>>,
+    /// Travel guides already fetched this session, keyed by coarse cell.
+    ///
+    /// **In memory only, deliberately.** The guide's *contents* are public
+    /// facts about public places, but the set of cells it is keyed by is a
+    /// record of where this person has stood — which is the one thing in this
+    /// feature worth protecting, and the reason it dies with the process
+    /// instead of landing in the vault beside the journal. [`Self::lock_vault`]
+    /// clears it early for the same reason.
+    ///
+    /// Behind an `Arc` so [`Self::travel_cache`] can hand a caller a handle to
+    /// clone out from under a short read lock — the network fetch in
+    /// [`travel_guide`] then runs with no runtime lock held at all.
+    travel: TravelCache,
 }
 
 impl Default for ComradeRuntime {
@@ -2413,6 +2435,7 @@ impl ComradeRuntime {
             together_starts_seen: Arc::new(SeenSet::new(TOGETHER_START_DEDUP_CAPACITY)),
             together_shares_seen: Arc::new(SeenSet::new(TOGETHER_SHARE_DEDUP_CAPACITY)),
             share_policy: Arc::new(Mutex::new(RelayPolicy::default())),
+            travel: TravelCache::default(),
         }
     }
 
@@ -2649,6 +2672,9 @@ impl ComradeRuntime {
         // otherwise. The peer's own TTL is what actually ends it on their side.
         *self.together.lock().unwrap() = None;
         self.nudge_watch.clear();
+        // Where somebody has been standing is not something a locked app should
+        // still be holding — see [`Self::travel`].
+        self.travel.clear();
         self.ui.lock();
     }
 
@@ -11438,6 +11464,414 @@ fn normalize_handle(raw: &str) -> Result<String, UiError> {
     Ok(handle)
 }
 
+// ── Travel (see `comrade_core::travel` and `docs/TRAVEL.md`) ─────────────────
+
+/// One place on the Travel tab, ready to render.
+///
+/// Flattened to strings and options for the reason [`RideSignalDto`]'s doc
+/// gives: a frontend keys its icon table on the wire names
+/// ([`comrade_core::travel::PlaceKind::as_str`]), and a bridged enum would put a
+/// Kotlin `when`, a Dart `switch` and a regenerated bridge behind every kind
+/// added to the vocabulary.
+///
+/// `distance_m` is computed against the caller's **real** fix, not the blurred
+/// coordinate the query went out with — see the module header of
+/// `comrade_core::travel`. The screen stays accurate while the wire stays vague.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct TravelPlaceDto {
+    pub id: String,
+    pub name: String,
+    /// `"restaurant"`, `"street_food"`, `"museum"`, … — [`PlaceKind::as_str`].
+    pub kind: String,
+    /// `"eat"` or `"do"`, so a frontend never re-derives the split.
+    pub section: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub distance_m: u32,
+    pub rating: Option<f64>,
+    /// How many people rated it. The half of "legendary" that does the work —
+    /// and a `None` here always accompanies a `None` rating, never a lone star
+    /// average with an unknown crowd behind it.
+    pub review_count: Option<u32>,
+    /// Whether this earns the badge ([`comrade_core::travel::is_legendary`]).
+    /// Decided in core so three frontends cannot disagree about what a legend is.
+    pub legendary: bool,
+    pub address: Option<String>,
+    pub cuisine: Option<String>,
+    pub note: Option<String>,
+    /// `"google_maps"`, `"openstreetmap"`, `"wikipedia"` — a card that shows a
+    /// number has to be able to say who said it.
+    pub source: String,
+    pub open_url: Option<String>,
+}
+
+impl TravelPlaceDto {
+    fn from_place(place: &Place, origin: (f64, f64)) -> Self {
+        Self {
+            id: place.id.clone(),
+            name: place.name.clone(),
+            kind: place.kind.as_str().to_string(),
+            section: place.kind.section().as_str().to_string(),
+            lat: place.lat,
+            lon: place.lon,
+            distance_m: place
+                .distance_m(origin)
+                .round()
+                .clamp(0.0, f64::from(u32::MAX)) as u32,
+            rating: place.rating,
+            review_count: place.review_count,
+            legendary: place.is_legendary(),
+            address: place.address.clone(),
+            cuisine: place.cuisine.clone(),
+            note: place.note.clone(),
+            source: place.source.as_str().to_string(),
+            open_url: place.open_url.clone(),
+        }
+    }
+}
+
+/// One thing worth knowing about where you are standing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct TravelFactDto {
+    pub title: String,
+    pub text: String,
+    pub url: Option<String>,
+    /// Present only when the article's subject has coordinates.
+    pub distance_m: Option<u32>,
+}
+
+/// Everything the Travel tab draws.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Record)]
+pub struct TravelGuideDto {
+    pub area: Option<String>,
+    pub eat: Vec<TravelPlaceDto>,
+    pub things_to_do: Vec<TravelPlaceDto>,
+    pub facts: Vec<TravelFactDto>,
+    /// Which source the ratings came from, or `None` when nothing supplied any.
+    /// **"No ratings configured" and "nothing legendary nearby" must not render
+    /// the same**, and this field plus [`Self::notice`] is how a frontend tells
+    /// them apart.
+    pub ratings_from: Option<String>,
+    /// A plain sentence about what did not work — a missing API key, a provider
+    /// that refused — or `None` when everything answered. Carried rather than
+    /// thrown, because an Overpass + Wikipedia guide is still worth showing when
+    /// the ratings half is misconfigured, and a blank screen would explain
+    /// nothing.
+    pub notice: Option<String>,
+    /// Unix seconds this guide was actually fetched.
+    pub fetched_at: u64,
+    /// True when this came from the session cache rather than the network.
+    pub from_cache: bool,
+    /// True when the cache was all there was — the network refused and this is
+    /// an older answer being shown anyway. A frontend should say "last checked
+    /// …" rather than pretending it is current.
+    pub stale: bool,
+}
+
+impl TravelGuideDto {
+    fn from_guide(guide: &TravelGuide, origin: (f64, f64), from_cache: bool, now: u64) -> Self {
+        Self {
+            area: guide.area.clone(),
+            eat: guide
+                .eat
+                .iter()
+                .map(|p| TravelPlaceDto::from_place(p, origin))
+                .collect(),
+            things_to_do: guide
+                .things_to_do
+                .iter()
+                .map(|p| TravelPlaceDto::from_place(p, origin))
+                .collect(),
+            facts: guide
+                .facts
+                .iter()
+                .map(|f| TravelFactDto {
+                    title: f.title.clone(),
+                    text: f.text.clone(),
+                    url: f.url.clone(),
+                    distance_m: f.coord.map(|c| {
+                        travel::haversine_m(origin, c)
+                            .round()
+                            .clamp(0.0, f64::from(u32::MAX)) as u32
+                    }),
+                })
+                .collect(),
+            ratings_from: guide.ratings_from.map(|s| s.as_str().to_string()),
+            notice: None,
+            fetched_at: guide.fetched_at,
+            from_cache,
+            stale: guide.is_stale(now),
+        }
+    }
+}
+
+/// The session's travel guides, keyed by coarse cell.
+///
+/// A separate handle type rather than a bare `Arc<Mutex<GuideCache>>` field so
+/// it can be cloned out of the runtime and used *after* the lock is released —
+/// which is the entire reason [`travel_guide`] can be a free function and can
+/// therefore never be the "lock held across an await" bug this repo has already
+/// fixed twice.
+#[derive(Debug, Clone, Default)]
+pub struct TravelCache(Arc<Mutex<GuideCache>>);
+
+impl TravelCache {
+    /// The cached guide for `cell` if it is still fresh, or — when
+    /// `allow_stale` — whatever is there regardless of age.
+    fn get(&self, cell: &str, now: u64, allow_stale: bool) -> Option<TravelGuide> {
+        let guard = self.0.lock().unwrap();
+        if allow_stale {
+            guard.stale(cell).cloned()
+        } else {
+            guard.fresh(cell, now).cloned()
+        }
+    }
+
+    fn put(&self, guide: TravelGuide) {
+        self.0.lock().unwrap().put(guide);
+    }
+
+    /// Forget every cell this session has visited.
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+impl ComradeRuntime {
+    /// A handle to this session's travel cache, for [`travel_guide`].
+    ///
+    /// Cloned out under a short read lock so the network fetch that follows
+    /// holds no runtime lock at all — see [`TravelCache`].
+    pub fn travel_cache(&self) -> TravelCache {
+        self.travel.clone()
+    }
+
+    /// The user's own Google Places API key, when one has been saved and the
+    /// vault is open.
+    ///
+    /// `None` when the vault is locked rather than an error: the free half of
+    /// the Travel tab (OpenStreetMap, Wikipedia) works without a vault, and a
+    /// guide with no ratings and a notice saying so is a better answer than a
+    /// thrown exception on a screen somebody opened to find lunch.
+    pub fn travel_api_key(&self) -> Option<String> {
+        self.ui
+            .store_ref()?
+            .get::<String>(SETTINGS_TREE, TRAVEL_PLACES_KEY)
+            .ok()
+            .flatten()
+            .filter(|k| !k.trim().is_empty())
+    }
+
+    /// Save (or, with a blank `key`, clear) the Google Places API key.
+    ///
+    /// Validated through [`travel::ApiKey::parse`] before it is written, so a
+    /// pasted blank fails here rather than at the far end as an opaque 403 —
+    /// and the value is never logged, on the way in or out.
+    pub fn set_travel_api_key(&self, key: &str) -> Result<(), UiError> {
+        let store = self.ui.store_ref().ok_or(UiError::VaultLocked)?;
+        if key.trim().is_empty() {
+            store
+                .delete(SETTINGS_TREE, TRAVEL_PLACES_KEY)
+                .map_err(|e| UiError::Storage(e.to_string()))?;
+        } else {
+            let parsed = travel::ApiKey::parse(key).map_err(|e| UiError::Travel(e.to_string()))?;
+            store
+                .put(
+                    SETTINGS_TREE,
+                    TRAVEL_PLACES_KEY,
+                    &parsed.header_value().to_string(),
+                )
+                .map_err(|e| UiError::Storage(e.to_string()))?;
+        }
+        // Ratings for a cell already in the cache were fetched under the old
+        // configuration; leaving them would make "I just added my key" look
+        // like it did nothing.
+        self.travel.clear();
+        store.flush().map_err(|e| UiError::Storage(e.to_string()))
+    }
+
+    /// Whether a ratings provider is configured, for a settings screen. The key
+    /// itself is never returned — only whether there is one.
+    pub fn travel_ratings_configured(&self) -> bool {
+        self.travel_api_key().is_some()
+    }
+}
+
+/// The sentence a guide carries when no ratings provider is configured.
+///
+/// Spelled out once, here, because it is the single most likely state of this
+/// feature on a fresh install and every frontend has to say the same thing
+/// about it.
+pub const TRAVEL_NO_KEY_NOTICE: &str =
+    "Restaurant ratings need your own Google Places API key — add one in Settings → Travel. \
+     Places and facts below come from OpenStreetMap and Wikipedia.";
+
+/// Build the Travel guide for a coordinate: legendary places to eat, things to
+/// do, and what this place is.
+///
+/// **A free function, and that is the point.** It reads nothing from
+/// [`ComradeRuntime`] — the caller clones a [`TravelCache`] handle and reads the
+/// API key under a short lock, then calls this with no lock held. Three network
+/// round trips inside a held `RwLock` is the shape of the two deadlocks this
+/// repo has already fixed.
+///
+/// What leaves the device: a coordinate rounded to a ~150 m geohash cell
+/// ([`travel::coarse_origin`]), a radius, and nothing else. No npub, no contact,
+/// no indication of who is asking. The Google request additionally carries the
+/// user's own API key, in a header rather than the query string, so it does not
+/// end up in every proxy log between here and Mountain View.
+///
+/// Partial failure is a notice, not an exception: a misconfigured or refused
+/// ratings provider still leaves an OpenStreetMap + Wikipedia guide worth
+/// showing, and [`TravelGuideDto::notice`] says what went wrong. A total
+/// failure falls back to a stale cached guide for the same cell if there is
+/// one — a guide from this morning with a "last checked" line beats a blank
+/// screen on a street — and only errors when there is nothing at all.
+///
+/// `refresh` skips the fresh-cache check; the cache itself is still written.
+pub async fn travel_guide(
+    cache: &TravelCache,
+    api_key: Option<String>,
+    lat: f64,
+    lon: f64,
+    radius_m: u32,
+    refresh: bool,
+) -> Result<TravelGuideDto, UiError> {
+    let origin = (lat, lon);
+    let now = now_secs();
+    // Both sections are asked for around the same blurred origin, so one cell
+    // key covers the whole guide.
+    let eat_query = TravelQuery::around(lat, lon, radius_m, travel::Section::Eat);
+    let cell = eat_query.cell.clone();
+
+    if !refresh {
+        if let Some(hit) = cache.get(&cell, now, false) {
+            return Ok(TravelGuideDto::from_guide(&hit, origin, true, now));
+        }
+    }
+
+    match fetch_travel_guide(&eat_query, api_key, origin, now).await {
+        Ok((guide, notice)) => {
+            cache.put(guide.clone());
+            let mut dto = TravelGuideDto::from_guide(&guide, origin, false, now);
+            dto.notice = notice;
+            Ok(dto)
+        }
+        Err(err) => match cache.get(&cell, now, true) {
+            Some(old) => {
+                let mut dto = TravelGuideDto::from_guide(&old, origin, true, now);
+                dto.stale = true;
+                dto.notice = Some(format!("Showing the last guide for here — {err}"));
+                Ok(dto)
+            }
+            None => Err(err),
+        },
+    }
+}
+
+/// The network half of [`travel_guide`]. Returns the guide and the notice (if
+/// any) about what did not answer.
+#[cfg(feature = "travel-http")]
+async fn fetch_travel_guide(
+    eat_query: &TravelQuery,
+    api_key: Option<String>,
+    origin: (f64, f64),
+    now: u64,
+) -> Result<(TravelGuide, Option<String>), UiError> {
+    use comrade_core::travel::{GooglePlaces, Overpass, PlaceProvider, WikipediaNearby};
+
+    // Overpass and Wikipedia both ask that clients identify themselves, and a
+    // generic agent is what gets a project rate-limited. No version: the string
+    // would then change with every release for no benefit to them.
+    const AGENT: &str = "comrade/1.0 (https://github.com/cmullu/comrade)";
+
+    let do_query = TravelQuery {
+        section: travel::Section::Do,
+        ..eat_query.clone()
+    };
+    let osm = Overpass::new(AGENT);
+    let wiki = WikipediaNearby::new(AGENT);
+
+    // Concurrent, not sequential: these are three independent hosts and the
+    // user is standing on a street. The `join!` is over futures that hold no
+    // lock, so there is nothing here for them to contend on.
+    let (osm_eat, osm_do, facts) = tokio::join!(
+        osm.nearby(eat_query),
+        osm.nearby(&do_query),
+        wiki.facts(eat_query),
+    );
+
+    let mut notices: Vec<String> = Vec::new();
+    let mut places: Vec<Place> = Vec::new();
+    for (label, result) in [("places", osm_eat), ("attractions", osm_do)] {
+        match result {
+            Ok(found) => places.extend(found),
+            Err(e) => notices.push(format!("OpenStreetMap {label} unavailable ({e})")),
+        }
+    }
+    let facts = match facts {
+        Ok(found) => travel::rank_facts(found, origin),
+        Err(e) => {
+            notices.push(format!("Wikipedia unavailable ({e})"));
+            Vec::new()
+        }
+    };
+
+    // The ratings half. Its absence is the expected state of a fresh install,
+    // so it is a notice rather than a failure — but a *loud* one, because a
+    // Travel tab with no review counts is not the feature that was asked for.
+    match api_key.as_deref().map(travel::ApiKey::parse) {
+        None | Some(Err(_)) => notices.push(TRAVEL_NO_KEY_NOTICE.to_string()),
+        Some(Ok(key)) => {
+            let google = GooglePlaces::new(key);
+            let (rated_eat, rated_do) =
+                tokio::join!(google.nearby(eat_query), google.nearby(&do_query));
+            let mut rated: Vec<Place> = Vec::new();
+            let mut google_failed = false;
+            for result in [rated_eat, rated_do] {
+                match result {
+                    Ok(found) => rated.extend(found),
+                    Err(e) => {
+                        if !google_failed {
+                            notices.push(format!("Google Maps ratings unavailable ({e})"));
+                            google_failed = true;
+                        }
+                    }
+                }
+            }
+            // OSM first so its cuisine tags and canonical object links survive
+            // the merge; the rating always comes from whichever record has one.
+            places = travel::merge_places(places, rated);
+        }
+    }
+
+    if places.is_empty() && facts.is_empty() {
+        return Err(UiError::Travel(if notices.is_empty() {
+            "nothing found near here".to_string()
+        } else {
+            notices.join("; ")
+        }));
+    }
+
+    let guide = travel::build_guide(origin, &eat_query.cell, places, facts, None, now);
+    Ok((guide, (!notices.is_empty()).then(|| notices.join(" "))))
+}
+
+/// Without `travel-http` there is no socket to reach a provider through.
+///
+/// A distinct error rather than an empty guide, for the reason
+/// [`UiError::CatalogueUnavailable`] exists: "this build cannot look places up"
+/// and "there is nothing near you" must not render the same.
+#[cfg(not(feature = "travel-http"))]
+async fn fetch_travel_guide(
+    _eat_query: &TravelQuery,
+    _api_key: Option<String>,
+    _origin: (f64, f64),
+    _now: u64,
+) -> Result<(TravelGuide, Option<String>), UiError> {
+    Err(UiError::TravelUnavailable)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -19167,5 +19601,205 @@ mod tests {
             rt.threads(&peer_b, Some("deposit".into())).unwrap().len(),
             0
         );
+    }
+    // ── Travel guide (see `comrade_core::travel` and `docs/TRAVEL.md`) ───────
+
+    /// Colaba, Mumbai.
+    const TRAVEL_ORIGIN: (f64, f64) = (18.9220, 72.8347);
+
+    fn travel_place(
+        name: &str,
+        kind: travel::PlaceKind,
+        rating: Option<f64>,
+        votes: Option<u32>,
+    ) -> Place {
+        Place {
+            id: format!("gm:{name}"),
+            name: name.to_string(),
+            kind,
+            lat: TRAVEL_ORIGIN.0,
+            lon: TRAVEL_ORIGIN.1,
+            rating,
+            review_count: votes,
+            address: None,
+            cuisine: None,
+            note: None,
+            source: if rating.is_some() {
+                travel::PlaceSource::GoogleMaps
+            } else {
+                travel::PlaceSource::OpenStreetMap
+            },
+            open_url: None,
+        }
+    }
+
+    fn cached_guide(cell: &str, at: u64, places: Vec<Place>) -> TravelGuide {
+        travel::build_guide(TRAVEL_ORIGIN, cell, places, Vec::new(), None, at)
+    }
+
+    #[tokio::test]
+    async fn a_cached_guide_is_served_without_touching_the_network() {
+        // The default test build has no `travel-http`, so *any* fetch is an
+        // error — which makes this a proof that the cache short-circuits it.
+        let cache = TravelCache::default();
+        let cell = TravelQuery::around(
+            TRAVEL_ORIGIN.0,
+            TRAVEL_ORIGIN.1,
+            2_000,
+            travel::Section::Eat,
+        )
+        .cell;
+        cache.put(cached_guide(
+            &cell,
+            now_secs(),
+            vec![travel_place(
+                "Britannia",
+                travel::PlaceKind::Restaurant,
+                Some(4.6),
+                Some(9_000),
+            )],
+        ));
+
+        let guide = travel_guide(&cache, None, TRAVEL_ORIGIN.0, TRAVEL_ORIGIN.1, 2_000, false)
+            .await
+            .expect("a fresh cache entry answers on its own");
+        assert!(guide.from_cache);
+        assert!(!guide.stale);
+        assert_eq!(guide.eat.len(), 1);
+        assert!(guide.eat[0].legendary);
+        assert_eq!(guide.ratings_from.as_deref(), Some("google_maps"));
+    }
+
+    /// Both tests below need the fetch to *fail*, which is only deterministic
+    /// in a build with no socket. Under `travel-http` they would make a real
+    /// request to Overpass and Wikipedia — which is flaky, slow, and rude to
+    /// two free public services that owe this project nothing. The behaviour
+    /// they pin is the no-network half, so that is where they run.
+    #[cfg(not(feature = "travel-http"))]
+    #[tokio::test]
+    async fn refresh_goes_past_a_fresh_cache_entry() {
+        let cache = TravelCache::default();
+        let cell = TravelQuery::around(
+            TRAVEL_ORIGIN.0,
+            TRAVEL_ORIGIN.1,
+            2_000,
+            travel::Section::Eat,
+        )
+        .cell;
+        cache.put(cached_guide(&cell, now_secs(), Vec::new()));
+
+        // Cache is fresh, so only `refresh` can reach the (absent) network —
+        // and the stale-fallback path then returns the same entry with a notice
+        // rather than an empty screen.
+        let guide = travel_guide(&cache, None, TRAVEL_ORIGIN.0, TRAVEL_ORIGIN.1, 2_000, true)
+            .await
+            .expect("the stale fallback keeps the screen populated");
+        assert!(
+            guide.stale,
+            "a fallback answer must not claim to be current"
+        );
+        assert!(
+            guide.notice.is_some(),
+            "and it has to say why it is not current"
+        );
+    }
+
+    #[cfg(not(feature = "travel-http"))]
+    #[tokio::test]
+    async fn nothing_cached_and_nothing_fetchable_is_an_error_not_an_empty_guide() {
+        // "This build cannot look places up" must never render as "there is
+        // nothing near you" — the whole reason `TravelUnavailable` exists.
+        let err = travel_guide(
+            &TravelCache::default(),
+            None,
+            TRAVEL_ORIGIN.0,
+            TRAVEL_ORIGIN.1,
+            2_000,
+            false,
+        )
+        .await
+        .expect_err("no cache and no socket is a failure");
+        assert!(matches!(err, UiError::TravelUnavailable), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn locking_the_vault_forgets_where_the_user_has_been() {
+        let dir = TempDir::new().unwrap();
+        let mut rt = offline_runtime(&dir).await;
+        let cache = rt.travel_cache();
+        let cell = TravelQuery::around(
+            TRAVEL_ORIGIN.0,
+            TRAVEL_ORIGIN.1,
+            2_000,
+            travel::Section::Eat,
+        )
+        .cell;
+        cache.put(cached_guide(&cell, now_secs(), Vec::new()));
+        assert!(cache.get(&cell, now_secs(), true).is_some());
+
+        rt.lock_vault().await;
+        assert!(
+            cache.get(&cell, now_secs(), true).is_none(),
+            "the cells someone has stood in are not something a locked app keeps"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_ratings_key_clears_rather_than_storing_an_unusable_one() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        assert!(!rt.travel_ratings_configured());
+
+        rt.set_travel_api_key("  AIzaSy-example  ").unwrap();
+        assert!(rt.travel_ratings_configured());
+        assert_eq!(
+            rt.travel_api_key().as_deref(),
+            Some("AIzaSy-example"),
+            "stored trimmed, so a pasted newline is not sent as part of the key"
+        );
+
+        rt.set_travel_api_key("   ").unwrap();
+        assert!(
+            !rt.travel_ratings_configured(),
+            "a blank key clears the setting instead of failing every lookup with a 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_the_ratings_key_drops_guides_fetched_under_the_old_one() {
+        let dir = TempDir::new().unwrap();
+        let rt = offline_runtime(&dir).await;
+        let cache = rt.travel_cache();
+        let cell = TravelQuery::around(
+            TRAVEL_ORIGIN.0,
+            TRAVEL_ORIGIN.1,
+            2_000,
+            travel::Section::Eat,
+        )
+        .cell;
+        cache.put(cached_guide(&cell, now_secs(), Vec::new()));
+
+        rt.set_travel_api_key("AIzaSy-example").unwrap();
+        assert!(
+            cache.get(&cell, now_secs(), true).is_none(),
+            "otherwise adding a key looks like it did nothing until the TTL expires"
+        );
+    }
+
+    #[test]
+    fn a_place_dto_measures_distance_from_the_real_fix_not_the_blurred_one() {
+        // The privacy blur must not leak into what the screen says: a place
+        // 200 m away has to read as 200 m, not as the cell-centre offset.
+        let mut place = travel_place("Bademiya", travel::PlaceKind::StreetFood, None, None);
+        place.lat = TRAVEL_ORIGIN.0 + 0.0018; // ~200 m north
+        let dto = TravelPlaceDto::from_place(&place, TRAVEL_ORIGIN);
+        assert!(
+            (150..=250).contains(&dto.distance_m),
+            "expected ~200 m, got {}",
+            dto.distance_m
+        );
+        assert_eq!(dto.section, "eat", "a stall is somewhere you eat");
+        assert_eq!(dto.kind, "street_food");
+        assert!(!dto.legendary, "an unrated stall carries no badge");
     }
 }

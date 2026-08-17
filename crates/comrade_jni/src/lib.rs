@@ -92,7 +92,7 @@ use comrade_ui::{
     PlayRoute, PlayTargetDto, PresenceDto, ProfileDto, ReactionDto, ReadSample, ReadVerdict,
     SavedReadDto, SavedReadSummaryDto, ShareVerdictDto, StretchStepDto, TaraChatDto,
     TaraMessageDto, TaskDto, TaskState, ThreadDto, ThreadSummaryDto, TogetherSessionDto, TopicDto,
-    TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
+    TravelGuideDto, TurnServerStatusDto, UiError, UpiIntentDto, WorkspaceDto,
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -1879,6 +1879,56 @@ impl Comrade {
     pub async fn sync_ledger(&self) -> Result<String, UiError> {
         let handles = self.inner.read().await.handles();
         handles.sync_ledger().await
+    }
+
+    // ── Travel (see `comrade_core::travel` and `docs/TRAVEL.md`) ─────────────
+
+    /// The Travel guide for where the caller is standing: legendary local
+    /// places to eat, things to do, and what this place is.
+    ///
+    /// `lat`/`lon` are the frontend's real fix. They are **not** what leaves
+    /// the device — `comrade_ui::travel_guide` rounds them to a ~150 m geohash
+    /// cell before any provider sees them, and uses the real pair only to
+    /// measure distances locally.
+    ///
+    /// `refresh` skips the session cache (a pull-to-refresh); `radius_m` is
+    /// clamped in core, so a frontend cannot ask for a country.
+    ///
+    /// The lock discipline here is stricter than
+    /// [`Comrade::broadcast_chitthi`]'s and deliberately so: this makes up to
+    /// five HTTP round trips, and both the cache handle and the API key are
+    /// taken out under a read lock that is **dropped before the await**. A
+    /// `handles()`-style pattern would not be enough — the guard has to be gone,
+    /// not just unused.
+    pub async fn travel_guide(
+        &self,
+        lat: f64,
+        lon: f64,
+        radius_m: u32,
+        refresh: bool,
+    ) -> Result<TravelGuideDto, UiError> {
+        let (cache, api_key) = {
+            let guard = self.inner.read().await;
+            (guard.travel_cache(), guard.travel_api_key())
+        };
+        comrade_ui::travel_guide(&cache, api_key, lat, lon, radius_m, refresh).await
+    }
+
+    /// Save (or, with a blank string, clear) the user's own Google Places API
+    /// key — the credential the ratings half of the Travel tab needs.
+    ///
+    /// There is no key shipped in this app and there is not going to be one;
+    /// see `comrade_core::travel`'s module header. Stored in the encrypted
+    /// vault, so this needs it unlocked.
+    pub fn set_travel_api_key(&self, key: String) -> Result<(), UiError> {
+        self.inner.blocking_read().set_travel_api_key(&key)
+    }
+
+    /// Whether a ratings provider is configured. The key itself is never
+    /// returned across the FFI — a settings screen needs the answer, not the
+    /// secret.
+    pub fn travel_ratings_configured(&self) -> bool {
+        self.inner.blocking_read().travel_ratings_configured()
     }
 }
 

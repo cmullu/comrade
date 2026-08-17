@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
+import mullu.comrade.travel.TravelDecisions
 import uniffi.comrade.BridgeEventListener
 import uniffi.comrade.Comrade
 import uniffi.comrade.allWorkspaces
@@ -145,6 +146,11 @@ object ComradeCore {
         // Callers that can tell the two apart should use that instead of this
         // sentence; this is the fallback for anywhere the distinction is lost.
         is UiException.CatalogueUnavailable -> "This build cannot search for music."
+        is UiException.Travel -> v1
+        // Same argument one feature over: "there is nothing near you" and "this
+        // build cannot look places up" are different answers, and only one of
+        // them is about the neighbourhood.
+        is UiException.TravelUnavailable -> "This build cannot look up places nearby."
         // No `else` on purpose. `UiException` is a sealed hierarchy generated
         // from `UiError`, so adding a variant in Rust should break *this*
         // compile and make someone word the new failure — the alternative is a
@@ -1741,6 +1747,82 @@ object ComradeCore {
     // ── Sakha/Sakhi CRDT ledger ────────────────────────────────────────────────
 
     fun syncLedgerTyped(): String = rethrowing("Sync ledger") { runBlocking { ffi.syncLedger() } }
+
+    // ── Travel (see `comrade_core::travel` and `docs/TRAVEL.md`) ───────────────
+
+    /**
+     * The Travel guide for where the phone is: legendary local places to eat,
+     * things to do, and facts about the place.
+     *
+     * [lat]/[lon] are the device's real fix. They are **not** what leaves the
+     * device — the Rust side rounds them to a ~150 m geohash cell before any
+     * provider sees them, and uses the exact pair only to measure distances
+     * locally. See `comrade_core::travel`'s module header.
+     *
+     * Blocking, like every other method here, and it makes up to five HTTPS
+     * round trips — so a caller must be on `Dispatchers.IO`, which
+     * [mullu.comrade.ui.TravelScreen] is.
+     */
+    fun travelGuideTyped(
+        lat: Double,
+        lon: Double,
+        radiusM: Int,
+        refresh: Boolean,
+    ): TravelDecisions.Guide = rethrowing("Travel guide") {
+        runBlocking { ffi.travelGuide(lat, lon, radiusM.toUInt(), refresh) }.toDecisions()
+    }
+
+    /**
+     * Save (or, with a blank string, clear) the user's own Google Places API
+     * key — the credential the ratings half of the Travel tab needs.
+     *
+     * Write-only from here on, exactly like [setTurnServerTyped]'s credential:
+     * nothing in this facade logs it or reads it back. [travelRatingsConfigured]
+     * answers the only question a settings screen actually has.
+     */
+    fun setTravelApiKeyTyped(key: String) {
+        rethrowing("Travel API key") { ffi.setTravelApiKey(key) }
+    }
+
+    /** Whether a ratings provider is configured. Never returns the key itself. */
+    fun travelRatingsConfigured(): Boolean = ffi.travelRatingsConfigured()
+
+    private fun uniffi.comrade_ui.TravelPlaceDto.toDecisions() = TravelDecisions.Place(
+        id = id,
+        name = name,
+        kind = kind,
+        section = section,
+        lat = lat,
+        lon = lon,
+        distanceM = distanceM.toInt(),
+        rating = rating,
+        reviewCount = reviewCount?.toInt(),
+        legendary = legendary,
+        address = address,
+        cuisine = cuisine,
+        note = note,
+        source = source,
+        openUrl = openUrl,
+    )
+
+    private fun uniffi.comrade_ui.TravelGuideDto.toDecisions() = TravelDecisions.Guide(
+        area = area,
+        eat = eat.map { it.toDecisions() },
+        thingsToDo = thingsToDo.map { it.toDecisions() },
+        facts = facts.map {
+            TravelDecisions.Fact(
+                title = it.title,
+                text = it.text,
+                url = it.url,
+                distanceM = it.distanceM?.toInt(),
+            )
+        },
+        ratingsFrom = ratingsFrom,
+        notice = notice,
+        fetchedAt = fetchedAt.toLong(),
+        fromCache = fromCache,
+        stale = stale,
+    )
 
     // ── Push events ────────────────────────────────────────────────────────────
 

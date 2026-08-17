@@ -77,6 +77,21 @@ void main() {
         'archive.example refused',
       );
     });
+
+    test('says the build cannot look places up, not that nowhere is nearby',
+        () {
+      // The Travel pair splits the same way the catalogue pair does: a guide
+      // with nothing in it is a claim about the neighbourhood, and this is a
+      // claim about the build.
+      final unavailable =
+          describeUiError(const rust.UiError.travelUnavailable());
+      expect(unavailable, contains('cannot look up places'));
+      expect(unavailable, isNot(contains('nothing')));
+      expect(
+        describeUiError(const rust.UiError.travel('overpass timed out')),
+        'overpass timed out',
+      );
+    });
   });
 
   group('parseCallMediaKind', () {
