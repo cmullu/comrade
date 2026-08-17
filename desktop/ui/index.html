@@ -64,6 +64,16 @@
           <span id="ws-badge" class="ws-badge">Base</span>
         </div>
 
+        <!-- The way in to everything, for people who would rather type than
+             hunt. Same trigger shadcn puts at the top of a sidebar: it looks
+             like a search field, opens the command palette, and shows its own
+             shortcut so the shortcut gets learned. -->
+        <button id="palette-open" class="palette-trigger" aria-haspopup="dialog">
+          <span class="palette-trigger-glyph" aria-hidden="true">⌕</span>
+          <span class="palette-trigger-label">Search or jump to…</span>
+          <kbd class="kbd">⌘K</kbd>
+        </button>
+
         <nav class="tabs" role="tablist" aria-orientation="vertical" aria-label="Sections">
           <!-- Together took the slot Sabha had. Sabha is not gone — it moved to
                the Modes section below, because a public feed is something you go
@@ -110,10 +120,18 @@
         </div>
 
         <div class="sidebar-foot">
-          <span class="net-pills" aria-label="Network status">
-            <span id="pill-relays" class="pill" title="Public relays">relays</span>
-            <span id="pill-mesh" class="pill" title="Off-grid mesh">mesh</span>
-          </span>
+          <div class="sidebar-foot-row">
+            <span class="net-pills" aria-label="Network status">
+              <span id="pill-relays" class="pill" title="Public relays">relays</span>
+              <span id="pill-mesh" class="pill" title="Off-grid mesh">mesh</span>
+            </span>
+            <!-- Light / dark / follow the system. The label says which of the
+                 three is chosen, because a sun glyph alone cannot tell "light"
+                 apart from "it is light because your OS is". -->
+            <button id="appearance-toggle" class="icon-btn" aria-label="Appearance">
+              <span id="appearance-glyph" aria-hidden="true">☾</span>
+            </button>
+          </div>
 
           <button id="identity-chip" class="identity-chip" title="Your profile">
             <span class="dot"></span>
@@ -191,7 +209,7 @@
               Positions travel between you, so you will be within about a second
               of each other — not frame-perfect.
             </p>
-            <button id="together-leave-full" class="btn btn-ghost">Leave</button>
+            <button id="together-leave-full" class="btn btn-outline">Leave</button>
           </div>
         </section>
 
@@ -255,16 +273,29 @@
                  filing itself is `assign_thread` in core, which owns the reply
                  graph so no frontend re-walks it. -->
             <div class="chat-body">
+              <!-- With nothing open this pane was a full-height empty
+                   rectangle. shadcn's Empty anatomy — media, title, one line —
+                   and it is also where ⌘K gets taught, since somebody looking
+                   at an empty conversation pane is exactly somebody looking
+                   for a conversation. -->
+              <div id="chat-empty" class="empty-state chat-empty">
+                <div class="empty-media" aria-hidden="true">💬</div>
+                <p class="empty-title">No conversation open</p>
+                <p class="empty-description">
+                  Pick someone from the list, or accept a request. Press
+                  <kbd class="kbd">⌘K</kbd> to jump straight to a conversation.
+                </p>
+              </div>
               <div id="chat-log" class="chat-log" aria-live="polite"></div>
               <aside id="threads-drawer" class="threads-drawer" hidden aria-label="Threads and topics">
                 <div class="threads-head">
                   <span class="threads-title">Threads</span>
-                  <button id="threads-new-topic" class="btn btn-ghost sm">New topic</button>
+                  <button id="threads-new-topic" class="btn btn-outline btn-sm">New topic</button>
                   <button id="threads-close" class="icon-btn" title="Close" aria-label="Close">✕</button>
                 </div>
                 <div id="threads-namer" class="field-row" hidden>
-                  <input id="threads-name" type="text" placeholder="Name it, like Flat deposit" />
-                  <button id="threads-create" class="btn btn-primary sm">Create</button>
+                  <input id="threads-name" class="input" type="text" placeholder="Name it, like Flat deposit" />
+                  <button id="threads-create" class="btn btn-primary btn-sm">Create</button>
                 </div>
                 <p id="threads-filing" class="hint sm" hidden></p>
                 <div id="threads-topics" class="threads-topics"></div>
@@ -275,12 +306,12 @@
                 <section id="thread-open" class="thread-open" hidden>
                   <div class="threads-head">
                     <span id="thread-open-title" class="threads-title"></span>
-                    <button id="thread-back" class="btn btn-ghost sm">Back</button>
+                    <button id="thread-back" class="btn btn-outline btn-sm">Back</button>
                   </div>
                   <div id="thread-log" class="thread-log" aria-live="polite"></div>
                   <div class="field-row">
-                    <input id="thread-input" type="text" placeholder="Reply in this thread" />
-                    <button id="thread-send" class="btn btn-primary sm" disabled>Send</button>
+                    <input id="thread-input" class="input" type="text" placeholder="Reply in this thread" />
+                    <button id="thread-send" class="btn btn-primary btn-sm" disabled>Send</button>
                   </div>
                 </section>
               </aside>
@@ -296,11 +327,11 @@
                 <span id="together-status" class="muted sm">Not in a session</span>
               </div>
               <div class="field-row">
-                <button id="together-pick" class="btn btn-ghost">Choose a file…</button>
+                <button id="together-pick" class="btn btn-outline">Choose a file…</button>
                 <input id="together-file" type="file" accept="audio/*,video/*" hidden />
                 <button id="together-invite" class="btn btn-primary" disabled>Watch together</button>
                 <button id="together-join" class="btn btn-primary" hidden>I'm ready</button>
-                <button id="together-leave" class="btn btn-ghost" hidden>Leave</button>
+                <button id="together-leave" class="btn btn-outline" hidden>Leave</button>
               </div>
               <!-- The player itself lives in the Together tab now; this panel is
                    the entry point. One <video>, one id — two would mean two
@@ -422,7 +453,7 @@
                 <p id="focus-clock" class="focus-clock" aria-live="off">0:00</p>
                 <div class="focus-actions">
                   <button id="focus-done" class="btn btn-primary">Done</button>
-                  <button id="focus-stop" class="btn btn-ghost">Stop early</button>
+                  <button id="focus-stop" class="btn btn-outline">Stop early</button>
                 </div>
                 <p class="hint sm">
                   Stopping early is recorded as stopping early. It is information,
@@ -478,7 +509,7 @@
                   <div id="stretch-bar" class="stretch-bar"></div>
                 </div>
                 <div class="focus-actions">
-                  <button id="stretch-stop" class="btn btn-ghost">End the break</button>
+                  <button id="stretch-stop" class="btn btn-outline">End the break</button>
                 </div>
               </div>
             </div>
@@ -532,7 +563,7 @@
 
               <!-- One read open: one chunk at a time -->
               <div id="reader-open" hidden>
-                <button id="reader-back" class="btn btn-ghost">← All reads</button>
+                <button id="reader-back" class="btn btn-outline btn-sm">← All reads</button>
                 <h4 id="reader-open-title" class="reader-open-title"></h4>
                 <p id="reader-open-source" class="reader-open-source muted" hidden></p>
                 <p id="reader-chunk" class="reader-chunk"></p>
@@ -540,7 +571,7 @@
                   That's the end. Worth a line about it?
                 </p>
                 <div class="reader-foot">
-                  <button id="reader-prev" class="btn btn-ghost">Back</button>
+                  <button id="reader-prev" class="btn btn-outline">Back</button>
                   <span id="reader-progress" class="muted"></span>
                   <button id="reader-next" class="btn btn-primary">Next</button>
                 </div>
@@ -559,7 +590,7 @@
              only, which is the documented mitigation for audit S6. -->
         <section id="view-profile" class="view view-profile" role="tabpanel" hidden>
           <div class="profile-header" id="profile-header">
-            <button id="profile-back" class="btn btn-ghost profile-back">← Back</button>
+            <button id="profile-back" class="btn btn-outline btn-sm profile-back">← Back</button>
             <div class="profile-identity">
               <div id="profile-avatar" class="profile-avatar" aria-hidden="true"></div>
               <div class="profile-titles">
@@ -588,7 +619,7 @@
           <h2>Couple Sandbox</h2>
           <span id="couple-role" class="role-badge">Sakha</span>
         </div>
-        <button id="couple-exit" class="btn btn-ghost">Return to Base</button>
+        <button id="couple-exit" class="btn btn-outline">Return to Base</button>
       </header>
 
       <div class="couple-body">
@@ -679,7 +710,7 @@
             <span class="btn-label">Continue to the shared ledger</span>
             <span class="spinner" hidden></span>
           </button>
-          <button id="pair-again" class="btn btn-ghost btn-block">Pair with a different key</button>
+          <button id="pair-again" class="btn btn-outline btn-block">Pair with a different key</button>
         </div>
 
         <div id="pair-form" class="pair-form">
@@ -850,6 +881,39 @@
         <button id="call-hangup" class="call-btn call-btn-end" title="Hang up" aria-label="Hang up">
           <span class="call-btn-glyph">📵</span>
         </button>
+      </div>
+    </div>
+
+    <!-- ───────────────────────── Command palette (⌘K / Ctrl-K) ──────────────
+         Every screen, mode and in-chat command in one searchable list.
+         Filtering, ranking and cursor movement are `command_palette.mjs`; the
+         catalogue is built in main.js from live state, so a row that cannot
+         run right now is never drawn. -->
+    <div id="palette" class="palette-overlay" hidden>
+      <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+        <div class="palette-input-row">
+          <span class="palette-search" aria-hidden="true">⌕</span>
+          <input
+            id="palette-input"
+            class="palette-input"
+            type="text"
+            placeholder="Search screens, modes and commands…"
+            autocomplete="off"
+            spellcheck="false"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="palette-list"
+            aria-autocomplete="list"
+          />
+          <kbd class="kbd">Esc</kbd>
+        </div>
+        <div id="palette-list" class="palette-list" role="listbox" aria-label="Results"></div>
+        <div id="palette-empty" class="palette-empty" hidden>Nothing matches that.</div>
+        <div class="palette-foot">
+          <span><kbd class="kbd">↑</kbd><kbd class="kbd">↓</kbd> move</span>
+          <span><kbd class="kbd">↵</kbd> run</span>
+          <span><kbd class="kbd">Esc</kbd> close</span>
+        </div>
       </div>
     </div>
 

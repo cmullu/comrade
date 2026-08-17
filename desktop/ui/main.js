@@ -56,6 +56,43 @@
     callDecisions = m;
   }).catch(() => {});
 
+  // ── Appearance (desktop/ui/theme.mjs) ──────────────────────────────────────
+  // Light / dark / follow-the-system, and the full <body> class list that goes
+  // with it. Loaded through the same cached dynamic import as the modules
+  // below. Degraded, not wrong: until it resolves the body carries only its
+  // modality class, which is dark — the appearance this app has always had.
+  let theme = null;
+  const themeReady = import("./theme.mjs")
+    .then((m) => {
+      theme = m;
+      // The vault door is on screen before this resolves, so read the stored
+      // choice and repaint as soon as the answer is available rather than
+      // waiting for the next workspace event.
+      state.appearance = loadAppearance();
+      applyAppearance();
+      return m;
+    })
+    .catch(() => null);
+
+  // ── Command palette (desktop/ui/command_palette.mjs) ───────────────────────
+  // Which entries a ⌘K query keeps, in what order, and where the cursor goes.
+  let commandPalette = null;
+  import("./command_palette.mjs")
+    .then((m) => {
+      commandPalette = m;
+    })
+    .catch(() => {});
+
+  // ── Toast stacking (desktop/ui/toast_queue.mjs) ────────────────────────────
+  // The visible cap and the repeat counter, so one relay flapping is one card
+  // with a count rather than a column of identical errors.
+  let toastQueue = null;
+  import("./toast_queue.mjs")
+    .then((m) => {
+      toastQueue = m;
+    })
+    .catch(() => {});
+
   // ── Draft reports (desktop/ui/draft_reports.mjs) ───────────────────────────
   // Which of "there is unsent text here" / "it is gone" a composer edit or a
   // conversation switch has to report, for `comrade_core::nudge`. Pure and
@@ -288,25 +325,90 @@
   }
 
   // ── Toasts (Milestone 5) ──────────────────────────────────────────────────
+  //
+  // Stacking is `toast_queue.mjs`'s decision: at most three cards, and an
+  // identical message counts up on the card it already has instead of adding a
+  // fourth. `safeInvoke` toasts every backend error, so one flapping relay used
+  // to bury the screen in identical cards each with its own timer.
+
+  /** DOM nodes by toast key, so a repeat can find the card to count up. */
+  const toastNodes = new Map();
+
+  function removeToast(key) {
+    const node = toastNodes.get(key);
+    if (!node) return;
+    toastNodes.delete(key);
+    state.toasts = toastQueue ? toastQueue.dropToast(state.toasts, key) : state.toasts;
+    node.classList.add("leaving");
+    setTimeout(() => node.remove(), 250);
+  }
+
   function showToast(message, type = "info", title) {
     const icons = { error: "⛔", success: "✓", info: "ℹ", warn: "⚠" };
-    const toast = el(
-      "div",
-      { class: `toast ${type}`, role: "status" },
-      el("span", { class: "toast-icon", text: icons[type] || "ℹ" }),
-      el(
+    const glyph = icons[type] || "ℹ";
+
+    // Degraded, not wrong: before the module resolves a toast is drawn with no
+    // cap and no counter, which is exactly what every toast did before it
+    // existed. Nothing is lost, and the window is a few milliseconds at boot.
+    if (!toastQueue) {
+      const plain = el(
         "div",
-        { class: "toast-body" },
-        title ? el("div", { class: "toast-title", text: title }) : null,
-        el("div", { text: message }),
-      ),
+        { class: `toast ${type}`, role: "status" },
+        el("span", { class: "toast-icon", text: glyph }),
+        el(
+          "div",
+          { class: "toast-body" },
+          title ? el("div", { class: "toast-title", text: title }) : null,
+          el("div", { text: message }),
+        ),
+      );
+      $("#toasts").append(plain);
+      setTimeout(() => {
+        plain.classList.add("leaving");
+        setTimeout(() => plain.remove(), 250);
+      }, type === "error" ? 6500 : 3500);
+      return;
+    }
+
+    const incoming = { type, title: title || "", message: String(message) };
+    const key = toastQueue.toastKey(incoming);
+    const decision = toastQueue.admitToast(state.toasts, incoming);
+    state.toasts = decision.live;
+    for (const gone of decision.evicted) removeToast(gone);
+
+    let node = toastNodes.get(key);
+    if (decision.repeated && node) {
+      // The card stays put and counts up — moving it would lose the reader's
+      // place in a stack they may be part-way through reading.
+      const live = state.toasts.find((t) => t.key === key);
+      let badge = node.querySelector(".toast-repeat");
+      if (!badge) {
+        badge = el("span", { class: "toast-repeat" });
+        node.append(badge);
+      }
+      badge.textContent = toastQueue.repeatLabel(live ? live.repeats : 2);
+    } else {
+      node = el(
+        "div",
+        { class: `toast ${type}`, role: "status" },
+        el("span", { class: "toast-icon", text: glyph }),
+        el(
+          "div",
+          { class: "toast-body" },
+          title ? el("div", { class: "toast-title", text: title }) : null,
+          el("div", { text: message }),
+        ),
+      );
+      toastNodes.set(key, node);
+      $("#toasts").append(node);
+    }
+
+    // A repeat restarts the clock: the message is current again, so the card
+    // should outlive the moment the first copy of it arrived.
+    if (node.dataset.timer) clearTimeout(Number(node.dataset.timer));
+    node.dataset.timer = String(
+      setTimeout(() => removeToast(key), toastQueue.ttlFor(type)),
     );
-    $("#toasts").append(toast);
-    const ttl = type === "error" ? 6500 : 3500;
-    setTimeout(() => {
-      toast.classList.add("leaving");
-      setTimeout(() => toast.remove(), 250);
-    }, ttl);
   }
 
   /** Single funnel for IPC: try/catch with an error toast, then rethrow. */
@@ -323,6 +425,16 @@
   const state = {
     identity: null,
     workspace: null,
+    // Light / dark / follow-the-system. Persisted in localStorage rather than
+    // the encrypted vault on purpose: the vault door itself has to be painted
+    // before anything can be decrypted, so a preference kept inside the vault
+    // could only ever take effect one screen late.
+    appearance: "dark",
+    // The ⌘K palette: whether it is open, what has been typed, the ranked
+    // entries currently drawn, and which of them Enter would run.
+    palette: { open: false, query: "", results: [], selectedId: null },
+    // Toasts on screen, oldest first (see toast_queue.mjs).
+    toasts: [],
     chitthis: [],
     seenChitthi: new Set(),
     // peer pubkey -> [{ id?, content?, media?, created_at, outgoing, upi, status?, reply_to? }]
@@ -723,6 +835,66 @@
     }
   }
 
+  // ── Appearance (light / dark / follow the system) ──────────────────────────
+  //
+  // `document.body.className` is assigned wholesale below, so the modality skin
+  // and the appearance have to be produced together — which is why the class
+  // list is `theme.mjs`'s answer and not a `classList.toggle` here.
+
+  const systemDarkQuery =
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
+      : null;
+
+  const systemPrefersDark = () => (systemDarkQuery ? systemDarkQuery.matches : true);
+
+  /** Repaint <body> for the current workspace and appearance. */
+  function applyAppearance() {
+    const modality = themeClass(state.workspace ? state.workspace.key : null);
+    document.body.className = theme
+      ? theme.bodyClassName(modality, state.appearance, systemPrefersDark())
+      : modality;
+
+    const glyph = $("#appearance-glyph");
+    const button = $("#appearance-toggle");
+    if (!theme || !glyph || !button) return;
+    glyph.textContent = theme.appearanceGlyph(state.appearance);
+    const label = theme.appearanceLabel(state.appearance);
+    button.title = `Appearance: ${label}`;
+    button.setAttribute("aria-label", `Appearance: ${label}`);
+  }
+
+  /**
+   * Read the stored preference. A browser that refuses localStorage (private
+   * mode, a hardened webview) is not an error worth a toast — it just means the
+   * choice lasts one session, so this falls back to the default in silence.
+   */
+  function loadAppearance() {
+    if (!theme) return "dark";
+    try {
+      return theme.normalizeAppearance(
+        window.localStorage.getItem(theme.APPEARANCE_STORAGE_KEY),
+      );
+    } catch {
+      return theme.DEFAULT_APPEARANCE;
+    }
+  }
+
+  function setAppearance(pref) {
+    if (!theme) return;
+    state.appearance = theme.normalizeAppearance(pref);
+    try {
+      window.localStorage.setItem(theme.APPEARANCE_STORAGE_KEY, state.appearance);
+    } catch {
+      /* see loadAppearance: a session-only choice, not a failure */
+    }
+    applyAppearance();
+  }
+
+  function cycleAppearance() {
+    if (theme) setAppearance(theme.nextAppearance(state.appearance));
+  }
+
   function setPill(node, on) {
     node.classList.toggle("on", !!on);
     node.classList.toggle("off", !on);
@@ -732,7 +904,7 @@
   function applyWorkspace(ws) {
     if (!ws) return;
     state.workspace = ws;
-    document.body.className = themeClass(ws.key);
+    applyAppearance();
 
     $("#ws-badge").textContent = ws.mesh_active
       ? "Off-Grid"
@@ -979,7 +1151,11 @@
       for (const action of actions) {
         bar.append(
           el("button", {
-            class: "btn btn-small",
+            // "Done" is the one of the three anybody is reaching for, so it is
+            // the outlined one; declining and withdrawing stay ghosts. Before
+            // the design system these carried no variant at all and rendered in
+            // the browser's own grey — light buttons on a dark screen.
+            class: `btn btn-sm ${action === "done" ? "btn-outline" : "btn-ghost"}`,
             type: "button",
             text: { done: "Done", decline: "Decline", withdraw: "Withdraw" }[action],
             onclick: async () => {
@@ -1021,6 +1197,250 @@
     // which is where the remaining time comes from on the next paint.
     if (name === "focus") loadFocus();
     else stopFocusTick();
+  }
+
+  // ── Command palette (⌘K / Ctrl-K) ─────────────────────────────────────────
+  //
+  // shadcn/ui's Command, over this app's own surface. Filtering, ranking and
+  // cursor movement are `command_palette.mjs`; the catalogue is built here,
+  // fresh on every open, from live state — so a conversation that does not
+  // exist is not offered, and the Travel row says which way it will go.
+
+  /** Everything the palette can run right now, in the order it opens on. */
+  function paletteCatalogue() {
+    const goTo = (id, label, tab, hint, glyph, keywords) => ({
+      id,
+      label,
+      group: "Go to",
+      hint,
+      glyph,
+      keywords,
+      run: () => {
+        delete document.body.dataset.profileOpen;
+        switchTab(tab);
+      },
+    });
+
+    const entries = [
+      goTo("go-together", "Together", "together", "Listen or watch in step", "♫", [
+        "music",
+        "play",
+        "watch",
+      ]),
+      goTo("go-vault", "Vault", "vault", "Encrypted conversations", "🔐", [
+        "chat",
+        "dm",
+        "messages",
+      ]),
+      goTo("go-focus", "Focus", "focus", "Sessions, long reads, stretch", "⏳", [
+        "attention",
+        "read",
+        "stretch",
+      ]),
+      goTo("go-tasks", "Tasks", "tasks", "Yours and asked of you", "🗒", ["todo"]),
+      goTo("go-sabha", "Sabha", "sabha", "Public Chitthis", "📢", ["feed", "public"]),
+    ];
+
+    if (state.identity) {
+      entries.push({
+        id: "go-profile",
+        label: "Your profile",
+        group: "Go to",
+        hint: "Key, handle, what you share",
+        glyph: "👤",
+        keywords: ["identity", "npub", "key"],
+        run: () => openProfile(null),
+      });
+    }
+
+    const travelling = !!(state.workspace && state.workspace.mesh_active);
+    entries.push(
+      {
+        id: "mode-travel",
+        label: travelling ? "Leave Off-Grid / Travel" : "Enter Off-Grid / Travel",
+        group: "Modes",
+        hint: travelling ? "Back to Base" : "Mesh-first, relays stood down",
+        glyph: "🧭",
+        keywords: ["mesh", "offline", "travel"],
+        run: () => {
+          // Flip the switch and hand it to the same handler a click uses, so
+          // the palette can never take a route the checkbox does not.
+          const toggle = $("#travel-toggle");
+          toggle.checked = !toggle.checked;
+          handleTravel({ target: toggle });
+        },
+      },
+      {
+        id: "mode-partner",
+        label: "Partner Portal",
+        group: "Modes",
+        hint: "Pair, and the shared ledger",
+        glyph: "❤",
+        keywords: ["couple", "sakha", "sakhi", "ledger"],
+        run: () => openPartnerModal(),
+      },
+      {
+        id: "mode-call-settings",
+        label: "Call settings",
+        group: "Modes",
+        hint: "TURN relay, and file-sending policy",
+        glyph: "📞",
+        keywords: ["turn", "relay", "video"],
+        run: () => openTurnModal(),
+      },
+    );
+
+    // A conversation is the thing most often being looked for, and the rail
+    // cannot list them — so the palette does.
+    for (const peer of state.dms.keys()) {
+      entries.push({
+        id: `chat-${peer}`,
+        label: displayName(peer),
+        group: "Conversations",
+        hint: "Open this conversation",
+        glyph: "💬",
+        keywords: [peer],
+        run: () => {
+          delete document.body.dataset.profileOpen;
+          switchTab("vault");
+          selectContact(peer);
+        },
+      });
+    }
+
+    if (theme) {
+      for (const pref of theme.APPEARANCES) {
+        entries.push({
+          id: `appearance-${pref}`,
+          label: `Appearance: ${theme.appearanceLabel(pref)}`,
+          group: "Appearance",
+          hint: pref === state.appearance ? "Current" : "",
+          glyph: theme.appearanceGlyph(pref),
+          keywords: ["theme", "dark", "light", "colour", "color"],
+          run: () => setAppearance(pref),
+        });
+      }
+    }
+
+    return entries;
+  }
+
+  /** Where the keyboard was before the palette took it. */
+  let paletteReturnFocus = null;
+
+  function openPalette() {
+    if (!commandPalette || state.palette.open) return;
+    state.palette.open = true;
+    state.palette.query = "";
+    // Opens on the first row every time. Resuming last time's highlight would
+    // mean ⌘K-Enter runs something different depending on what was done an hour
+    // ago, which is the opposite of what a palette is for.
+    state.palette.selectedId = null;
+    paletteReturnFocus = document.activeElement;
+    $("#palette").hidden = false;
+    const input = $("#palette-input");
+    input.value = "";
+    renderPalette();
+    input.focus();
+  }
+
+  function closePalette() {
+    if (!state.palette.open) return;
+    state.palette.open = false;
+    $("#palette").hidden = true;
+    // Give the keyboard back to whatever had it — closing a dialog onto
+    // `<body>` costs a keyboard user their place on the page. Skipped when the
+    // element has since left the document (a re-rendered row).
+    if (paletteReturnFocus && paletteReturnFocus.isConnected) paletteReturnFocus.focus();
+    paletteReturnFocus = null;
+  }
+
+  function renderPalette() {
+    const all = paletteCatalogue();
+    const groups = commandPalette.groupCommands(
+      commandPalette.filterCommands(all, state.palette.query),
+    );
+    // Grouping re-orders the ranked list (two "Go to" hits either side of a
+    // "Modes" one end up adjacent), so the cursor walks the *drawn* order.
+    // Anything else makes ↓ skip a row and come back to it.
+    const results = groups.flatMap((g) => g.commands);
+    state.palette.results = results;
+
+    // Keyed on the entry, not the row: re-ranking moves rows under the cursor,
+    // and Enter must run what is highlighted rather than whatever inherited
+    // its index a keystroke ago.
+    const selected = commandPalette.keepSelection(results, state.palette.selectedId);
+    state.palette.selectedId = selected === -1 ? null : results[selected].id;
+
+    const list = $("#palette-list");
+    list.innerHTML = "";
+    $("#palette-empty").hidden = results.length > 0;
+
+    for (const group of groups) {
+      if (group.group) list.append(el("div", { class: "palette-group-label", text: group.group }));
+      for (const entry of group.commands) {
+        const on = entry.id === state.palette.selectedId;
+        list.append(
+          el(
+            "button",
+            {
+              class: "palette-item",
+              type: "button",
+              role: "option",
+              "aria-selected": on ? "true" : "false",
+              // Pointer and keyboard agree about which row Enter runs: hovering
+              // moves the selection rather than drawing a second highlight.
+              onMouseMove: () => {
+                if (state.palette.selectedId === entry.id) return;
+                state.palette.selectedId = entry.id;
+                paintPaletteSelection();
+              },
+              onClick: () => runPaletteEntry(entry),
+            },
+            el("span", { class: "palette-item-glyph", text: entry.glyph || "›" }),
+            el(
+              "span",
+              { class: "palette-item-body" },
+              el("span", { class: "palette-item-label", text: entry.label }),
+              entry.hint ? el("span", { class: "palette-item-hint", text: entry.hint }) : null,
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  /** Repaint only the highlight — a full re-render on hover would fight the
+   *  pointer and reset the scroll position mid-move. */
+  function paintPaletteSelection() {
+    const rows = [...$("#palette-list").querySelectorAll(".palette-item")];
+    rows.forEach((row, i) => {
+      const entry = state.palette.results[i];
+      const on = !!entry && entry.id === state.palette.selectedId;
+      row.setAttribute("aria-selected", on ? "true" : "false");
+      if (on) row.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function movePaletteSelection(delta) {
+    const results = state.palette.results;
+    if (!results.length) return;
+    const from = results.findIndex((r) => r.id === state.palette.selectedId);
+    const to = commandPalette.moveSelection(results.length, from === -1 ? 0 : from, delta);
+    state.palette.selectedId = results[to].id;
+    paintPaletteSelection();
+  }
+
+  function runPaletteEntry(entry) {
+    if (!entry) return;
+    // Closed first: several of these open a modal or a screen, and running one
+    // behind the palette would leave the palette on top of its own result.
+    closePalette();
+    try {
+      entry.run();
+    } catch (e) {
+      showToast(errText(e), "error");
+    }
   }
 
   // ── Profile page ──────────────────────────────────────────────────────────
@@ -1257,7 +1677,12 @@
     if (!spec) return null;
     const [label, handler] = spec;
     return el("button", {
-      class: `btn ${action === "block" ? "btn-danger" : "btn-ghost"} profile-action`,
+      // `btn-danger` was never a class this stylesheet defined, so Block has
+      // been rendering with no variant at all — a transparent rectangle where
+      // the one destructive action on the page should be. `btn-destructive` is
+      // the name the design system uses; the rest are outlined, because a row
+      // of borderless ghosts under a name reads as a sentence, not as buttons.
+      class: `btn ${action === "block" ? "btn-destructive" : "btn-outline"} btn-sm profile-action`,
       text: label,
       // Mute has no desktop backend yet. Rendered disabled and titled, rather
       // than omitted, because `actionRow` says a contact has one — an absent
@@ -1909,9 +2334,15 @@
     head.innerHTML = "";
     if (!state.activeContact) {
       head.append(el("span", { class: "muted", text: "Select a conversation" }));
+      // The log and the empty pane share the row, so exactly one of them is in
+      // it — two flex children both claiming `flex: 1` would split the pane.
+      $("#chat-empty").hidden = false;
+      log.hidden = true;
       renderedPeer = null;
       return;
     }
+    $("#chat-empty").hidden = true;
+    log.hidden = false;
     const peer = state.activeContact;
     const presence = presenceOf(peer);
     head.append(
@@ -6790,6 +7221,57 @@
         delete document.body.dataset.profileOpen;
         switchTab(t.dataset.tab);
       });
+
+    // Appearance. Also repainted when the OS flips while "Match system" is
+    // chosen — a laptop switching to dark at sunset should take this window
+    // with it without a relaunch.
+    applyAppearance();
+    $("#appearance-toggle").addEventListener("click", cycleAppearance);
+    if (systemDarkQuery && systemDarkQuery.addEventListener)
+      systemDarkQuery.addEventListener("change", () => applyAppearance());
+
+    // ── Command palette ──────────────────────────────────────────────────
+    $("#palette-open").addEventListener("click", openPalette);
+    $("#palette").addEventListener("mousedown", (e) => {
+      // Only the scrim closes it: a mousedown that started inside the dialog
+      // and drifted out (selecting text in the field) must not dismiss it.
+      if (e.target === $("#palette")) closePalette();
+    });
+    $("#palette-input").addEventListener("input", (e) => {
+      state.palette.query = e.target.value;
+      renderPalette();
+    });
+    $("#palette-input").addEventListener("keydown", (e) => {
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          movePaletteSelection(1);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          movePaletteSelection(-1);
+          break;
+        case "Enter": {
+          e.preventDefault();
+          const entry = state.palette.results.find((r) => r.id === state.palette.selectedId);
+          runPaletteEntry(entry);
+          break;
+        }
+        case "Escape":
+          e.preventDefault();
+          closePalette();
+          break;
+        default:
+          break;
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "k" && e.key !== "K") return;
+      if (!e.metaKey && !e.ctrlKey) return;
+      e.preventDefault();
+      if (state.palette.open) closePalette();
+      else openPalette();
+    });
 
     $("#chitthi-input").addEventListener("input", updateCount);
     $("#broadcast-btn").addEventListener("click", handleBroadcast);

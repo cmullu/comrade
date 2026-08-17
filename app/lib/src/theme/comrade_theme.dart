@@ -35,11 +35,13 @@ const List<Color> kAvatarPalette = <Color>[
 
 /// The workspace skins `styles.css` swaps CSS variables for.
 ///
-/// The dark accents are `--accent-2` verbatim. The light ones are **not**
-/// `--accent`, which is what the first port of this file used: `styles.css`
-/// has no `prefers-color-scheme` block at all, so every value in it was tuned
-/// against a near-black background, and there `--accent` is a *fill* carrying
-/// dark `--accent-contrast` text — never text itself. Reused as a light-mode
+/// The dark accents are `--primary-hover` verbatim (spelled `--accent-2`
+/// before `styles.css` adopted shadcn/ui's token names — see
+/// `docs/DESIGN_SYSTEM.md`). The light ones are **not** `--primary`, which is
+/// what the first port of this file used: `styles.css` is dark-first, so every
+/// value in `:root` was tuned against a near-black background, and there
+/// `--primary` is a *fill* carrying `--primary-foreground` text — never text
+/// itself. Reused as a light-mode
 /// `primary` it becomes small text on white, and `SectionCard` titles in the
 /// Travel workspace measured 2.1:1 against the surface (WCAG AA wants 4.5:1
 /// for body text). A `FilledButton` was worse still: white on `#f59e0b` is
@@ -62,7 +64,7 @@ enum WorkspaceSkin {
 
   const WorkspaceSkin(this.darkAccent, this.lightAccent);
 
-  /// Used on a dark background: `--accent-2`, bright.
+  /// Used on a dark background: `--primary-hover`, bright.
   final Color darkAccent;
 
   /// Used on a light background: the same hue, dark enough to read as text.
@@ -107,19 +109,19 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
     required this.bad,
   });
 
-  /// `--panel` — sidebar, cards, the conversation list.
+  /// `--card` — sidebar, cards, the conversation list.
   final Color panel;
 
-  /// `--panel-2` — a hover/selected step above [panel].
+  /// `--accent` — a hover/selected step above [panel].
   final Color panelAlt;
 
   /// `--border`.
   final Color border;
 
-  /// `--border-strong`.
+  /// `--input`, the firmer border form controls take.
   final Color borderStrong;
 
-  /// `--good` / `--warn` / `--bad` status pills.
+  /// `--success` / `--warning` / `--destructive` status pills.
   final Color good;
   final Color warn;
   final Color bad;
@@ -137,8 +139,8 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
   /// Same note as [WorkspaceSkin]'s light accents: `good`/`warn`/`bad` are
   /// rendered as *text* (the sidebar status pills in `home_shell.dart` colour
   /// their label with them, over an 18%-alpha wash of the same colour), so the
-  /// dark ramp's `--good`/`--warn`/`--bad` are too light to reuse here. These
-  /// are the 700/800 steps of the same hues.
+  /// dark ramp's `--success`/`--warning`/`--destructive` are too light to
+  /// reuse here. These are the 700/800 steps of the same hues.
   static const ComradeSurfaces light = ComradeSurfaces(
     panel: Color(0xFFF4F6FB),
     panelAlt: Color(0xFFE8ECF6),
