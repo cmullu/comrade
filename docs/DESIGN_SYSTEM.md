@@ -159,6 +159,25 @@ This is a real difference and it is allowed to stay one. Revisit if a
 first-party backdrop-blur modifier ships in Compose, or if minSdk reaches 31
 and `RenderEffect` becomes unconditional.
 
+**Android also cannot implement §4's second hatch, because the signal does not
+exist.** Reduced transparency is an iOS accessibility setting with a CSS
+counterpart (`prefers-reduced-transparency`); Android exposes no public
+equivalent, so there is nothing to read. Desktop and Flutter honour it; Android
+has no way to.
+
+What Android *can* read is reduced **motion** — `Settings.Global.ANIMATOR_DURATION_SCALE`
+at `0f`, which is the same setting that backs Flutter's `MediaQuery.disableAnimations`
+on Android. That hatch is implemented, and it is deliberately wired to do more
+work there than elsewhere: as well as collapsing durations, it makes the glass
+tint **opaque**. Android's glass has no blur, but it is still translucent, so
+content still moves behind it; turning it opaque under the one signal Android
+does expose recovers most of what the missing transparency hatch would have
+bought. A user who asks for no motion gets a still, solid surface.
+
+So the honest count is: desktop 3 of 3, Flutter 3 of 3, Android 2 of 3, with the
+third unavailable rather than skipped. Revisit if Android ever ships a
+reduced-transparency setting.
+
 ## 6. What this does not change
 
 Behaviour. This is a visual system: token definitions, a tier applied to
