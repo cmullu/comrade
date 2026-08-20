@@ -26,6 +26,7 @@ import '../../data/comrade_repository.dart';
 import '../../data/models.dart';
 import '../../state/topic_providers.dart';
 import '../../util/topic_view.dart';
+import '../../widgets/glass_surface.dart';
 
 /// Open the topic sheet.
 ///
@@ -51,10 +52,15 @@ Future<String?> showTopicSheet(
       showDragHandle: true,
       useSafeArea: true,
       isScrollControlled: true,
-      builder: (BuildContext sheetContext) => _TopicSheet(
-        peer: peer,
-        filingMessageId: filingMessageId,
-        onOpenThread: onOpenThread,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext sheetContext) => GlassSurface(
+        tier: GlassTier.sheet,
+        borderRadius: kGlassSheetRadius,
+        child: _TopicSheet(
+          peer: peer,
+          filingMessageId: filingMessageId,
+          onOpenThread: onOpenThread,
+        ),
       ),
     );
 
@@ -72,8 +78,12 @@ Future<void> showThreadSheet(
       showDragHandle: true,
       useSafeArea: true,
       isScrollControlled: true,
-      builder: (BuildContext sheetContext) =>
-          _ThreadSheet(peer: peer, rootId: rootId, onFile: onFile),
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext sheetContext) => GlassSurface(
+        tier: GlassTier.sheet,
+        borderRadius: kGlassSheetRadius,
+        child: _ThreadSheet(peer: peer, rootId: rootId, onFile: onFile),
+      ),
     );
 
 class _TopicSheet extends ConsumerStatefulWidget {

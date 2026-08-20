@@ -259,7 +259,10 @@ class _InlineImage extends ConsumerWidget {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 240, maxHeight: 240),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(ComradeRadii.small),
+        // `lg`, kept at its old value — an inline photo up to 240px square
+        // reads as a card next to the bubble's own 18px rounding, not as
+        // `small`'s "chip"; see `ComradeRadii.small`'s doc.
+        borderRadius: BorderRadius.circular(ComradeRadii.lg),
         child: bytes.when(
           data: (MediaBytes m) => GestureDetector(
             key: const Key('media-open-fullscreen'),
@@ -319,16 +322,19 @@ class _VideoPoster extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ColorScheme colors = Theme.of(context).colorScheme;
+    // `lg`, kept at its old value on both the ink well and the fill below
+    // it — they have to match, and this is a 220×124 preview, not `small`'s
+    // "chip"; see `ComradeRadii.small`'s doc.
     return InkWell(
       key: const Key('media-open-fullscreen'),
-      borderRadius: BorderRadius.circular(ComradeRadii.small),
+      borderRadius: BorderRadius.circular(ComradeRadii.lg),
       onTap: () => openMediaViewer(context, info),
       child: Container(
         width: 220,
         height: 124,
         decoration: BoxDecoration(
           color: colors.surface.withValues(alpha: 0.4),
-          borderRadius: BorderRadius.circular(ComradeRadii.small),
+          borderRadius: BorderRadius.circular(ComradeRadii.lg),
         ),
         alignment: Alignment.center,
         child: Column(

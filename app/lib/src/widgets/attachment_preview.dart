@@ -22,6 +22,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/comrade_theme.dart';
 import '../util/attachment_caption.dart';
+import 'glass_surface.dart';
 import 'media_attachment.dart';
 
 /// Show [attachment] and return the caption the sender confirmed, or `null` if
@@ -39,9 +40,14 @@ Future<String?> showAttachmentPreview(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (BuildContext _) => AttachmentPreviewSheet(
-        attachment: attachment,
-        seedCaption: seedCaption,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext _) => GlassSurface(
+        tier: GlassTier.sheet,
+        borderRadius: kGlassSheetRadius,
+        child: AttachmentPreviewSheet(
+          attachment: attachment,
+          seedCaption: seedCaption,
+        ),
       ),
     );
 
@@ -121,8 +127,11 @@ class _AttachmentPreviewSheetState extends State<AttachmentPreviewSheet> {
                   isDense: true,
                   filled: true,
                   fillColor: colors.surfaceContainerHighest,
+                  // `lg`, not `sm`: kept at this field's old value (12) —
+                  // reviewed after the radius rework, see `ComradeRadii`'s
+                  // own doc on `small`.
                   border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(ComradeRadii.small),
+                    borderRadius: BorderRadius.circular(ComradeRadii.lg),
                     borderSide: BorderSide.none,
                   ),
                 ),
@@ -203,7 +212,9 @@ class _AttachmentPreviewSheetState extends State<AttachmentPreviewSheet> {
     switch (attachmentPreviewKind(file.mimeType)) {
       case AttachmentPreviewKind.image:
         return ClipRRect(
-          borderRadius: BorderRadius.circular(ComradeRadii.small),
+          // `lg`, kept at its old value — this is the preview photo itself,
+          // not a chip; see `ComradeRadii.small`'s doc.
+          borderRadius: BorderRadius.circular(ComradeRadii.lg),
           child: Image.memory(
             file.bytes,
             key: const Key('attachment-preview-image'),
@@ -247,7 +258,9 @@ class _AttachmentPreviewSheetState extends State<AttachmentPreviewSheet> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
         decoration: BoxDecoration(
           color: colors.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(ComradeRadii.small),
+          // `lg`, kept at its old value — a card, in the literal §3.2 sense,
+          // not `small`'s "chip".
+          borderRadius: BorderRadius.circular(ComradeRadii.lg),
         ),
         child: Column(
           children: <Widget>[

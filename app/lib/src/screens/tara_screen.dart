@@ -19,6 +19,7 @@ import '../data/models.dart';
 import '../state/tara_providers.dart';
 import '../util/chat_thread.dart';
 import '../widgets/app_chrome.dart';
+import '../widgets/glass_surface.dart';
 
 class TaraScreen extends ConsumerWidget {
   const TaraScreen({super.key});
@@ -123,8 +124,8 @@ class _TaraThreadState extends ConsumerState<_TaraThread> {
   }
 
   Future<void> _confirmClear() async {
-    final bool? yes = await showDialog<bool>(
-      context: context,
+    final bool? yes = await showGlassDialog<bool>(
+      context,
       builder: (BuildContext context) => AlertDialog(
         title: const Text('Clear this conversation?'),
         content: const Text(

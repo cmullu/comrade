@@ -35,6 +35,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../util/composer_mode.dart';
 import 'emoji_picker.dart';
+import 'glass_surface.dart';
 import 'media_attachment.dart';
 
 export '../util/composer_mode.dart' show ComposerCaptureMode;
@@ -89,6 +90,12 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   /// cannot start a second one.
   bool _busy = false;
 
+  // Explicit `FocusNode`s so `ComradeFocusRing` (§4) can share the same node
+  // the button itself focuses through, rather than wrap it in a second,
+  // independent `Focus` — see that widget's own doc for why that matters.
+  final FocusNode _attachFocus = FocusNode(debugLabel: 'dm-attach');
+  final FocusNode _actionFocus = FocusNode(debugLabel: 'dm-action');
+
   @override
   void initState() {
     super.initState();
@@ -100,6 +107,8 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   void dispose() {
     widget.controller.removeListener(_onDraftChanged);
     _tick?.cancel();
+    _attachFocus.dispose();
+    _actionFocus.dispose();
     super.dispose();
   }
 
@@ -304,17 +313,23 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                 suffixIcon: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
-                    IconButton(
-                      key: const Key('dm-attach'),
-                      tooltip: 'Attach a file (max 10 MB, encrypted)',
-                      onPressed: (widget.attaching || _busy) ? null : _attach,
-                      icon: (widget.attaching || _busy)
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.attach_file),
+                    ComradeFocusRing(
+                      focusNode: _attachFocus,
+                      child: IconButton(
+                        key: const Key('dm-attach'),
+                        focusNode: _attachFocus,
+                        tooltip: 'Attach a file (max 10 MB, encrypted)',
+                        onPressed:
+                            (widget.attaching || _busy) ? null : _attach,
+                        icon: (widget.attaching || _busy)
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.attach_file),
+                      ),
                     ),
                     _actionControl(context),
                   ],
@@ -349,32 +364,39 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
         : (_recording ? 'Stop and send' : _labelFor(mode));
     final bool enabled = _hasText ? !widget.sending : (mode != null && !_busy);
 
-    final Widget button = IconButton(
-      key: const Key('dm-action'),
-      tooltip: canSwipe ? '$label — swipe right to switch mode' : label,
-      onPressed: enabled
-          ? () {
-              if (_hasText) {
-                widget.onSend();
-                return;
+    final Widget button = ComradeFocusRing(
+      focusNode: _actionFocus,
+      borderRadius: const BorderRadius.all(Radius.circular(24)),
+      child: IconButton(
+        key: const Key('dm-action'),
+        focusNode: _actionFocus,
+        tooltip: canSwipe ? '$label — swipe right to switch mode' : label,
+        onPressed: enabled
+            ? () {
+                if (_hasText) {
+                  widget.onSend();
+                  return;
+                }
+                switch (mode!) {
+                  case ComposerCaptureMode.voice:
+                    _recording
+                        ? _finishRecording(send: true)
+                        : _startRecording();
+                  case ComposerCaptureMode.photo:
+                    _capturePhoto();
+                  case ComposerCaptureMode.video:
+                    _captureVideo();
+                }
               }
-              switch (mode!) {
-                case ComposerCaptureMode.voice:
-                  _recording ? _finishRecording(send: true) : _startRecording();
-                case ComposerCaptureMode.photo:
-                  _capturePhoto();
-                case ComposerCaptureMode.video:
-                  _captureVideo();
-              }
-            }
-          : null,
-      icon: (_busy && !_recording)
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : Icon(icon),
+            : null,
+        icon: (_busy && !_recording)
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Icon(icon),
+      ),
     );
 
     if (!canSwipe) return button;

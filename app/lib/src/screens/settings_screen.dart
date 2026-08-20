@@ -44,6 +44,7 @@ import '../platform/platform.dart'
 import '../state/providers.dart';
 import '../state/settings_providers.dart';
 import '../widgets/app_chrome.dart';
+import '../widgets/glass_surface.dart';
 import '../widgets/peer_avatar.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -94,8 +95,8 @@ class _ProfileCardState extends ConsumerState<_ProfileCard> {
   bool _copied = false;
 
   Future<void> _editUsername() async {
-    final Profile? saved = await showDialog<Profile>(
-      context: context,
+    final Profile? saved = await showGlassDialog<Profile>(
+      context,
       builder: (BuildContext context) =>
           _EditUsernameDialog(current: widget.profile.username),
     );
@@ -960,8 +961,8 @@ Future<bool?> showTurnServerDialog(
   BuildContext context, {
   required TurnServerStatus current,
 }) =>
-    showDialog<bool>(
-      context: context,
+    showGlassDialog<bool>(
+      context,
       builder: (BuildContext context) =>
           _EditTurnServerDialog(current: current),
     );
@@ -1109,8 +1110,8 @@ class _VaultLockCard extends ConsumerWidget {
               width: double.infinity,
               child: OutlinedButton(
                 onPressed: () async {
-                  final bool? yes = await showDialog<bool>(
-                    context: context,
+                  final bool? yes = await showGlassDialog<bool>(
+                    context,
                     builder: (BuildContext context) => AlertDialog(
                       title: const Text('Lock vault now'),
                       content: const Text(

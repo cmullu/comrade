@@ -30,6 +30,7 @@ import '../theme/comrade_theme.dart';
 import '../util/chat_menu.dart';
 import '../util/display_name.dart';
 import '../widgets/app_chrome.dart';
+import '../widgets/glass_surface.dart';
 import '../widgets/peer_avatar.dart';
 import 'call_screen.dart';
 import 'chats/call_history_screen.dart';
@@ -92,6 +93,11 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final List<StreamSubscription<String>> _navRequests =
       <StreamSubscription<String>>[];
+
+  /// The app bar's own background is transparent, painted instead by this —
+  /// glass tier chrome, per §2 of `docs/DESIGN_SYSTEM.md`.
+  static const Widget _glassAppBarBackground =
+      GlassSurface(tier: GlassTier.chrome, child: SizedBox.expand());
 
   /// Notification taps land here (WP11 in `docs/COMMS_ARCHITECTURE.md`).
   ///
@@ -346,20 +352,26 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       // The conversation view owns the whole screen, Telegram-style.
       bottomNavigationBar: (inConversation || _secondary != null)
           ? null
-          : NavigationBar(
-              selectedIndex: _tab.index,
-              onDestinationSelected: (int i) => setState(() {
-                _tab = MainTab.values[i];
-                _chatNav = ChatNav.list;
-              }),
-              destinations: <Widget>[
-                for (final MainTab t in MainTab.values)
-                  NavigationDestination(
-                    icon: Icon(t.icon),
-                    selectedIcon: Icon(t.selectedIcon),
-                    label: t.label,
-                  ),
-              ],
+          // Glass tier chrome (§2): the bar paints nothing of its own —
+          // `GlassSurface` supplies the tint, blur, specular edge and shadow.
+          : GlassSurface(
+              tier: GlassTier.chrome,
+              child: NavigationBar(
+                backgroundColor: Colors.transparent,
+                selectedIndex: _tab.index,
+                onDestinationSelected: (int i) => setState(() {
+                  _tab = MainTab.values[i];
+                  _chatNav = ChatNav.list;
+                }),
+                destinations: <Widget>[
+                  for (final MainTab t in MainTab.values)
+                    NavigationDestination(
+                      icon: Icon(t.icon),
+                      selectedIcon: Icon(t.selectedIcon),
+                      label: t.label,
+                    ),
+                ],
+              ),
             ),
       floatingActionButton: (_secondary == null &&
               _tab == MainTab.chats &&
@@ -419,6 +431,8 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   PreferredSizeWidget _appBar(BuildContext context, ChatTarget? openChat) {
     if (_secondary != null) {
       return AppBar(
+        backgroundColor: Colors.transparent,
+        flexibleSpace: _glassAppBarBackground,
         leading: BackButton(onPressed: () => setState(() => _secondary = null)),
         title: Text(_secondary!.label),
       );
@@ -427,6 +441,8 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       final String title =
           peerTitle(openChat.peer, openChat.alias, openChat.username);
       return AppBar(
+        backgroundColor: Colors.transparent,
+        flexibleSpace: _glassAppBarBackground,
         leading: BackButton(onPressed: _closeConversation),
         titleSpacing: 0,
         title: Row(
@@ -459,6 +475,8 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     }
     if (_tab == MainTab.chats && _chatNav != ChatNav.list) {
       return AppBar(
+        backgroundColor: Colors.transparent,
+        flexibleSpace: _glassAppBarBackground,
         leading: BackButton(
             onPressed: () => setState(() => _chatNav = ChatNav.list)),
         title:
@@ -466,6 +484,8 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       );
     }
     return AppBar(
+      backgroundColor: Colors.transparent,
+      flexibleSpace: _glassAppBarBackground,
       centerTitle: true,
       leading: IconButton(
         key: const Key('nav-drawer-button'),
@@ -686,39 +706,43 @@ class _WideHeader extends StatelessWidget {
   final Widget? leading;
   final List<Widget> actions;
 
+  // Glass tier chrome (§2, "top bar"): the fixed height comes from this
+  // `Container`, the fill/blur/specular edge/shadow from `GlassSurface`.
   @override
-  Widget build(BuildContext context) => Container(
-        height: 60,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        color: context.surfaces.panel,
-        child: Row(
-          children: <Widget>[
-            if (leading != null) ...<Widget>[
-              leading!,
-              const SizedBox(width: 10)
-            ],
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  if (subtitle != null)
-                    KeyText(
-                      subtitle!,
-                      short: false,
-                      style: Theme.of(context).textTheme.labelSmall,
+  Widget build(BuildContext context) => GlassSurface(
+        tier: GlassTier.chrome,
+        child: Container(
+          height: 60,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: <Widget>[
+              if (leading != null) ...<Widget>[
+                leading!,
+                const SizedBox(width: 10)
+              ],
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium,
                     ),
-                ],
+                    if (subtitle != null)
+                      KeyText(
+                        subtitle!,
+                        short: false,
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                  ],
+                ),
               ),
-            ),
-            ...actions,
-          ],
+              ...actions,
+            ],
+          ),
         ),
       );
 }

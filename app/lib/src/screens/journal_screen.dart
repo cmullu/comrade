@@ -31,6 +31,7 @@ import '../util/display_name.dart';
 import '../util/journal_note.dart';
 import '../util/journal_recording.dart';
 import '../widgets/app_chrome.dart';
+import '../widgets/glass_surface.dart';
 
 /// Self-reported mood markers, low → high. Stored as the emoji itself.
 const List<String> kMoods = <String>['😞', '😕', '😐', '🙂', '😄'];
@@ -80,8 +81,8 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
   }
 
   Future<void> _confirmDelete(JournalEntryInfo entry) async {
-    final bool? yes = await showDialog<bool>(
-      context: context,
+    final bool? yes = await showGlassDialog<bool>(
+      context,
       builder: (BuildContext context) => AlertDialog(
         title: const Text('Delete this entry?'),
         content: const Text(
@@ -122,8 +123,8 @@ class _JournalScreenState extends ConsumerState<JournalScreen> {
               ))
           .toList(),
     );
-    final ShareTarget? pick = await showDialog<ShareTarget>(
-      context: context,
+    final ShareTarget? pick = await showGlassDialog<ShareTarget>(
+      context,
       builder: (BuildContext context) => AlertDialog(
         title: const Text('Send this note to…'),
         content: SizedBox(

@@ -15,6 +15,7 @@ import '../../data/models.dart';
 import '../../state/providers.dart';
 import '../../util/display_name.dart';
 import '../../widgets/app_chrome.dart';
+import '../../widgets/glass_surface.dart';
 
 /// Shows the editor and returns the saved contact, or `null` if cancelled.
 Future<ContactInfo?> showEditAliasDialog(
@@ -22,8 +23,8 @@ Future<ContactInfo?> showEditAliasDialog(
   required String peer,
   String? currentAlias,
 }) =>
-    showDialog<ContactInfo>(
-      context: context,
+    showGlassDialog<ContactInfo>(
+      context,
       builder: (BuildContext context) =>
           _EditAliasDialog(peer: peer, currentAlias: currentAlias),
     );
