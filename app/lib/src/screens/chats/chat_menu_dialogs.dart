@@ -6,6 +6,8 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../widgets/glass_surface.dart';
+
 /// Explains what protects this thread and shows the peer's key in full.
 ///
 /// The key is unabbreviated and selectable on purpose: comparing it out of band
@@ -15,8 +17,8 @@ Future<void> showEncryptionDetailsDialog(
   BuildContext context, {
   required String peer,
 }) =>
-    showDialog<void>(
-      context: context,
+    showGlassDialog<void>(
+      context,
       builder: (BuildContext context) {
         final ThemeData theme = Theme.of(context);
         return AlertDialog(
@@ -82,8 +84,8 @@ Future<void> showEncryptionDetailsDialog(
 /// the copy says both of those things before it happens.
 Future<bool> confirmBlockPeer(BuildContext context) async {
   final ThemeData theme = Theme.of(context);
-  final bool? yes = await showDialog<bool>(
-    context: context,
+  final bool? yes = await showGlassDialog<bool>(
+    context,
     builder: (BuildContext context) => AlertDialog(
       icon: Icon(Icons.warning, color: theme.colorScheme.error),
       title: const Text('Block this person?'),

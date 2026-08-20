@@ -28,6 +28,7 @@ import 'package:comrade/src/screens/settings_screen.dart';
 import 'package:comrade/src/state/providers.dart';
 import 'package:comrade/src/state/settings_providers.dart';
 import 'package:comrade/src/theme/comrade_theme.dart';
+import 'package:comrade/src/widgets/glass_surface.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -238,6 +239,213 @@ void main() {
           greaterThanOrEqualTo(kAaBodyText),
           reason: 'CallPalette.$name on the PiP background',
         );
+      });
+    });
+  });
+
+  // ── §3.1–§3.5: the extended token set ────────────────────────────────────
+  group('design system tokens (§3)', () {
+    test('every X/XForeground pair clears 4.5:1, every skin, both ramps', () {
+      for (final WorkspaceSkin skin in WorkspaceSkin.values) {
+        for (final Brightness brightness in Brightness.values) {
+          final String where = '${skin.name}/${brightness.name}';
+          final ComradeSurfaces s =
+              themeFor(brightness, skin).extension<ComradeSurfaces>()!;
+          final Map<String, (Color, Color)> pairs = <String, (Color, Color)>{
+            'card': (s.cardForeground, s.card),
+            'popover': (s.popoverForeground, s.popover),
+            'muted': (s.mutedForeground, s.muted),
+            'good': (s.goodForeground, s.good),
+            'warn': (s.warnForeground, s.warn),
+            'bad': (s.badForeground, s.bad),
+          };
+          pairs.forEach((String name, (Color, Color) pair) {
+            final (Color fg, Color bg) = pair;
+            expect(
+              contrastRatio(fg, bg),
+              greaterThanOrEqualTo(kAaBodyText),
+              reason: '$where: ${name}Foreground on $name',
+            );
+          });
+        }
+      }
+    });
+
+    test('ring is never the same value as border, either ramp', () {
+      expect(ComradeSurfaces.dark.ring, isNot(ComradeSurfaces.dark.border));
+      expect(ComradeSurfaces.light.ring, isNot(ComradeSurfaces.light.border));
+    });
+
+    test('input matches borderStrong — one field, kept in step', () {
+      // §3.1 describes `input` as "a step stronger than border", which is
+      // exactly what `borderStrong` already was; this locks the two together
+      // rather than letting them drift if one is ever hand-edited alone.
+      expect(ComradeSurfaces.dark.input, ComradeSurfaces.dark.borderStrong);
+      expect(ComradeSurfaces.light.input, ComradeSurfaces.light.borderStrong);
+    });
+
+    test('card/popover/muted are aliases, not copies that can drift', () {
+      for (final ComradeSurfaces s in <ComradeSurfaces>[
+        ComradeSurfaces.dark,
+        ComradeSurfaces.light,
+      ]) {
+        expect(s.card, s.panel);
+        expect(s.popover, s.panelAlt);
+        expect(s.muted, s.panelAlt);
+      }
+    });
+
+    test('the derived radius scale stays ordered (§3.2)', () {
+      expect(ComradeRadii.sm, lessThan(ComradeRadii.md));
+      expect(ComradeRadii.md, lessThan(ComradeRadii.lg));
+      expect(ComradeRadii.lg, lessThan(ComradeRadii.xl));
+      expect(ComradeRadii.xl, lessThan(ComradeRadii.xxl));
+      // Every tier derives from the one base constant.
+      expect(ComradeRadii.sm, ComradeRadii.base - 4);
+      expect(ComradeRadii.md, ComradeRadii.base - 2);
+      expect(ComradeRadii.lg, ComradeRadii.base);
+      expect(ComradeRadii.xl, ComradeRadii.base + 6);
+      expect(ComradeRadii.xxl, ComradeRadii.base + 16);
+      // The bubble pair is the one documented exception (§3.2) — not derived,
+      // and the tail stays tighter than the bubble itself.
+      expect(ComradeRadii.bubbleTail, lessThan(ComradeRadii.bubble));
+    });
+
+    test('pre-existing radius names still resolve to a §3.2 tier', () {
+      // Regression guard for the rework: every old name is one of the five
+      // derived constants, not an orphaned literal that silently stopped
+      // moving with `ComradeRadii.base`.
+      const List<double> tiers = <double>[
+        ComradeRadii.sm,
+        ComradeRadii.md,
+        ComradeRadii.lg,
+        ComradeRadii.xl,
+        ComradeRadii.xxl,
+      ];
+      for (final double legacy in <double>[
+        ComradeRadii.extraSmall,
+        ComradeRadii.small,
+        ComradeRadii.medium,
+        ComradeRadii.large,
+        ComradeRadii.extraLarge,
+      ]) {
+        expect(tiers, contains(legacy));
+      }
+    });
+
+    test('state-layer opacities are fixed constants (§3.3)', () {
+      expect(ComradeStateLayers.hover, 0.08);
+      expect(ComradeStateLayers.focus, 0.10);
+      expect(ComradeStateLayers.pressed, 0.10);
+      expect(ComradeStateLayers.dragged, 0.16);
+      expect(ComradeStateLayers.selected, 0.12);
+      expect(ComradeStateLayers.disabledContent, 0.38);
+      expect(ComradeStateLayers.disabledContainer, 0.12);
+    });
+
+    test('motion durations step up: fast < base < slow (§3.5)', () {
+      expect(
+        ComradeMotion.fast.inMilliseconds,
+        lessThan(ComradeMotion.base.inMilliseconds),
+      );
+      expect(
+        ComradeMotion.base.inMilliseconds,
+        lessThan(ComradeMotion.slow.inMilliseconds),
+      );
+    });
+
+    group('GlassSurface (§3.4, §4)', () {
+      // The `MediaQuery` has to sit *inside* `MaterialApp`, not around it:
+      // `MaterialApp` builds its own from the platform and a wrapper outside
+      // it never reaches a descendant.
+      Widget probe({
+        bool highContrast = false,
+        bool disableAnimations = false,
+      }) =>
+          MaterialApp(
+            theme: ComradeTheme.dark(),
+            home: MediaQuery(
+              data: MediaQueryData(
+                highContrast: highContrast,
+                disableAnimations: disableAnimations,
+              ),
+              child: const Scaffold(
+                body: GlassSurface(
+                  key: Key('glass-probe'),
+                  child: SizedBox(width: 100, height: 100),
+                ),
+              ),
+            ),
+          );
+
+      testWidgets('blurs the backdrop by default', (
+        WidgetTester tester,
+      ) async {
+        await tester.pumpWidget(probe());
+        expect(find.byType(BackdropFilter), findsOneWidget);
+      });
+
+      testWidgets('no BackdropFilter when transparency is reduced', (
+        WidgetTester tester,
+      ) async {
+        await tester.pumpWidget(probe(highContrast: true));
+        expect(find.byType(BackdropFilter), findsNothing);
+      });
+
+      testWidgets('no BackdropFilter when animations are disabled', (
+        WidgetTester tester,
+      ) async {
+        await tester.pumpWidget(probe(disableAnimations: true));
+        expect(find.byType(BackdropFilter), findsNothing);
+      });
+
+      testWidgets('the reduced-transparency fallback is fully opaque', (
+        WidgetTester tester,
+      ) async {
+        await tester.pumpWidget(probe(highContrast: true));
+        final DecoratedBox box = tester.widget<DecoratedBox>(
+          find.descendant(
+            of: find.byKey(const Key('glass-probe')),
+            matching: find.byType(DecoratedBox),
+          ),
+        );
+        final BoxDecoration decoration = box.decoration as BoxDecoration;
+        expect(decoration.color, ComradeSurfaces.dark.popover);
+        expect(decoration.color!.a, 1.0);
+      });
+    });
+
+    group('showGlassDialog (§2 dialogs)', () {
+      Widget probe() => MaterialApp(
+            theme: ComradeTheme.dark(),
+            home: Builder(
+              builder: (BuildContext context) => Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    onPressed: () => showGlassDialog<void>(
+                      context,
+                      builder: (BuildContext context) => const AlertDialog(
+                        key: Key('dialog-probe'),
+                        title: Text('Test dialog'),
+                      ),
+                    ),
+                    child: const Text('open'),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+      testWidgets('wraps the dialog in glass tier chrome', (
+        WidgetTester tester,
+      ) async {
+        await tester.pumpWidget(probe());
+        await tester.tap(find.text('open'));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('dialog-probe')), findsOneWidget);
+        expect(find.byType(GlassSurface), findsOneWidget);
+        expect(find.byType(BackdropFilter), findsOneWidget);
       });
     });
   });

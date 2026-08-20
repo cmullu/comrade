@@ -158,6 +158,23 @@ is absent (`pkg-config --exists gdk-3.0` fails). The error names `glib-sys` or
 place this lane has ever run, so treat `desktop/src-tauri` exactly like
 `android/` and `app/`: reason from the code, and never report it as checked.
 
+## Design system
+
+`docs/DESIGN_SYSTEM.md` is the visual contract, and it is the source of truth for
+all three frontends: shadcn-style paired `X`/`X-foreground` tokens, one `--radius`
+the scale derives from, Material 3 state layers, and a **glass tier** applied to
+floating chrome only — never to dense content.
+
+The rule worth remembering without re-reading it: **a fill token is never used as
+text, and a foreground token is never used as a fill.** `app/lib/src/theme/comrade_theme.dart`
+records what it costs when that is broken — a reused accent measured 2.1:1.
+
+The one sanctioned divergence is Android's: Compose gets the glass tier **without
+backdrop blur**, because `Modifier.blur` blurs a composable's own content rather
+than the backdrop, and the alternatives are API-31-only `RenderEffect` plumbing or
+a haze dependency that would have to be added to *two* gradle files. Same tokens,
+same tier rules, one missing ingredient. §5 has the exit condition.
+
 ## Lint bar
 
 Every lane gates at maximum strictness, deliberately and consistently:

@@ -94,7 +94,19 @@ abstract final class CallPalette {
 }
 
 /// Extra surface tokens `styles.css` has and Material's [ColorScheme] does
-/// not — the panel/border ramp the desktop shell is built out of.
+/// not — the panel/border ramp the desktop shell is built out of, plus the
+/// rest of `docs/DESIGN_SYSTEM.md` §3.1's paired semantics that neither
+/// `styles.css` nor [ColorScheme] had a slot for: `card`, `popover`, `muted`,
+/// `input` and `ring`, and the `*Foreground` partners `good`/`warn`/`bad`
+/// needed to be usable as fills rather than only as text.
+///
+/// `panel`/`panelAlt`/`border`/`borderStrong`/`good`/`warn`/`bad` are the
+/// original names and have call sites across `app/lib/src/`; they are kept
+/// exactly as they were rather than renamed out from under those call sites.
+/// `card`/`popover`/`muted`/`input` are added alongside as §3.1's vocabulary
+/// — mostly the same fills under a second name, because desktop and Android
+/// reason in shadcn's naming and a third frontend using a third vocabulary
+/// for the same ramp is its own kind of drift.
 @immutable
 class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
   const ComradeSurfaces({
@@ -105,6 +117,13 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
     required this.good,
     required this.warn,
     required this.bad,
+    required this.cardForeground,
+    required this.popoverForeground,
+    required this.mutedForeground,
+    required this.goodForeground,
+    required this.warnForeground,
+    required this.badForeground,
+    required this.ring,
   });
 
   /// `--panel` — sidebar, cards, the conversation list.
@@ -119,10 +138,66 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
   /// `--border-strong`.
   final Color borderStrong;
 
-  /// `--good` / `--warn` / `--bad` status pills.
+  /// `--good` / `--warn` / `--bad` status pills, rendered as *text* over a
+  /// low-alpha wash of the same colour — the existing, unchanged use.
   final Color good;
   final Color warn;
   final Color bad;
+
+  /// §3.1 `card` — content surfaces. Numerically [panel]; `SectionCard` and
+  /// `CardThemeData` are exactly what the contract means by "card".
+  Color get card => panel;
+
+  /// §3.1 `card-foreground` — text on [card]. Stored rather than derived from
+  /// [ColorScheme] because [ComradeSurfaces] does not carry one; matches
+  /// `onSurface` in both ramps (`theme_test.dart` locks the pairing so the
+  /// two cannot drift apart under a future palette edit).
+  final Color cardForeground;
+
+  /// §3.1 `popover` — the glass tier's base fill, before the tint alpha,
+  /// blur, specular edge and shadow in §3.4 are layered on top (see
+  /// `GlassSurface`). Numerically [panelAlt] today: the ramp has one
+  /// elevated step, not two, and glass is meant to read as distinct through
+  /// the *material*, not through owning a unique flat colour.
+  Color get popover => panelAlt;
+
+  /// §3.1 `popover-foreground` — text/icons on [popover], including the
+  /// opaque fallback glass renders under §4's escape hatches.
+  final Color popoverForeground;
+
+  /// §3.1 `muted` — de-emphasised fills. Numerically [panelAlt]; kept as its
+  /// own name because "a hover step" and "a muted fill" are different
+  /// justifications for the same colour, and call sites should say which one
+  /// they mean.
+  Color get muted => panelAlt;
+
+  /// §3.1 `muted-foreground` — de-emphasised text. Matches
+  /// `ColorScheme.onSurfaceVariant` in both ramps.
+  final Color mutedForeground;
+
+  /// §3.1 `input` — field borders, "a step stronger than border". Exactly
+  /// [borderStrong], which was already documented that way.
+  Color get input => borderStrong;
+
+  /// The `*Foreground` partners for [good]/[warn]/[bad] (§3.1's
+  /// `success`/`warning`/`destructive`, under the names this ramp already
+  /// uses): what to paint on top when one of them is a *fill* — a filled
+  /// status badge — rather than text over a wash. Each equals the matching
+  /// `on*` role in [ComradeTheme]'s [ColorScheme] (`good`↔`secondary`,
+  /// `warn`↔`tertiary`, `bad`↔`error` already share a value by design; see
+  /// "the status ramp agrees with the scheme beside it" in `theme_test.dart`).
+  final Color goodForeground;
+  final Color warnForeground;
+  final Color badForeground;
+
+  /// §3.1 `ring` — the focus indicator. Explicitly not tied to
+  /// [WorkspaceSkin]: [ComradeSurfaces] carries no skin parameter, and glass
+  /// chrome, dialogs and anything themed without a skin in scope still need
+  /// a ring. It is [WorkspaceSkin.base]'s accent, so an unskinned focus ring
+  /// still reads as this app's colour rather than an arbitrary one, and it
+  /// is never [border] — the pairing rule (§3.1) requires the two to differ,
+  /// and here they differ by more than a shade.
+  final Color ring;
 
   static const ComradeSurfaces dark = ComradeSurfaces(
     panel: Color(0xFF131B2E),
@@ -132,6 +207,16 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
     good: Color(0xFF34D399),
     warn: Color(0xFFFBBF24),
     bad: Color(0xFFF87171),
+    cardForeground: Color(0xFFE6EBF5),
+    popoverForeground: Color(0xFFE6EBF5),
+    mutedForeground: Color(0xFF9AA7C2),
+    // Same literals as `onSecondary`/`onTertiary`/`onError` in the dark
+    // `ColorScheme` below, because `good`/`warn`/`bad` already equal
+    // `secondary`/`tertiary`/`error` there.
+    goodForeground: Color(0xFF022C22),
+    warnForeground: Color(0xFF2A1B06),
+    badForeground: Color(0xFF3B0A0A),
+    ring: Color(0xFF818CF8),
   );
 
   /// Same note as [WorkspaceSkin]'s light accents: `good`/`warn`/`bad` are
@@ -147,6 +232,15 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
     good: Color(0xFF065F46),
     warn: Color(0xFF92400E),
     bad: Color(0xFFB91C1C),
+    cardForeground: Color(0xFF141A28),
+    popoverForeground: Color(0xFF141A28),
+    mutedForeground: Color(0xFF4A5468),
+    // `onSecondary`/`onTertiary`/`onError` are all white in the light
+    // scheme, for the same reason as the dark ramp's note above.
+    goodForeground: Colors.white,
+    warnForeground: Colors.white,
+    badForeground: Colors.white,
+    ring: Color(0xFF4F46E5),
   );
 
   static ComradeSurfaces forBrightness(Brightness brightness) =>
@@ -161,6 +255,13 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
     Color? good,
     Color? warn,
     Color? bad,
+    Color? cardForeground,
+    Color? popoverForeground,
+    Color? mutedForeground,
+    Color? goodForeground,
+    Color? warnForeground,
+    Color? badForeground,
+    Color? ring,
   }) =>
       ComradeSurfaces(
         panel: panel ?? this.panel,
@@ -170,6 +271,13 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
         good: good ?? this.good,
         warn: warn ?? this.warn,
         bad: bad ?? this.bad,
+        cardForeground: cardForeground ?? this.cardForeground,
+        popoverForeground: popoverForeground ?? this.popoverForeground,
+        mutedForeground: mutedForeground ?? this.mutedForeground,
+        goodForeground: goodForeground ?? this.goodForeground,
+        warnForeground: warnForeground ?? this.warnForeground,
+        badForeground: badForeground ?? this.badForeground,
+        ring: ring ?? this.ring,
       );
 
   @override
@@ -183,6 +291,14 @@ class ComradeSurfaces extends ThemeExtension<ComradeSurfaces> {
       good: Color.lerp(good, other.good, t)!,
       warn: Color.lerp(warn, other.warn, t)!,
       bad: Color.lerp(bad, other.bad, t)!,
+      cardForeground: Color.lerp(cardForeground, other.cardForeground, t)!,
+      popoverForeground:
+          Color.lerp(popoverForeground, other.popoverForeground, t)!,
+      mutedForeground: Color.lerp(mutedForeground, other.mutedForeground, t)!,
+      goodForeground: Color.lerp(goodForeground, other.goodForeground, t)!,
+      warnForeground: Color.lerp(warnForeground, other.warnForeground, t)!,
+      badForeground: Color.lerp(badForeground, other.badForeground, t)!,
+      ring: Color.lerp(ring, other.ring, t)!,
     );
   }
 }
@@ -209,16 +325,121 @@ const ShapeBorder kCardShape = RoundedRectangleBorder(
   borderRadius: BorderRadius.all(Radius.circular(16)),
 );
 
+/// Radius, derived (§3.2): one base constant, the rest a fixed offset from
+/// it. "Changing `--radius` re-proportions the whole app" only holds if
+/// everything actually reads from [base] — these do.
 abstract final class ComradeRadii {
-  static const double extraSmall = 8;
-  static const double small = 12;
-  static const double medium = 16;
-  static const double large = 22;
-  static const double extraLarge = 28;
+  /// `--radius`. The one knob.
+  static const double base = 12;
 
-  /// Chat bubbles: 18 everywhere except the "tail" corner, which is 6.
+  /// `sm` — chips, ticks, small controls.
+  static const double sm = base - 4;
+
+  /// `md` — inputs, buttons.
+  static const double md = base - 2;
+
+  /// `lg` — cards. Equal to [base] itself.
+  static const double lg = base;
+
+  /// `xl` — sheets, dialogs, bubbles.
+  static const double xl = base + 6;
+
+  /// `2xl` — the vault card, full-screen surfaces. Named `xxl`: Dart
+  /// identifiers cannot start with a digit.
+  static const double xxl = base + 16;
+
+  // ── Pre-existing names ──────────────────────────────────────────────────
+  // These had call sites across `app/lib/src/` before §3.2 existed and are
+  // kept working rather than renamed out from under them. Each is mapped to
+  // the §3.2 tier that matches what it is actually used for — not to
+  // whichever numeral happened to be closest to the old one, which is why
+  // `small` (`sm`) and `large` (`md`) both change value here.
+  /// Was a hardcoded 8 — unchanged; message-bubble reaction chips and the
+  /// "mDNS off" pill are exactly `sm`'s "small controls".
+  static const double extraSmall = sm;
+
+  /// Was a hardcoded 12; now `sm`, not `lg` — attachment thumbnails and
+  /// media corners (`message_bubble.dart`, `media_attachment.dart`,
+  /// `attachment_preview.dart`) are chips and small controls, not cards.
+  static const double small = sm;
+
+  /// Was a hardcoded 16; now `lg` — `SectionCard` and `CardThemeData` are
+  /// exactly §3.2's "cards".
+  static const double medium = lg;
+
+  /// Was a hardcoded 22; now `md` — the only call sites are
+  /// `FilledButton`/`OutlinedButton` shapes in [ComradeTheme], and §3.2 says
+  /// buttons are `md`.
+  static const double large = md;
+
+  /// Was a hardcoded 28 — unchanged. Nothing under `app/lib/src/` used this
+  /// outside [ComradeTheme] itself, which now points its dialog shape at
+  /// [xl] directly (§3.2: dialogs are `xl`, not `2xl`), so `extraLarge` keeps
+  /// its old value and its old meaning — the `2xl` "full-screen surfaces"
+  /// tier — for whatever reaches for the biggest rounding on the scale.
+  static const double extraLarge = xxl;
+
+  /// Chat bubbles: 18 everywhere except the "tail" corner, which is 6 — the
+  /// one documented exception to the derived scale (§3.2).
   static const double bubble = 18;
   static const double bubbleTail = 6;
+}
+
+/// State-layer opacities (§3.3, Material 3, fixed): an overlay of the
+/// *foreground* colour over a surface, at a strength that names the
+/// interaction rather than the component. A component that wants a
+/// different hover strength is wrong about being a different component.
+abstract final class ComradeStateLayers {
+  static const double hover = 0.08;
+  static const double focus = 0.10;
+  static const double pressed = 0.10;
+  static const double dragged = 0.16;
+  static const double selected = 0.12;
+  static const double disabledContent = 0.38;
+  static const double disabledContainer = 0.12;
+}
+
+/// Motion (§3.5). `easing` is M3's emphasised-decelerate curve.
+abstract final class ComradeMotion {
+  /// State layers, ticks.
+  static const Duration fast = Duration(milliseconds: 120);
+
+  /// Most transitions.
+  static const Duration base = Duration(milliseconds: 200);
+
+  /// Sheets, dialogs, tier changes.
+  static const Duration slow = Duration(milliseconds: 320);
+
+  static const Curve easing = Cubic(0.2, 0, 0, 1);
+}
+
+/// The glass tier's material constants (§3.4). Consumed by `GlassSurface`
+/// (`app/lib/src/widgets/glass_surface.dart`); kept here with the rest of the
+/// token layer rather than inline in the widget, same as every other number
+/// on this page.
+abstract final class ComradeGlass {
+  /// Chrome that sits directly over content: app bars, bottom navigation,
+  /// snackbars, popovers, the composer, the call control dock.
+  static const double blurChrome = 20;
+
+  /// Sheets and dialogs, which sit further above the content than chrome
+  /// does.
+  static const double blurSheet = 28;
+
+  /// 180% — restores the colour the blur washes out.
+  static const double saturation = 1.8;
+
+  /// The tier's fill, at this alpha, is the tint.
+  static const double tintAlpha = 0.72;
+
+  /// The specular top-edge highlight, over `popoverForeground`.
+  static const double highlightAlpha = 0.10;
+
+  /// The depth shadow, over the page background.
+  static const double shadowAlpha = 0.40;
+
+  /// The 1px border, over `border`.
+  static const double borderAlpha = 0.60;
 }
 
 abstract final class ComradeTheme {
@@ -315,6 +536,9 @@ abstract final class ComradeTheme {
       ),
     );
 
+    final ComradeSurfaces surfaces =
+        isDark ? ComradeSurfaces.dark : ComradeSurfaces.light;
+
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
@@ -322,9 +546,13 @@ abstract final class ComradeTheme {
       scaffoldBackgroundColor:
           isDark ? const Color(0xFF0A0E1A) : const Color(0xFFFBFCFF),
       textTheme: text,
-      extensions: <ThemeExtension<dynamic>>[
-        isDark ? ComradeSurfaces.dark : ComradeSurfaces.light,
-      ],
+      extensions: <ThemeExtension<dynamic>>[surfaces],
+      // §4: the baseline focus colour for stock Material widgets that paint
+      // their own focus state layer. `ComradeFocusRing`
+      // (`widgets/glass_surface.dart`) is the explicit 2px `ring` for
+      // components that draw their own chrome, including glass; this keeps
+      // the two consistent rather than picking a different colour by accident.
+      focusColor: surfaces.ring.withValues(alpha: ComradeStateLayers.focus),
       cardTheme: CardThemeData(
         clipBehavior: Clip.antiAlias,
         elevation: 0,
@@ -334,13 +562,17 @@ abstract final class ComradeTheme {
         ),
       ),
       dialogTheme: DialogThemeData(
+        // §3.2: dialogs are `xl`, not the old hardcoded 28 (`extraLarge` is
+        // now the `2xl` tier — see `ComradeRadii.extraLarge`'s doc).
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(ComradeRadii.extraLarge),
+          borderRadius: BorderRadius.circular(ComradeRadii.xl),
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(
+        // §3.2: `md`, not `small`/`sm` — an input field is exactly `md`'s
+        // "inputs, buttons", not `sm`'s "chips, ticks, small controls".
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(ComradeRadii.small),
+          borderRadius: BorderRadius.circular(ComradeRadii.md),
         ),
         isDense: true,
       ),
@@ -361,10 +593,39 @@ abstract final class ComradeTheme {
         ),
       ),
       navigationBarTheme: const NavigationBarThemeData(height: 68),
+      // §2 lists toasts and popovers as glass tier chrome, but neither
+      // `SnackBarThemeData` nor `PopupMenuThemeData` has a slot for a widget
+      // — no `BackdropFilter`, and `ThemeData` is built once, with no live
+      // `BuildContext`, so it cannot react to §4's escape hatches the way
+      // `GlassSurface` does per frame. `showGlassDialog`
+      // (`widgets/glass_surface.dart`) works around that for dialogs by
+      // wrapping each call site's builder; snackbars and popup menus are not
+      // built through a call site this app controls the same way (a
+      // `PopupMenuButton`'s menu surface is assembled by the framework, not
+      // handed back to a builder), so both stay the one thing `ThemeData`
+      // *can* give them: the §4 opaque-fallback look, permanently — the
+      // glass tier's fill, border and text colour, without the blur.
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
+        backgroundColor: surfaces.popover,
+        contentTextStyle:
+            text.bodyMedium?.copyWith(color: surfaces.popoverForeground),
+        actionTextColor: scheme.primary,
+        elevation: 6,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(ComradeRadii.small),
+          side: BorderSide(color: surfaces.border),
+        ),
+      ),
+      popupMenuTheme: PopupMenuThemeData(
+        color: surfaces.popover,
+        surfaceTintColor: Colors.transparent,
+        textStyle:
+            text.bodyMedium?.copyWith(color: surfaces.popoverForeground),
+        elevation: 8,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(ComradeRadii.md),
+          side: BorderSide(color: surfaces.border),
         ),
       ),
       dividerTheme: DividerThemeData(

@@ -16,6 +16,8 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'glass_surface.dart';
+
 /// One labelled group in the picker.
 @immutable
 class EmojiGroup {
@@ -107,7 +109,12 @@ Future<void> showEmojiPicker(
       context: context,
       showDragHandle: true,
       useSafeArea: true,
-      builder: (BuildContext context) => EmojiPickerSheet(onPick: onPick),
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext context) => GlassSurface(
+        tier: GlassTier.sheet,
+        borderRadius: kGlassSheetRadius,
+        child: EmojiPickerSheet(onPick: onPick),
+      ),
     );
 
 class EmojiPickerSheet extends StatefulWidget {

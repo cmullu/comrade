@@ -52,6 +52,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../state/call_providers.dart';
 import '../theme/comrade_theme.dart';
 import '../util/display_name.dart';
+import '../widgets/glass_surface.dart';
 import '../widgets/peer_avatar.dart';
 import '../widgets/signal_bars.dart';
 import '../widgets/slashed_icon.dart';
@@ -1128,21 +1129,34 @@ class _CallOptionsDock extends StatelessWidget {
   final VoidCallback onSwitchCamera;
   final VoidCallback onChat;
 
+  // Glass tier chrome (§2, "the call control dock"). The tint/border/
+  // highlight/shadow are overridden from `CallPalette` rather than the
+  // ambient `ComradeSurfaces` ramp: a call stays dark regardless of the
+  // app's light/dark setting (see `CallPalette`'s own doc), so this dock
+  // must not pick up a light-theme fill the way an unparameterised
+  // `GlassSurface` would.
   @override
-  Widget build(BuildContext context) => Material(
+  Widget build(BuildContext context) => GlassSurface(
         key: const Key('call-dock'),
-        color: CallPalette.pipBackground,
-        elevation: 10,
+        tier: GlassTier.chrome,
         borderRadius: BorderRadius.circular(16),
-        clipBehavior: Clip.antiAlias,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 216),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              for (final CallControl item in items) _item(item),
-            ],
+        tint: CallPalette.pipBackground,
+        border: CallPalette.controlIdle,
+        highlight: Colors.white,
+        shadowColor: CallPalette.background,
+        child: Material(
+          // The fill is `GlassSurface`'s; this `Material` exists only so
+          // `_DockItem`'s `InkWell` has one to splash against.
+          type: MaterialType.transparency,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 216),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                for (final CallControl item in items) _item(item),
+              ],
+            ),
           ),
         ),
       );
@@ -1175,7 +1189,7 @@ class _CallOptionsDock extends StatelessWidget {
       };
 }
 
-class _DockItem extends StatelessWidget {
+class _DockItem extends StatefulWidget {
   const _DockItem({
     required this.icon,
     required this.label,
@@ -1192,25 +1206,45 @@ class _DockItem extends StatelessWidget {
   final bool active;
 
   @override
+  State<_DockItem> createState() => _DockItemState();
+}
+
+class _DockItemState extends State<_DockItem> {
+  // Owned here (not passed in) so `ComradeFocusRing` (§4) can share the
+  // exact node `InkWell` focuses through — see that widget's own doc.
+  final FocusNode _focusNode = FocusNode(debugLabel: 'call-dock-item');
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final Color tint = active ? CallPalette.controlActive : Colors.white;
-    return InkWell(
-      onTap: onPressed,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        child: Row(
-          children: <Widget>[
-            Icon(icon, size: 22, color: tint),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: tint, fontSize: 15),
+    final Color tint =
+        widget.active ? CallPalette.controlActive : Colors.white;
+    return ComradeFocusRing(
+      focusNode: _focusNode,
+      child: InkWell(
+        focusNode: _focusNode,
+        onTap: widget.onPressed,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: <Widget>[
+              Icon(widget.icon, size: 22, color: tint),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: tint, fontSize: 15),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

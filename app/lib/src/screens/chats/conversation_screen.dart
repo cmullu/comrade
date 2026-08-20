@@ -26,6 +26,7 @@ import '../../widgets/app_chrome.dart';
 import '../../widgets/attachment_preview.dart';
 import '../../widgets/composer.dart';
 import '../../widgets/emoji_picker.dart';
+import '../../widgets/glass_surface.dart';
 import '../../widgets/media_attachment.dart';
 import '../../widgets/message_bubble.dart';
 import 'thread_sheet.dart';
@@ -677,14 +678,20 @@ class _ConversationScreenState extends ConsumerState<ConversationScreen> {
   /// Emoji · text · paper clip, then one round button that is Send or the
   /// swappable mic/camera — see [MessageComposer], which owns the layout and the
   /// capability gating.
+  // Glass tier chrome (§2, "the composer"): the fill/blur/specular
+  // edge/shadow come from `GlassSurface`; `MessageComposer` itself paints no
+  // background of its own.
   Widget _composer(BuildContext context, ConversationState state) =>
-      MessageComposer(
-        controller: _draft,
-        focusNode: _composerFocus,
-        sending: state.sending,
-        attaching: state.attaching,
-        onSend: _send,
-        onAttachment: _sendAttachment,
+      GlassSurface(
+        tier: GlassTier.chrome,
+        child: MessageComposer(
+          controller: _draft,
+          focusNode: _composerFocus,
+          sending: state.sending,
+          attaching: state.attaching,
+          onSend: _send,
+          onAttachment: _sendAttachment,
+        ),
       );
 }
 
