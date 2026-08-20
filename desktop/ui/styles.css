@@ -4,61 +4,244 @@
    overlays (Travel / Couple) re-skin the whole app by swapping CSS variables.
    ========================================================================== */
 
+/* ── Token contract (docs/DESIGN_SYSTEM.md §3) ────────────────────────────
+   §3.1 defines the paired semantics below as the vocabulary every frontend
+   shares: a fill token (`X`) is never used as text, and a foreground token
+   (`X-foreground`) is never used as a fill. Values here are the dark ramp —
+   the default posture — re-valued per skin in the `body.theme-*` blocks and
+   again, in full, in the `prefers-color-scheme: light` block near the bottom
+   of this file. Every `X`/`X-foreground` pair is checked at 4.5:1 in both
+   ramps by `design_tokens.test.mjs`. */
 :root {
-  --bg: #0a0e1a;
-  --bg-elev: #0f1525;
-  --panel: #131b2e;
-  --panel-2: #1a2438;
+  --background: #0a0e1a;
+  --foreground: #e6ebf5;
+
+  --card: #131b2e;
+  --card-foreground: #e6ebf5;
+
+  /* Floating chrome's fill — sidebar, composer, sheets, toasts. One step
+     brighter than `--card` so glass reads as raised, not just tinted. */
+  --popover: #1a2438;
+  --popover-foreground: #e6ebf5;
+
+  --muted: #1a2438;
+  --muted-foreground: #9aa7c2;
+
+  /* `--primary` doubles as the small-text accent color several existing
+     rules already use directly (`.bubble-author`, `.brand-mark`, `.heart`) —
+     it is picked to clear 4.5:1 as text on `--card`/`--background` as well
+     as to read well as a fill, in both ramps. See the light-ramp comment
+     below for why this is *not* the same value shadcn's own primary would
+     pick, and `app/lib/src/theme/comrade_theme.dart`'s `WorkspaceSkin` for
+     the sibling frontend hitting the same trap first. */
+  --primary: #818cf8;
+  --primary-foreground: #1e1b4b;
+
+  --secondary: #34d399;
+  --secondary-foreground: #022c22;
+
+  --destructive: #f87171;
+  --destructive-foreground: #3b0a0a;
+
+  --success: #34d399;
+  --success-foreground: #022c22;
+
+  --warning: #fbbf24;
+  --warning-foreground: #1a1206;
+
   --border: #243049;
-  --border-strong: #34425f;
-  --text: #e6ebf5;
-  --text-dim: #9aa7c2;
-  --muted: #6b7894;
-  --accent: #6366f1;
-  --accent-2: #818cf8;
-  --accent-contrast: #ffffff;
-  --good: #34d399;
-  --warn: #fbbf24;
-  --bad: #f87171;
+  /* Field borders — a step stronger than `--border`, per §3.1. */
+  --input: #34425f;
+  /* Never equal to `--border`: a focus ring that matched the hairline it
+     sits next to would not be a visible ring. Tracks `--primary` so it
+     re-skins with every workspace automatically. */
+  --ring: var(--primary);
+
+  /* §3.2 — one knob. Changing `--radius` re-proportions the whole app. */
   --radius: 12px;
-  --radius-sm: 8px;
-  --shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+  --radius-2xl: calc(var(--radius) + 16px);
+
+  /* §3.3 — Material 3 state layers, fixed constants applied as an overlay
+     of a surface's *foreground* token over that surface's fill. */
+  --state-hover: 8%;
+  --state-focus: 10%;
+  --state-pressed: 10%;
+  --state-dragged: 16%;
+  --state-selected: 12%;
+  --state-disabled-content: 38%;
+  --state-disabled-container: 12%;
+
+  /* §3.4 — glass tier. Chrome only (see the "Glass tier" section below for
+     which selectors use these); never on dense/body content. */
+  --glass-blur: 20px;
+  --glass-blur-lg: 28px;
+  --glass-saturate: 180%;
+  --glass-tint: color-mix(in srgb, var(--popover) 72%, transparent);
+  --glass-border-color: color-mix(in srgb, var(--border) 60%, transparent);
+  --glass-border: 1px solid var(--glass-border-color);
+  --glass-highlight: inset 0 1px 0
+    color-mix(in srgb, var(--popover-foreground) 10%, transparent);
+  --glass-shadow: 0 8px 32px color-mix(in srgb, var(--background) 40%, transparent);
+  /* `background` at 70% with a light blur — the scrim tier, behind a modal. */
+  --scrim: color-mix(in srgb, var(--background) 70%, transparent);
+
+  /* §3.5 — motion. */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* A soft accent wash — pressed chips, "mine" bubbles. Derived from
+     `--primary` so it re-skins with every workspace and ramp automatically,
+     rather than being a fixed grey that ignores both. */
+  --accent-soft: color-mix(in srgb, var(--primary) 18%, transparent);
+
+  /* App-specific, outside the shared §3 contract. */
   --app-edge: transparent;
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
     sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── Legacy aliases ────────────────────────────────────────────────────
+     Every rule written before this contract existed reaches for these
+     names — 471 of them. Rather than rewrite that surface, the token layer
+     changed underneath it: each legacy name now resolves through the pair
+     above it was already, visually, standing in for. New rules should use
+     the §3.1 names directly; these exist for the old ones. */
+  --bg: var(--background);
+  /* Sat between `--bg` and `--card` before; reproduced the same way so a
+     future edit to either end of that range keeps this in proportion. */
+  --bg-elev: color-mix(in srgb, var(--card) 50%, var(--background));
+  --panel: var(--card);
+  --panel-2: var(--muted);
+  --border-strong: var(--input);
+  --text: var(--foreground);
+  --text-dim: var(--muted-foreground);
+  --accent: var(--primary);
+  --accent-2: color-mix(in srgb, var(--primary) 75%, white 25%);
+  --accent-contrast: var(--primary-foreground);
+  --good: var(--success);
+  --warn: var(--warning);
+  --bad: var(--destructive);
+  /* Previously undefined: used only with a `var()` fallback (a fixed grey,
+     never responding to a theme swap). `design_tokens.test.mjs` is the
+     regression test — it fails without a real definition here. */
+  --surface-2: var(--muted);
+  --fg: var(--foreground);
+  --hover: color-mix(in srgb, var(--foreground) var(--state-hover), var(--card));
 }
 
-/* Off-Grid / Travel: warm amber, dashed "off the grid" edge */
+/* Off-Grid / Travel: warm amber, dashed "off the grid" edge. Previously left
+   `--bg`/`--panel`/`--border` at the base ramp's values while the Couple
+   skins re-valued them — the one skin `design_tokens.test.mjs` would have
+   caught silently omitting a token the others define. Restated explicitly
+   (at the same values as the base ramp: Travel's identity is the accent and
+   the dashed edge, not a re-hued background) so all three skins now
+   re-value the identical token set. */
 body.theme-travel {
-  --accent: #f59e0b;
-  --accent-2: #fbbf24;
-  --accent-contrast: #1a1206;
+  --background: #0a0e1a;
+  --card: #131b2e;
+  --popover: #1a2438;
+  --muted: #1a2438;
+  --border: #243049;
+  --primary: #fbbf24;
+  --primary-foreground: #1a1206;
   --app-edge: #f59e0b;
 }
 
 /* Couple Sandbox — Sakha: cool cyan */
 body.theme-couple-sakha {
-  --bg: #07131a;
-  --panel: #0d2330;
-  --panel-2: #123040;
+  --background: #07131a;
+  --card: #0d2330;
+  --popover: #123040;
+  --muted: #123040;
   --border: #1d4456;
-  --accent: #38bdf8;
-  --accent-2: #7dd3fc;
-  --accent-contrast: #042430;
+  --primary: #7dd3fc;
+  --primary-foreground: #042430;
   --app-edge: #38bdf8;
 }
 
 /* Couple Sandbox — Sakhi: warm rose */
 body.theme-couple-sakhi {
-  --bg: #1a0a12;
-  --panel: #2a0f1d;
-  --panel-2: #381425;
+  --background: #1a0a12;
+  --card: #2a0f1d;
+  --popover: #381425;
+  --muted: #381425;
   --border: #5a2138;
-  --accent: #fb7185;
-  --accent-2: #fda4af;
-  --accent-contrast: #2a0a12;
+  --primary: #fda4af;
+  --primary-foreground: #2a0a12;
   --app-edge: #fb7185;
+}
+
+/* ── Glass, and its three escape hatches (docs/DESIGN_SYSTEM.md §4) ───────
+   The glass-tier selectors, listed once here and again in each fallback
+   rule below (plain CSS has no mixin to share the list through). All three
+   fall back the same way: an opaque `--popover` fill, its border and
+   shadow, no blur — legible, not merely visible. */
+
+/* 1. No `backdrop-filter` support. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .sidebar,
+  .tabs,
+  .composer,
+  .chat-composer,
+  .view-focus .focus-card,
+  .modal,
+  .attach-preview,
+  .requests-section,
+  .call-dock,
+  .call-active.is-minimized,
+  .toast {
+    background: var(--popover);
+  }
+}
+
+/* 2. A stated accessibility need, not a preference to average against a
+   default — same opaque fallback, regardless of `backdrop-filter` support. */
+@media (prefers-reduced-transparency: reduce) {
+  .sidebar,
+  .tabs,
+  .composer,
+  .chat-composer,
+  .view-focus .focus-card,
+  .modal,
+  .attach-preview,
+  .requests-section,
+  .call-dock,
+  .call-active.is-minimized,
+  .toast {
+    background: var(--popover);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+/* 3. Drift/ambient animation stops and transitions collapse to `fast`. This
+   is what the Focus tab's drifting colour fields (`.focus-ambient`, further
+   down) exist to be stopped by, but it applies to every animated rule in
+   the file, not only that one — a reduced-motion request should not depend
+   on each new rule remembering to opt in. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* Animations (drift, breathing, spinners) *stop* — near-zero duration,
+       one iteration, so a looping keyframe completes almost instantly and
+       holds its end state rather than looping fast. Transitions (state
+       changes: hover, focus, tier swaps) *collapse to `fast`* rather than
+       stopping outright — those carry information about what just changed,
+       `--duration-fast` is still perceptible, and it is the tier §3.5
+       already names for exactly this. */
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: var(--duration-fast) !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 * {
@@ -184,7 +367,9 @@ body.theme-travel {
 .textarea {
   width: 100%;
   background: var(--bg-elev);
-  border: 1px solid var(--border);
+  /* §3.1: field borders are `--input`, a step stronger than the hairline
+     `--border` everything else uses. */
+  border: 1px solid var(--input);
   color: var(--text);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
@@ -199,13 +384,30 @@ body.theme-travel {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
+/* §4: "every interactive element shows a 2px `ring` offset 2px on
+   `:focus-visible`, in every tier including glass." One rule by element,
+   rather than one per class: main.js builds every clickable primitive —
+   `.tab` (the sidebar rows), `.btn`, `.command-row`, `.bubble-note-more`,
+   `.thread-row` and the rest — as a real `<button>`, so targeting the tag
+   covers them without naming each class individually. `--ring` is never
+   `--border` (see the token block), so the ring is always visible against
+   the hairline the element already sits on.
+
+   `.contact` (the DM list row) is a plain `<li onClick>` with no `tabindex`
+   today, so it is not keyboard-focusable at all yet — a pre-existing gap in
+   main.js, outside this file, that this rule cannot close by itself. */
+:is(button, input, textarea, select, a[href]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 .textarea {
   resize: vertical;
   min-height: 64px;
 }
 
 .hint {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 12px;
   margin: 4px 0 0;
 }
@@ -324,14 +526,19 @@ code {
   align-items: stretch;
 }
 
+/* Glass tier (docs/DESIGN_SYSTEM.md §2, §3.4): floating chrome, not scrolled
+   content — this is the nav rail. */
 .sidebar {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
   padding: 16px 12px 14px;
-  background: var(--panel);
-  border-right: 1px solid var(--border);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-right: 1px solid var(--glass-border-color);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
   overflow-y: auto;
 }
 
@@ -357,7 +564,7 @@ code {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-weight: 700;
 }
 
@@ -408,7 +615,7 @@ code {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--muted);
+  color: var(--muted-foreground);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 8px;
@@ -420,7 +627,7 @@ code {
 }
 
 .pill.off {
-  color: var(--muted);
+  color: var(--muted-foreground);
   opacity: 0.6;
 }
 
@@ -507,10 +714,17 @@ code {
    The nav keeps the `.tab[data-tab]` contract main.js binds to; only the
    presentation changed from top tabs to vertical sidebar items. */
 
+/* Glass tier. Nested inside `.sidebar`'s own glass, so the depth shadow and
+   border would only double the framing — the tint + blur carry the tier
+   through here, same tokens either way. */
 .tabs {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-radius: var(--radius-md);
 }
 
 .tab {
@@ -555,7 +769,7 @@ code {
 .tab-sub {
   font-size: 11px;
   font-weight: 500;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 /* ─────────────────────────── App body ─────────────────────────── */
@@ -594,10 +808,14 @@ code {
   gap: 14px;
 }
 
+/* Glass tier: the composer floats over whatever feed/log it sits below. */
 .composer {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
   border-radius: var(--radius);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
   padding: 12px;
 }
 
@@ -645,7 +863,7 @@ code {
 
 .chitthi-time {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .chitthi-body {
@@ -655,7 +873,7 @@ code {
 
 .chitthi-reply {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   margin-top: 6px;
 }
 
@@ -717,7 +935,7 @@ code {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--muted);
+  background: var(--muted-foreground);
   opacity: 0.6;
 }
 
@@ -743,7 +961,7 @@ code {
 
 .contact-last {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -780,7 +998,7 @@ code {
 .chat-presence {
   font-family: var(--font);
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   margin-right: auto;
 }
 
@@ -858,7 +1076,7 @@ code {
 }
 
 .topic-chip[aria-pressed="true"] {
-  background: var(--accent-soft, rgba(120, 140, 255, 0.18));
+  background: var(--accent-soft);
   border-color: transparent;
 }
 
@@ -912,12 +1130,12 @@ code {
   padding: 6px 10px;
   max-width: 90%;
   align-self: flex-start;
-  background: var(--surface-2, rgba(127, 127, 127, 0.14));
+  background: var(--surface-2);
 }
 
 .thread-bubble.mine {
   align-self: flex-end;
-  background: var(--accent-soft, rgba(120, 140, 255, 0.18));
+  background: var(--accent-soft);
 }
 
 .bubble {
@@ -1135,10 +1353,14 @@ code {
   left: -10px;
 }
 
+/* Glass tier: same composer chrome, the DM variant. */
 .chat-composer {
-  border-top: 1px solid var(--border);
+  border-top: var(--glass-border);
   padding: 12px 16px;
-  background: var(--panel);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
 }
 
 /* Encrypted media in chat bubbles */
@@ -1221,6 +1443,7 @@ code {
   background: rgba(0, 0, 0, 0.72);
 }
 
+/* Glass tier: the confirm-before-sending sheet. */
 .attach-preview {
   display: flex;
   flex-direction: column;
@@ -1231,10 +1454,12 @@ code {
   max-height: 100%;
   overflow-y: auto;
   padding: 16px;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
 }
 
 .attach-preview-head {
@@ -1497,8 +1722,13 @@ code {
 
 /* ─────────────────────────── Message requests ─────────────────────────── */
 
+/* Glass tier: the message-request sheet sits over the conversation list. */
 .requests-section {
-  border-bottom: 1px solid var(--border);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-bottom: 1px solid var(--glass-border-color);
+  box-shadow: var(--glass-highlight);
 }
 
 .req-badge {
@@ -1548,7 +1778,7 @@ code {
 
 .request-last {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1669,6 +1899,11 @@ code {
 
    Top-right, not bottom-right: the bottom right of a conversation is the send
    button, and a call tile parked on it would defeat the point of the mode. */
+/* Glass tier, minus the blur: the tile's own video fills it edge to edge, so
+   there is no translucent area for a backdrop-filter to show through — same
+   tokens, same tier rules, one ingredient not doing anything here (the same
+   shape of trade-off §5 documents for Android's glass, for a different
+   reason). Border, shadow and specular edge still read as glass chrome. */
 .call-active.is-minimized {
   /* `left`/`top` are set inline by placeTile — the tile goes wherever it is
      dragged (Telegram-style), clamped to the window, snapping to the nearer
@@ -1676,14 +1911,15 @@ code {
   inset: auto;
   width: 148px;
   height: 208px;
-  border-radius: 14px;
+  border-radius: var(--radius-xl);
   overflow: hidden;
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--shadow);
+  border: var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
   backdrop-filter: none;
   cursor: grab;
   touch-action: none; /* the pointer drag owns the gesture, not the scroller */
-  transition: left 0.18s ease, top 0.18s ease;
+  transition: left var(--duration-base) var(--ease-standard),
+    top var(--duration-base) var(--ease-standard);
   z-index: 320;
 }
 
@@ -1917,6 +2153,7 @@ code {
 /* The overflow dock the ⋮ opens: everything the bar deliberately does not
    hold. Rises out of the bar rather than floating loose, and is `hidden`
    rather than merely transparent so its buttons are not tabbable while shut. */
+/* Glass tier. */
 .call-dock {
   position: absolute;
   right: 18px;
@@ -1924,11 +2161,13 @@ code {
   z-index: 2;
   min-width: 200px;
   padding: 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  background: var(--panel);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-  animation: call-dock-in 140ms ease-out;
+  border: var(--glass-border);
+  border-radius: var(--radius-xl);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+  animation: call-dock-in var(--duration-fast) ease-out;
 }
 
 @keyframes call-dock-in {
@@ -2122,11 +2361,12 @@ code {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: color-mix(in srgb, var(--panel) 72%, transparent);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border-radius: 18px;
-  transition: border-color 600ms ease;
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-highlight);
+  border-radius: var(--radius-xl);
+  transition: border-color var(--duration-slow) var(--ease-standard);
 }
 
 .focus-head {
@@ -2287,7 +2527,7 @@ code {
 .reader-item-meta {
   flex-shrink: 0;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .reader-open-source {
@@ -2569,7 +2809,7 @@ code {
 }
 
 .muted {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 12px;
 }
 
@@ -2719,16 +2959,18 @@ code {
 
 /* ─────────────────────────── Modal ─────────────────────────── */
 
+/* Scrim tier (§2, §3.4): `--background` at 70% with a light blur, behind the
+   `.modal` dialog. Not glass — the dialog itself is. */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(3, 6, 14, 0.7);
+  background: var(--scrim);
   backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 50;
-  animation: fade 0.2s ease;
+  animation: fade var(--duration-base) var(--ease-standard);
 }
 
 @keyframes fade {
@@ -2737,17 +2979,20 @@ code {
   }
 }
 
+/* Glass tier: dialogs use the larger, "sheets and dialogs" blur. */
 .modal {
   width: min(420px, 92vw);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: var(--shadow);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
   padding: 22px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  animation: rise 0.25s ease;
+  animation: rise var(--duration-slow) var(--ease-standard);
 }
 
 .modal-head {
@@ -2791,7 +3036,7 @@ code {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .role-picker {
@@ -2842,17 +3087,20 @@ code {
   max-width: min(360px, 90vw);
 }
 
+/* Glass tier. */
 .toast {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border: var(--glass-border);
   border-left-width: 4px;
   border-radius: var(--radius-sm);
   padding: 11px 14px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
   display: flex;
   gap: 10px;
   align-items: flex-start;
-  animation: toast-in 0.25s ease;
+  animation: toast-in var(--duration-base) ease;
 }
 
 .toast.leaving {
@@ -3069,7 +3317,7 @@ code {
 
 .command-row:hover,
 .command-row:focus-visible {
-  background: var(--hover, #232323);
+  background: var(--hover);
 }
 
 .command-name {
@@ -3159,10 +3407,12 @@ code {
    tab rail — so it has no `.tab` of its own and `switchTab` correctly leaves
    every rail button deselected while it is open.
 
-   Every value below is an existing `:root` token. No new hex, and no
-   `prefers-color-scheme` block: this file is dark-only by design and a second
-   colour source is how two platforms start rendering visibly different
-   products (SCREEN_INVENTORY D25). */
+   Every value below is an existing `:root` token, no new hex — so this page
+   follows the `prefers-color-scheme: light` re-valuing near the bottom of
+   this file automatically. Introducing a *second* set of literal colours
+   here, alongside the token contract, is what SCREEN_INVENTORY D25 warns
+   against: that is how two platforms start rendering visibly different
+   products, not the existence of a light ramp itself. */
 .view-profile {
   display: flex;
   flex-direction: column;
@@ -3228,7 +3478,7 @@ code {
 
 .profile-status {
   margin: 0.15rem 0 0;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.9rem;
 }
 
@@ -3273,7 +3523,7 @@ code {
 }
 
 .profile-row-label {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.85rem;
 }
 
@@ -3290,7 +3540,7 @@ code {
 }
 
 .profile-row-empty {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-style: italic;
 }
 
@@ -3312,7 +3562,7 @@ code {
   border: 0;
   border-radius: var(--radius);
   padding: 0.35rem 0.7rem;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font: inherit;
   cursor: pointer;
 }
@@ -3346,7 +3596,7 @@ code {
 
 .profile-media-kind,
 .profile-media-meta {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.8rem;
   white-space: nowrap;
 }
@@ -3368,7 +3618,7 @@ code {
 
 .profile-link-url {
   min-width: 0;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 0.8rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3378,7 +3628,7 @@ code {
 .profile-empty {
   margin: 0;
   padding: 1rem;
-  color: var(--muted);
+  color: var(--muted-foreground);
   text-align: center;
 }
 
@@ -3498,7 +3748,7 @@ code {
 }
 .together-empty-body {
   margin: 0;
-  color: var(--muted, #9aa7c2);
+  color: var(--muted-foreground, #9aa7c2);
   line-height: 1.6;
 }
 .together-empty-body code {
@@ -3587,7 +3837,7 @@ code {
 .together-time {
   font-variant-numeric: tabular-nums;
   font-size: 0.8rem;
-  color: var(--muted, #9aa7c2);
+  color: var(--muted-foreground, #9aa7c2);
   /* Tabular figures still change width at the hour boundary; a fixed min-width
      stops the track resizing on every tick. */
   min-width: 3ch;
@@ -3608,7 +3858,7 @@ code {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--fg, #e6ebf5);
+  background: var(--fg);
   border: 0;
   transition: transform 120ms ease;
 }
@@ -3642,7 +3892,7 @@ code {
   width: 60px;
   height: 60px;
   font-size: 1.5rem;
-  background: var(--fg, #e6ebf5);
+  background: var(--fg);
   color: var(--bg, #0a0e1a);
 }
 .together-ctl-main:hover { background: #fff; }
@@ -3667,4 +3917,94 @@ code {
    report of poor measurement look like a fault. */
 .together-health-num {
   font-variant-numeric: tabular-nums;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Light ramp (docs/DESIGN_SYSTEM.md §3.1: "the light ramp is the same
+   names re-valued"). Every token from the `:root` block above is re-valued
+   here, and again inside each `body.theme-*` skin's own light override —
+   the same set `design_tokens.test.mjs` checks for the dark ramp.
+
+   The trap this exists to avoid is already on record in the sibling
+   frontend: `app/lib/src/theme/comrade_theme.dart`'s `WorkspaceSkin` found
+   that reusing the *dark* ramp's bright accent (`--accent-2`, here
+   `--primary`) as light-mode text measured 2.1:1 against its surface —
+   nowhere near WCAG's 4.5:1 — because a colour picked to glow on near-black
+   does not automatically read on near-white. Every `--primary` value below
+   is `WorkspaceSkin.lightAccent`'s value verbatim: the same hue, taken
+   several steps darker, already proven (by that file's own test suite) to
+   clear 4.5:1 as text on every surface in this ramp and under white.
+   `--secondary`/`--success`/`--warning`/`--destructive` below are likewise
+   `ComradeSurfaces.light`'s values, not new picks — one accessibility
+   audit, reused, rather than two frontends independently discovering the
+   same failure. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --background: #fbfcff;
+    --foreground: #141a28;
+
+    --card: #f4f6fb;
+    --card-foreground: #141a28;
+
+    --popover: #e8ecf6;
+    --popover-foreground: #141a28;
+
+    --muted: #e8ecf6;
+    --muted-foreground: #4a5468;
+
+    /* base skin — indigo, `WorkspaceSkin.base.lightAccent`. */
+    --primary: #4f46e5;
+    --primary-foreground: #ffffff;
+
+    --secondary: #065f46;
+    --secondary-foreground: #ffffff;
+
+    --destructive: #b91c1c;
+    --destructive-foreground: #ffffff;
+
+    --success: #065f46;
+    --success-foreground: #ffffff;
+
+    --warning: #92400e;
+    --warning-foreground: #ffffff;
+
+    --border: #d5dbe8;
+    --input: #b6bfd2;
+    /* Still never `--border`: re-verified in this ramp, not assumed to
+       carry over from the dark one. */
+    --ring: var(--primary);
+  }
+
+  /* Off-Grid / Travel — `WorkspaceSkin.travel.lightAccent`. */
+  body.theme-travel {
+    --background: #fbfcff;
+    --card: #f4f6fb;
+    --popover: #e8ecf6;
+    --muted: #e8ecf6;
+    --border: #d5dbe8;
+    --primary: #92400e;
+    --primary-foreground: #ffffff;
+  }
+
+  /* Couple Sandbox — Sakha — `WorkspaceSkin.coupleSakha.lightAccent`. */
+  body.theme-couple-sakha {
+    --background: #fbfcff;
+    --card: #f4f6fb;
+    --popover: #e8ecf6;
+    --muted: #e8ecf6;
+    --border: #d5dbe8;
+    --primary: #0369a1;
+    --primary-foreground: #ffffff;
+  }
+
+  /* Couple Sandbox — Sakhi — `WorkspaceSkin.coupleSakhi.lightAccent`. */
+  body.theme-couple-sakhi {
+    --background: #fbfcff;
+    --card: #f4f6fb;
+    --popover: #e8ecf6;
+    --muted: #e8ecf6;
+    --border: #d5dbe8;
+    --primary: #be123c;
+    --primary-foreground: #ffffff;
+  }
 }
