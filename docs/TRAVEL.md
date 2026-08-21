@@ -207,11 +207,11 @@ run. Only the socket is behind `travel-http`.
 
 **Not checked anywhere before CI:**
 
-- Anything about how the screen *looks*, and whether `TravelScreen` survives a
-  recomposition. `.claude/rules/android.md`'s early-return rule was followed
-  (every branch is an `if`/`when`), but the lane that would prove it is the
-  emulator, and this change does not add an emulator test — a gap recorded
-  rather than hidden.
+- How the screen *looks*. `.claude/rules/android.md`'s early-return rule was
+  followed (every branch is an `if`/`when`), and §10's TRAVEL-1 closed the
+  emulator-cover gap this line used to name — but that test is itself unrun
+  here (no Android SDK), so CI's emulator lane is still the first place either
+  claim is actually checked.
 - Every real network response. Every parser test is a fixture; nothing here has
   ever spoken to Overpass, Wikipedia or Google.
 - `app/` (Flutter). The Travel tab is **Android-only** for now — see §9.
