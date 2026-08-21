@@ -233,10 +233,13 @@ Both are parity debt, not a closed decision.
 
 ## 10. Follow-ups worth naming
 
-- **TRAVEL-1 — no emulator cover.** `MainActivityUiTest` does not open the tab.
-  The two Compose crashes this app has shipped (`TaskListScreen`, `RideScreen`)
-  were both invisible to every lane that runs here. Exit: a test that opens
-  Travel and waits past a state change.
+- ~~**TRAVEL-1 — no emulator cover.**~~ **— done 2026-08-21.**
+  `MainActivityUiTest` now opens the Travel tab (coarse location pre-granted so
+  it actually walks Locating → Loading → a terminal state) and waits until
+  either the guide (`travel_guide` tag) or a terminal error/no-fix state
+  ("Try again") appears, then takes one more action to prove the screen
+  survived the recomposition — the same proof the Tasks and Ride legs already
+  give. Still unrun on a device or in CI; this sandbox has no Android SDK.
 - **TRAVEL-2 — the guide is not reachable offline.** The cache is per-session and
   in memory, so a guide fetched on hotel WiFi is gone by the time it is useful on
   the street. Persisting it would mean writing where somebody has been into the
