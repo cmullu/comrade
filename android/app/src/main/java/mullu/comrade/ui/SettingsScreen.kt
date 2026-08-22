@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -43,6 +44,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -81,6 +83,9 @@ import mullu.comrade.voice.VoiceCommand
 import mullu.comrade.voice.VoiceModelMissingException
 import mullu.comrade.voice.VoskModel
 import mullu.comrade.voice.WakeWordService
+import mullu.comrade.ui.theme.ComradeRadii
+import mullu.comrade.ui.theme.GlassElevation
+import mullu.comrade.ui.theme.glassSurface
 
 @Composable
 fun SettingsScreen(
@@ -215,9 +220,13 @@ private fun EditUsernameDialog(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val dialogShape = RoundedCornerShape(ComradeRadii.xl)
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
+        modifier = Modifier.glassSurface(GlassElevation.Sheet, shape = dialogShape),
+        shape = dialogShape,
+        containerColor = Color.Transparent,
         title = { Text("Username") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1110,8 +1119,12 @@ private fun VaultLockSection(onLock: () -> Unit) {
     }
 
     if (confirming) {
+        val dialogShape = RoundedCornerShape(ComradeRadii.xl)
         AlertDialog(
             onDismissRequest = { if (!busy) confirming = false },
+            modifier = Modifier.glassSurface(GlassElevation.Sheet, shape = dialogShape),
+            shape = dialogShape,
+            containerColor = Color.Transparent,
             title = { Text(stringResource(R.string.settings_lock_vault_title)) },
             text = { Text(stringResource(R.string.settings_lock_vault_summary)) },
             confirmButton = {
@@ -1268,8 +1281,12 @@ private fun EditTurnServerDialog(
         }
     }
 
+    val dialogShape = RoundedCornerShape(ComradeRadii.xl)
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
+        modifier = Modifier.glassSurface(GlassElevation.Sheet, shape = dialogShape),
+        shape = dialogShape,
+        containerColor = Color.Transparent,
         title = { Text(stringResource(R.string.settings_turn_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

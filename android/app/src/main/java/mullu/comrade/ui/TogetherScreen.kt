@@ -109,6 +109,9 @@ import mullu.comrade.together.PlaybackOwnership
 import mullu.comrade.together.ShareTransfer
 import mullu.comrade.together.TogetherDecisions
 import mullu.comrade.together.TogetherManager
+import mullu.comrade.ui.theme.ComradeRadii
+import mullu.comrade.ui.theme.GlassElevation
+import mullu.comrade.ui.theme.glassSurface
 import java.util.Locale
 
 /**
@@ -683,8 +686,12 @@ private fun PlayerHome(
     // follower may put something on as freely as the leader, which is what a
     // pair means, but not silently.
     confirming?.let { (what, with) ->
+        val dialogShape = RoundedCornerShape(ComradeRadii.xl)
         AlertDialog(
             onDismissRequest = { confirming = null },
+            modifier = Modifier.glassSurface(GlassElevation.Sheet, shape = dialogShape),
+            shape = dialogShape,
+            containerColor = Color.Transparent,
             title = { Text(stringResource(R.string.together_takeover_title)) },
             text = { Text(stringResource(R.string.together_takeover_body, with.label)) },
             confirmButton = {
@@ -1890,7 +1897,14 @@ private fun ListenWithSheet(
         loaded = true
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+    val sheetShape = RoundedCornerShape(topStart = ComradeRadii.xl, topEnd = ComradeRadii.xl)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        modifier = Modifier.glassSurface(GlassElevation.Sheet, shape = sheetShape),
+        shape = sheetShape,
+        containerColor = Color.Transparent,
+    ) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2233,8 +2247,12 @@ private fun EmbedSurface(modifier: Modifier = Modifier) {
 private fun ShareRelayConsent() {
     val question by ShareTransfer.consentQuestion.collectAsState()
     val text = question ?: return
+    val dialogShape = RoundedCornerShape(ComradeRadii.xl)
     AlertDialog(
         onDismissRequest = { ShareTransfer.refuseShareConsent() },
+        modifier = Modifier.glassSurface(GlassElevation.Sheet, shape = dialogShape),
+        shape = dialogShape,
+        containerColor = Color.Transparent,
         title = { Text(stringResource(R.string.together_relay_title)) },
         text = { Text(text) },
         confirmButton = {
