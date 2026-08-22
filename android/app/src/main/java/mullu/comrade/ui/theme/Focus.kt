@@ -23,8 +23,16 @@ import androidx.compose.ui.unit.dp
  * keyboards and switch access all drive focus rather than touch, and this app
  * had no visible focus indicator at all before this pass — a 2dp
  * [ring][ComradeSurfaces.ring] stroke, drawn 2dp *outside* the element's own
- * bounds so it never steals layout space or gets clipped by a parent's own
- * `Modifier.clip`.
+ * bounds so it never steals layout space or reflows the row when focus
+ * arrives.
+ *
+ * Drawing outside the bounds has one cost worth stating rather than
+ * discovering: a parent that clips (`Modifier.clip`, a `Card`, a rounded
+ * sheet) clips this ring too, so on an element flush against such an edge
+ * the ring can be trimmed. Give the element a little padding inside the
+ * clipping parent where that matters — the alternative, drawing the ring
+ * inside the bounds, trades a rare trim for permanently covering the
+ * element's own edge.
  *
  * Order matters: put this **before** `clickable`/`selectable` in the chain so
  * it draws around whatever focus target the interaction modifier establishes,

@@ -2,6 +2,7 @@ package mullu.comrade.ui.theme
 
 import android.app.Activity
 import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -9,6 +10,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -36,9 +38,27 @@ fun ComradeTheme(
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
+    val context = LocalContext.current
+    // AUDIT V4 / §4.3: reduced motion is the one accessibility request
+    // Android actually exposes, so it has to be *read* here — a
+    // CompositionLocal left at its default is a hatch that looks wired and
+    // never fires. ANIMATOR_DURATION_SCALE is the same setting backing
+    // Flutter's MediaQuery.disableAnimations on this platform, which is why
+    // both frontends collapse on the same user action. The decision itself
+    // lives in MotionDecisions, framework-free, so the JUnit lane checks it
+    // without an Android classpath.
+    val reducedMotion = remember(context) {
+        MotionDecisions.isReducedMotion(
+            Settings.Global.getFloat(
+                context.contentResolver,
+                Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f,
+            ),
+        )
+    }
+
     val colorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context)
             else dynamicLightColorScheme(context)
         }
@@ -63,7 +83,10 @@ fun ComradeTheme(
         }
     }
 
-    CompositionLocalProvider(LocalComradeSurfaces provides surfaces) {
+    CompositionLocalProvider(
+        LocalComradeSurfaces provides surfaces,
+        LocalReducedMotion provides reducedMotion,
+    ) {
         MaterialTheme(
             colorScheme = colorScheme,
             shapes = ComradeShapes,
